@@ -29,6 +29,15 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
         return default
 
 
+def _env_list(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    return tuple(
+        value.strip()
+        for value in raw.replace(";", ",").split(",")
+        if value.strip()
+    )
+
+
 @dataclass(frozen=True)
 class NaverSyncSettings:
     """Read-only Naver inquiry synchronization safety settings."""
@@ -202,6 +211,43 @@ class DpsSessionSettings:
             keepalive_interval_minutes=_env_int(
                 "DPS_SESSION_KEEPALIVE_INTERVAL_MINUTES", 20, minimum=10
             ),
+        )
+
+
+@dataclass(frozen=True)
+class DpsGuiGuardSettings:
+    """Low-priority DPS access to shared Windows GUI resources."""
+
+    enabled: bool = True
+    recheck_seconds: float = 5.0
+    cooldown_seconds: float = 5.0
+    max_wait_seconds: float = 600.0
+    activity_grace_seconds: float = 15.0
+    process_patterns: tuple[str, ...] = ()
+    window_patterns: tuple[str, ...] = ("KakaoTalk", "카카오톡")
+    activity_paths: tuple[str, ...] = ()
+
+    @classmethod
+    def from_environment(cls) -> "DpsGuiGuardSettings":
+        return cls(
+            enabled=get_env_bool("DPS_GUI_GUARD_ENABLED", default=True),
+            recheck_seconds=_env_float(
+                "DPS_GUI_GUARD_RECHECK_SECONDS", 5.0, minimum=0.05
+            ),
+            cooldown_seconds=_env_float(
+                "DPS_GUI_GUARD_COOLDOWN_SECONDS", 5.0, minimum=0.0
+            ),
+            max_wait_seconds=_env_float(
+                "DPS_GUI_RESOURCE_MAX_WAIT_SECONDS", 600.0, minimum=0.0
+            ),
+            activity_grace_seconds=_env_float(
+                "DPS_GUI_GUARD_ACTIVITY_GRACE_SECONDS", 15.0, minimum=0.0
+            ),
+            process_patterns=_env_list("DPS_GUI_GUARD_PROCESS_PATTERNS"),
+            window_patterns=_env_list(
+                "DPS_GUI_GUARD_WINDOW_PATTERNS", "KakaoTalk,카카오톡"
+            ),
+            activity_paths=_env_list("DPS_GUI_GUARD_ACTIVITY_PATHS"),
         )
 
 

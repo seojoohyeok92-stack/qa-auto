@@ -28,7 +28,7 @@ class VariableSpec:
 
 KNOWN_VARIABLES: tuple[VariableSpec, ...] = (
     VariableSpec(
-        "OJE_DB_PATH", EnvironmentRequirement.OPTIONAL, "Database",
+        "OJE_AUTOMATION_DB_PATH", EnvironmentRequirement.OPTIONAL, "Database",
         "SQLite 경로 재정의", "미설정 시 data/oje_automation.db를 사용합니다.",
     ),
     VariableSpec(
@@ -118,11 +118,23 @@ KNOWN_VARIABLES: tuple[VariableSpec, ...] = (
     for name, scope in (
         ("DPS_CONNECT_TIMEOUT_SECONDS", "DPS Agent"),
         ("OJE_PLUS_STORE_NAME", "Naver Store"),
-        ("SMART_STORE_STORE_NAME", "Naver Store"),
+        ("SMART_STORE_NAME", "Naver Store"),
         ("DPS_READ_TIMEOUT_SECONDS", "DPS Agent"),
         ("DPS_TOTAL_TIMEOUT_SECONDS", "DPS Agent"),
         ("DPS_SUCCESS_CACHE_TTL_SECONDS", "DPS Agent"),
         ("DPS_NOT_FOUND_CACHE_TTL_SECONDS", "DPS Agent"),
+        ("DPS_SESSION_IDLE_SECONDS", "DPS Agent"),
+        ("DPS_CACHE_TTL_SECONDS", "DPS Agent"),
+        ("DPS_LOOKUP_JOB_TTL_SECONDS", "DPS Agent"),
+        ("DPS_LOOKUP_JOB_MAX_ITEMS", "DPS Agent"),
+        ("DPS_GUI_GUARD_ENABLED", "DPS GUI Guard"),
+        ("DPS_GUI_GUARD_RECHECK_SECONDS", "DPS GUI Guard"),
+        ("DPS_GUI_GUARD_COOLDOWN_SECONDS", "DPS GUI Guard"),
+        ("DPS_GUI_RESOURCE_MAX_WAIT_SECONDS", "DPS GUI Guard"),
+        ("DPS_GUI_GUARD_ACTIVITY_GRACE_SECONDS", "DPS GUI Guard"),
+        ("DPS_GUI_GUARD_PROCESS_PATTERNS", "DPS GUI Guard"),
+        ("DPS_GUI_GUARD_WINDOW_PATTERNS", "DPS GUI Guard"),
+        ("DPS_GUI_GUARD_ACTIVITY_PATHS", "DPS GUI Guard"),
         ("QNA_GPT_ENABLED", "GPT Governance"),
         ("QNA_GPT_ALLOWED_PROVIDERS", "GPT Governance"),
         ("QNA_GPT_ALLOWED_MODELS", "GPT Governance"),
@@ -155,6 +167,7 @@ _BOOLEAN_NAMES = {
     "QNA_GPT_ENABLED", "QNA_GPT_SHADOW_ENABLED",
     "QNA_GPT_PROMPT_CAPTURE_COMPANY_APPROVED",
     "QNA_GPT_PROMPT_CAPTURE_SECURITY_APPROVED",
+    "DPS_GUI_GUARD_ENABLED",
 }
 _BOOLEAN_VALUES = {"1", "0", "true", "false", "yes", "no", "on", "off"}
 _NONNEGATIVE_NUMBER_NAMES = {
@@ -167,6 +180,11 @@ _NONNEGATIVE_NUMBER_NAMES = {
     "QNA_GPT_PER_INQUIRY_LIMIT", "QNA_GPT_REGENERATION_COOLDOWN_SECONDS",
     "QNA_GPT_DAILY_COST_LIMIT_KRW", "QNA_GPT_CANARY_PERCENTAGE",
     "QNA_GPT_USD_KRW_RATE",
+    "DPS_SESSION_IDLE_SECONDS", "DPS_CACHE_TTL_SECONDS",
+    "DPS_LOOKUP_JOB_TTL_SECONDS", "DPS_LOOKUP_JOB_MAX_ITEMS",
+    "DPS_GUI_GUARD_RECHECK_SECONDS", "DPS_GUI_GUARD_COOLDOWN_SECONDS",
+    "DPS_GUI_RESOURCE_MAX_WAIT_SECONDS",
+    "DPS_GUI_GUARD_ACTIVITY_GRACE_SECONDS",
 }
 
 

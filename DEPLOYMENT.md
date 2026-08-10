@@ -174,3 +174,37 @@ Streamlit 포트 8502를 인터넷에 직접 공개하는 것은 권장하지 �
 - 운영 DB·`.env` 파일 권한 제한과 백업 암호화
 
 GitHub Repository는 Private을 권장합니다. GitHub 인증은 운영자가 직접 수행하며 비밀번호나 Personal Access Token을 프로젝트 파일에 저장하지 않습니다.
+
+## Server GUI coexistence / DPS Low Priority
+
+DPS Windows Agent는 같은 서버의 Kakao, Naver, Ecount 등 다른 GUI
+automation보다 낮은 우선순위로 동작합니다. 실제 foreground/UIA 조작 전에
+현재 foreground 창과 최근 activity marker를 확인하고, 다른 GUI 작업이
+감지되면 대기합니다. 신호가 사라진 뒤 cooldown을 거쳐 자동 재개합니다.
+상주 dispatcher 또는 scheduler 프로세스의 존재만으로 BUSY 판정하지 않으므로
+기존 서버 프로그램을 수정할 필요가 없습니다.
+
+```dotenv
+DPS_GUI_GUARD_ENABLED=true
+DPS_GUI_GUARD_RECHECK_SECONDS=5
+DPS_GUI_GUARD_COOLDOWN_SECONDS=5
+DPS_GUI_RESOURCE_MAX_WAIT_SECONDS=600
+DPS_GUI_GUARD_ACTIVITY_GRACE_SECONDS=15
+DPS_GUI_GUARD_PROCESS_PATTERNS=
+DPS_GUI_GUARD_WINDOW_PATTERNS=KakaoTalk,카카오톡
+DPS_GUI_GUARD_ACTIVITY_PATHS=
+```
+
+`PROCESS_PATTERNS`는 전체 프로세스 목록이 아니라 현재 foreground 창의 소유
+프로세스에만 적용됩니다. `ACTIVITY_PATHS`는 쉼표로 구분하며 상대경로는
+qa-auto 기준입니다. 운영 `.env`의 값을 표시하지 않고 누락 key만 점검하거나
+안전한 non-secret 기본값만 추가하려면 다음을 실행합니다.
+
+```powershell
+python scripts/check_env.py
+python scripts/check_env.py --add-safe-defaults
+```
+
+기존 값은 덮어쓰지 않으며 secret과 빈 기본값은 자동 추가하지 않습니다.
+`DPS_SESSION_KEEPALIVE_ENABLED=false`는 실제 서버 검증 전까지 유지하는 것을
+권장합니다. Keepalive는 Guard가 BUSY이면 GUI를 빼앗지 않고 defer됩니다.

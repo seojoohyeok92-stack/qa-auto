@@ -28,6 +28,7 @@ from dps.dates import (
 )
 from dps.dps_ui_automation import DpsUiAutomation
 from dps.identifiers import select_dps_query_identifier
+from dps.gui_resource_guard import GUIResourceGuard, GUIResourceState
 from dps.sales_detail import (
     mask_address,
     mask_name,
@@ -306,6 +307,7 @@ class DpsWindowsAgent:
         store: ConnectionStore | None = None,
         tab_manager: ChromeTabManager | None = None,
         ui_automation: DpsUiAutomation | None = None,
+        gui_guard: GUIResourceGuard | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.lock = threading.RLock()
@@ -338,6 +340,11 @@ class DpsWindowsAgent:
             calendar_logger=CALENDAR_TREE_LOGGER,
             detail_logger=SALES_DETAIL_TREE_LOGGER,
         )
+        self.gui_guard = gui_guard or GUIResourceGuard(
+            project_root=PROJECT_ROOT,
+            sleep=sleep,
+            logger=LOGGER,
+        )
         state = self.store.load_agent_state()
         self.login_confirmed_at = state.get("login_confirmed_at")
         self.last_activity_at = state.get("last_activity_at")
@@ -364,6 +371,85 @@ class DpsWindowsAgent:
         # HWND/UIA 요소는 프로세스 재시작 후 재사용하지 않습니다.
         self.connection_status = "DISCONNECTED"
         self.connection: RuntimeConnection | None = None
+
+    @staticmethod
+    def _gui_resource_failure(state: GUIResourceState) -> dict[str, Any]:
+        return failure(
+            "GUI_RESOURCE_WAIT_TIMEOUT",
+            "DPS GUI resource did not become available before the wait timeout.",
+            {"gui_resource": state.to_dict()},
+            gui_resource_state=state.state,
+            gui_resource_reason=state.reason,
+            retryable=True,
+        )
+
+    def _wait_for_gui_resource(self, *, owner: str) -> GUIResourceState:
+        state = self.gui_guard.wait_for_available()
+        LOGGER.info(
+            "DPS GUI guard result: owner=%s state=%s reason=%s source=%s",
+            owner,
+            state.state,
+            state.reason,
+            state.detected_source,
+        )
+        return state
+
+    def _run_guarded_gui_operation(
+        self,
+        owner: str,
+        operation: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        wait_seconds = max(0.0, self.gui_guard.settings.max_wait_seconds)
+        acquired = self.lookup_gate.acquire(timeout=wait_seconds)
+        if not acquired:
+            return self._gui_resource_failure(
+                GUIResourceState(
+                    False,
+                    "TIMEOUT",
+                    "DPS_GUI_OPERATION_LOCK_TIMEOUT",
+                    "dps_gui_operation_lock",
+                )
+            )
+        self.lookup_gate_owner = owner
+        previous = None
+        try:
+            guard_state = self._wait_for_gui_resource(owner=owner)
+            if not guard_state.available:
+                return self._gui_resource_failure(guard_state)
+            try:
+                previous = self.tab_manager.capture_previous_context()
+            except Exception:
+                LOGGER.warning("DPS could not capture the previous foreground context")
+            return operation()
+        finally:
+            if previous is not None and getattr(previous, "foreground_hwnd", None):
+                try:
+                    target_hwnd = self.tab_manager.foreground_hwnd() or 0
+                    restored = self.tab_manager.restore_previous_context(
+                        previous, target_hwnd
+                    )
+                    if not restored:
+                        self.last_window_restore_warning = (
+                            "PREVIOUS_WINDOW_RESTORE_FAILED"
+                        )
+                        LOGGER.warning(
+                            "DPS foreground restore failed: owner=%s previous_hwnd=%s",
+                            owner,
+                            previous.foreground_hwnd,
+                        )
+                    else:
+                        self.last_window_restore_warning = None
+                except Exception:
+                    self.last_window_restore_warning = (
+                        "PREVIOUS_WINDOW_RESTORE_EXCEPTION"
+                    )
+                    LOGGER.warning(
+                        "DPS foreground restore raised an exception: owner=%s",
+                        owner,
+                        exc_info=True,
+                    )
+            self.lookup_gate_owner = None
+            self.lookup_gate.release()
 
     def _save_state(self) -> None:
         self.store.save_agent_state(
@@ -495,9 +581,37 @@ class DpsWindowsAgent:
             )
 
         self.lookup_gate_owner = "KEEPALIVE" if keepalive_enabled else "MONITOR"
-        previous = self.tab_manager.capture_previous_context()
+        previous = None
         target_hwnd = 0
         try:
+            guard_state = self.gui_guard.check()
+            if not guard_state.available:
+                deferred_keepalive = keepalive_enabled or force_keepalive
+                code = (
+                    "KEEPALIVE_DEFERRED"
+                    if deferred_keepalive
+                    else "SESSION_MONITOR_DEFERRED"
+                )
+                LOGGER.info(
+                    "DPS session work deferred by GUI guard: code=%s state=%s "
+                    "reason=%s source=%s",
+                    code,
+                    guard_state.state,
+                    guard_state.reason,
+                    guard_state.detected_source,
+                )
+                return success(
+                    code,
+                    "DPS session work was deferred for higher-priority GUI activity.",
+                    session_status=self.session_status,
+                    monitor_status=self.session_status,
+                    skipped=True,
+                    deferred=True,
+                    skip_reason="GUI_RESOURCE_BUSY",
+                    gui_resource=guard_state.to_dict(),
+                    keepalive_performed=False,
+                )
+            previous = self.tab_manager.capture_previous_context()
             with self.lock:
                 candidate, connection_error = self._select_current_dps()
                 if connection_error:
@@ -648,11 +762,30 @@ class DpsWindowsAgent:
                 keepalive_performed=False,
             )
         finally:
-            if previous.foreground_hwnd and target_hwnd:
+            if (
+                previous is not None
+                and previous.foreground_hwnd
+                and target_hwnd
+            ):
                 try:
-                    self.tab_manager.restore_previous_context(previous, target_hwnd)
+                    restored = self.tab_manager.restore_previous_context(
+                        previous, target_hwnd
+                    )
+                    if not restored:
+                        self.last_window_restore_warning = (
+                            "PREVIOUS_WINDOW_RESTORE_FAILED"
+                        )
+                        LOGGER.warning(
+                            "DPS monitor could not restore previous UI context"
+                        )
                 except Exception:
-                    LOGGER.warning("DPS monitor could not restore previous UI context")
+                    self.last_window_restore_warning = (
+                        "PREVIOUS_WINDOW_RESTORE_EXCEPTION"
+                    )
+                    LOGGER.warning(
+                        "DPS monitor could not restore previous UI context",
+                        exc_info=True,
+                    )
             self.lookup_gate_owner = None
             self.lookup_gate.release()
 
@@ -923,6 +1056,19 @@ class DpsWindowsAgent:
         select_tab: bool = False,
         force: bool = False,
     ) -> dict[str, Any]:
+        return self._run_guarded_gui_operation(
+            "AUTO_CONNECT",
+            lambda: self._ensure_connection_unlocked(
+                select_tab=select_tab, force=force
+            ),
+        )
+
+    def _ensure_connection_unlocked(
+        self,
+        *,
+        select_tab: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
         with self.lock:
             current = self._current_candidate()
             if current is not None:
@@ -1024,6 +1170,11 @@ class DpsWindowsAgent:
         )
 
     def list_chrome_windows(self) -> dict[str, Any]:
+        return self._run_guarded_gui_operation(
+            "CHROME_TAB_DISCOVERY", self._list_chrome_windows_locked
+        )
+
+    def _list_chrome_windows_locked(self) -> dict[str, Any]:
         with self.lock:
             return self._list_chrome_windows_unlocked()
 
@@ -1067,6 +1218,12 @@ class DpsWindowsAgent:
         )
 
     def connect_window_by_handle(self, hwnd: Any) -> dict[str, Any]:
+        return self._run_guarded_gui_operation(
+            "MANUAL_CONNECT",
+            lambda: self._connect_window_by_handle_locked(hwnd),
+        )
+
+    def _connect_window_by_handle_locked(self, hwnd: Any) -> dict[str, Any]:
         with self.lock:
             return self._connect_window_by_handle_unlocked(hwnd)
 
@@ -1141,7 +1298,7 @@ class DpsWindowsAgent:
         )
 
     def _select_current_dps(self) -> tuple[TabCandidate | None, dict[str, Any] | None]:
-        connected = self.ensure_connection(select_tab=False, force=True)
+        connected = self._ensure_connection_unlocked(select_tab=False, force=True)
         if not connected.get("success"):
             return None, connected
         candidate = self._current_candidate()
@@ -1191,6 +1348,11 @@ class DpsWindowsAgent:
         return connected
 
     def confirm_login(self) -> dict[str, Any]:
+        return self._run_guarded_gui_operation(
+            "LOGIN_RECHECK", self._confirm_login_unlocked
+        )
+
+    def _confirm_login_unlocked(self) -> dict[str, Any]:
         LOGGER.info("login recheck started")
         had_connection = self.connection is not None
         candidate = self._current_candidate()
@@ -1233,7 +1395,9 @@ class DpsWindowsAgent:
                     login_state="LOGIN_UNCERTAIN",
                     logged_in=False,
                 )
-            connected = self.ensure_connection(select_tab=True, force=True)
+            connected = self._ensure_connection_unlocked(
+                select_tab=True, force=True
+            )
             if not connected.get("success"):
                 LOGGER.warning(
                     "recheck validation result: success=False state=%s "
@@ -2056,6 +2220,10 @@ class DpsWindowsAgent:
                     "active_request_id": self.active_request_id,
                 },
             )
+        guard_state = self._wait_for_gui_resource(owner="LOOKUP")
+        if not guard_state.available:
+            self._release_actual_lookup_gate()
+            return self._gui_resource_failure(guard_state)
         with self.lock:
             self.lookup_in_progress = True
             self.active_request_id = resolved_request_id
