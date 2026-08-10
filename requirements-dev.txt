@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Test suite
+pytest
+
+# Maintenance/import scripts and their tests
+openpyxl

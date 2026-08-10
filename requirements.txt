@@ -1,0 +1,7 @@
+bcrypt
+python-dotenv
+requests
+streamlit
+pywinauto
+pyperclip
+pandas

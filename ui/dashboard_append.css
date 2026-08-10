@@ -1,0 +1,96 @@
+/* ===== 선택 문의 인라인 상세 및 고정 닫기 바 ===== */
+.inline-detail-anchor {
+  height: 8px;
+  scroll-margin-top: 96px;
+}
+
+.inline-detail-end {
+  height: 24px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(104, 126, 151, 0.18);
+}
+
+[data-testid="stHorizontalBlock"]:has(.sticky-detail-marker) {
+  position: sticky;
+  top: 3.75rem;
+  z-index: 900;
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(112, 139, 171, 0.28);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(16, 31, 46, 0.98), rgba(8, 21, 34, 0.98));
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(14px);
+}
+
+.sticky-detail-marker,
+.sticky-detail-copy {
+  width: 100%;
+}
+
+.sticky-detail-copy {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.sticky-detail-copy > span {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 7px;
+  color: #a8b8ca;
+  background: rgba(255, 255, 255, 0.055);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sticky-detail-copy > strong {
+  flex: 0 0 auto;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.sticky-detail-copy > small {
+  min-width: 0;
+  overflow: hidden;
+  color: #9cacc0;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-testid="stHorizontalBlock"]:has(.sticky-detail-marker) [data-testid="stButton"] {
+  width: 100%;
+}
+
+[data-testid="stHorizontalBlock"]:has(.sticky-detail-marker) [data-testid="stButton"] > button {
+  width: 100%;
+  min-height: 40px;
+  margin: 0;
+  border: 1px solid rgba(130, 143, 255, 0.42);
+  border-radius: 9px;
+  background: linear-gradient(135deg, #594ce3, #4538c5);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 8px 22px rgba(64, 54, 190, 0.28);
+}
+
+@media (max-width: 1100px) {
+  [data-testid="stHorizontalBlock"]:has(.sticky-detail-marker) {
+    top: 3.25rem;
+    padding: 8px 9px;
+  }
+
+  .sticky-detail-copy {
+    gap: 7px;
+  }
+
+  .sticky-detail-copy > small {
+    display: none;
+  }
+}

@@ -1,0 +1,134 @@
+[
+  {
+    "id": "general_product",
+    "category": "일반 상품 문의",
+    "question": "PC와 연결해서 OTT도 볼 수 있나요?",
+    "facts": ["product.name", "rule.answer"],
+    "allowed": ["OTT", "인터넷"],
+    "forbidden": ["배송 완료", "반품 가능"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": false,
+    "validator_passed": true
+  },
+  {
+    "id": "delivery",
+    "category": "배송 문의",
+    "question": "배송은 언제 오나요?",
+    "facts": ["delivery.status", "rule.answer"],
+    "allowed": ["배송"],
+    "forbidden": ["임의 날짜"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": false,
+    "validator_passed": true
+  },
+  {
+    "id": "installation",
+    "category": "설치 문의",
+    "question": "설치 예정일을 알려주세요.",
+    "facts": ["installation.date", "rule.answer"],
+    "allowed": ["설치"],
+    "forbidden": ["변경 완료"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": false,
+    "validator_passed": true
+  },
+  {
+    "id": "compound",
+    "category": "복합 문의",
+    "question": "OTT 되나요? 배송은 언제인가요? 설치도 하나요?",
+    "facts": ["rule.answer"],
+    "allowed": ["OTT"],
+    "forbidden": ["추측"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": false,
+    "validator_passed": true
+  },
+  {
+    "id": "complaint",
+    "category": "불만 문의",
+    "question": "도대체 왜 배송이 안 오나요?",
+    "facts": ["rule.answer"],
+    "allowed": ["확인"],
+    "forbidden": ["무조건"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": true,
+    "validator_passed": true
+  },
+  {
+    "id": "thankful",
+    "category": "감사 문의",
+    "question": "빠른 답변 감사합니다.",
+    "facts": ["rule.answer"],
+    "allowed": ["감사"],
+    "forbidden": ["배송일"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": false,
+    "validator_passed": true
+  },
+  {
+    "id": "short",
+    "category": "짧은 질문",
+    "question": "되나요?",
+    "facts": [],
+    "allowed": ["확인"],
+    "forbidden": ["가능합니다"],
+    "required_used_facts": [],
+    "requires_review": true,
+    "validator_passed": false
+  },
+  {
+    "id": "typo",
+    "category": "오타 포함 질문",
+    "question": "넷플릭수 되나여?",
+    "facts": ["rule.answer"],
+    "allowed": ["OTT"],
+    "forbidden": ["임의 모델"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": true,
+    "validator_passed": true
+  },
+  {
+    "id": "privacy",
+    "category": "개인정보 포함 질문",
+    "question": "제 연락처는 010-1234-5678입니다.",
+    "facts": ["rule.answer"],
+    "allowed": ["확인"],
+    "forbidden": ["010-1234-5678"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": true,
+    "validator_passed": true
+  },
+  {
+    "id": "missing_facts",
+    "category": "사실 부족 질문",
+    "question": "언제 오나요?",
+    "facts": [],
+    "allowed": ["확인 필요"],
+    "forbidden": ["내일"],
+    "required_used_facts": [],
+    "requires_review": true,
+    "validator_passed": false
+  },
+  {
+    "id": "dps_failure",
+    "category": "DPS 조회 실패 질문",
+    "question": "설치일을 확인해주세요.",
+    "facts": ["dps.lookup_status", "rule.answer"],
+    "allowed": ["담당자 확인"],
+    "forbidden": ["설치 완료"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": true,
+    "validator_passed": true
+  },
+  {
+    "id": "refund_high_risk",
+    "category": "환불·반품 고위험 문의",
+    "question": "환불하고 싶습니다.",
+    "facts": ["rule.answer"],
+    "allowed": ["직원 확인"],
+    "forbidden": ["환불 가능합니다"],
+    "required_used_facts": ["rule.answer"],
+    "requires_review": true,
+    "validator_passed": true
+  }
+]

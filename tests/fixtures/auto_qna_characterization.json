@@ -1,0 +1,152 @@
+[
+  {
+    "id": "general_product",
+    "product": "삼성 스마트모니터 M5 32인치 스탠드 포함",
+    "question": "스탠드도 같이 오는 상품인가요?",
+    "option_name": "",
+    "expected": {
+      "status": "답변하지 않음",
+      "answer": "",
+      "reason": "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다.",
+      "category": "기타/직원확인",
+      "question_count": 1,
+      "question_breakdown": "스탠드도 같이 오는 상품인가요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "parcel_shipping",
+    "product": "삼성 스마트모니터 M5 32인치",
+    "question": "배송은 얼마나 걸리나요?",
+    "option_name": "",
+    "expected": {
+      "status": "답변 가능",
+      "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n택배배송 상품은 오후 3시 이전 결제 주문에 한해 당일 발송되며,\n배송은 보통 1영업일에서 2영업일 정도 소요됩니다.\n\n도서산간 지역은\n1일 정도 추가 소요될 수 있습니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+      "reason": "택배배송 기본 안내입니다.",
+      "category": "배송/택배",
+      "question_count": 1,
+      "question_breakdown": "배송은 얼마나 걸리나요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "installation",
+    "product": "삼성 비즈니스TV LH43BEAHLGFXKR 기사님 방문설치",
+    "question": "오늘 주문하면 설치까지 얼마나 걸리나요?",
+    "option_name": "",
+    "expected": {
+      "status": "답변 가능",
+      "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n배송/설치까지 빠르면 1~2주 정도 소요되고 있습니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+      "reason": "방문설치 신규 주문 일정 안내입니다.",
+      "category": "배송/설치신규",
+      "question_count": 1,
+      "question_breakdown": "오늘 주문하면 설치까지 얼마나 걸리나요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "color",
+    "product": "삼성 스마트모니터 M5 32인치",
+    "question": "화이트 색상인가요?",
+    "option_name": "화이트",
+    "expected": {
+      "status": "답변하지 않음",
+      "answer": "",
+      "reason": "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다.",
+      "category": "기타/직원확인",
+      "question_count": 1,
+      "question_breakdown": "화이트 색상인가요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "model_option",
+    "product": "삼성 스마트모니터 M5 32인치 S32DM501",
+    "question": "오토피벗을 지원하나요?",
+    "option_name": "",
+    "expected": {
+      "status": "답변 가능",
+      "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n문의하신 모델은 오토피벗 기능을 지원합니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+      "reason": "DM5 시리즈 오토피벗 지원 룰입니다.",
+      "category": "모델스펙/오토피벗",
+      "question_count": 1,
+      "question_breakdown": "오토피벗을 지원하나요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "unsupported",
+    "product": "삼성 스마트모니터 M5",
+    "question": "이 제품 정말 좋은가요?",
+    "option_name": "",
+    "expected": {
+      "status": "답변하지 않음",
+      "answer": "",
+      "reason": "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다.",
+      "category": "기타/직원확인",
+      "question_count": 1,
+      "question_breakdown": "이 제품 정말 좋은가요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "empty",
+    "product": "삼성 스마트모니터 M5",
+    "question": "",
+    "option_name": "",
+    "expected": {
+      "status": "답변하지 않음",
+      "answer": "",
+      "reason": "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다.",
+      "category": "기타/직원확인",
+      "question_count": 0,
+      "question_breakdown": "",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "multiline_special",
+    "product": "삼성 스마트모니터 M5 32인치",
+    "question": "넷플릭스 되나요???\n와이파이만 연결해도 되나요!",
+    "option_name": "",
+    "expected": {
+      "status": "답변 가능",
+      "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n문의하신 제품은 인터넷만 연결해 주시면 OTT 시청이 가능합니다.\n\n와이파이만 연결해도 사용 가능하며, OTT별 개인 구독은 별도로 필요합니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+      "reason": "스마트모니터는 사이니지와 달리 OTT 앱 사용이 가능한 상품군입니다.",
+      "category": "스마트모니터/OTT",
+      "question_count": 2,
+      "question_breakdown": "넷플릭스 되나요 / 와이파이만 연결해도 되나요!",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "missing_product",
+    "product": "",
+    "question": "배송은 얼마나 걸리나요?",
+    "option_name": "",
+    "expected": {
+      "status": "답변하지 않음",
+      "answer": "",
+      "reason": "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다.",
+      "category": "기타/직원확인",
+      "question_count": 1,
+      "question_breakdown": "배송은 얼마나 걸리나요",
+      "provider": "rules"
+    }
+  },
+  {
+    "id": "needs_review",
+    "product": "삼성 비즈니스TV 기사님 방문설치",
+    "question": "설치일을 다음 달로 변경해 주세요.",
+    "option_name": "",
+    "expected": {
+      "status": "답변하지 않음",
+      "answer": "",
+      "reason": "배송일/설치일 변경, 지정, 연기 요청은 직원이 실제 주문 업무를 진행해야 하므로 자동답변하지 않습니다.",
+      "category": "배송/설치일변경요청",
+      "question_count": 1,
+      "question_breakdown": "설치일을 다음 달로 변경해 주세요.",
+      "provider": "rules"
+    }
+  }
+]
