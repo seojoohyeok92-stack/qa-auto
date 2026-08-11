@@ -232,6 +232,8 @@ class HistoricalCaseService:
             created_at=item.get("source_created_at") or item.get("registered_at"),
             repeated=repeated,
         )
+        flags["learning_signal_type"] = "POSITIVE"
+        flags["answer_provenance"] = "HISTORICAL_VERIFIED"
         case_key = self._digest("NAVER_HISTORY", store, source_type, external_id, normalized)
         fingerprint = self._digest(case_key, answer)
         raw = item.get("raw_payload") if isinstance(item.get("raw_payload"), dict) else {}

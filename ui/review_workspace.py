@@ -11,6 +11,13 @@ import uuid
 import streamlit as st
 import streamlit.components.v1 as components
 
+from answer.answer_format import format_final_answer
+from answer.learning_feedback import (
+    CORRECTION_REASON_BY_LABEL,
+    CORRECTION_REASON_LABELS,
+    INTENT_OPTIONS,
+    CorrectionReason,
+)
 from answer.exceptions import AnswerAlreadyPostedError
 from config import NaverPostSettings
 from core.time_utils import format_datetime_kst, format_datetime_minute_kst
@@ -19,8 +26,12 @@ from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.inquiry_repository import InquiryRepository
+from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_post_repository import NaverPostRepository
+from repositories.naver_posted_answer_repository import (
+    NaverPostedAnswerRepository,
+)
 from repositories.post_review_repository import PostReviewRepository
 from repositories.gpt_provider_run_repository import GptProviderRunRepository
 from repositories.workflow_repository import WorkflowRepository
@@ -602,6 +613,20 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     draft_identity_key = f"draft_text_identity_{inquiry_id}"
     view_model = load_program_answer_view(database, inquiry_id)
     draft = view_model["draft"]
+    source_answered = bool(inquiry.get("source_answered"))
+    posted_answer_record = NaverPostedAnswerRepository(database).current(
+        inquiry_id
+    )
+    posted_answer_available = bool(
+        posted_answer_record
+        and posted_answer_record.get("fetch_status") == "AVAILABLE"
+        and str(posted_answer_record.get("answer_body") or "").strip()
+    )
+    posted_answer_body = (
+        str(posted_answer_record.get("answer_body") or "")
+        if posted_answer_available and posted_answer_record is not None
+        else ""
+    )
     pending_draft_text = st.session_state.pop(
         pending_draft_text_key, None
     )
@@ -758,13 +783,21 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     )
     reset = top_actions[1].button(
         "초기화",
-        disabled=not draft or posted or approved or not can_edit,
+        disabled=(
+            not draft
+            or not can_edit
+            or (not source_answered and (posted or approved))
+        ),
         width="stretch",
         key=f"review_reset_{inquiry_id}",
     )
     save = top_actions[2].button(
         "임시 저장",
-        disabled=not draft or posted or approved or not can_edit,
+        disabled=(
+            not draft
+            or not can_edit
+            or (not source_answered and (posted or approved))
+        ),
         width="stretch",
         key=f"review_save_{inquiry_id}",
     )
@@ -835,12 +868,18 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             )
     with answer_column:
         rendered_program_text: str | None = None
+        answer_views = ["Program Answer", "직원 수정본"]
+        if source_answered:
+            answer_views.append("네이버 실제 등록 답변")
+        answer_views.append("Final Answer")
         selected_view = st.segmented_control(
             "답변 보기",
-            ["Program Answer", "직원 수정본", "Final Answer"],
+            answer_views,
             default=(
                 None
                 if view_key in st.session_state
+                else "네이버 실제 등록 답변"
+                if source_answered
                 else "직원 수정본"
                 if draft and not approved
                 else "Final Answer"
@@ -860,6 +899,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             if edit_key not in st.session_state:
                 st.session_state[edit_key] = str(
                     draft.get("edited_answer")
+                    or posted_answer_body
                     or draft.get("original_answer")
                     or ""
                 )
@@ -867,7 +907,10 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "직원 수정본",
                 height=360,
                 key=edit_key,
-                disabled=posted or approved or not can_edit,
+                disabled=(
+                    not can_edit
+                    or (not source_answered and (posted or approved))
+                ),
                 label_visibility="collapsed",
                 on_change=_autosave_staff_edit,
                 args=(
@@ -878,7 +921,30 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     actor,
                 ),
             )
-            st.caption("변경 내용은 자동 저장되며 임시 저장으로 즉시 확정할 수 있습니다.")
+            st.caption(
+                "내부 교정 및 Learning용 수정입니다. 네이버에 재등록되지 않습니다."
+                if source_answered
+                else "변경 내용은 자동 저장되며 임시 저장으로 즉시 확정할 수 있습니다."
+            )
+        elif selected_view == "네이버 실제 등록 답변":
+            if posted_answer_available:
+                st.text_area(
+                    "네이버 실제 등록 답변",
+                    value=posted_answer_body,
+                    height=360,
+                    disabled=True,
+                    label_visibility="collapsed",
+                    key=f"naver_posted_answer_{inquiry_id}_{posted_answer_record['id']}",
+                )
+                st.caption(
+                    "네이버 동기화에서 확인한 고객 노출 답변 · Source of Truth"
+                )
+            else:
+                st.warning(
+                    "네이버에서는 답변완료 상태이지만 현재 조회 응답에 "
+                    "실제 답변 본문이 없어 NOT_FETCHED로 기록했습니다. "
+                    "Program Answer를 대신 표시하지 않습니다."
+                )
         elif selected_view == "Final Answer":
             st.text_area(
                 "Final Answer",
@@ -913,6 +979,75 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 label_visibility="collapsed",
                 key=draft_session_key,
             )
+
+        correction_reason = ""
+        correction_note = ""
+        corrected_intent = ""
+        edited_value = (
+            str(st.session_state.get(edit_key) or "")
+            if draft
+            else ""
+        )
+        original_value = (
+            posted_answer_body
+            if posted_answer_available
+            else str(draft.get("original_answer") or "")
+            if draft
+            else ""
+        )
+        answer_was_corrected = bool(
+            draft
+            and format_final_answer(edited_value)
+            and format_final_answer(edited_value)
+            != format_final_answer(original_value)
+        )
+        if answer_was_corrected:
+            with st.expander("수정 피드백", expanded=False):
+                st.caption(
+                    "자동답변에서 잘못된 부분을 기록하면 직원 수정본과 함께 "
+                    "높은 우선순위의 교정 신호로 저장됩니다."
+                )
+                stored_feedback = LearningFeedbackRepository(
+                    database
+                ).for_inquiry(inquiry_id)
+                if stored_feedback:
+                    latest_feedback = stored_feedback[-1]
+                    st.caption(
+                        "저장된 교정 · "
+                        f"{latest_feedback.get('correction_reason')}"
+                        + (
+                            f" · {latest_feedback.get('correction_note')}"
+                            if latest_feedback.get("correction_note")
+                            else ""
+                        )
+                    )
+                reason_labels = [
+                    CORRECTION_REASON_LABELS[reason]
+                    for reason in CorrectionReason
+                ]
+                selected_reason = st.selectbox(
+                    "수정 사유",
+                    ["선택하지 않음", *reason_labels],
+                    key=f"staff_correction_reason_{inquiry_id}_{draft['id']}",
+                )
+                selected = CORRECTION_REASON_BY_LABEL.get(selected_reason)
+                correction_reason = selected.value if selected else ""
+                if selected is CorrectionReason.ROUTING_ERROR:
+                    intent_labels = list(INTENT_OPTIONS.values())
+                    intent_label = st.selectbox(
+                        "올바른 문의 유형",
+                        intent_labels,
+                        key=f"staff_corrected_intent_{inquiry_id}_{draft['id']}",
+                    )
+                    corrected_intent = next(
+                        code
+                        for code, label in INTENT_OPTIONS.items()
+                        if label == intent_label
+                    )
+                correction_note = st.text_input(
+                    "상세 메모 (선택)",
+                    key=f"staff_correction_note_{inquiry_id}_{draft['id']}",
+                )
 
         run = (diagnostics or {}).get("provider_run") or {}
         confirmed_facts = (
@@ -1158,7 +1293,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     )
     approve = action_columns[2].button(
         "승인",
-        disabled=not draft or posted or approved or not can_approve,
+        disabled=(
+            not can_approve
+            or (
+                not posted_answer_available
+                if source_answered
+                else not draft or posted or approved
+            )
+        ),
         type="primary",
         width="stretch",
         key=f"review_approve_{inquiry_id}",
@@ -1310,17 +1452,34 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 draft_id=int(draft["id"]),
                 edited_answer=str(st.session_state.get(edit_key) or ""),
                 actor=actor,
+                correction_reason=correction_reason,
+                correction_note=correction_note,
+                corrected_intent=corrected_intent,
             )
             st.session_state["approval_ui_notice"] = (
                 "success",
                 "직원 수정본을 저장했습니다.",
             )
             st.rerun()
-        if approve and draft:
+        if approve and source_answered:
+            ApprovalService(database).approve_posted_answer(
+                inquiry_id=inquiry_id,
+                actor=actor,
+            )
+            st.session_state["approval_ui_notice"] = (
+                "success",
+                "네이버 실제 등록 답변을 Positive Learning으로 승인했습니다. "
+                "네이버 재등록은 수행하지 않았습니다.",
+            )
+            st.rerun()
+        if approve and draft and not source_answered:
             ApprovalService(database).approve(
                 inquiry_id=inquiry_id,
                 draft_id=int(draft["id"]),
                 actor=actor,
+                correction_reason=correction_reason,
+                correction_note=correction_note,
+                corrected_intent=corrected_intent,
             )
             st.session_state["approval_ui_notice"] = (
                 "success",
@@ -1452,11 +1611,6 @@ def _render_inquiry_detail(
         if isinstance(inquiry.get("raw_json"), dict)
         else {}
     )
-    original = (
-        raw.get("original_data")
-        if isinstance(raw.get("original_data"), dict)
-        else {}
-    )
     order_snapshot = (
         raw.get("order_lookup")
         if isinstance(raw.get("order_lookup"), dict)
@@ -1464,15 +1618,20 @@ def _render_inquiry_detail(
         if isinstance(raw.get("order_snapshot"), dict)
         else {}
     )
-    existing_answer = (
-        raw.get("existing_answer")
-        or original.get("answerContent")
-        or original.get("answer")
+    posted_answer = (
+        NaverPostedAnswerRepository(database).current(int(inquiry["id"]))
+        if database is not None and inquiry.get("id") is not None
+        else None
     )
-    if isinstance(existing_answer, dict):
-        existing_answer = (
-            existing_answer.get("content")
-            or existing_answer.get("answerContent")
+    legacy_posted_answer = (
+        raw.get("existing_answer")
+        if database is None
+        else None
+    )
+    if isinstance(legacy_posted_answer, dict):
+        legacy_posted_answer = (
+            legacy_posted_answer.get("content")
+            or legacy_posted_answer.get("answerContent")
         )
     st.markdown(
         '<div class="official-fields two">'
@@ -1507,11 +1666,24 @@ def _render_inquiry_detail(
         + "</p></div>",
         unsafe_allow_html=True,
     )
-    if existing_answer:
+    if posted_answer and posted_answer.get("fetch_status") == "AVAILABLE":
+        with st.expander("네이버 실제 등록 답변", expanded=False):
+            st.markdown(
+                '<div class="existing-answer-scroll">'
+                f"{escape(str(posted_answer.get('answer_body') or ''))}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("고객에게 실제 노출된 답변 · NAVER_POSTED")
+    elif inquiry.get("source_answered"):
+        st.caption(
+            "네이버 답변완료 · 실제 답변 본문 NOT_FETCHED "
+            "(Program Answer로 대체하지 않음)"
+        )
+    elif legacy_posted_answer:
         with st.expander("기존 네이버 답변", expanded=False):
             st.markdown(
                 '<div class="existing-answer-scroll">'
-                f"{escape(str(existing_answer))}</div>",
+                f"{escape(str(legacy_posted_answer))}</div>",
                 unsafe_allow_html=True,
             )
     if database is not None and inquiry.get("id") is not None:
@@ -2262,53 +2434,42 @@ def _render_naver_post_prepare(
         column.metric(label, "-" if value in (None, "") else value)
 
     dry_result = st.session_state.get(result_key)
-    dry_ready = bool(
-        isinstance(dry_result, dict) and dry_result.get("eligible")
-    )
     already_posted = post_status in {
         "POSTED",
         "POSTING",
         "POST_UNKNOWN",
     }
-    actions = st.columns([1.2, 1.2, 4.6], gap="small")
-    dry_run = actions[0].button(
-        "등록 Dry Run",
-        key=f"naver_post_dry_run_{inquiry_id}",
-        type="primary",
-        width="stretch",
-    )
-    actual = actions[1].button(
+    actions = st.columns([1.2, 4.6], gap="small")
+    actual = actions[0].button(
         "네이버 실제 등록",
         key=f"naver_post_actual_{inquiry_id}",
         disabled=(
             not settings.enabled
-            or not dry_ready
             or already_posted
             or not can(Permission.APPROVE)
         ),
         width="stretch",
     )
     if settings.enabled:
-        actions[2].caption(
-            "수동 등록 모드 · Dry Run 통과 후 명시적 확인이 필요합니다."
+        actions[1].caption(
+            "수동 등록 모드 · 내부 preflight 통과 후 명시적 확인이 필요합니다."
         )
     else:
-        actions[2].caption(
+        actions[1].caption(
             "NAVER_POST_ENABLED=false · 네이버 실제 등록 기능이 잠겨 있습니다."
         )
-    if dry_run:
-        st.session_state[result_key] = NaverPostDryRunService(
-            database
-        ).run(inquiry_id).to_dict()
-        st.session_state.pop(confirm_key, None)
-        st.rerun()
     if actual:
-        st.session_state[confirm_key] = True
+        preflight = NaverPostDryRunService(database).run(inquiry_id).to_dict()
+        st.session_state[result_key] = preflight
+        if preflight.get("eligible"):
+            st.session_state[confirm_key] = True
+        else:
+            st.session_state.pop(confirm_key, None)
         st.rerun()
 
     result = st.session_state.get(result_key)
     if not isinstance(result, dict):
-        st.info("Dry Run을 실행하면 등록 가능 여부와 Payload Preview를 확인할 수 있습니다.")
+        st.info("실제 등록을 누르면 내부 preflight 후 등록 가능 여부를 확인합니다.")
     else:
         if result.get("eligible"):
             st.success("등록 가능 · Validation PASS")
@@ -2431,7 +2592,7 @@ def render_review_workspace(
             _render_pagination(resolved_page, resolved_total_pages)
     if selected is None:
         with detail_column:
-            with st.container(border=True, height=520, key="official_detail_empty_panel"):
+            with st.container(border=True, height=680, key="official_detail_empty_panel"):
                 st.markdown("### 문의 상세")
                 st.info("문의 목록에서 항목을 선택하면 상세 정보가 표시됩니다.")
         return
@@ -2447,7 +2608,7 @@ def render_review_workspace(
 
     with detail_column:
         with st.container(
-            border=True, height=520, key="official_detail_panel"
+            border=True, height=680, key="official_detail_panel"
         ):
             _render_inquiry_detail(inquiry, database)
 

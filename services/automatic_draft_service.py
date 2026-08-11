@@ -48,6 +48,15 @@ class AutomaticDraftService:
         inquiry = self.inquiries.get(int(inquiry_id))
         if inquiry is None:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
+        if (
+            bool(inquiry.get("source_answered"))
+            or str(inquiry.get("answer_status") or "").upper() == "ANSWERED"
+            or str(inquiry.get("post_status") or "").upper() == "POSTED"
+        ):
+            return AutomaticDraftOutcome(
+                status="SKIPPED_ALREADY_ANSWERED",
+                inquiry_id=int(inquiry_id),
+            )
         active = self.answers.active_for_inquiry(int(inquiry_id))
         if active and is_valid_draft(active.get("original_answer")):
             return AutomaticDraftOutcome(
@@ -60,15 +69,6 @@ class AutomaticDraftService:
                     )
                     or "EXISTING"
                 ),
-            )
-        if (
-            bool(inquiry.get("source_answered"))
-            or str(inquiry.get("answer_status") or "").upper() == "ANSWERED"
-            or str(inquiry.get("post_status") or "").upper() == "POSTED"
-        ):
-            return AutomaticDraftOutcome(
-                status="SKIPPED_ALREADY_ANSWERED",
-                inquiry_id=int(inquiry_id),
             )
 
         trace_id = correlation_id or str(uuid.uuid4())

@@ -6,6 +6,9 @@ from typing import Any, Callable, Iterable
 
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository, mask_sensitive_data
+from repositories.naver_posted_answer_repository import (
+    NaverPostedAnswerRepository,
+)
 from repositories.workflow_repository import WorkflowRepository
 from repositories.post_review_repository import PostReviewRepository
 from services.automatic_draft_service import AutomaticDraftService
@@ -268,6 +271,32 @@ class InquirySyncService:
                 normalized = normalize_work_item(work_item)
                 failed_stage = "INQUIRY_UPSERT"
                 upsert = self.inquiries.upsert_work_item(normalized)
+                if bool(normalized.get("source_answered")):
+                    posted = (
+                        work_item.get("posted_answer")
+                        if isinstance(work_item.get("posted_answer"), dict)
+                        else {}
+                    )
+                    failed_stage = "NAVER_POSTED_ANSWER_CAPTURE"
+                    NaverPostedAnswerRepository(
+                        self.inquiries.database
+                    ).observe(
+                        inquiry_id=upsert.inquiry_id,
+                        answer_body=(
+                            posted.get("body")
+                            or work_item.get("seller_answer")
+                            or work_item.get("existing_answer")
+                        ),
+                        answer_id=posted.get("answer_id"),
+                        posted_at=posted.get("posted_at"),
+                        author_type=posted.get("author_type"),
+                        source_api=str(
+                            normalized.get("source_type") or "NAVER"
+                        ),
+                        metadata={
+                            "sync_provenance": "NAVER_API_RESPONSE"
+                        },
+                    )
                 failed_stage = "SELLER_ANSWER_LEARNING"
                 seller_answer = str(work_item.get("seller_answer") or "").strip()
                 if seller_answer:

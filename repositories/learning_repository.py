@@ -79,7 +79,12 @@ class LearningRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM learning_examples
-                WHERE active=1 AND (store_code=? OR store_code IS NULL OR ? IS NULL)
+                WHERE active=1
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.learning_signal_type'),
+                      'POSITIVE'
+                  )='POSITIVE'
+                  AND (store_code=? OR store_code IS NULL OR ? IS NULL)
                 ORDER BY rating DESC, quality_score DESC, created_at DESC
                 LIMIT ?
                 """,

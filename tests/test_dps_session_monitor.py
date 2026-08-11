@@ -9,6 +9,7 @@ from config import DpsSessionSettings
 from dps.agent_server import DpsWindowsAgent
 from dps.chrome_tab_manager import PreviousUiContext
 from dps.connection_store import ConnectionStore
+from dps.gui_resource_guard import GUIResourceState
 from dps.session_scheduler import DpsSessionMonitorScheduler
 
 
@@ -37,6 +38,16 @@ class FakeTabManager:
         return True
 
 
+class FreeGuard:
+    settings = SimpleNamespace(max_wait_seconds=0.01)
+
+    def check(self) -> GUIResourceState:
+        return GUIResourceState(True, "FREE", "TEST_FREE", "test")
+
+    def wait_for_available(self) -> GUIResourceState:
+        return self.check()
+
+
 def make_agent(tmp_path: Path, *, extension_result: bool = True):
     manager = FakeTabManager(extension_result=extension_result)
     store = ConnectionStore(
@@ -46,6 +57,7 @@ def make_agent(tmp_path: Path, *, extension_result: bool = True):
         store=store,
         tab_manager=manager,
         ui_automation=SimpleNamespace(),
+        gui_guard=FreeGuard(),
         session_settings=DpsSessionSettings(passive_monitor_enabled=False),
         sleep=lambda _: None,
     )

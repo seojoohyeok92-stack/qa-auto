@@ -111,10 +111,35 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
         "Program Answer", "직원 수정본", "Final Answer"
     ]
     assert at.text_area[0].value == "직원 수정 본문"
+    assert any(item.label == "수정 피드백" for item in at.expander)
+    assert any(item.label == "수정 사유" for item in at.selectbox)
+    assert any(item.label == "상세 메모 (선택)" for item in at.text_input)
     at.segmented_control[0].set_value("Program Answer")
     at.run(timeout=30)
     assert len(at.text_area) == 1
     assert at.text_area[0].value == "Program 본문"
+
+
+def test_inquiry_detail_prioritizes_large_question_body(tmp_path: Path) -> None:
+    path = tmp_path / "detail.db"
+    database = Database(path)
+    database.initialize()
+    inquiry_id = seed_inquiry(database)
+    at = run(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_inquiry_detail
+db=Database(r"{path}")
+db.initialize()
+_render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert "official-fields two" in rendered
+    assert "inquiry-content-scroll" in rendered
+    assert "문의 내용" in rendered
 
 
 def test_validator_is_compact_and_vertical_stage_chain_removed(

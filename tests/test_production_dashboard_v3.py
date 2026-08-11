@@ -164,7 +164,7 @@ def test_workspace_prioritizes_detail_and_answer_without_progress_card() -> None
     )
     final = css[css.index("Final cascade overrides must remain last."):]
     assert "_render_progress" not in source
-    assert 'height=520, key="official_detail_panel"' in source
+    assert 'height=680, key="official_detail_panel"' in source
     assert 'height=760, key="official_dps_panel"' in source
     assert 'height=760, key="official_answer_panel"' in source
     assert "min-height: 760px !important" in css

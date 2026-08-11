@@ -298,11 +298,13 @@ class HistoricalCaseRepository:
                 ):
                     metadata.pop(key, None)
                 metadata["learning_reenabled_at"] = now
+                metadata["learning_signal_type"] = "POSITIVE"
                 if actor:
                     metadata["learning_reenabled_by"] = str(actor)
             else:
                 metadata["learning_exclusion_reason"] = str(reason or "기타")
                 metadata["learning_excluded_at"] = now
+                metadata["learning_signal_type"] = "EXCLUDED"
                 if actor:
                     metadata["learning_excluded_by"] = str(actor)
             connection.execute(
@@ -314,6 +316,30 @@ class HistoricalCaseRepository:
                 """,
                 (int(bool(enabled)), _json(metadata), int(case_id)),
             )
+
+    def set_learning_signal_type(
+        self, case_id: int, signal_type: str
+    ) -> None:
+        normalized = str(signal_type or "").upper()
+        if normalized not in {
+            "POSITIVE", "NEGATIVE", "INTENT_CORRECTION", "EXCLUDED"
+        }:
+            raise ValueError("지원하지 않는 Historical learning 신호입니다.")
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE historical_cases
+                SET metadata_json=json_set(
+                        COALESCE(metadata_json, '{}'),
+                        '$.learning_signal_type', ?
+                    ),
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE id=?
+                """,
+                (normalized, int(case_id)),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError("Historical Case를 찾을 수 없습니다.")
 
     def set_active(self, case_id: int, active: bool) -> None:
         """Backward-compatible wrapper for the Historical learning toggle."""

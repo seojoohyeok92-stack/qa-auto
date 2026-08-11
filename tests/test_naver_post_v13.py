@@ -495,12 +495,6 @@ workspace._render_naver_post_prepare(
 '''
     ).run(timeout=30)
     assert not app.exception
-    next(
-        button
-        for button in app.button
-        if button.label == "\ub4f1\ub85d Dry Run"
-    ).click()
-    app = app.run(timeout=30)
     actual = next(
         button
         for button in app.button

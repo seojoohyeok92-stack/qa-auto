@@ -208,6 +208,12 @@ def test_streamlit_post_prepare_panel_keeps_actual_button_locked(
 ) -> None:
     inquiry_id = _inquiry(database)
     code = f'''
+import os
+os.environ["NAVER_POST_ENABLED"]="false"
+from config import NaverPostSettings
+NaverPostSettings.from_environment=classmethod(
+    lambda cls: cls(enabled=False)
+)
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from ui.review_workspace import _render_naver_post_prepare
@@ -218,9 +224,6 @@ _render_naver_post_prepare(db, inquiry)
     app = AppTest.from_string(code).run(timeout=30)
     assert not app.exception
     labels = {button.label: button for button in app.button}
-    assert "등록 Dry Run" in labels
+    assert "등록 Dry Run" not in labels
     assert labels["네이버 실제 등록"].disabled is True
-    labels["등록 Dry Run"].click()
-    app = app.run(timeout=30)
-    assert not app.exception
-    assert app.success or app.warning
+    assert any("내부 preflight" in item.value for item in app.info)

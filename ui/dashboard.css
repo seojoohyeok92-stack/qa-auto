@@ -2686,12 +2686,18 @@ input,
 }
 [class*="st-key-official_detail_panel"],
 [class*="st-key-official_detail_empty_panel"] {
-  min-height: 520px !important;
-  max-height: 520px !important;
+  min-height: 680px !important;
+  max-height: 680px !important;
   overflow-y: auto !important;
   overflow-x: hidden !important;
   box-sizing: border-box !important;
   min-width: 0 !important;
+}
+.inquiry-content-scroll {
+  min-height: 160px !important;
+  max-height: 280px !important;
+  padding: 16px 18px !important;
+  overflow-y: auto !important;
 }
 [class*="st-key-official_answer_panel"] {
   margin-top: 0 !important;

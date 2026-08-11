@@ -105,6 +105,9 @@ class NormalizedInquiry:
     source_updated_at: str | None
     raw_payload: dict[str, Any]
     seller_answer: str | None = None
+    seller_answer_id: str | None = None
+    seller_answer_at: str | None = None
+    seller_answer_author_type: str | None = None
 
     def to_work_item(self) -> dict[str, Any]:
         metadata = derive_operational_metadata(
@@ -137,6 +140,19 @@ class NormalizedInquiry:
             # Passed directly to the isolated Learning Layer. It is not
             # copied into inquiries.raw_json.
             "seller_answer": self.seller_answer,
+            "posted_answer": (
+                {
+                    "body": self.seller_answer,
+                    "fetch_status": (
+                        "AVAILABLE" if self.seller_answer else "NOT_FETCHED"
+                    ),
+                    "answer_id": self.seller_answer_id,
+                    "posted_at": self.seller_answer_at,
+                    "author_type": self.seller_answer_author_type,
+                }
+                if self.answered is True
+                else None
+            ),
             "registered_at": self.source_created_at,
             "analysis": metadata["analysis"],
             "is_delivery": metadata["is_delivery"],
@@ -240,6 +256,16 @@ class InquiryNormalizer:
                 )) not in (None, "")
                 else None
             ),
+            seller_answer_id=(
+                str(value)
+                if (value := _first(
+                    payload, "answerContentId", "inquiryCommentNo"
+                )) not in (None, "")
+                else None
+            ),
+            seller_answer_at=_source_time(
+                _first(payload, "answerRegistrationDateTime")
+            ),
             raw_payload=self._safe_raw(
                 payload, self._PRODUCT_RAW_FIELDS
             ),
@@ -322,6 +348,16 @@ class InquiryNormalizer:
                     payload, "sellerAnswer", "answerContent", "commentContent", "answer"
                 )) not in (None, "")
                 else None
+            ),
+            seller_answer_id=(
+                str(value)
+                if (value := _first(
+                    payload, "answerContentId", "inquiryCommentNo"
+                )) not in (None, "")
+                else None
+            ),
+            seller_answer_at=_source_time(
+                _first(payload, "answerRegistrationDateTime")
             ),
             raw_payload=self._safe_raw(
                 payload, self._CUSTOMER_RAW_FIELDS

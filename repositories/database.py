@@ -1664,6 +1664,102 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        22,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS learning_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT NOT NULL UNIQUE,
+                feedback_type TEXT NOT NULL CHECK (
+                    feedback_type IN ('STAFF_CORRECTION','HISTORICAL_REVIEW')
+                ),
+                correction_reason TEXT NOT NULL,
+                correction_note TEXT,
+                corrected_intent TEXT,
+                learning_signal_type TEXT NOT NULL CHECK (
+                    learning_signal_type IN (
+                        'NEGATIVE','INTENT_CORRECTION','EXCLUDED'
+                    )
+                ),
+                source TEXT NOT NULL,
+                inquiry_id INTEGER,
+                answer_draft_id INTEGER,
+                historical_case_id INTEGER,
+                question_masked TEXT,
+                original_answer_masked TEXT,
+                corrected_answer_masked TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                    ON DELETE SET NULL,
+                FOREIGN KEY (answer_draft_id) REFERENCES answer_drafts(id)
+                    ON DELETE SET NULL,
+                FOREIGN KEY (historical_case_id) REFERENCES historical_cases(id)
+                    ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_feedback_signal
+            ON learning_feedback(
+                learning_signal_type, active, correction_reason, created_at DESC
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_feedback_inquiry
+            ON learning_feedback(inquiry_id, answer_draft_id, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_feedback_historical
+            ON learning_feedback(historical_case_id, created_at DESC)
+            """,
+        ),
+    ),
+    (
+        23,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS naver_posted_answers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT NOT NULL UNIQUE,
+                inquiry_id INTEGER NOT NULL,
+                answer_body TEXT,
+                fetch_status TEXT NOT NULL CHECK (
+                    fetch_status IN ('AVAILABLE','NOT_FETCHED')
+                ),
+                answer_id TEXT,
+                posted_at TEXT,
+                author_type TEXT,
+                provenance TEXT NOT NULL DEFAULT 'NAVER_POSTED' CHECK (
+                    provenance='NAVER_POSTED'
+                ),
+                source_api TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK (is_current IN (0,1)),
+                first_observed_at TEXT NOT NULL,
+                last_observed_at TEXT NOT NULL,
+                FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                    ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_naver_posted_answers_current
+            ON naver_posted_answers(inquiry_id, is_current, id DESC)
+            """,
+            """
+            ALTER TABLE learning_feedback
+            ADD COLUMN original_answer_source TEXT
+            """,
+            """
+            ALTER TABLE learning_feedback
+            ADD COLUMN original_answer_reference_id INTEGER
+            """,
+        ),
+    ),
 )
 
 

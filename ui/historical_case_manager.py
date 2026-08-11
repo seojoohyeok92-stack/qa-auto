@@ -4,10 +4,18 @@ from datetime import UTC, date, datetime, time
 
 import streamlit as st
 
+from answer.learning_feedback import (
+    CORRECTION_REASON_BY_LABEL,
+    CORRECTION_REASON_LABELS,
+    INTENT_OPTIONS,
+    CorrectionReason,
+)
 from config import get_configured_stores
 from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
+from repositories.learning_feedback_repository import LearningFeedbackRepository
 from services.historical_case_service import HistoricalCaseService
+from services.learning_feedback_service import LearningFeedbackService
 from ui.session_identity import current_identity
 
 
@@ -307,9 +315,12 @@ def render_historical_case_manager(database: Database) -> None:
         if case.get("active"):
             st.success("학습 상태: 검증 Learning")
         else:
-            reason = (case.get("metadata_json") or {}).get("learning_exclusion_reason")
+            case_metadata = case.get("metadata_json") or {}
+            reason = case_metadata.get("learning_exclusion_reason")
+            signal = case_metadata.get("learning_signal_type") or "EXCLUDED"
             st.warning(
-                "학습 상태: 제외됨" + (f" · 사유: {reason}" if reason else "")
+                f"학습 상태: {signal}"
+                + (f" · 사유: {reason}" if reason else "")
             )
         if case.get("promoted_learning_id"):
             st.info(
@@ -323,14 +334,97 @@ def render_historical_case_manager(database: Database) -> None:
             )
         else:
             st.info("원본 사례는 보존되며 Similar Search와 Prompt Context에서 제외됩니다.")
+        with st.expander("잘못된 사례 Learning", expanded=False):
+            st.caption(
+                "잘못된 답변은 Positive 예제로 사용하지 않고 Negative 또는 "
+                "Intent Correction 신호로만 저장합니다."
+            )
+            existing_feedback = LearningFeedbackRepository(
+                database
+            ).for_historical_case(int(selected_id))
+            if existing_feedback:
+                st.dataframe(
+                    [
+                        {
+                            "신호": item.get("learning_signal_type"),
+                            "사유": item.get("correction_reason"),
+                            "올바른 유형": item.get("corrected_intent") or "-",
+                            "상세 메모": item.get("correction_note") or "-",
+                            "저장일": item.get("created_at"),
+                        }
+                        for item in existing_feedback
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+            feedback_mode = st.radio(
+                "학습 신호",
+                ["잘못된 답변", "문의 유형/라우팅 오류"],
+                horizontal=True,
+                key="historical_feedback_mode",
+            )
+            if feedback_mode == "문의 유형/라우팅 오류":
+                feedback_reason = CorrectionReason.ROUTING_ERROR
+                corrected_label = st.selectbox(
+                    "올바른 문의 유형",
+                    list(INTENT_OPTIONS.values()),
+                    key="historical_corrected_intent",
+                )
+                corrected_intent = next(
+                    code
+                    for code, label in INTENT_OPTIONS.items()
+                    if label == corrected_label
+                )
+            else:
+                reason_label = st.selectbox(
+                    "잘못된 이유",
+                    [
+                        CORRECTION_REASON_LABELS[reason]
+                        for reason in CorrectionReason
+                        if reason is not CorrectionReason.ROUTING_ERROR
+                    ],
+                    key="historical_correction_reason",
+                )
+                feedback_reason = CORRECTION_REASON_BY_LABEL[reason_label]
+                corrected_intent = ""
+            feedback_note = st.text_input(
+                "상세 메모 (선택)", key="historical_correction_note"
+            )
+            if st.button(
+                "잘못된 사례로 학습",
+                key="historical_save_negative_learning",
+                type="primary",
+            ):
+                try:
+                    identity = current_identity()
+                    saved = LearningFeedbackService(
+                        database
+                    ).capture_historical_review(
+                        case_id=int(selected_id),
+                        correction_reason=feedback_reason,
+                        correction_note=feedback_note,
+                        corrected_intent=corrected_intent,
+                        actor=str(identity.get("username") or "관리자"),
+                    )
+                    _action_notice(
+                        status="success",
+                        message=f"✅ 구조화된 교정 신호 {len(saved)}건을 저장했습니다.",
+                        case_id=int(selected_id),
+                    )
+                except Exception as error:
+                    _action_notice(
+                        status="error",
+                        message="❌ 교정 Learning 저장 실패",
+                        details=f"원인: {str(error)[:300]}",
+                        case_id=int(selected_id),
+                    )
+                st.rerun()
         exclusion_reason = ""
         if case.get("active"):
             reason_columns = st.columns([1.5, 3.5], gap="small")
             reason_choice = reason_columns[0].selectbox(
-                "학습 제외 사유", [
-                    "잘못된 답변", "오래된 정책", "현재 정책과 충돌",
-                    "상품 특수 사례", "개인정보/민감정보", "표현 부적절", "기타",
-                ],
+                "학습 제외 사유",
+                [CORRECTION_REASON_LABELS[reason] for reason in CorrectionReason],
                 key="historical_exclusion_reason",
             )
             reason_note = reason_columns[1].text_input(
@@ -348,11 +442,24 @@ def render_historical_case_manager(database: Database) -> None:
             target_active = not bool(case.get("active"))
             try:
                 identity = current_identity()
-                repository.set_learning_enabled(
-                    int(selected_id), target_active,
-                    reason=exclusion_reason,
-                    actor=str(identity.get("username") or "관리자"),
-                )
+                actor = str(identity.get("username") or "관리자")
+                if target_active:
+                    repository.set_learning_enabled(
+                        int(selected_id), True, actor=actor
+                    )
+                    LearningFeedbackRepository(
+                        database
+                    ).deactivate_for_historical_case(int(selected_id))
+                else:
+                    LearningFeedbackService(
+                        database
+                    ).capture_historical_review(
+                        case_id=int(selected_id),
+                        correction_reason=reason_choice,
+                        correction_note=reason_note,
+                        actor=actor,
+                        excluded=True,
+                    )
                 refreshed = repository.get(int(selected_id)) or {}
                 if bool(refreshed.get("active")) is not target_active:
                     raise RuntimeError("Historical Case 상태가 DB에 반영되지 않았습니다.")

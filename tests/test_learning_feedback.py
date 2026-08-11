@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from answer.learning_feedback import CorrectionReason, LearningSignalType
+from answer.models import AnswerResult, AnswerStatus
+from repositories.answer_repository import AnswerRepository
+from repositories.database import Database
+from repositories.historical_case_repository import HistoricalCaseRepository
+from repositories.inquiry_repository import InquiryRepository
+from repositories.learning_feedback_repository import LearningFeedbackRepository
+from repositories.learning_repository import LearningRepository
+from repositories.workflow_repository import WorkflowRepository
+from services.approval_service import ApprovalService
+from services.historical_case_service import HistoricalCaseService
+from services.learning_feedback_service import LearningFeedbackService
+
+
+def make_context(tmp_path):
+    database = Database(tmp_path / "feedback.db")
+    assert database.initialize() == list(range(1, 24))
+    inquiry_id = InquiryRepository(database).upsert_work_item(
+        {
+            "store_code": "OJE_PLUS",
+            "source_type": "PRODUCT_INQUIRY",
+            "source_question_id": "FEEDBACK-1",
+            "inquiry_type": "PRODUCT_INQUIRY",
+            "title": "배송 문의",
+            "content": "언제 설치되나요?",
+            "product_name": "삼성 TV",
+            "post_status": "NOT_POSTED",
+            "raw_json": {},
+        }
+    ).inquiry_id
+    WorkflowRepository(database).initialize_steps(inquiry_id)
+    draft = AnswerRepository(database).create_program_draft(
+        inquiry_id,
+        AnswerResult(
+            status=AnswerStatus.GENERATED,
+            category="GENERAL",
+            reason="test",
+            answer="상품 설명서를 확인해 주세요.",
+            provider="rules",
+            auto_answerable=True,
+            needs_review=False,
+        ),
+    )
+    return database, inquiry_id, draft
+
+
+def make_historical_case(database: Database) -> dict:
+    service = HistoricalCaseService(database)
+    case = service.prepare_case(
+        {
+            "store_code": "OJE_PLUS",
+            "source_type": "PRODUCT_INQUIRY",
+            "external_inquiry_id": "HISTORY-FEEDBACK-1",
+            "title": "배송 문의",
+            "content": "언제 설치되나요?",
+            "seller_answer": "무조건 내일 설치됩니다.",
+            "answered": True,
+            "source_created_at": datetime.now(UTC).isoformat(),
+        },
+        source_reference="TEST:feedback",
+    )
+    saved, _ = service.repository.upsert(case)
+    return saved
+
+
+def test_unchanged_answer_creates_no_correction_learning(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    saved = LearningFeedbackService(database).capture_staff_correction(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        correction_reason=CorrectionReason.FACT_ERROR,
+    )
+    assert saved == []
+    assert LearningFeedbackRepository(database).for_inquiry(inquiry_id) == []
+
+
+def test_staff_edit_approval_creates_positive_learning(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    service = ApprovalService(database)
+    service.save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer="현재 주문정보를 확인한 뒤 설치일을 안내드리겠습니다.",
+    )
+    service.approve(inquiry_id=inquiry_id, draft_id=draft["id"])
+    positive = LearningRepository(database).candidates(store_code="OJE_PLUS")
+    assert len(positive) == 1
+    assert positive[0]["learning_source"] == "APPROVED_EDITED"
+    assert positive[0]["metadata_json"]["learning_signal_type"] == "POSITIVE"
+
+
+def test_fact_error_creates_positive_and_negative_with_note(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    service = ApprovalService(database)
+    service.save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer="주문정보 확인 후 설치일을 안내드리겠습니다.",
+        correction_reason=CorrectionReason.FACT_ERROR.value,
+        correction_note="주문 확인 없이 일반 답변을 제공함",
+        actor="staff-1",
+    )
+    service.approve(inquiry_id=inquiry_id, draft_id=draft["id"])
+
+    positive = LearningRepository(database).candidates(store_code="OJE_PLUS")
+    feedback = LearningFeedbackRepository(database).for_inquiry(inquiry_id)
+    assert len(positive) == 1
+    assert [item["learning_signal_type"] for item in feedback] == ["NEGATIVE"]
+    assert feedback[0]["correction_note"] == "주문 확인 없이 일반 답변을 제공함"
+
+
+def test_feedback_can_be_saved_after_answer_autosave(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    service = ApprovalService(database)
+    corrected = "주문정보 확인 후 설치일을 안내드리겠습니다."
+    service.save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer=corrected,
+        autosave=True,
+    )
+    assert LearningFeedbackRepository(database).for_inquiry(inquiry_id) == []
+    service.save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer=corrected,
+        correction_reason=CorrectionReason.FACT_ERROR.value,
+    )
+    assert len(LearningFeedbackRepository(database).for_inquiry(inquiry_id)) == 1
+
+
+def test_routing_error_creates_negative_and_intent_correction(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    ApprovalService(database).save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer="주문번호를 확인해 설치 일정을 조회하겠습니다.",
+        correction_reason=CorrectionReason.ROUTING_ERROR.value,
+        corrected_intent="DELIVERY_INSTALLATION_STATUS",
+    )
+    feedback = LearningFeedbackRepository(database).for_inquiry(inquiry_id)
+    assert {item["learning_signal_type"] for item in feedback} == {
+        "NEGATIVE",
+        "INTENT_CORRECTION",
+    }
+    assert {
+        item["corrected_intent"] for item in feedback
+    } == {"DELIVERY_INSTALLATION_STATUS"}
+
+
+def test_historical_bad_case_creates_negative_and_is_not_retrievable(
+    tmp_path,
+) -> None:
+    database, _, _ = make_context(tmp_path)
+    case = make_historical_case(database)
+    saved = LearningFeedbackService(database).capture_historical_review(
+        case_id=case["id"],
+        correction_reason=CorrectionReason.DELIVERY_INSTALLATION_ERROR,
+        correction_note="확정되지 않은 설치일 단정",
+    )
+    assert [item["learning_signal_type"] for item in saved] == ["NEGATIVE"]
+    historical = HistoricalCaseRepository(database).get(case["id"])
+    assert historical["active"] is False
+    assert historical["metadata_json"]["learning_signal_type"] == "NEGATIVE"
+    assert HistoricalCaseService(database).search("언제 설치", store_code="OJE_PLUS") == []
+
+
+def test_historical_routing_error_creates_intent_correction(tmp_path) -> None:
+    database, _, _ = make_context(tmp_path)
+    case = make_historical_case(database)
+    saved = LearningFeedbackService(database).capture_historical_review(
+        case_id=case["id"],
+        correction_reason=CorrectionReason.ROUTING_ERROR,
+        corrected_intent="DELIVERY_INSTALLATION_STATUS",
+    )
+    assert {item["learning_signal_type"] for item in saved} == {
+        "NEGATIVE",
+        "INTENT_CORRECTION",
+    }
+    historical = HistoricalCaseRepository(database).get(case["id"])
+    assert historical["metadata_json"]["learning_signal_type"] == "INTENT_CORRECTION"
+
+
+def test_historical_exclusion_is_distinct_from_negative(tmp_path) -> None:
+    database, _, _ = make_context(tmp_path)
+    case = make_historical_case(database)
+    saved = LearningFeedbackService(database).capture_historical_review(
+        case_id=case["id"],
+        correction_reason=CorrectionReason.OTHER,
+        correction_note="오염된 데이터",
+        excluded=True,
+    )
+    assert [item["learning_signal_type"] for item in saved] == ["EXCLUDED"]
+    historical = HistoricalCaseRepository(database).get(case["id"])
+    assert historical["metadata_json"]["learning_signal_type"] == "EXCLUDED"
+    assert LearningFeedbackRepository(database).candidates("NEGATIVE") == []
+
+
+def test_negative_feedback_never_appears_in_positive_candidates(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    ApprovalService(database).save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer="주문정보 확인 후 안내드리겠습니다.",
+        correction_reason=CorrectionReason.FACT_ERROR.value,
+    )
+    negative = LearningFeedbackRepository(database).candidates(
+        LearningSignalType.NEGATIVE.value
+    )
+    assert len(negative) == 1
+    assert LearningRepository(database).candidates(store_code="OJE_PLUS") == []
+
+
+def test_feedback_migration_is_idempotent_and_legacy_rows_remain_positive(
+    tmp_path,
+) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    ApprovalService(database).approve(
+        inquiry_id=inquiry_id, draft_id=draft["id"]
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE learning_examples
+            SET metadata_json=json_remove(metadata_json, '$.learning_signal_type')
+            """
+        )
+    assert database.initialize() == []
+    assert database.migration_versions() == list(range(1, 24))
+    assert len(LearningRepository(database).candidates(store_code="OJE_PLUS")) == 1

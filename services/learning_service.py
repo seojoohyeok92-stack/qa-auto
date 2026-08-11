@@ -5,11 +5,15 @@ import json
 import re
 from typing import Any
 
+from answer.answer_provenance import AnswerProvenance
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
-from repositories.inquiry_repository import InquiryRepository
+from repositories.inquiry_repository import InquiryRepository, utc_now
 from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
+from repositories.naver_posted_answer_repository import (
+    NaverPostedAnswerRepository,
+)
 from services.learning_privacy_service import LearningPrivacyService
 from services.learning_quality_service import LearningQualityService
 from services.similar_answer_service import normalize_learning_question
@@ -82,6 +86,13 @@ class LearningService:
         original = self.privacy.mask((draft or {}).get("original_answer"), customer_names=names)
         edited = self.privacy.mask((draft or {}).get("edited_answer"), customer_names=names)
         source = learning_source
+        answer_provenance = {
+            "APPROVED_EDITED": AnswerProvenance.STAFF_EDITED.value,
+            "APPROVED_UNEDITED": AnswerProvenance.PROGRAM_GENERATED.value,
+            "SELLER_ANSWER": AnswerProvenance.NAVER_POSTED.value,
+            "AUTO_POST_CORRECTED": AnswerProvenance.NAVER_POSTED.value,
+            "AUTO_POST_REVIEWED_NO_CHANGE": AnswerProvenance.NAVER_POSTED.value,
+        }.get(source, AnswerProvenance.HISTORICAL_VERIFIED.value)
         quality = self.quality.score(source, original, masked_answer)
         digest = hashlib.sha256(
             f"{source}|{inquiry.get('id')}|{masked_question}|{masked_answer}".encode("utf-8")
@@ -117,7 +128,14 @@ class LearningService:
             "style_only": source == "SELLER_ANSWER",
             "version": 1,
             "style_features_json": self.quality.style_features(masked_answer),
-            "metadata_json": {"facts_authority": "STYLE_ONLY" if source == "SELLER_ANSWER" else "APPROVED_REFERENCE"},
+            "metadata_json": {
+                "facts_authority": (
+                    "STYLE_ONLY" if source == "SELLER_ANSWER"
+                    else "APPROVED_REFERENCE"
+                ),
+                "learning_signal_type": "POSITIVE",
+                "answer_provenance": answer_provenance,
+            },
             "active": True,
         }
 
@@ -160,6 +178,91 @@ class LearningService:
         )
         self.logs.record_inquiry(inquiry_id, "LEARNING_EXAMPLE_SAVED", "승인된 최종 답변을 Learning Repository에 저장했습니다.", details={"learning_example_id": saved["id"], "learning_source": source, "rating": saved["rating"]})
         return saved
+
+    def capture_posted_staff_correction(
+        self, *, inquiry_id: int, draft_id: int
+    ) -> dict[str, Any] | None:
+        """Save an internal correction without claiming it was posted to Naver."""
+
+        inquiry = self.inquiries.get(int(inquiry_id))
+        draft = self.answers.get(int(draft_id))
+        posted = NaverPostedAnswerRepository(self.database).current(
+            int(inquiry_id)
+        )
+        if inquiry is None or draft is None or posted is None:
+            return None
+        if posted.get("fetch_status") != "AVAILABLE":
+            return None
+        customer_truth = str(posted.get("answer_body") or "").strip()
+        corrected = str(draft.get("edited_answer") or "").strip()
+        if not customer_truth or not corrected or corrected == customer_truth:
+            return None
+        example = self._build(
+            inquiry=inquiry,
+            draft=draft,
+            learning_source="APPROVED_EDITED",
+            answer=corrected,
+        )
+        if example is None:
+            return None
+        example["posted"] = False
+        example["posted_at"] = None
+        example["auto_posted"] = False
+        example["metadata_json"] = {
+            **(example.get("metadata_json") or {}),
+            "facts_authority": "STAFF_CORRECTION_OF_NAVER_POSTED",
+            "answer_provenance": AnswerProvenance.STAFF_EDITED.value,
+            "evaluated_answer_provenance": AnswerProvenance.NAVER_POSTED.value,
+            "naver_posted_answer_id": int(posted["id"]),
+            "customer_truth_remains_naver_posted": True,
+        }
+        return self.repository.upsert(example)
+
+    def capture_verified_posted_answer(
+        self, *, inquiry_id: int, actor: str
+    ) -> dict[str, Any] | None:
+        """Promote only the customer-visible Naver answer after human review."""
+
+        inquiry = self.inquiries.get(int(inquiry_id))
+        posted = NaverPostedAnswerRepository(self.database).current(
+            int(inquiry_id)
+        )
+        if inquiry is None or posted is None:
+            return None
+        answer = str(posted.get("answer_body") or "").strip()
+        if posted.get("fetch_status") != "AVAILABLE" or not answer:
+            return None
+        example = self._build(
+            inquiry=inquiry,
+            draft=None,
+            learning_source="SELLER_ANSWER",
+            answer=answer,
+            seller_answer=answer,
+        )
+        if example is None:
+            return None
+        example.update(
+            {
+                "answer_draft_id": None,
+                "posted": True,
+                "posted_at": posted.get("posted_at"),
+                "rating": 5,
+                "quality_score": 1.0,
+                "style_only": False,
+                "validator_result": "HUMAN_VERIFIED_NAVER_POSTED",
+                "metadata_json": {
+                    **(example.get("metadata_json") or {}),
+                    "facts_authority": "HUMAN_VERIFIED_NAVER_POSTED",
+                    "answer_provenance": AnswerProvenance.NAVER_POSTED.value,
+                    "human_verified": True,
+                    "verified_by": str(actor or "직원"),
+                    "verified_at": utc_now(),
+                    "naver_posted_answer_id": int(posted["id"]),
+                    "customer_facing_truth": True,
+                },
+            }
+        )
+        return self.repository.upsert(example)
 
     def import_existing_seller_answers(self, *, limit: int | None = None) -> dict[str, int]:
         sql = "SELECT id FROM inquiries WHERE source_answered=1 ORDER BY id"
