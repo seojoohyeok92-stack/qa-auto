@@ -28,6 +28,9 @@ class PassiveProbeManager:
         self.select_candidate = Mock(return_value=(False, "NOT_SELECTED"))
         self.activate_window = Mock(return_value=False)
         self.click_reload_button = Mock(return_value=False)
+        self.click_login_time_extension = Mock(
+            return_value=(False, "KEEPALIVE_EXTENSION_CONTROL_NOT_FOUND")
+        )
         self.is_window = Mock(return_value=True)
 
 
@@ -84,6 +87,7 @@ def assert_no_active_gui_calls(manager: PassiveProbeManager) -> None:
     manager.select_candidate.assert_not_called()
     manager.activate_window.assert_not_called()
     manager.click_reload_button.assert_not_called()
+    manager.click_login_time_extension.assert_not_called()
 
 
 def test_agent_startup_is_passive(tmp_path: Path) -> None:

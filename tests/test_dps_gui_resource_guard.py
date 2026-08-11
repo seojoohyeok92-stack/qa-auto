@@ -230,7 +230,7 @@ def test_lookup_gate_blocks_keepalive_from_concurrent_gui(tmp_path: Path) -> Non
     result = agent.monitor_session(keepalive_enabled=True, force_keepalive=True)
     release.set()
     worker.join(timeout=2)
-    assert result["code"] == "SESSION_MONITOR_SKIPPED"
+    assert result["code"] == "KEEPALIVE_DEFERRED"
     assert result["skip_reason"] == "LOOKUP_IN_PROGRESS"
 
 

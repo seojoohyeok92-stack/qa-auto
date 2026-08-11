@@ -774,6 +774,44 @@ class ChromeTabManager:
                 continue
         return False
 
+    def click_login_time_extension(self, window: Any) -> tuple[bool, str]:
+        """Invoke only the DPS ``로그인시간연장`` control on the active page."""
+
+        try:
+            elements = window.descendants()
+        except Exception:
+            return False, "KEEPALIVE_EXTENSION_CONTROL_READ_FAILED"
+        matching_control_found = False
+        for element in elements:
+            try:
+                if self.element_name(element).strip() != "로그인시간연장":
+                    continue
+                control_type = str(element.element_info.control_type or "")
+                if control_type not in {
+                    "Button",
+                    "Hyperlink",
+                    "MenuItem",
+                    "Text",
+                }:
+                    continue
+                matching_control_found = True
+                if hasattr(element, "is_visible") and not element.is_visible():
+                    continue
+                if hasattr(element, "is_enabled") and not element.is_enabled():
+                    continue
+                try:
+                    element.invoke()
+                except Exception:
+                    element.click_input()
+                return True, "KEEPALIVE_EXTENSION_CLICKED"
+            except Exception:
+                continue
+        return False, (
+            "KEEPALIVE_EXTENSION_CLICK_FAILED"
+            if matching_control_found
+            else "KEEPALIVE_EXTENSION_CONTROL_NOT_FOUND"
+        )
+
     def capture_previous_context(self) -> PreviousUiContext:
         hwnd = self.foreground_hwnd()
         window = self.window_from_handle(hwnd) if hwnd else None

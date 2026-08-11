@@ -1914,6 +1914,9 @@ class DpsCompletionTests(unittest.TestCase):
             self.assertTrue(first["success"])
             self.assertTrue(second["cached"])
             self.assertEqual(ui.perform_lookup.call_count, 1)
+            self.assertIsNotNone(agent.last_dps_activity_at)
+            self.assertIsNotNone(agent.next_keepalive_due_at)
+            self.assertFalse(agent.keepalive_due)
             saved = json.loads(cache_path.read_text(encoding="utf-8"))
             self.assertIn("expires_at", saved["order:2026071112345678"])
 

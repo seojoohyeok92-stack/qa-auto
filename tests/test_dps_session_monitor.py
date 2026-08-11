@@ -13,9 +13,9 @@ from dps.session_scheduler import DpsSessionMonitorScheduler
 
 
 class FakeTabManager:
-    def __init__(self, *, reload_result: bool = True) -> None:
-        self.reload_result = reload_result
-        self.reload_calls = 0
+    def __init__(self, *, extension_result: bool = True) -> None:
+        self.extension_result = extension_result
+        self.extension_calls = 0
         self.restore_calls = 0
 
     def capture_previous_context(self) -> PreviousUiContext:
@@ -24,17 +24,21 @@ class FakeTabManager:
     def validate_selected_candidate(self, candidate):
         return True, {"dps_domain_valid": True, "dps_path_valid": True}
 
-    def click_reload_button(self, window) -> bool:
-        self.reload_calls += 1
-        return self.reload_result
+    def click_login_time_extension(self, window) -> tuple[bool, str]:
+        self.extension_calls += 1
+        return self.extension_result, (
+            "KEEPALIVE_EXTENSION_CLICKED"
+            if self.extension_result
+            else "KEEPALIVE_EXTENSION_CONTROL_NOT_FOUND"
+        )
 
     def restore_previous_context(self, context, target_hwnd) -> bool:
         self.restore_calls += 1
         return True
 
 
-def make_agent(tmp_path: Path, *, reload_result: bool = True):
-    manager = FakeTabManager(reload_result=reload_result)
+def make_agent(tmp_path: Path, *, extension_result: bool = True):
+    manager = FakeTabManager(extension_result=extension_result)
     store = ConnectionStore(
         tmp_path / "connection.json", tmp_path / "state.json"
     )
@@ -78,7 +82,7 @@ def test_ready_keepalive_succeeds_and_stays_ready(tmp_path: Path) -> None:
     assert result["success"] is True
     assert result["session_status"] == "READY"
     assert result["keepalive_performed"] is True
-    assert manager.reload_calls == 1
+    assert manager.extension_calls == 1
     assert agent.last_keepalive_at
 
 
@@ -145,9 +149,9 @@ def test_lookup_lock_makes_keepalive_skip(tmp_path: Path) -> None:
     finally:
         agent.lookup_gate_owner = None
         agent.lookup_gate.release()
-    assert result["code"] == "SESSION_MONITOR_SKIPPED"
+    assert result["code"] == "KEEPALIVE_DEFERRED"
     assert result["skip_reason"] == "LOOKUP_IN_PROGRESS"
-    assert manager.reload_calls == 0
+    assert manager.extension_calls == 0
 
 
 def test_actual_lookup_waits_for_keepalive_and_gets_priority(
@@ -179,7 +183,7 @@ def test_actual_lookup_waits_for_keepalive_and_gets_priority(
 def test_one_keepalive_failure_does_not_immediately_mark_connection_failed(
     tmp_path: Path,
 ) -> None:
-    agent, _ = make_agent(tmp_path, reload_result=False)
+    agent, _ = make_agent(tmp_path, extension_result=False)
     agent._detect_candidate_state = lambda candidate: logged_in_state()  # type: ignore[method-assign]
 
     first = agent.monitor_session(force_keepalive=True)

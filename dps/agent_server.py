@@ -70,6 +70,9 @@ SESSION_MONITOR_STATUSES = {
     "UNKNOWN",
     "STALE",
 }
+DPS_ACTIVITY_TYPES = frozenset(
+    {"LOOKUP_SUCCESS", "KEEPALIVE_SUCCESS", "EXPLICIT_SESSION_ACTIVITY"}
+)
 
 
 def _configure_logger() -> logging.Logger:
@@ -250,6 +253,31 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _iso_from_epoch(value: float) -> str:
+    return datetime.fromtimestamp(value).astimezone().isoformat(timespec="seconds")
+
+
+def _iso_epoch(value: object) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.timestamp()
+
+
+def _latest_iso_value(*values: object) -> str | None:
+    valid = [
+        (epoch, str(value))
+        for value in values
+        if (epoch := _iso_epoch(value)) is not None
+    ]
+    return max(valid, default=(0.0, None), key=lambda item: item[0])[1]
+
+
 def _read_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -377,6 +405,14 @@ class DpsWindowsAgent:
         self.consecutive_keepalive_failures = int(
             state.get("consecutive_keepalive_failures") or 0
         )
+        self.last_dps_activity_at = _latest_iso_value(
+            state.get("last_dps_activity_at"),
+            state.get("last_successful_lookup_at"),
+            self.last_keepalive_at,
+        )
+        self.next_keepalive_due_at = state.get("next_keepalive_due_at")
+        self.keepalive_due = bool(state.get("keepalive_due", False))
+        self.keepalive_deferred_reason = state.get("keepalive_deferred_reason")
         self.keepalive_lock_skips = int(state.get("keepalive_lock_skips") or 0)
         self.last_monitor_event = state.get("last_monitor_event")
         self.last_passive_monitor_at = state.get("last_passive_monitor_at")
@@ -483,6 +519,10 @@ class DpsWindowsAgent:
                 "last_ready_at": self.last_ready_at,
                 "last_keepalive_at": self.last_keepalive_at,
                 "last_keepalive_attempt_at": self.last_keepalive_attempt_at,
+                "last_dps_activity_at": self.last_dps_activity_at,
+                "next_keepalive_due_at": self.next_keepalive_due_at,
+                "keepalive_due": self.keepalive_due,
+                "keepalive_deferred_reason": self.keepalive_deferred_reason,
                 "consecutive_keepalive_failures": (
                     self.consecutive_keepalive_failures
                 ),
@@ -576,6 +616,99 @@ class DpsWindowsAgent:
             parsed = parsed.astimezone()
         return max(0.0, time.time() - parsed.timestamp())
 
+    def _keepalive_schedule_snapshot(
+        self,
+        *,
+        interval_seconds: int | None = None,
+        now_epoch: float | None = None,
+    ) -> tuple[str | None, bool]:
+        activity_epoch = _iso_epoch(self.last_dps_activity_at)
+        if activity_epoch is None:
+            return None, False
+        interval = max(
+            600,
+            int(
+                interval_seconds
+                if interval_seconds is not None
+                else self.session_settings.keepalive_interval_minutes * 60
+            ),
+        )
+        due_epoch = activity_epoch + interval
+        current = time.time() if now_epoch is None else float(now_epoch)
+        return _iso_from_epoch(due_epoch), current >= due_epoch
+
+    def _refresh_keepalive_schedule(
+        self,
+        *,
+        interval_seconds: int | None = None,
+        now_epoch: float | None = None,
+    ) -> bool:
+        next_due, due = self._keepalive_schedule_snapshot(
+            interval_seconds=interval_seconds,
+            now_epoch=now_epoch,
+        )
+        self.next_keepalive_due_at = next_due
+        self.keepalive_due = due
+        return due
+
+    def _record_dps_activity(
+        self,
+        activity_type: str,
+        *,
+        activity_epoch: float | None = None,
+        interval_seconds: int | None = None,
+    ) -> None:
+        normalized = str(activity_type or "").upper()
+        if normalized not in DPS_ACTIVITY_TYPES:
+            raise ValueError(f"Unsupported DPS activity type: {activity_type}")
+        current = time.time() if activity_epoch is None else float(activity_epoch)
+        self.last_dps_activity_at = _iso_from_epoch(current)
+        self.last_activity_at = current
+        self.keepalive_deferred_reason = None
+        self._refresh_keepalive_schedule(
+            interval_seconds=interval_seconds,
+            now_epoch=current,
+        )
+        self._save_state()
+
+    def _keepalive_is_urgent(self) -> bool:
+        elapsed = self._elapsed_since_iso(self.last_dps_activity_at)
+        return bool(
+            elapsed is not None
+            and elapsed >= self.session_settings.keepalive_urgent_minutes * 60
+        )
+
+    def _defer_keepalive(
+        self,
+        reason: str,
+        *,
+        gui_resource: GUIResourceState | None = None,
+    ) -> dict[str, Any]:
+        self.keepalive_lock_skips += 1
+        self.keepalive_deferred_reason = str(reason or "UNKNOWN")[:200]
+        self.last_checked_at = now_iso()
+        urgent = self._keepalive_is_urgent()
+        self.last_monitor_event = (
+            "SESSION_KEEPALIVE_URGENT" if urgent else "KEEPALIVE_DEFERRED"
+        )
+        self._save_state()
+        extra: dict[str, Any] = {}
+        if gui_resource is not None:
+            extra["gui_resource"] = gui_resource.to_dict()
+        return success(
+            "KEEPALIVE_DEFERRED",
+            "DPS keepalive yielded to higher-priority GUI activity.",
+            session_status=self.session_status,
+            monitor_status=self.session_status,
+            skipped=True,
+            deferred=True,
+            skip_reason=self.keepalive_deferred_reason,
+            keepalive_deferred_reason=self.keepalive_deferred_reason,
+            keepalive_urgency=("SESSION_KEEPALIVE_URGENT" if urgent else None),
+            keepalive_performed=False,
+            **extra,
+        )
+
     def _passive_monitor_session(self, *, trigger: str) -> dict[str, Any]:
         """Validate only saved process metadata without traversing Windows UIA."""
 
@@ -634,24 +767,18 @@ class DpsWindowsAgent:
         self,
         *,
         keepalive_enabled: bool = False,
-        keepalive_interval_seconds: int = 1200,
+        keepalive_interval_seconds: int = 2400,
         force_keepalive: bool = False,
         trigger: str = "MANUAL",
     ) -> dict[str, Any]:
         """Run passive monitoring; perform guarded GUI keepalive only when enabled and due."""
 
+        due = self._refresh_keepalive_schedule(
+            interval_seconds=keepalive_interval_seconds,
+        )
         if self.session_settings.passive_monitor_enabled:
             passive_result = self._passive_monitor_session(trigger=trigger)
-            elapsed = self._elapsed_since_iso(self.last_keepalive_at)
-            keepalive_due = bool(
-                keepalive_enabled
-                and (
-                    force_keepalive
-                    or elapsed is None
-                    or elapsed >= max(600, int(keepalive_interval_seconds))
-                )
-            )
-            if not keepalive_due:
+            if not keepalive_enabled or not (force_keepalive or due):
                 return passive_result
         return self._active_monitor_session(
             keepalive_enabled=keepalive_enabled,
@@ -664,20 +791,23 @@ class DpsWindowsAgent:
         self,
         *,
         keepalive_enabled: bool = False,
-        keepalive_interval_seconds: int = 1200,
+        keepalive_interval_seconds: int = 2400,
         force_keepalive: bool = False,
         trigger: str = "MANUAL",
     ) -> dict[str, Any]:
         """Inspect DPS session and optionally perform one read-only reload."""
 
+        keepalive_requested = bool(keepalive_enabled or force_keepalive)
         if self.actual_lookup_waiting.is_set() or not self.lookup_gate.acquire(
             blocking=False
         ):
+            LOGGER.info("DPS session monitor skipped: lookup lock busy")
+            if keepalive_requested:
+                return self._defer_keepalive("LOOKUP_IN_PROGRESS")
             self.keepalive_lock_skips += 1
             self.last_checked_at = now_iso()
             self.last_monitor_event = "LOOKUP_LOCK_SKIP"
             self._save_state()
-            LOGGER.info("DPS session monitor skipped: lookup lock busy")
             return success(
                 "SESSION_MONITOR_SKIPPED",
                 "DPS lookup is active; session monitoring was skipped.",
@@ -692,16 +822,20 @@ class DpsWindowsAgent:
         previous = None
         target_hwnd = 0
         try:
-            guard_state = self._wait_for_gui_resource(
-                owner=self.lookup_gate_owner or "MONITOR"
+            guard_state = (
+                self.gui_guard.check()
+                if keepalive_requested
+                else self._wait_for_gui_resource(
+                    owner=self.lookup_gate_owner or "MONITOR"
+                )
             )
             if not guard_state.available:
-                deferred_keepalive = keepalive_enabled or force_keepalive
-                code = (
-                    "KEEPALIVE_DEFERRED"
-                    if deferred_keepalive
-                    else "SESSION_MONITOR_DEFERRED"
-                )
+                if keepalive_requested:
+                    return self._defer_keepalive(
+                        f"GUI_RESOURCE_{guard_state.state}:{guard_state.reason}",
+                        gui_resource=guard_state,
+                    )
+                code = "SESSION_MONITOR_DEFERRED"
                 LOGGER.info(
                     "DPS session work deferred by GUI guard: code=%s state=%s "
                     "reason=%s source=%s",
@@ -770,12 +904,10 @@ class DpsWindowsAgent:
 
                 self.runtime_login_confirmed = True
                 self._set_monitor_state("READY", event="READY_CHECKED")
-                elapsed = self._elapsed_since_iso(self.last_keepalive_at)
                 due = force_keepalive or (
                     keepalive_enabled
-                    and (
-                        elapsed is None
-                        or elapsed >= max(600, int(keepalive_interval_seconds))
+                    and self._refresh_keepalive_schedule(
+                        interval_seconds=keepalive_interval_seconds
                     )
                 )
                 if not due:
@@ -788,20 +920,10 @@ class DpsWindowsAgent:
                         last_checked_at=self.last_checked_at,
                     )
                 if self.actual_lookup_waiting.is_set():
-                    self.keepalive_lock_skips += 1
-                    self.last_monitor_event = "LOOKUP_PRIORITY_SKIP"
-                    self._save_state()
-                    return success(
-                        "KEEPALIVE_SKIPPED",
-                        "An actual DPS lookup has priority over keepalive.",
-                        session_status="READY",
-                        monitor_status="READY",
-                        skipped=True,
-                        skip_reason="ACTUAL_LOOKUP_WAITING",
-                        keepalive_performed=False,
-                    )
+                    return self._defer_keepalive("ACTUAL_LOOKUP_WAITING")
 
                 self.last_keepalive_attempt_at = now_iso()
+                self.keepalive_deferred_reason = None
                 valid, checks = self.tab_manager.validate_selected_candidate(candidate)
                 if not valid:
                     return self._record_keepalive_failure(
@@ -809,10 +931,14 @@ class DpsWindowsAgent:
                         "DPS tab verification failed before keepalive.",
                         details=checks,
                     )
-                if not self.tab_manager.click_reload_button(candidate.window):
+                clicked, extension_code = (
+                    self.tab_manager.click_login_time_extension(candidate.window)
+                )
+                if not clicked:
                     return self._record_keepalive_failure(
-                        "REFRESH_BUTTON_NOT_FOUND",
-                        "Chrome reload control was not found on the verified DPS tab.",
+                        "KEEPALIVE_UNAVAILABLE",
+                        "The DPS login-time extension control was unavailable.",
+                        details={"extension_code": extension_code},
                     )
                 self.sleep(0.75)
                 refreshed = self._detect_candidate_state(candidate)
@@ -837,11 +963,14 @@ class DpsWindowsAgent:
                 if refreshed_status != "READY":
                     return self._record_keepalive_failure(
                         "KEEPALIVE_STATE_UNCERTAIN",
-                        "DPS state could not be confirmed after the read-only reload.",
+                        "DPS state could not be confirmed after session extension.",
                     )
                 self.consecutive_keepalive_failures = 0
                 self.last_keepalive_at = now_iso()
-                self.last_activity_at = time.time()
+                self._record_dps_activity(
+                    "KEEPALIVE_SUCCESS",
+                    interval_seconds=keepalive_interval_seconds,
+                )
                 self._set_monitor_state("READY", event="KEEPALIVE_SUCCEEDED")
                 LOGGER.info(
                     "DPS keepalive succeeded: trigger=%s last_keepalive_at=%s",
@@ -849,12 +978,14 @@ class DpsWindowsAgent:
                     self.last_keepalive_at,
                 )
                 return success(
-                    "SESSION_REFRESHED",
-                    "The verified DPS tab was refreshed read-only.",
+                    "SESSION_EXTENDED",
+                    "The DPS login session was extended.",
                     session_status="READY",
                     monitor_status="READY",
                     keepalive_performed=True,
                     last_keepalive_at=self.last_keepalive_at,
+                    last_dps_activity_at=self.last_dps_activity_at,
+                    next_keepalive_due_at=self.next_keepalive_due_at,
                 )
         except Exception as error:
             LOGGER.exception(
@@ -1610,7 +1741,9 @@ class DpsWindowsAgent:
     def refresh_session(self) -> dict[str, Any]:
         return self.monitor_session(
             keepalive_enabled=True,
-            keepalive_interval_seconds=0,
+            keepalive_interval_seconds=(
+                self.session_settings.keepalive_interval_minutes * 60
+            ),
             force_keepalive=True,
             trigger="MANUAL_REFRESH",
         )
@@ -1798,6 +1931,9 @@ class DpsWindowsAgent:
 
     def _status_unlocked(self) -> dict[str, Any]:
         remaining = self._session_remaining()
+        next_keepalive_due_at, keepalive_due = (
+            self._keepalive_schedule_snapshot()
+        )
         config = self.store.load()
         runtime = self.connection
         hwnd_valid: bool | None = None
@@ -1868,6 +2004,14 @@ class DpsWindowsAgent:
             last_ready_at=self.last_ready_at,
             last_keepalive_at=self.last_keepalive_at,
             last_keepalive_attempt_at=self.last_keepalive_attempt_at,
+            last_dps_activity_at=self.last_dps_activity_at,
+            next_keepalive_due_at=next_keepalive_due_at,
+            keepalive_due=keepalive_due,
+            keepalive_enabled=self.session_settings.keepalive_enabled,
+            keepalive_interval_minutes=(
+                self.session_settings.keepalive_interval_minutes
+            ),
+            keepalive_deferred_reason=self.keepalive_deferred_reason,
             consecutive_keepalive_failures=self.consecutive_keepalive_failures,
             keepalive_lock_skips=self.keepalive_lock_skips,
             last_monitor_event=self.last_monitor_event,
@@ -2434,6 +2578,10 @@ class DpsWindowsAgent:
                             LAST_LOOKUP_RESULT_FILE,
                             _safe_lookup_log_payload(result),
                         )
+                        self.last_lookup_at = now_iso()
+                        self.last_successful_lookup_at = self.last_lookup_at
+                        self.last_order_number = self.ui.mask_order_number(query_value)
+                        self._record_dps_activity("LOOKUP_SUCCESS")
                         return result
 
                 automation = self.ui.perform_lookup(
@@ -2458,7 +2606,6 @@ class DpsWindowsAgent:
                         stage,
                     ),
                 )
-                self.last_activity_at = time.time()
                 self.last_lookup_at = now_iso()
                 self.last_order_number = self.ui.mask_order_number(query_value)
                 if not automation.get("success"):
@@ -2559,6 +2706,7 @@ class DpsWindowsAgent:
                         "DPS 실행 식별자 echo가 요청 컨텍스트와 일치하지 않습니다.",
                         result["diagnostics"],
                     )
+                self._record_dps_activity("LOOKUP_SUCCESS")
                 _write_json(
                     LAST_LOOKUP_RESULT_FILE,
                     _safe_lookup_log_payload(result),
