@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+import pytest
 
 from config import DpsSessionSettings
+from dps import agent_server
 from dps.agent_server import DpsWindowsAgent
 from dps.connection_store import ConnectionStore
 from dps.gui_resource_guard import GUIResourceState
@@ -83,6 +89,127 @@ def assert_no_active_gui_calls(manager: PassiveProbeManager) -> None:
 def test_agent_startup_is_passive(tmp_path: Path) -> None:
     _, manager = make_agent(tmp_path)
     assert_no_active_gui_calls(manager)
+
+
+def test_module_import_constructs_global_agent_in_fresh_process(
+    tmp_path: Path,
+) -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DPS_CONNECTION_FILE": str(tmp_path / "connection.json"),
+            "DPS_SESSION_MONITOR_ENABLED": "false",
+            "DPS_SESSION_KEEPALIVE_ENABLED": "false",
+        }
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from dps import agent_server; "
+                "assert agent_server.AGENT.connection is None; "
+                "print('AGENT_IMPORT_OK')"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "AGENT_IMPORT_OK"
+
+
+def test_agent_startup_downgrades_persisted_ready_until_active_check(
+    tmp_path: Path,
+) -> None:
+    store = ConnectionStore(
+        tmp_path / "connection.json", tmp_path / "state.json"
+    )
+    store.save_agent_state(
+        {
+            "session_status": "READY",
+            "login_confirmed_at": 123.0,
+        }
+    )
+    manager = PassiveProbeManager()
+    agent = DpsWindowsAgent(
+        store=store,
+        tab_manager=manager,
+        ui_automation=SimpleNamespace(),
+        gui_guard=FreeGuard(),
+        sleep=lambda _: None,
+    )
+
+    status = agent.status()
+
+    assert status["connection_status"] == "DISCONNECTED"
+    assert status["session_status"] == "STALE"
+    assert status["logged_in"] is False
+    assert status["login_state"] == "LOGIN_UNCERTAIN"
+    assert_no_active_gui_calls(manager)
+
+
+def test_main_binds_server_before_scheduler_and_always_closes() -> None:
+    events: list[str] = []
+
+    class FakeServer:
+        def __init__(self, address, handler) -> None:
+            events.append("server_bound")
+
+        def serve_forever(self) -> None:
+            events.append("serve_forever")
+            raise RuntimeError("stop test server")
+
+        def server_close(self) -> None:
+            events.append("server_closed")
+
+    class FakeScheduler:
+        def __init__(self, monitor, *, logger) -> None:
+            events.append("scheduler_created")
+
+        def start(self) -> bool:
+            events.append("scheduler_started")
+            return True
+
+        def stop(self) -> None:
+            events.append("scheduler_stopped")
+
+    with (
+        patch.object(agent_server, "ThreadingHTTPServer", FakeServer),
+        patch.object(agent_server, "DpsSessionMonitorScheduler", FakeScheduler),
+        pytest.raises(RuntimeError, match="stop test server"),
+    ):
+        agent_server.main()
+
+    assert events == [
+        "server_bound",
+        "scheduler_created",
+        "scheduler_started",
+        "serve_forever",
+        "scheduler_stopped",
+        "server_closed",
+    ]
+
+
+def test_main_bind_failure_never_starts_scheduler() -> None:
+    scheduler = Mock()
+    with (
+        patch.object(
+            agent_server,
+            "ThreadingHTTPServer",
+            side_effect=OSError("port unavailable"),
+        ),
+        patch.object(agent_server, "DpsSessionMonitorScheduler", scheduler),
+        pytest.raises(OSError, match="port unavailable"),
+    ):
+        agent_server.main()
+
+    scheduler.assert_not_called()
 
 
 def test_passive_monitor_has_zero_foreground_or_input_calls(tmp_path: Path) -> None:

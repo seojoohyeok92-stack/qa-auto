@@ -361,6 +361,12 @@ class DpsWindowsAgent:
         self.session_status = str(state.get("session_status") or "UNKNOWN")
         if self.session_status not in SESSION_MONITOR_STATUSES:
             self.session_status = "UNKNOWN"
+        elif self.session_status == "READY":
+            # Runtime HWND/UIA objects are deliberately not restored after a
+            # process restart. Persisted READY is stale until this process
+            # performs an explicit active login check.
+            self.session_status = "STALE"
+        self.runtime_login_confirmed = False
         self.last_checked_at = state.get("last_checked_at")
         self.last_ready_at = state.get("last_ready_at")
         self.last_keepalive_at = state.get("last_keepalive_at")
@@ -745,6 +751,7 @@ class DpsWindowsAgent:
                     login_state=str(state.get("login_state") or ""),
                 )
                 if status != "READY":
+                    self.runtime_login_confirmed = False
                     self._set_monitor_state(
                         status,
                         event="LOGIN_STATE_CHECKED",
@@ -761,6 +768,7 @@ class DpsWindowsAgent:
                         keepalive_performed=False,
                     )
 
+                self.runtime_login_confirmed = True
                 self._set_monitor_state("READY", event="READY_CHECKED")
                 elapsed = self._elapsed_since_iso(self.last_keepalive_at)
                 due = force_keepalive or (
@@ -1105,6 +1113,7 @@ class DpsWindowsAgent:
             self.connection.connected_at,
         )
         self.connection_status = "CONNECTED"
+        self.runtime_login_confirmed = False
         self.last_error = None
         self.store.update(
             last_window_title=candidate.window_title,
@@ -1368,6 +1377,9 @@ class DpsWindowsAgent:
             )
         self._remember_connection(candidate)
         state_result = self._detect_candidate_state(candidate)
+        self.runtime_login_confirmed = (
+            state_result.get("login_state") == "LOGGED_IN"
+        )
         response = self._connection_response(
             candidate,
             code="MANUAL_CONNECTED",
@@ -1392,6 +1404,7 @@ class DpsWindowsAgent:
 
     def disconnect_current_window(self) -> dict[str, Any]:
         self.connection = None
+        self.runtime_login_confirmed = False
         self.connection_status = "DISCONNECTED"
         self.store.update(auto_connect=False)
         self._save_state()
@@ -1544,6 +1557,7 @@ class DpsWindowsAgent:
             had_connection,
         )
         if login_state != "LOGGED_IN":
+            self.runtime_login_confirmed = False
             code = (
                 "DPS_LOGIN_REQUIRED"
                 if login_state == "LOGIN_REQUIRED"
@@ -1567,6 +1581,7 @@ class DpsWindowsAgent:
             )
         current = time.time()
         self.login_confirmed_at = current
+        self.runtime_login_confirmed = True
         self.last_activity_at = current
         self.last_error = None
         self._save_state()
@@ -1583,6 +1598,7 @@ class DpsWindowsAgent:
 
     def mark_logged_out(self) -> dict[str, Any]:
         self.login_confirmed_at = None
+        self.runtime_login_confirmed = False
         self.last_activity_at = None
         self._save_state()
         return success(
@@ -1790,7 +1806,7 @@ class DpsWindowsAgent:
                 hwnd_valid = bool(self.tab_manager.is_window(runtime.hwnd))
             except Exception:
                 hwnd_valid = None
-        logged_in = bool(self.login_confirmed_at or self.session_status == "READY")
+        logged_in = bool(runtime is not None and self.runtime_login_confirmed)
         state_result = {
             "login_state": "LOGGED_IN" if logged_in else "LOGIN_UNCERTAIN",
             "login_reason": "passive status uses the last saved session state",
@@ -2308,6 +2324,7 @@ class DpsWindowsAgent:
                     state_result=state_result,
                 )
                 if state_result["login_state"] != "LOGGED_IN":
+                    self.runtime_login_confirmed = False
                     self.connection_status = state_result["login_state"]
                     self.last_error = state_result["login_reason"]
                     self._save_state()
@@ -2334,6 +2351,7 @@ class DpsWindowsAgent:
                         login_state=state_result["login_state"],
                     )
 
+                self.runtime_login_confirmed = True
                 navigation = self.ui.navigate_to_online_sales_purchase_request_list(
                     window=candidate.window,
                     validate_target=lambda: self._navigation_safety_checks(
@@ -2803,17 +2821,22 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     LOGGER.info("DPS Windows Agent v6 시작: http://%s:%s", HOST, PORT)
-    session_scheduler = DpsSessionMonitorScheduler(
-        AGENT.monitor_session,
-        logger=LOGGER,
-    )
-    session_scheduler.start()
+    # Bind the HTTP endpoint before starting any background scheduler. If the
+    # port is unavailable, startup fails without leaving a monitor Timer alive.
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"DPS Windows Agent v6 listening on http://{HOST}:{PORT}", flush=True)
+    session_scheduler: DpsSessionMonitorScheduler | None = None
     try:
+        session_scheduler = DpsSessionMonitorScheduler(
+            AGENT.monitor_session,
+            logger=LOGGER,
+        )
+        session_scheduler.start()
+        print(f"DPS Windows Agent v6 listening on http://{HOST}:{PORT}", flush=True)
         server.serve_forever()
     finally:
-        session_scheduler.stop()
+        if session_scheduler is not None:
+            session_scheduler.stop()
+        server.server_close()
 
 
 if __name__ == "__main__":
