@@ -163,7 +163,10 @@ def test_readability_override_changes_colors_only() -> None:
     css = (
         Path(__file__).parents[1] / "ui" / "dashboard.css"
     ).read_text(encoding="utf-8")
-    block = css[css.index("Readability-only overrides:") :]
+    block = css[
+        css.index("Readability-only overrides:") :
+        css.index("End readability-only overrides.")
+    ]
     assert '[data-testid="stWidgetLabel"] p' in block
     assert '[data-testid="stCaptionContainer"]' in block
     assert '[data-testid="stDataFrame"] [role="columnheader"]' in block

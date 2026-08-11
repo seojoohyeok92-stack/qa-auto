@@ -137,9 +137,82 @@ _render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
     )
     assert not at.exception
     rendered = "\n".join(item.value for item in at.markdown)
+    assert "inquiry-detail-layout" in rendered
     assert "official-fields two" in rendered
     assert "inquiry-content-scroll" in rendered
     assert "문의 내용" in rendered
+
+
+def test_inquiry_detail_renders_long_question_without_truncating_source(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "long-detail.db"
+    database = Database(path)
+    database.initialize()
+    inquiry_id = seed_inquiry(database, "Q-LONG")
+    long_question = "긴 문의 본문입니다. " * 120
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET content = ? WHERE id = ?",
+            (long_question, inquiry_id),
+        )
+    at = run(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_inquiry_detail
+db=Database(r"{path}")
+db.initialize()
+_render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert long_question in rendered
+
+
+def test_workspace_css_stretches_detail_row_and_expands_question_body() -> None:
+    css = Path("ui/dashboard.css").read_text(encoding="utf-8")
+    assert ':has([class*="st-key-official_inquiry_list_panel"])' in css
+    assert "align-items: stretch !important" in css
+    assert ".inquiry-detail-layout" in css
+    assert "min-height: 310px !important" in css
+    assert "max-height: 350px !important" in css
+    assert "overflow-y: auto !important" in css
+    assert "@media (max-width: 1199px)" in css
+    assert "min-height: 230px !important" in css
+
+
+def test_answer_tabs_have_readable_dark_theme_states_and_accents() -> None:
+    css = Path("ui/dashboard.css").read_text(encoding="utf-8")
+    scope = css[css.index("/* The tab accent communicates provenance") :]
+    for accent in ("#7299ff", "#61e5c7", "#ffad66", "#a995ff"):
+        assert accent in scope
+    assert 'button[aria-pressed="true"]' in scope
+    assert '[role="radio"][aria-checked="true"]' in scope
+    assert "button:hover" in scope
+    assert "button:focus-visible" in scope
+    assert "button:disabled" in scope
+    assert "background: #122234 !important" in scope
+    assert "color: #e8eff7 !important" in scope
+
+
+def test_answer_body_tokens_cover_editable_placeholder_and_read_only() -> None:
+    css = Path("ui/dashboard.css").read_text(encoding="utf-8")
+    root = css[css.index(":root") : css.index("* {")]
+    assert "--answer-text: #f4f8fc" in root
+    assert "--answer-placeholder: #a8b8c9" in root
+    assert "--answer-disabled: #e7eef6" in root
+    scope = css[css.index("[class*=\"st-key-official_answer_panel\"] textarea {") :]
+    assert "color: var(--answer-text) !important" in scope
+    assert "font-size: 16px !important" in scope
+    assert "line-height: 1.7 !important" in scope
+    assert "textarea::placeholder" in scope
+    assert "color: var(--answer-placeholder) !important" in scope
+    assert "textarea:disabled" in scope
+    assert "textarea[readonly]" in scope
+    assert "color: var(--answer-disabled) !important" in scope
+    assert "-webkit-text-fill-color: var(--answer-disabled) !important" in scope
 
 
 def test_validator_is_compact_and_vertical_stage_chain_removed(

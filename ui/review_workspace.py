@@ -936,9 +936,21 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     label_visibility="collapsed",
                     key=f"naver_posted_answer_{inquiry_id}_{posted_answer_record['id']}",
                 )
-                st.caption(
-                    "네이버 동기화에서 확인한 고객 노출 답변 · Source of Truth"
-                )
+                posted_metadata = ["NAVER_POSTED", "Source of Truth"]
+                if posted_answer_record.get("posted_at"):
+                    posted_metadata.append(
+                        "등록 "
+                        + format_datetime_kst(posted_answer_record.get("posted_at"))
+                    )
+                if posted_answer_record.get("answer_id"):
+                    posted_metadata.append(
+                        f"답변 ID {posted_answer_record['answer_id']}"
+                    )
+                if posted_answer_record.get("source_api"):
+                    posted_metadata.append(
+                        f"Source {posted_answer_record['source_api']}"
+                    )
+                st.caption(" · ".join(posted_metadata))
             else:
                 st.warning(
                     "네이버에서는 답변완료 상태이지만 현재 조회 응답에 "
@@ -958,20 +970,6 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 ),
             )
         else:
-            st.markdown(
-                f"""
-                <style>
-                .st-key-{draft_session_key} textarea:disabled {{
-                    color: #ffffff !important;
-                    -webkit-text-fill-color: #ffffff !important;
-                    opacity: 1 !important;
-                    line-height: 1.65 !important;
-                    white-space: pre-wrap !important;
-                }}
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
             rendered_program_text = st.text_area(
                 "Program Answer",
                 height=360,
@@ -1634,7 +1632,7 @@ def _render_inquiry_detail(
             or legacy_posted_answer.get("answerContent")
         )
     st.markdown(
-        '<div class="official-fields two">'
+        '<div class="inquiry-detail-layout"><div class="official-fields two">'
         + _field("문의 ID", inquiry.get("source_question_id"))
         + _field("문의시간", time_text)
         + _field("문의유형", inquiry.get("inquiry_type"))
@@ -1663,7 +1661,7 @@ def _render_inquiry_detail(
         + "</div>"
         + '<div class="official-copy-block inquiry-content-scroll"><span>문의 내용</span><p>'
         + escape(display_value(inquiry.get("content")))
-        + "</p></div>",
+        + "</p></div></div>",
         unsafe_allow_html=True,
     )
     if posted_answer and posted_answer.get("fetch_status") == "AVAILABLE":
@@ -2577,7 +2575,9 @@ def render_review_workspace(
     )
     list_column, detail_column = st.columns([2.05, 0.95], gap="medium")
     with list_column:
-        with st.container(border=True, key="official_inquiry_list_panel"):
+        with st.container(
+            border=True, height=680, key="official_inquiry_list_panel"
+        ):
             first = (resolved_page - 1) * page_size + 1 if total_count else 0
             last = min(resolved_page * page_size, total_count)
             st.caption(

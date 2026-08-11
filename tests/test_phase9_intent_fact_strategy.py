@@ -387,15 +387,21 @@ def test_log_masking_hides_full_order_identifier() -> None:
     assert "2026073012345678" not in str(masked)
 
 
-def test_program_answer_css_is_scoped_and_high_contrast() -> None:
+def test_program_answer_css_is_centralized_and_high_contrast() -> None:
+    css = (
+        __import__("pathlib")
+        .Path("ui/dashboard.css")
+        .read_text(encoding="utf-8")
+    )
     source = (
         __import__("pathlib")
         .Path("ui/review_workspace.py")
         .read_text(encoding="utf-8")
     )
-    assert ".st-key-{draft_session_key} textarea:disabled" in source
-    assert "-webkit-text-fill-color: #ffffff" in source
+    assert '[class*="st-key-official_answer_panel"] textarea:disabled' in css
+    assert "-webkit-text-fill-color: var(--answer-disabled) !important" in css
     assert "program_answer_widget_key" in source
+    assert ".st-key-{draft_session_key} textarea:disabled" not in source
 
 
 def test_naver_post_is_gated_by_disabled_by_default_setting() -> None:

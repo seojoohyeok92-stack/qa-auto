@@ -232,6 +232,10 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
         "Program Answer", "직원 수정본", "네이버 실제 등록 답변", "Final Answer"
     ]
     assert app.text_area[0].value == "네이버에 실제 등록된 답변입니다."
+    captions = "\n".join(item.value for item in app.caption)
+    assert "NAVER_POSTED" in captions
+    assert "Source of Truth" in captions
+    assert "답변 ID ANSWER-100" in captions
     app.segmented_control[0].set_value("Program Answer")
     app.run(timeout=40)
     assert "Program Answer" in app.text_area[0].value
