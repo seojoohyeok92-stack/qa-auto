@@ -163,6 +163,9 @@ class BusyGuard:
     def check(self) -> GUIResourceState:
         return GUIResourceState(False, "BUSY", "KAKAO_ACTIVE", "fake")
 
+    def wait_for_available(self) -> GUIResourceState:
+        return self.check()
+
 
 class FreeGuard:
     settings = settings(max_wait_seconds=1.0)

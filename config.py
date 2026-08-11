@@ -195,6 +195,9 @@ class DpsSessionSettings:
     keepalive_enabled: bool = False
     monitor_interval_seconds: int = 60
     keepalive_interval_minutes: int = 20
+    passive_idle_enabled: bool = True
+    passive_monitor_enabled: bool = True
+    on_demand_connect_enabled: bool = True
 
     @classmethod
     def from_environment(cls) -> "DpsSessionSettings":
@@ -210,6 +213,15 @@ class DpsSessionSettings:
             ),
             keepalive_interval_minutes=_env_int(
                 "DPS_SESSION_KEEPALIVE_INTERVAL_MINUTES", 20, minimum=10
+            ),
+            passive_idle_enabled=get_env_bool(
+                "DPS_PASSIVE_IDLE_ENABLED", default=True
+            ),
+            passive_monitor_enabled=get_env_bool(
+                "DPS_PASSIVE_SESSION_MONITOR_ENABLED", default=True
+            ),
+            on_demand_connect_enabled=get_env_bool(
+                "DPS_ON_DEMAND_CONNECT_ENABLED", default=True
             ),
         )
 

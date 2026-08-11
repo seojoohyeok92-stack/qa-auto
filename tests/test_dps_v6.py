@@ -967,7 +967,7 @@ class AgentLookupGuardTests(unittest.TestCase):
             self.assertIsNotNone(agent.connection)
             manager.select_candidate.assert_not_called()
 
-    def test_connection_is_cleared_only_after_saved_tab_disappears(self) -> None:
+    def test_passive_status_does_not_scan_or_clear_saved_tab(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             agent, manager, _, candidate = self._agent_fixture(directory)
             agent._remember_connection(candidate)
@@ -978,9 +978,11 @@ class AgentLookupGuardTests(unittest.TestCase):
             self.assertTrue(agent.status()["connected"])
             closed = agent.status()
 
-            self.assertFalse(closed["connected"])
-            self.assertEqual(agent.connection_status, "TAB_CLOSED")
-            self.assertIsNone(agent.connection)
+            # Passive /status validates only HWND metadata and never scans tabs.
+            self.assertTrue(closed["connected"])
+            self.assertEqual(agent.connection_status, "CONNECTED")
+            self.assertIsNotNone(agent.connection)
+            manager.candidate_for_connection.assert_not_called()
 
     def test_transient_uia_failure_preserves_runtime_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

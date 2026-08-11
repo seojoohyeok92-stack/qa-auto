@@ -145,6 +145,9 @@ class ConnectionStore:
             "consecutive_keepalive_failures",
             "keepalive_lock_skips",
             "last_monitor_event",
+            "last_passive_monitor_at",
+            "last_gui_operation_at",
+            "last_gui_operation_type",
         }
         safe = {key: state.get(key) for key in allowed if key in state}
         with self._lock:

@@ -42,6 +42,7 @@ def make_agent(tmp_path: Path, *, reload_result: bool = True):
         store=store,
         tab_manager=manager,
         ui_automation=SimpleNamespace(),
+        session_settings=DpsSessionSettings(passive_monitor_enabled=False),
         sleep=lambda _: None,
     )
     candidate = SimpleNamespace(

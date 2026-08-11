@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
+from config import DpsSessionSettings
 from dps.chrome_tab_manager import (
     ChromeTabManager,
     RuntimeConnection,
@@ -67,6 +68,7 @@ SESSION_MONITOR_STATUSES = {
     "DPS_PAGE_NOT_FOUND",
     "CONNECTION_FAILED",
     "UNKNOWN",
+    "STALE",
 }
 
 
@@ -308,6 +310,7 @@ class DpsWindowsAgent:
         tab_manager: ChromeTabManager | None = None,
         ui_automation: DpsUiAutomation | None = None,
         gui_guard: GUIResourceGuard | None = None,
+        session_settings: DpsSessionSettings | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.lock = threading.RLock()
@@ -345,6 +348,9 @@ class DpsWindowsAgent:
             sleep=sleep,
             logger=LOGGER,
         )
+        self.session_settings = (
+            session_settings or DpsSessionSettings.from_environment()
+        )
         state = self.store.load_agent_state()
         self.login_confirmed_at = state.get("login_confirmed_at")
         self.last_activity_at = state.get("last_activity_at")
@@ -367,6 +373,9 @@ class DpsWindowsAgent:
         )
         self.keepalive_lock_skips = int(state.get("keepalive_lock_skips") or 0)
         self.last_monitor_event = state.get("last_monitor_event")
+        self.last_passive_monitor_at = state.get("last_passive_monitor_at")
+        self.last_gui_operation_at = state.get("last_gui_operation_at")
+        self.last_gui_operation_type = state.get("last_gui_operation_type")
         self.sleep = sleep
         # HWND/UIA 요소는 프로세스 재시작 후 재사용하지 않습니다.
         self.connection_status = "DISCONNECTED"
@@ -420,6 +429,7 @@ class DpsWindowsAgent:
                 previous = self.tab_manager.capture_previous_context()
             except Exception:
                 LOGGER.warning("DPS could not capture the previous foreground context")
+            self._record_gui_operation(owner)
             return operation()
         finally:
             if previous is not None and getattr(previous, "foreground_hwnd", None):
@@ -472,8 +482,16 @@ class DpsWindowsAgent:
                 ),
                 "keepalive_lock_skips": self.keepalive_lock_skips,
                 "last_monitor_event": self.last_monitor_event,
+                "last_passive_monitor_at": self.last_passive_monitor_at,
+                "last_gui_operation_at": self.last_gui_operation_at,
+                "last_gui_operation_type": self.last_gui_operation_type,
             }
         )
+
+    def _record_gui_operation(self, operation_type: str) -> None:
+        self.last_gui_operation_at = now_iso()
+        self.last_gui_operation_type = str(operation_type or "UNKNOWN")[:100]
+        self._save_state()
 
     @staticmethod
     def _monitor_status_for(
@@ -552,7 +570,91 @@ class DpsWindowsAgent:
             parsed = parsed.astimezone()
         return max(0.0, time.time() - parsed.timestamp())
 
+    def _passive_monitor_session(self, *, trigger: str) -> dict[str, Any]:
+        """Validate only saved process metadata without traversing Windows UIA."""
+
+        config = self.store.load()
+        runtime = self.connection
+        metadata_present = bool(
+            config.get("last_window_title")
+            or config.get("last_tab_title")
+            or config.get("last_connected_at")
+        )
+        hwnd_valid: bool | None = None
+        if runtime is not None:
+            try:
+                hwnd_valid = bool(self.tab_manager.is_window(runtime.hwnd))
+            except Exception:
+                hwnd_valid = None
+            if hwnd_valid is False:
+                self.connection = None
+                self.connection_status = "TAB_CLOSED"
+            elif hwnd_valid is True:
+                self.connection_status = "CONNECTED"
+
+        if runtime is not None and hwnd_valid is True:
+            passive_state = "STALE"
+            event = "PASSIVE_HWND_VALID"
+        elif runtime is not None and hwnd_valid is False:
+            passive_state = "STALE"
+            event = "PASSIVE_HWND_CLOSED"
+        elif metadata_present:
+            passive_state = "STALE"
+            event = "PASSIVE_METADATA_ONLY"
+        else:
+            passive_state = "UNKNOWN"
+            event = "PASSIVE_NO_METADATA"
+
+        checked_at = now_iso()
+        self.session_status = passive_state
+        self.last_checked_at = checked_at
+        self.last_passive_monitor_at = checked_at
+        self.last_monitor_event = event
+        self._save_state()
+        return success(
+            "PASSIVE_SESSION_MONITORED",
+            "DPS session metadata was checked without activating Windows GUI.",
+            session_status=passive_state,
+            monitor_status=passive_state,
+            passive=True,
+            trigger=trigger,
+            connection_metadata_present=metadata_present,
+            stored_hwnd_valid=hwnd_valid,
+            keepalive_performed=False,
+            last_passive_monitor_at=checked_at,
+        )
+
     def monitor_session(
+        self,
+        *,
+        keepalive_enabled: bool = False,
+        keepalive_interval_seconds: int = 1200,
+        force_keepalive: bool = False,
+        trigger: str = "MANUAL",
+    ) -> dict[str, Any]:
+        """Run passive monitoring; perform guarded GUI keepalive only when enabled and due."""
+
+        if self.session_settings.passive_monitor_enabled:
+            passive_result = self._passive_monitor_session(trigger=trigger)
+            elapsed = self._elapsed_since_iso(self.last_keepalive_at)
+            keepalive_due = bool(
+                keepalive_enabled
+                and (
+                    force_keepalive
+                    or elapsed is None
+                    or elapsed >= max(600, int(keepalive_interval_seconds))
+                )
+            )
+            if not keepalive_due:
+                return passive_result
+        return self._active_monitor_session(
+            keepalive_enabled=keepalive_enabled,
+            keepalive_interval_seconds=keepalive_interval_seconds,
+            force_keepalive=force_keepalive,
+            trigger=trigger,
+        )
+
+    def _active_monitor_session(
         self,
         *,
         keepalive_enabled: bool = False,
@@ -584,7 +686,9 @@ class DpsWindowsAgent:
         previous = None
         target_hwnd = 0
         try:
-            guard_state = self.gui_guard.check()
+            guard_state = self._wait_for_gui_resource(
+                owner=self.lookup_gate_owner or "MONITOR"
+            )
             if not guard_state.available:
                 deferred_keepalive = keepalive_enabled or force_keepalive
                 code = (
@@ -612,6 +716,7 @@ class DpsWindowsAgent:
                     keepalive_performed=False,
                 )
             previous = self.tab_manager.capture_previous_context()
+            self._record_gui_operation(self.lookup_gate_owner or "MONITOR")
             with self.lock:
                 candidate, connection_error = self._select_current_dps()
                 if connection_error:
@@ -1298,6 +1403,14 @@ class DpsWindowsAgent:
         )
 
     def _select_current_dps(self) -> tuple[TabCandidate | None, dict[str, Any] | None]:
+        if (
+            self.connection is None
+            and not self.session_settings.on_demand_connect_enabled
+        ):
+            return None, failure(
+                "ON_DEMAND_CONNECT_DISABLED",
+                "DPS on-demand connection is disabled by configuration.",
+            )
         connected = self._ensure_connection_unlocked(select_tab=False, force=True)
         if not connected.get("success"):
             return None, connected
@@ -1669,47 +1782,23 @@ class DpsWindowsAgent:
 
     def _status_unlocked(self) -> dict[str, Any]:
         remaining = self._session_remaining()
-        candidate = self._current_candidate()
         config = self.store.load()
-        candidate_selected = bool(
-            candidate is not None
-            and self.tab_manager.is_tab_selected(candidate.tab)
-        )
-        if candidate is not None and candidate_selected:
-            state_result = self._detect_candidate_state(candidate)
-        elif candidate is not None:
-            # A background status poll must not judge the saved DPS connection by
-            # whichever tab the user is currently viewing.
-            state_result = {
-                "login_state": "LOGIN_UNCERTAIN",
-                "login_reason": "저장된 DPS 탭은 존재하며 현재 다른 탭을 보고 있습니다.",
-                "current_page": "UNKNOWN",
-                "current_page_label": "다른 탭 보는 중",
-                "current_url": candidate.current_url,
-                "login_signals": {},
-            }
-        else:
-            connection_state = self.connection_status
-            login_state = (
-                "DPS_TAB_NOT_FOUND"
-                if connection_state
-                in {
-                    "DPS_TAB_NOT_FOUND",
-                    "TAB_CLOSED",
-                    "DISCONNECTED",
-                    "CHROME_NOT_FOUND",
-                }
-                else "DPS_PAGE_INVALID"
-            )
-            state_result = {
-                "login_state": login_state,
-                "login_reason": "연결된 DPS 탭이 없음",
-                "current_page": "UNKNOWN",
-                "current_page_label": "알 수 없음",
-                "current_url": "",
-                "login_signals": {},
-            }
-        logged_in = state_result["login_state"] == "LOGGED_IN"
+        runtime = self.connection
+        hwnd_valid: bool | None = None
+        if runtime is not None:
+            try:
+                hwnd_valid = bool(self.tab_manager.is_window(runtime.hwnd))
+            except Exception:
+                hwnd_valid = None
+        logged_in = bool(self.login_confirmed_at or self.session_status == "READY")
+        state_result = {
+            "login_state": "LOGGED_IN" if logged_in else "LOGIN_UNCERTAIN",
+            "login_reason": "passive status uses the last saved session state",
+            "current_page": "UNKNOWN",
+            "current_page_label": "passive status",
+            "current_url": runtime.current_url if runtime else "",
+            "login_signals": {},
+        }
         return success(
             "STATUS_OK",
             "DPS Agent 상태를 확인했습니다.",
@@ -1740,28 +1829,22 @@ class DpsWindowsAgent:
             window_manually_connected=self.connection is not None,  # 기존 UI/클라이언트 호환
             connected_hwnd=self.connection.hwnd if self.connection else None,
             connected_window_title=(
-                candidate.window_title
-                if candidate
-                else self.connection.window_title
-                if self.connection
+                runtime.window_title
+                if runtime
                 else None
             ),
             connected_tab_title=(
-                candidate.tab_title
-                if candidate
-                else self.connection.tab_title
-                if self.connection
+                runtime.tab_title
+                if runtime
                 else None
             ),
             dps_window_title=(
-                candidate.window_title
-                if candidate
-                else self.connection.window_title
-                if self.connection
+                runtime.window_title
+                if runtime
                 else None
             ),
-            dps_window_found=bool(candidate),
-            connection_mode="TAB_UIA_V6" if candidate else "AUTO_DETECT",
+            dps_window_found=hwnd_valid is True,
+            connection_mode="TAB_UIA_V6" if runtime else "ON_DEMAND",
             connection_status=self.connection_status,
             session_status=self.session_status,
             monitor_status=self.session_status,
@@ -1772,6 +1855,16 @@ class DpsWindowsAgent:
             consecutive_keepalive_failures=self.consecutive_keepalive_failures,
             keepalive_lock_skips=self.keepalive_lock_skips,
             last_monitor_event=self.last_monitor_event,
+            passive_idle_enabled=self.session_settings.passive_idle_enabled,
+            passive_session_monitor_enabled=(
+                self.session_settings.passive_monitor_enabled
+            ),
+            on_demand_connect_enabled=(
+                self.session_settings.on_demand_connect_enabled
+            ),
+            last_passive_monitor_at=self.last_passive_monitor_at,
+            last_gui_operation_at=self.last_gui_operation_at,
+            last_gui_operation_type=self.last_gui_operation_type,
             lookup_gate_owner=self.lookup_gate_owner,
             last_connected_at=config.get("last_connected_at"),
             auto_connect=bool(config.get("auto_connect", True)),
@@ -1781,76 +1874,45 @@ class DpsWindowsAgent:
         )
 
     def diagnostics(self) -> dict[str, Any]:
-        candidate = self._current_candidate()
-        state_result = (
-            self._detect_candidate_state(candidate)
-            if candidate
-            else {
-                "login_state": "DPS_TAB_NOT_FOUND",
-                "login_reason": "연결된 DPS 탭이 없음",
-                "current_page": "UNKNOWN",
-                "current_page_label": "알 수 없음",
-                "current_url": "",
-                "login_signals": {},
-            }
-        )
-        signals = state_result.get("login_signals") or {}
-        chrome_found = bool(self.tab_manager.chrome_windows())
+        status = self._status_unlocked()
+        runtime = self.connection
         checks = [
             {
-                "name": "Google Chrome",
-                "ok": chrome_found,
-                "detail": "일반 Chrome 창 발견" if chrome_found else "실행 중인 Chrome을 찾지 못했습니다.",
+                "name": "Passive idle",
+                "ok": self.session_settings.passive_idle_enabled,
+                "detail": "No UI traversal is performed by diagnostics.",
             },
             {
-                "name": "Windows UI Automation",
-                "ok": os.name == "nt",
-                "detail": "pywinauto UIA 사용" if os.name == "nt" else "Windows에서 실행해야 합니다.",
+                "name": "Stored DPS connection",
+                "ok": runtime is not None,
+                "detail": runtime.tab_title if runtime else "No runtime connection metadata.",
             },
             {
-                "name": "DPS 탭 연결",
-                "ok": bool(candidate),
-                "detail": candidate.tab_title if candidate else "자동 탐색 또는 재연결이 필요합니다.",
-            },
-            {
-                "name": "DPS 로그인 상태",
-                "ok": state_result["login_state"] == "LOGGED_IN",
-                "detail": (
-                    f"{state_result['login_state']} · "
-                    f"{state_result['login_reason']}"
-                ),
-            },
-            {
-                "name": "DPS 사이트 주소",
-                "ok": bool(signals.get("domain_ok") and signals.get("path_ok")),
-                "detail": (
-                    state_result["current_url"]
-                    or "허용된 DPS 주소를 확인하지 못했습니다."
-                ),
-            },
-            {
-                "name": "현재 DPS 화면",
-                "ok": state_result["current_page"] != "UNKNOWN",
-                "detail": state_result["current_page_label"],
+                "name": "Last known session",
+                "ok": self.session_status == "READY",
+                "detail": self.session_status,
             },
         ]
-        diagnostic_texts = self.ui.visible_texts(candidate.window, limit=80) if candidate else []
-        self._log_login_diagnostic(
-            candidate=candidate,
-            state_result=state_result,
-        )
         return success(
             "DIAGNOSTICS_COMPLETE",
-            "DPS 환경 진단을 완료했습니다.",
+            "Passive DPS diagnostics completed without Windows GUI access.",
             checks=checks,
-            diagnostic_texts=diagnostic_texts,
+            diagnostic_texts=[],
             log_file=str(LOG_FILE),
             ui_tree_log_file=str(UI_TREE_LOG_FILE),
             result_tree_log_file=str(RESULT_TREE_LOG_FILE),
-            login_state=state_result["login_state"],
-            current_page=state_result["current_page"],
-            current_page_label=state_result["current_page_label"],
+            login_state=status["login_state"],
+            current_page=status["current_page"],
+            current_page_label=status["current_page_label"],
             mode=AGENT_MODE,
+            passive=True,
+            passive_idle_enabled=self.session_settings.passive_idle_enabled,
+            passive_session_monitor_enabled=(
+                self.session_settings.passive_monitor_enabled
+            ),
+            last_passive_monitor_at=self.last_passive_monitor_at,
+            last_gui_operation_at=self.last_gui_operation_at,
+            last_gui_operation_type=self.last_gui_operation_type,
         )
 
     def _cache(self) -> dict[str, Any]:
@@ -2224,6 +2286,7 @@ class DpsWindowsAgent:
         if not guard_state.available:
             self._release_actual_lookup_gate()
             return self._gui_resource_failure(guard_state)
+        self._record_gui_operation("LOOKUP")
         with self.lock:
             self.lookup_in_progress = True
             self.active_request_id = resolved_request_id
