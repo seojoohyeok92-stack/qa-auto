@@ -74,6 +74,20 @@ class LearningRepository:
             ).fetchone()
         return self._row(row)
 
+    def for_inquiry(self, inquiry_id: int) -> list[dict[str, Any]]:
+        """Return every Learning example for one inquiry, newest first."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM learning_examples
+                WHERE inquiry_id=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (int(inquiry_id),),
+            ).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
     def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(
@@ -150,6 +164,27 @@ class LearningRepository:
                   AND json_extract(metadata_json, '$.acceptance_mode')='AUTO_OBSERVATION'
                 """
             ).fetchone()[0])
+            human_verified = int(connection.execute(
+                """
+                SELECT COUNT(*) FROM learning_examples
+                WHERE active=1
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.learning_signal_type'),
+                      'POSITIVE'
+                  )='POSITIVE'
+                  AND json_extract(metadata_json, '$.human_verified')=1
+                """
+            ).fetchone()[0])
+            positive_active = int(connection.execute(
+                """
+                SELECT COUNT(*) FROM learning_examples
+                WHERE active=1
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.learning_signal_type'),
+                      'POSITIVE'
+                  )='POSITIVE'
+                """
+            ).fetchone()[0])
         sources = {str(row["learning_source"]): int(row["count"]) for row in rows}
         return {
             "total": int(totals["total"] or 0),
@@ -159,6 +194,8 @@ class LearningRepository:
             "recent": totals["recent"],
             "sources": sources,
             "automatic_positive": automatic_positive,
+            "human_verified": human_verified,
+            "positive_active": positive_active,
         }
 
     def deactivate_automatic_positive(
@@ -189,10 +226,11 @@ class LearningRepository:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, question_original_masked, gpt_draft,
+                SELECT id, source_key, inquiry_id, answer_draft_id,
+                       approval_history_id, question_original_masked, gpt_draft,
                        edited_answer, final_answer, learning_source,
                        rating, quality_score, usage_count, last_used_at,
-                       active, created_at
+                       active, metadata_json, created_at, updated_at
                 FROM learning_examples
                 ORDER BY created_at DESC, id DESC LIMIT ?
                 """,
@@ -201,6 +239,13 @@ class LearningRepository:
         results = [dict(row) for row in rows]
         for row in results:
             row["active"] = bool(row["active"])
+            row["metadata_json"] = deserialize_json(row.get("metadata_json"))
+            metadata = row["metadata_json"]
+            row["provenance"] = metadata.get("answer_provenance")
+            row["human_verified"] = bool(metadata.get("human_verified"))
+            row["signal_type"] = metadata.get(
+                "learning_signal_type", "POSITIVE"
+            )
         return results
 
     def deactivate_draft(self, draft_id: int) -> int:

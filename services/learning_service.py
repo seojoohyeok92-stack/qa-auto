@@ -152,8 +152,15 @@ class LearningService:
         example = self._build(inquiry=inquiry, draft=draft, learning_source=source, answer=final, history_id=history_id)
         if example is None:
             return None
+        example["metadata_json"] = {
+            **(example.get("metadata_json") or {}),
+            "human_verified": True,
+            "verified_by": inquiry.get("approved_by"),
+            "verified_at": inquiry.get("approved_at") or utc_now(),
+        }
         existing = self.repository.get_by_source_key(example["source_key"])
         if existing is not None:
+            existing = self.repository.upsert(example)
             self.logs.record_inquiry(
                 inquiry_id,
                 "LEARNING_RECORD_SKIPPED",
@@ -180,7 +187,12 @@ class LearningService:
         return saved
 
     def capture_posted_staff_correction(
-        self, *, inquiry_id: int, draft_id: int
+        self,
+        *,
+        inquiry_id: int,
+        draft_id: int,
+        human_verified: bool = False,
+        actor: str = "직원",
     ) -> dict[str, Any] | None:
         """Save an internal correction without claiming it was posted to Naver."""
 
@@ -215,6 +227,9 @@ class LearningService:
             "evaluated_answer_provenance": AnswerProvenance.NAVER_POSTED.value,
             "naver_posted_answer_id": int(posted["id"]),
             "customer_truth_remains_naver_posted": True,
+            "human_verified": bool(human_verified),
+            "verified_by": str(actor or "직원") if human_verified else None,
+            "verified_at": utc_now() if human_verified else None,
         }
         return self.repository.upsert(example)
 

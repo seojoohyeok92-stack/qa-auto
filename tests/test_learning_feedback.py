@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from answer.learning_feedback import CorrectionReason, LearningSignalType
+from answer.answer_provenance import AnswerProvenance
 from answer.models import AnswerResult, AnswerStatus
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
@@ -91,6 +92,42 @@ def test_staff_edit_approval_creates_positive_learning(tmp_path) -> None:
     assert len(positive) == 1
     assert positive[0]["learning_source"] == "APPROVED_EDITED"
     assert positive[0]["metadata_json"]["learning_signal_type"] == "POSITIVE"
+
+
+def test_staff_edit_approval_apptest_shows_persisted_final_and_learning(
+    tmp_path,
+) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    database, inquiry_id, draft = make_context(tmp_path)
+    corrected = "직원이 사실관계를 확인해 수정한 최종 답변입니다."
+    ApprovalService(database).save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer=corrected,
+        correction_reason=CorrectionReason.FACT_ERROR.value,
+    )
+    app = AppTest.from_string(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_answer_panel
+db=Database(r"{database.path}")
+db.initialize()
+_render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
+'''
+    ).run(timeout=40)
+    assert not app.exception
+    approve = next(button for button in app.button if button.label == "승인")
+    approve.click()
+    app.run(timeout=40)
+    assert not app.exception
+    assert app.segmented_control[0].value == "Final Answer"
+    assert corrected in app.text_area[0].value
+    rendered = "\n".join(item.value for item in app.markdown)
+    assert "승인 완료" in rendered
+    assert "Final Answer: STAFF_EDITED" in rendered
+    assert "Positive Learning: 반영 완료" in rendered
 
 
 def test_fact_error_creates_positive_and_negative_with_note(tmp_path) -> None:
@@ -212,6 +249,104 @@ def test_negative_feedback_never_appears_in_positive_candidates(tmp_path) -> Non
         LearningSignalType.NEGATIVE.value
     )
     assert len(negative) == 1
+    assert LearningRepository(database).candidates(store_code="OJE_PLUS") == []
+
+
+def test_dashboard_negative_only_keeps_positive_candidates_empty(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    saved = LearningFeedbackService(database).capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=AnswerProvenance.PROGRAM_GENERATED,
+        original_answer_reference_id=draft["id"],
+        correction_reason=CorrectionReason.FACT_ERROR,
+        correction_note="확인되지 않은 사실을 단정함",
+        actor="staff-1",
+    )
+    assert [row["learning_signal_type"] for row in saved] == ["NEGATIVE"]
+    assert saved[0]["original_answer_source"] == "PROGRAM_GENERATED"
+    assert saved[0]["original_answer_reference_id"] == draft["id"]
+    assert saved[0]["source"] == "DASHBOARD_NEGATIVE_REVIEW"
+    assert saved[0]["metadata_json"]["positive_learning_created"] is False
+    assert LearningRepository(database).candidates(store_code="OJE_PLUS") == []
+
+
+def test_dashboard_routing_negative_creates_intent_correction(tmp_path) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    saved = LearningFeedbackService(database).capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source="PROGRAM_GENERATED",
+        original_answer_reference_id=draft["id"],
+        correction_reason=CorrectionReason.ROUTING_ERROR,
+        corrected_intent="DELIVERY_INSTALLATION_STATUS",
+    )
+    assert {row["learning_signal_type"] for row in saved} == {
+        "NEGATIVE",
+        "INTENT_CORRECTION",
+    }
+    assert {row["corrected_intent"] for row in saved} == {
+        "DELIVERY_INSTALLATION_STATUS"
+    }
+
+
+def test_dashboard_negative_rejects_mismatched_reference(tmp_path) -> None:
+    import pytest
+
+    database, inquiry_id, draft = make_context(tmp_path)
+    with pytest.raises(LookupError):
+        LearningFeedbackService(database).capture_dashboard_negative(
+            inquiry_id=inquiry_id,
+            original_answer_source="PROGRAM_GENERATED",
+            original_answer_reference_id=int(draft["id"]) + 999,
+            correction_reason=CorrectionReason.FACT_ERROR,
+        )
+
+
+def test_dashboard_and_history_share_correction_taxonomy() -> None:
+    import ui.historical_case_manager as historical_ui
+    import ui.review_workspace as dashboard_ui
+
+    assert (
+        dashboard_ui.CORRECTION_REASON_LABELS
+        is historical_ui.CORRECTION_REASON_LABELS
+    )
+    assert dashboard_ui.INTENT_OPTIONS is historical_ui.INTENT_OPTIONS
+
+
+def test_dashboard_negative_apptest_saves_selected_program_answer(
+    tmp_path,
+) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    database, inquiry_id, draft = make_context(tmp_path)
+    app = AppTest.from_string(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_answer_panel
+db=Database(r"{database.path}")
+db.initialize()
+_render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
+'''
+    ).run(timeout=40)
+    assert not app.exception
+    app.segmented_control[0].set_value("Program Answer")
+    app.run(timeout=40)
+    reason = next(item for item in app.selectbox if item.label == "잘못된 이유")
+    reason.set_value("사실 오류")
+    app.run(timeout=40)
+    save = next(
+        button for button in app.button
+        if button.label == "Negative Learning 저장"
+    )
+    assert save.disabled is False
+    save.click()
+    app.run(timeout=40)
+    assert not app.exception
+    feedback = LearningFeedbackRepository(database).for_inquiry(inquiry_id)
+    assert len(feedback) == 1
+    assert feedback[0]["learning_signal_type"] == "NEGATIVE"
+    assert feedback[0]["original_answer_source"] == "PROGRAM_GENERATED"
+    assert feedback[0]["original_answer_reference_id"] == draft["id"]
     assert LearningRepository(database).candidates(store_code="OJE_PLUS") == []
 
 

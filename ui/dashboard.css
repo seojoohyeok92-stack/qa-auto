@@ -2853,18 +2853,52 @@ input,
 }
 
 .inquiry-detail-layout .inquiry-content-scroll {
-  flex: 1 1 310px;
-  min-height: 310px !important;
-  max-height: 350px !important;
+  flex: 1 1 auto;
+  min-height: 180px !important;
+  max-height: 400px !important;
+  height: auto !important;
   margin-top: 10px;
   overflow-y: auto !important;
   scrollbar-gutter: stable;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .inquiry-detail-layout .inquiry-content-scroll p {
+  max-height: none !important;
+  overflow: visible !important;
+  margin: 0 !important;
   color: var(--answer-text) !important;
   font-size: 16px !important;
   line-height: 1.7 !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+
+.approval-result-card {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px 12px;
+  margin: 10px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid rgba(97, 229, 157, 0.35);
+  border-radius: 10px;
+  background: rgba(38, 113, 78, 0.16);
+}
+
+.approval-result-card strong {
+  grid-column: 1 / -1;
+  color: #82f0b4;
+  font-size: 17px;
+}
+
+.approval-result-card span {
+  color: var(--answer-disabled);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 /* The tab accent communicates provenance; answer text stays neutral/readable. */
@@ -2977,7 +3011,11 @@ input,
   }
 
   .inquiry-detail-layout .inquiry-content-scroll {
-    min-height: 230px !important;
-    max-height: 330px !important;
+    min-height: 180px !important;
+    max-height: 360px !important;
+  }
+
+  .approval-result-card {
+    grid-template-columns: 1fr;
   }
 }

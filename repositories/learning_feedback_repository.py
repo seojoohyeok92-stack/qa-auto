@@ -94,6 +94,53 @@ class LearningFeedbackRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
+    def manager_rows(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM learning_feedback
+                ORDER BY created_at DESC, id DESC LIMIT ?
+                """,
+                (max(1, min(int(limit), 2_000)),),
+            ).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
+    def manager_summary(self) -> dict[str, int]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT learning_signal_type, COUNT(*) AS count
+                FROM learning_feedback WHERE active=1
+                GROUP BY learning_signal_type
+                """
+            ).fetchall()
+        return {str(row["learning_signal_type"]): int(row["count"]) for row in rows}
+
+    def deactivate_dashboard_evaluation(
+        self,
+        *,
+        inquiry_id: int,
+        original_answer_source: str,
+        original_answer_reference_id: int,
+    ) -> int:
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE learning_feedback
+                SET active=0,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE inquiry_id=? AND source='DASHBOARD_NEGATIVE_REVIEW'
+                  AND original_answer_source=?
+                  AND original_answer_reference_id=? AND active=1
+                """,
+                (
+                    int(inquiry_id),
+                    str(original_answer_source),
+                    int(original_answer_reference_id),
+                ),
+            )
+        return int(cursor.rowcount)
+
     def deactivate_for_draft(self, draft_id: int) -> int:
         with self.database.transaction() as connection:
             cursor = connection.execute(

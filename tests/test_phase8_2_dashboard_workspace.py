@@ -171,16 +171,86 @@ _render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
     assert long_question in rendered
 
 
+def test_inquiry_detail_preserves_newlines_wraps_tokens_and_escapes_html(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "safe-detail.db"
+    database = Database(path)
+    database.initialize()
+    inquiry_id = seed_inquiry(database, "Q-SAFE")
+    content = (
+        "리뷰비 배송 언제 오나요?\n한달도 넘었어요...\n0105418 6373\n"
+        "https://example.com/this/is/a/very/long/path/that/must/wrap\n"
+        "<script>alert('xss')</script>"
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET content=? WHERE id=?",
+            (content, inquiry_id),
+        )
+    at = run(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_inquiry_detail
+db=Database(r"{path}")
+db.initialize()
+_render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert "리뷰비 배송 언제 오나요?\n한달도 넘었어요" in rendered
+    assert "https://example.com/this/is/a/very/long/path" in rendered
+    assert "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" in rendered
+    assert "<script>alert('xss')</script>" not in rendered
+
+
+def test_general_dashboard_does_not_render_naver_post_prepare_card(
+    tmp_path: Path,
+) -> None:
+    import inspect
+
+    from ui.review_workspace import render_review_workspace
+
+    source = inspect.getsource(render_review_workspace)
+    assert "_render_naver_post_prepare" not in source
+    path = tmp_path / "without-post-card.db"
+    database = Database(path)
+    database.initialize()
+    seed_inquiry(database, "Q-NO-POST-CARD")
+    at = run(
+        f'''
+from app import dashboard_work_items_from_database
+from repositories.database import Database
+from ui.review_workspace import render_review_workspace
+db=Database(r"{path}")
+db.initialize()
+items=dashboard_work_items_from_database(db)
+render_review_workspace(items, len(items), db, page_size=10)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(
+        item.value for item in [*at.markdown, *at.caption, *at.info]
+    )
+    assert "네이버 등록 준비" not in rendered
+
+
 def test_workspace_css_stretches_detail_row_and_expands_question_body() -> None:
     css = Path("ui/dashboard.css").read_text(encoding="utf-8")
     assert ':has([class*="st-key-official_inquiry_list_panel"])' in css
     assert "align-items: stretch !important" in css
     assert ".inquiry-detail-layout" in css
-    assert "min-height: 310px !important" in css
-    assert "max-height: 350px !important" in css
+    assert "min-height: 180px !important" in css
+    assert "max-height: 400px !important" in css
+    assert "max-height: none !important" in css
+    assert "overflow: visible !important" in css
+    assert "white-space: pre-wrap !important" in css
+    assert "overflow-wrap: anywhere !important" in css
     assert "overflow-y: auto !important" in css
     assert "@media (max-width: 1199px)" in css
-    assert "min-height: 230px !important" in css
+    assert "max-height: 360px !important" in css
 
 
 def test_answer_tabs_have_readable_dark_theme_states_and_accents() -> None:

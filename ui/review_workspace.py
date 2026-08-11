@@ -12,6 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from answer.answer_format import format_final_answer
+from answer.answer_provenance import AnswerProvenance
 from answer.learning_feedback import (
     CORRECTION_REASON_BY_LABEL,
     CORRECTION_REASON_LABELS,
@@ -27,6 +28,7 @@ from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
+from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_post_repository import NaverPostRepository
 from repositories.naver_posted_answer_repository import (
@@ -38,6 +40,7 @@ from repositories.workflow_repository import WorkflowRepository
 from services.answer_service import AnswerService, is_valid_draft
 from services.automatic_draft_service import AutomaticDraftService
 from services.approval_service import ApprovalError, ApprovalService
+from services.learning_feedback_service import LearningFeedbackService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
 from services.dps_agent_client import get_dps_agent_status
 from services.local_auth_service import Permission
@@ -445,6 +448,113 @@ def _show_notice() -> None:
     )
 
 
+def approval_learning_trace(
+    database: Database,
+    *,
+    inquiry_id: int,
+    draft: dict[str, Any] | None,
+    approval_state: dict[str, Any],
+    source_answered: bool,
+) -> dict[str, Any]:
+    """Build the post-rerun approval view only from persisted repositories."""
+
+    examples = LearningRepository(database).for_inquiry(inquiry_id)
+    feedback = LearningFeedbackRepository(database).for_inquiry(inquiry_id)
+    positives = [
+        row
+        for row in examples
+        if row.get("active")
+        and str(
+            (row.get("metadata_json") or {}).get(
+                "learning_signal_type", "POSITIVE"
+            )
+        ).upper()
+        == "POSITIVE"
+    ]
+    if source_answered:
+        accepted = next(
+            (
+                row
+                for row in positives
+                if bool((row.get("metadata_json") or {}).get("human_verified"))
+            ),
+            None,
+        )
+    else:
+        accepted = next(
+            (
+                row
+                for row in positives
+                if draft is None
+                or row.get("answer_draft_id") in {None, draft.get("id")}
+            ),
+            None,
+        )
+    repository_approved = str(
+        approval_state.get("approval_status") or "PENDING"
+    ).upper() == "APPROVED"
+    approval_complete = repository_approved or accepted is not None
+    metadata = (
+        accepted.get("metadata_json")
+        if accepted and isinstance(accepted.get("metadata_json"), dict)
+        else {}
+    )
+    stored_final = str((draft or {}).get("final_answer") or "").strip()
+    final_answer = stored_final or str(
+        (accepted or {}).get("final_answer") or ""
+    ).strip()
+    provenance = metadata.get("answer_provenance")
+    if not provenance and stored_final:
+        provenance = (
+            AnswerProvenance.STAFF_EDITED.value
+            if str((draft or {}).get("edited_answer") or "").strip()
+            else AnswerProvenance.PROGRAM_GENERATED.value
+        )
+    approved_at = (
+        approval_state.get("approved_at")
+        or metadata.get("verified_at")
+        or (accepted or {}).get("created_at")
+    )
+    active_feedback = [row for row in feedback if row.get("active")]
+    negative = [
+        row
+        for row in active_feedback
+        if row.get("learning_signal_type") == "NEGATIVE"
+    ]
+    intent = [
+        row
+        for row in active_feedback
+        if row.get("learning_signal_type") == "INTENT_CORRECTION"
+    ]
+    human_verified = bool(metadata.get("human_verified")) or bool(
+        repository_approved and approval_state.get("approved_by")
+    )
+    return {
+        "approval_complete": approval_complete,
+        "final_answer": final_answer,
+        "provenance": provenance,
+        "approved_at": approved_at,
+        "approved_by": approval_state.get("approved_by")
+        or metadata.get("verified_by"),
+        "human_verified": human_verified,
+        "positive_learning": accepted is not None,
+        "positive_learning_id": (accepted or {}).get("id"),
+        "learning_source": (accepted or {}).get("learning_source"),
+        "negative_count": len(negative),
+        "intent_correction_count": len(intent),
+        "latest_reason": (negative[0].get("correction_reason") if negative else None),
+        "final_reference_id": (
+            metadata.get("naver_posted_answer_id")
+            if provenance == AnswerProvenance.NAVER_POSTED.value
+            else (accepted or {}).get("answer_draft_id")
+            or (draft or {}).get("id")
+        ),
+        "reference": (
+            f"LEARNING:{accepted['id']}" if accepted is not None else None
+        ),
+    }
+
+
 def build_gpt_diagnostics(
     draft: dict[str, Any] | None,
     provider_run: dict[str, Any] | None = None,
@@ -606,6 +716,7 @@ def _render_gpt_diagnostics(
 def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     inquiry_id = int(inquiry["id"])
     view_key = f"answer_workspace_view_{inquiry_id}"
+    pending_answer_view_key = f"answer_pending_view_{inquiry_id}"
     pending_view_key = f"answer_pending_program_view_{inquiry_id}"
     pending_success_key = f"pending_generation_success_{inquiry_id}"
     draft_session_key = f"draft_text_{inquiry_id}"
@@ -630,6 +741,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     pending_draft_text = st.session_state.pop(
         pending_draft_text_key, None
     )
+    pending_answer_view = st.session_state.pop(
+        pending_answer_view_key, None
+    )
+    if pending_answer_view in {
+        "Program Answer",
+        "직원 수정본",
+        "네이버 실제 등록 답변",
+        "Final Answer",
+    }:
+        st.session_state[view_key] = pending_answer_view
     current_draft_id = int(draft["id"]) if draft else None
     if is_valid_draft(pending_draft_text):
         st.session_state[draft_session_key] = pending_draft_text
@@ -660,18 +781,26 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     state = approvals.get_inquiry_approval(inquiry_id)
     posted = answers.is_inquiry_posted(inquiry_id)
     approved = state["approval_status"] == "APPROVED"
+    approval_trace = approval_learning_trace(
+        database,
+        inquiry_id=inquiry_id,
+        draft=draft,
+        approval_state=state,
+        source_answered=source_answered,
+    )
+    approval_complete = bool(approval_trace["approval_complete"])
     actor = current_actor()
     can_edit = can(Permission.STAFF_EDIT)
     can_approve = can(Permission.APPROVE)
     diagnostics = build_gpt_diagnostics(draft, provider_run)
     program_answer = str(draft.get("original_answer") or "") if draft else ""
-    final_answer = str(draft.get("final_answer") or "") if draft else ""
+    final_answer = str(approval_trace.get("final_answer") or "")
     validator_passed = bool(
         diagnostics
         and diagnostics["validation"].get("passed")
         and not diagnostics["hybrid"].get("fallback_used")
     )
-    if approved:
+    if approval_complete:
         workspace_status = "승인 완료"
     elif diagnostics and not validator_passed:
         workspace_status = "Validator 확인 필요"
@@ -878,6 +1007,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             default=(
                 None
                 if view_key in st.session_state
+                else "Final Answer"
+                if approval_complete
                 else "네이버 실제 등록 답변"
                 if source_answered
                 else "직원 수정본"
@@ -969,6 +1100,20 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     f"{draft['id'] if draft else 'empty'}_{approved}"
                 ),
             )
+            if approval_complete:
+                final_metadata = [
+                    f"Source {approval_trace.get('provenance') or 'UNKNOWN'}",
+                    "Human Verified "
+                    + ("YES" if approval_trace.get("human_verified") else "NO"),
+                ]
+                if approval_trace.get("approved_at"):
+                    final_metadata.append(
+                        "승인 "
+                        + format_datetime_kst(approval_trace.get("approved_at"))
+                    )
+                if approval_trace.get("reference"):
+                    final_metadata.append(str(approval_trace["reference"]))
+                st.caption(" · ".join(final_metadata))
         else:
             rendered_program_text = st.text_area(
                 "Program Answer",
@@ -977,6 +1122,26 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 label_visibility="collapsed",
                 key=draft_session_key,
             )
+
+        if approval_complete:
+            st.markdown(
+                '<div class="approval-result-card">'
+                '<strong>승인 완료</strong>'
+                f'<span>Final Answer: {escape(str(approval_trace.get("provenance") or "UNKNOWN"))}</span>'
+                f'<span>승인 시각: {escape(format_datetime_kst(approval_trace.get("approved_at")))}</span>'
+                f'<span>Human Verified: {"YES" if approval_trace.get("human_verified") else "NO"}</span>'
+                f'<span>Positive Learning: {"반영 완료" if approval_trace.get("positive_learning") else "저장 확인 필요"}</span>'
+                f'<span>Negative: {int(approval_trace.get("negative_count") or 0)}</span>'
+                f'<span>Intent Correction: {int(approval_trace.get("intent_correction_count") or 0)}</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            if approval_trace.get("reference"):
+                st.caption(
+                    "Learning에서 확인 · 문의 ID "
+                    f"{inquiry_id} · {approval_trace['reference']} · "
+                    f"Source {approval_trace.get('learning_source') or '-'}"
+                )
 
         correction_reason = ""
         correction_note = ""
@@ -1046,6 +1211,94 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "상세 메모 (선택)",
                     key=f"staff_correction_note_{inquiry_id}_{draft['id']}",
                 )
+
+        evaluation_source: str | None = None
+        evaluation_reference_id: int | None = None
+        if selected_view == "Program Answer" and draft and program_answer:
+            evaluation_source = AnswerProvenance.PROGRAM_GENERATED.value
+            evaluation_reference_id = int(draft["id"])
+        elif (
+            selected_view == "직원 수정본"
+            and draft
+            and str(draft.get("edited_answer") or "").strip()
+        ):
+            evaluation_source = AnswerProvenance.STAFF_EDITED.value
+            evaluation_reference_id = int(draft["id"])
+        elif (
+            selected_view == "네이버 실제 등록 답변"
+            and posted_answer_available
+            and posted_answer_record is not None
+        ):
+            evaluation_source = AnswerProvenance.NAVER_POSTED.value
+            evaluation_reference_id = int(posted_answer_record["id"])
+        elif selected_view == "Final Answer" and final_answer:
+            final_provenance = str(approval_trace.get("provenance") or "")
+            if final_provenance == AnswerProvenance.NAVER_POSTED.value:
+                evaluation_source = AnswerProvenance.NAVER_POSTED.value
+            else:
+                evaluation_source = AnswerProvenance.FINAL_ANSWER.value
+            reference_value = approval_trace.get("final_reference_id")
+            if reference_value is not None:
+                evaluation_reference_id = int(reference_value)
+
+        negative_save = False
+        negative_reason = ""
+        negative_note = ""
+        negative_intent = ""
+        with st.expander("이 답변이 잘못됨", expanded=False):
+            st.caption(
+                "현재 선택한 답변을 삭제하지 않고 Negative Learning으로 기록합니다. "
+                "실제 네이버 답변은 수정하거나 재등록하지 않습니다."
+            )
+            st.caption(
+                "평가 대상: "
+                + (
+                    f"{evaluation_source} · Reference {evaluation_reference_id}"
+                    if evaluation_source and evaluation_reference_id is not None
+                    else "현재 탭에 평가 가능한 답변 없음"
+                )
+            )
+            negative_reason_label = st.selectbox(
+                "잘못된 이유",
+                ["선택하지 않음", *[
+                    CORRECTION_REASON_LABELS[reason]
+                    for reason in CorrectionReason
+                ]],
+                key=f"negative_reason_{inquiry_id}_{selected_view}",
+            )
+            selected_negative_reason = CORRECTION_REASON_BY_LABEL.get(
+                negative_reason_label
+            )
+            negative_reason = (
+                selected_negative_reason.value
+                if selected_negative_reason is not None
+                else ""
+            )
+            if selected_negative_reason is CorrectionReason.ROUTING_ERROR:
+                negative_intent_label = st.selectbox(
+                    "올바른 문의 유형",
+                    list(INTENT_OPTIONS.values()),
+                    key=f"negative_intent_{inquiry_id}_{selected_view}",
+                )
+                negative_intent = next(
+                    code
+                    for code, label in INTENT_OPTIONS.items()
+                    if label == negative_intent_label
+                )
+            negative_note = st.text_input(
+                "Negative 상세 메모 (선택)",
+                key=f"negative_note_{inquiry_id}_{selected_view}",
+            )
+            negative_save = st.button(
+                "Negative Learning 저장",
+                disabled=(
+                    evaluation_source is None
+                    or evaluation_reference_id is None
+                    or not negative_reason
+                ),
+                key=f"negative_save_{inquiry_id}_{selected_view}",
+                width="stretch",
+            )
 
         run = (diagnostics or {}).get("provider_run") or {}
         confirmed_facts = (
@@ -1294,7 +1547,21 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         disabled=(
             not can_approve
             or (
-                not posted_answer_available
+                (
+                    not posted_answer_available
+                    or (
+                        approval_complete
+                        and (
+                            not answer_was_corrected
+                            or (
+                                approval_trace.get("provenance")
+                                == AnswerProvenance.STAFF_EDITED.value
+                                and format_final_answer(final_answer)
+                                == format_final_answer(edited_value)
+                            )
+                        )
+                    )
+                )
                 if source_answered
                 else not draft or posted or approved
             )
@@ -1308,6 +1575,27 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     generation_correlation_id: str | None = None
     generated_draft_id: int | None = None
     try:
+        if negative_save:
+            saved_feedback = LearningFeedbackService(
+                database
+            ).capture_dashboard_negative(
+                inquiry_id=inquiry_id,
+                original_answer_source=str(evaluation_source),
+                original_answer_reference_id=int(evaluation_reference_id),
+                correction_reason=negative_reason,
+                correction_note=negative_note,
+                corrected_intent=negative_intent,
+                actor=actor,
+            )
+            signals = ", ".join(
+                str(row.get("learning_signal_type"))
+                for row in saved_feedback
+            )
+            st.session_state["approval_ui_notice"] = (
+                "success",
+                f"Learning 저장 완료 · {signals}",
+            )
+            st.rerun()
         if generate:
             generation_correlation_id = str(uuid.uuid4())
             _record_ui_event(
@@ -1459,11 +1747,29 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "직원 수정본을 저장했습니다.",
             )
             st.rerun()
+        if approve and source_answered and answer_was_corrected and draft:
+            ApprovalService(database).approve_posted_staff_correction(
+                inquiry_id=inquiry_id,
+                draft_id=int(draft["id"]),
+                edited_answer=str(st.session_state.get(edit_key) or ""),
+                actor=actor,
+                correction_reason=correction_reason,
+                correction_note=correction_note,
+                corrected_intent=corrected_intent,
+            )
+            st.session_state[pending_answer_view_key] = "Final Answer"
+            st.session_state["approval_ui_notice"] = (
+                "success",
+                "직원 수정본을 STAFF_EDITED Positive Learning으로 승인했습니다. "
+                "실제 네이버 답변은 변경하지 않았습니다.",
+            )
+            st.rerun()
         if approve and source_answered:
             ApprovalService(database).approve_posted_answer(
                 inquiry_id=inquiry_id,
                 actor=actor,
             )
+            st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
                 "success",
                 "네이버 실제 등록 답변을 Positive Learning으로 승인했습니다. "
@@ -1479,6 +1785,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
             )
+            st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
                 "success",
                 "승인 완료했습니다. 네이버 등록은 잠금 상태입니다.",
@@ -2618,8 +2925,6 @@ def render_review_workspace(
             border=True, height=760, key="official_answer_panel"
         ):
             _render_answer_panel(database, inquiry)
-        with st.container(border=True, key="official_naver_post_prepare_panel"):
-            _render_naver_post_prepare(database, inquiry)
     with dps_column:
         with st.container(
             border=True, height=760, key="official_dps_panel"

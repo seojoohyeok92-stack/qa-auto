@@ -8,6 +8,7 @@ from answer.learning_feedback import CorrectionReason
 from answer.models import AnswerResult, AnswerStatus
 from config import NaverSyncSettings, StoreConfig
 from repositories.answer_repository import AnswerRepository
+from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
@@ -18,6 +19,7 @@ from repositories.naver_posted_answer_repository import (
 from services.approval_service import ApprovalService
 from services.automatic_draft_service import AutomaticDraftService
 from services.naver_inquiry_sync_service import NaverInquirySyncService
+from ui.review_workspace import approval_learning_trace
 
 
 def _settings() -> NaverSyncSettings:
@@ -268,6 +270,16 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     approve.click()
     app.run(timeout=40)
     assert not app.exception
+    assert app.segmented_control[0].value == "Final Answer"
+    assert app.text_area[0].value == "네이버에 실제 등록된 답변입니다."
+    rendered = "\n".join(item.value for item in app.markdown)
+    captions = "\n".join(item.value for item in app.caption)
+    assert "approval-result-card" in rendered
+    assert "승인 완료" in rendered
+    assert "Final Answer: NAVER_POSTED" in rendered
+    assert "Positive Learning: 반영 완료" in rendered
+    assert "Human Verified: YES" in rendered
+    assert "Learning에서 확인" in captions
 
     positive = LearningRepository(database).candidates(store_code="STORE")
     assert len(positive) == 1
@@ -279,6 +291,70 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     assert verified["metadata_json"]["customer_facing_truth"] is True
     assert "Program Answer" not in verified["final_answer"]
     assert AnswerRepository(database).get(draft["id"]) is not None
+
+
+def test_posted_staff_correction_approval_keeps_naver_truth_and_staff_source(
+    tmp_path,
+) -> None:
+    database, inquiry_id, draft = _answered_with_existing_draft(tmp_path)
+    posted_before = NaverPostedAnswerRepository(database).current(inquiry_id)
+    saved = ApprovalService(database).approve_posted_staff_correction(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer="직원이 내부 학습용으로 교정한 답변입니다.",
+        correction_reason=CorrectionReason.FACT_ERROR.value,
+        correction_note="실제 사실관계 교정",
+        actor="staff-1",
+    )
+    assert saved["metadata_json"]["answer_provenance"] == "STAFF_EDITED"
+    assert saved["metadata_json"]["human_verified"] is True
+    assert "직원이 내부 학습용으로 교정한 답변입니다." in saved["final_answer"]
+    assert saved["posted"] is False
+    posted_after = NaverPostedAnswerRepository(database).current(inquiry_id)
+    assert posted_after["id"] == posted_before["id"]
+    assert posted_after["answer_body"] == posted_before["answer_body"]
+    feedback = LearningFeedbackRepository(database).for_inquiry(inquiry_id)
+    assert [row["learning_signal_type"] for row in feedback] == ["NEGATIVE"]
+    assert feedback[0]["original_answer_source"] == "NAVER_POSTED"
+
+
+def test_posted_staff_edit_is_not_shown_as_approved_before_explicit_approval(
+    tmp_path,
+) -> None:
+    database, inquiry_id, draft = _answered_with_existing_draft(tmp_path)
+    service = ApprovalService(database)
+    corrected = "승인 전 내부 수정본입니다."
+    service.save_edited_answer(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer=corrected,
+        correction_reason=CorrectionReason.FACT_ERROR.value,
+    )
+    current_draft = AnswerRepository(database).get(draft["id"])
+    state = ApprovalRepository(database).get_inquiry_approval(inquiry_id)
+    before = approval_learning_trace(
+        database,
+        inquiry_id=inquiry_id,
+        draft=current_draft,
+        approval_state=state,
+        source_answered=True,
+    )
+    assert before["approval_complete"] is False
+    service.approve_posted_staff_correction(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        edited_answer=corrected,
+    )
+    after = approval_learning_trace(
+        database,
+        inquiry_id=inquiry_id,
+        draft=AnswerRepository(database).get(draft["id"]),
+        approval_state=state,
+        source_answered=True,
+    )
+    assert after["approval_complete"] is True
+    assert after["provenance"] == "STAFF_EDITED"
+    assert after["human_verified"] is True
 
 
 def test_posted_answer_migration_is_idempotent(tmp_path) -> None:

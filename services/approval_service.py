@@ -271,6 +271,49 @@ class ApprovalService:
         )
         return saved
 
+    def approve_posted_staff_correction(
+        self,
+        *,
+        inquiry_id: int,
+        draft_id: int,
+        edited_answer: str,
+        actor: str = "직원",
+        correction_reason: str = "",
+        correction_note: str = "",
+        corrected_intent: str = "",
+    ) -> dict[str, Any]:
+        """Approve an internal correction without changing the Naver answer."""
+
+        self.save_edited_answer(
+            inquiry_id=inquiry_id,
+            draft_id=draft_id,
+            edited_answer=edited_answer,
+            actor=actor,
+            correction_reason=correction_reason,
+            correction_note=correction_note,
+            corrected_intent=corrected_intent,
+        )
+        saved = LearningService(self.database).capture_posted_staff_correction(
+            inquiry_id=inquiry_id,
+            draft_id=draft_id,
+            human_verified=True,
+            actor=actor,
+        )
+        if saved is None:
+            raise ApprovalError("학습할 직원 수정 답변이 없습니다.")
+        self.logs.record_inquiry(
+            inquiry_id,
+            "NAVER_POSTED_INTERNAL_CORRECTION_APPROVED",
+            "네이버 실제 등록 답변의 내부 수정본을 Positive Learning으로 승인했습니다.",
+            details={
+                "actor": actor,
+                "learning_example_id": int(saved["id"]),
+                "answer_provenance": "STAFF_EDITED",
+                "network_call_count": 0,
+            },
+        )
+        return saved
+
     def reset_edited_answer(
         self,
         *,
