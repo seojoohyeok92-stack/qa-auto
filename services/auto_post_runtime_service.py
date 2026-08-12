@@ -15,7 +15,7 @@ from repositories.naver_sync_repository import NaverSyncRepository
 
 
 class AutoPostRuntimeService:
-    """Persistent operator switch and system-wide automatic-post safety gate."""
+    """Persistent operator switch for the complete automatic-processing path."""
 
     def __init__(
         self,

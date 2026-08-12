@@ -101,10 +101,11 @@ render_realtime_operations(db)
     assert not app.exception
     labels = {metric.label for metric in app.metric}
     assert {
-        "Auto Sync", "Runtime 자동등록", "Scheduler", "Pending",
-        "최근 등록", "최근 오류", "환경 허용",
+        "Auto Sync", "Auto Processing", "Auto Post", "DPS Agent",
+        "DPS Keepalive", "최근 Sync", "최근 Auto Process",
+        "최근 Auto Post", "직원 검토 필요",
     } <= labels
-    assert app.toggle[0].label == "자동등록 ON/OFF"
+    assert app.toggle[0].label == "자동처리 ON/OFF"
     assert app.toggle[0].disabled
     assert app.warning
 
@@ -129,7 +130,10 @@ render_learning_status(data)
     )
     labels = {metric.label for metric in app.metric}
     assert {"오늘 문의", "자동답변", "자동등록 성공", "자동등록 실패", "직원 수정", "Learning"} <= labels
-    assert {"총 개수", "오늘 증가", "오늘 사용", "최근 학습", "최근 수정"} <= labels
+    assert {
+        "총 개수", "오늘 생성/승격", "오늘 답변 생성에서 참조",
+        "최근 학습", "최근 수정",
+    } <= labels
     assert any("품질 분포" in item.value for item in app.caption)
 
 

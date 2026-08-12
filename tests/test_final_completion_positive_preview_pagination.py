@@ -13,6 +13,7 @@ from repositories.post_review_repository import PostReviewRepository
 from services.copilot_correction_learning_service import CopilotCorrectionLearningService
 from services.historical_case_service import HistoricalCaseService
 from services.learning_service import LearningService
+from services.learning_feedback_service import LearningFeedbackService
 from services.positive_learning_service import PositiveLearningService
 from services.similar_answer_service import SimilarAnswerService
 from ui.review_workspace import paginate_items
@@ -91,7 +92,7 @@ def test_positive_learning_waits_deduplicates_and_is_superseded(tmp_path) -> Non
     assert early["reason"] == "OBSERVATION_PERIOD_NOT_ELAPSED"
     assert LearningRepository(database).count() == 0
     accepted = service.observe(
-        inquiry_id=inquiry_id, seller_answer=answer, observed_at=now + timedelta(days=2)
+        inquiry_id=inquiry_id, seller_answer=answer, observed_at=now + timedelta(days=1)
     )
     assert accepted["saved"] is True, accepted
     assert accepted["learning"]["metadata_json"]["acceptance_mode"] == "AUTO_OBSERVATION"
@@ -218,6 +219,40 @@ def test_positive_learning_rejects_unknown_and_staff_review(tmp_path) -> None:
         review_db, settings=SimpleNamespace(observation_days=7)
     ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
     assert result["reason"] == "STAFF_REVIEW_REQUIRED"
+
+
+def test_positive_learning_rejects_pre_promotion_edit_and_negative(tmp_path) -> None:
+    now = datetime(2026, 8, 7, tzinfo=UTC)
+    edited_db = Database(tmp_path / "edited-before-seven.db"); edited_db.initialize()
+    inquiry_id, _, original = _posted(
+        edited_db, posted_at=(now - timedelta(days=10)).isoformat()
+    )
+    PostReviewRepository(edited_db).capture_remote_naver_edit(
+        inquiry_id=inquiry_id, answer_body="직원이 수정한 최종 답변입니다."
+    )
+    edited = PositiveLearningService(
+        edited_db, settings=SimpleNamespace(observation_days=7)
+    ).observe(inquiry_id=inquiry_id, seller_answer=original, observed_at=now)
+    assert edited["reason"] == "ANSWER_ALREADY_REVIEWED_OR_CORRECTED"
+    assert LearningRepository(edited_db).count() == 0
+
+    negative_db = Database(tmp_path / "negative-before-seven.db"); negative_db.initialize()
+    inquiry_id, _, answer = _posted(
+        negative_db, posted_at=(now - timedelta(days=10)).isoformat()
+    )
+    active = AnswerRepository(negative_db).active_for_inquiry(inquiry_id)
+    LearningFeedbackService(negative_db).capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source="PROGRAM_GENERATED",
+        original_answer_reference_id=int(active["id"]),
+        correction_reason="FACT_ERROR",
+        actor="tester",
+    )
+    negative = PositiveLearningService(
+        negative_db, settings=SimpleNamespace(observation_days=7)
+    ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
+    assert negative["reason"] == "NEGATIVE_FEEDBACK_EXISTS"
+    assert LearningRepository(negative_db).count() == 0
 
 
 def test_dashboard_pagination_apptest_keeps_page_and_separates_historical_state(tmp_path) -> None:

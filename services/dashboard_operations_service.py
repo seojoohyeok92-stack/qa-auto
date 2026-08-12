@@ -72,6 +72,14 @@ class DashboardOperationsService:
                   AND post_status IN ('NOT_POSTED','POST_FAILED')
                 """
             )
+            review_required = scalar(
+                """
+                SELECT COUNT(*) FROM inquiries
+                WHERE COALESCE(source_answered,0)=0
+                  AND post_status != 'POSTED'
+                  AND workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')
+                """
+            )
             existing_pending = scalar(
                 """
                 SELECT COUNT(*) FROM inquiries i
@@ -94,6 +102,17 @@ class DashboardOperationsService:
                 SELECT inquiry_id, completed_at FROM naver_post_attempts
                 WHERE status='POSTED'
                 ORDER BY completed_at DESC, id DESC LIMIT 1
+                """
+            ).fetchone()
+            recent_auto_process = connection.execute(
+                """
+                SELECT inquiry_id, event_code, created_at FROM activity_logs
+                WHERE event_code IN (
+                    'AUTO_ANSWER_SUCCEEDED',
+                    'AUTO_PROCESSING_REVIEW_REQUIRED',
+                    'AUTO_PROCESSING_BLOCKED'
+                )
+                ORDER BY created_at DESC, id DESC LIMIT 1
                 """
             ).fetchone()
             latest_event = connection.execute(
@@ -138,6 +157,7 @@ class DashboardOperationsService:
             "learning_today": learning_today,
             "learning_used_today": learning_used_today,
             "pending": pending,
+            "review_required": review_required,
             "existing_pending": existing_pending,
             "new_pending": max(0, pending - existing_pending),
             "automatic_waiting": automatic_waiting,
@@ -145,6 +165,9 @@ class DashboardOperationsService:
             "event_summary": event_summary,
             "recent_error": dict(recent_error) if recent_error else None,
             "recent_post": dict(recent_post) if recent_post else None,
+            "recent_auto_process": (
+                dict(recent_auto_process) if recent_auto_process else None
+            ),
             "latest_event": dict(latest_event) if latest_event else None,
             "learning": {
                 **learning,

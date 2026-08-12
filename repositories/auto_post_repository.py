@@ -56,6 +56,9 @@ class AutoPostRepository:
         }
         value["enabled"] = bool(value["enabled"])
         value["runtime_auto_post_enabled"] = value["enabled"]
+        # Version 1.0 operator terminology. Keep the legacy alias because the
+        # scheduler and older deployments already persist this singleton row.
+        value["auto_processing_enabled"] = value["enabled"]
         value["allow_existing_pending"] = bool(
             value.get("allow_existing_pending", False)
         )

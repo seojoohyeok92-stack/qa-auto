@@ -112,6 +112,7 @@ def test_sync_starts_idempotent_automatic_draft_for_every_synced_inquiry(
         WorkflowRepository(database),
         LogRepository(database),
         automatic_drafts=automatic,
+        automatic_processing_enabled=lambda: True,
     )
 
     first = service.sync([_work_item("SYNC-AUTO")], correlation_id="sync-1")
@@ -188,6 +189,7 @@ def test_delivery_sync_automatically_runs_order_dps_and_answer(
         automatic_drafts=AutomaticDraftService(
             database, answer_service=answer_service
         ),
+        automatic_processing_enabled=lambda: True,
     )
 
     result = sync.sync([delivery], correlation_id="automatic-delivery")

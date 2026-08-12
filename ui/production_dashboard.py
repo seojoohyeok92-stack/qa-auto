@@ -5,7 +5,12 @@ from typing import Any
 
 import streamlit as st
 
-from config import NaverAutoPostSettings, NaverPostSettings, NaverSyncSettings
+from config import (
+    DpsSessionSettings,
+    NaverAutoPostSettings,
+    NaverPostSettings,
+    NaverSyncSettings,
+)
 from core.time_utils import format_datetime_kst
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
@@ -69,14 +74,14 @@ def _confirm_auto_post_start(database_path: str) -> None:
     st.write("새로운 미답변 문의에 생성된 답변이 네이버에 자동 등록됩니다.")
     cancel, start = st.columns(2)
     if cancel.button("취소", width="stretch", key="auto_post_start_cancel"):
-        st.session_state["production_auto_post_runtime"] = False
+        st.session_state["production_auto_processing_widget"] = False
         st.rerun()
     if start.button(
         "자동등록 시작", type="primary", width="stretch",
         key="auto_post_start_confirm",
     ):
         result = AutoPostRuntimeService(Database(database_path)).enable()
-        st.session_state["production_auto_post_runtime"] = bool(
+        st.session_state["production_auto_processing_widget"] = bool(
             AutoPostRepository(Database(database_path)).settings().get(
                 "runtime_auto_post_enabled"
             )
@@ -115,6 +120,7 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
     post_env = NaverPostSettings.from_environment()
     auto_env = NaverAutoPostSettings.from_environment()
     sync_env = NaverSyncSettings.from_environment()
+    dps_env = DpsSessionSettings.from_environment()
     environment_ready = post_env.enabled and auto_env.enabled
     persisted_runtime_enabled = bool(
         post_settings.get("runtime_auto_post_enabled")
@@ -130,17 +136,23 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
     # The compact status strip and the emergency ON/OFF control always remain
     # visible.  Everything else belongs to the native expander below so it
     # consumes no vertical workspace while collapsed.
-    status_columns = st.columns([1.05, 1.25, 1.05, 0.75, 1.35, 1.25, 1.05], gap="small")
+    status_columns = st.columns(9, gap="small")
     values = (
         ("Auto Sync", _status(sync_state.get("status"), enabled=sync_enabled)),
-        ("Runtime 자동등록", "ON" if persisted_runtime_enabled else "OFF"),
-        ("Scheduler", str(post_state.get("status") or "STOPPED")),
-        ("Pending", data["pending"]),
-        ("최근 등록", format_datetime_kst(
+        ("Auto Processing", "ON" if persisted_runtime_enabled else "OFF"),
+        ("Auto Post", post_status),
+        ("DPS Agent", "ON" if dps_session.get("agent_running") else "OFF"),
+        ("DPS Keepalive", "ON" if dps_env.keepalive_enabled else "OFF"),
+        ("최근 Sync", format_datetime_kst(
+            sync_state.get("last_completed_at"), empty="없음"
+        )),
+        ("최근 Auto Process", format_datetime_kst(
+            (data.get("recent_auto_process") or {}).get("created_at"), empty="없음"
+        )),
+        ("최근 Auto Post", format_datetime_kst(
             (data.get("recent_post") or {}).get("completed_at"), empty="없음"
         )),
-        ("최근 오류", (data.get("recent_error") or {}).get("event_code") or "없음"),
-        ("환경 허용", "ON" if environment_ready and sync_env.enabled else "OFF"),
+        ("직원 검토 필요", data.get("review_required", 0)),
     )
     for column, (label, value) in zip(status_columns, values):
         column.metric(label, value)
@@ -148,12 +160,22 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
     control, admin, explanation = st.columns(
         [1.5, 1.4, 5.1], gap="medium", vertical_alignment="center"
     )
+    widget_key = "production_auto_processing_widget"
+    observed_key = "production_auto_processing_observed_db_value"
+    previous_observed = st.session_state.get(
+        observed_key, persisted_runtime_enabled
+    )
+    if widget_key not in st.session_state or (
+        previous_observed != persisted_runtime_enabled
+        and st.session_state.get(widget_key) == previous_observed
+    ):
+        st.session_state[widget_key] = persisted_runtime_enabled
+    st.session_state[observed_key] = persisted_runtime_enabled
     requested_runtime = control.toggle(
-        "자동등록 ON/OFF",
-        value=persisted_runtime_enabled,
+        "자동처리 ON/OFF",
         disabled=not environment_ready and not persisted_runtime_enabled,
-        key="production_auto_post_runtime",
-        help="환경변수와 Dashboard Runtime이 모두 ON일 때만 실제 등록합니다.",
+        key=widget_key,
+        help="DB에 저장되는 서버 공용 스위치입니다. OFF에서도 Auto Sync와 수동 기능은 유지됩니다.",
     )
     with admin:
         _render_admin_mode(database)
@@ -166,10 +188,10 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
             st.rerun()
     changed = st.session_state.pop("auto_post_runtime_result", None)
     if changed:
-        st.toast(f"자동등록 Runtime 상태: {changed}")
+        st.toast(f"자동처리 Runtime 상태: {changed}")
     explanation.caption(
-        "OFF여도 Auto Sync와 답변 생성은 계속됩니다. 진행 중인 POSTING만 완료되고 "
-        "Scheduler는 새 등록을 시작하지 않습니다."
+        "OFF에서는 Auto Sync와 문의 저장만 계속됩니다. 자동 답변·GPT·DPS·POST는 새로 시작하지 않으며, "
+        "진행 중 POST는 안전하게 완료됩니다."
     )
     if not environment_ready:
         explanation.warning(
@@ -284,13 +306,17 @@ def render_learning_status(data: dict[str, Any]) -> None:
         latest = learning.get("latest") or {}
         values = (
             ("총 개수", learning.get("total", 0)),
-            ("오늘 증가", learning.get("today", 0)),
-            ("오늘 사용", learning.get("used_today", 0)),
+            ("오늘 생성/승격", learning.get("today", 0)),
+            ("오늘 답변 생성에서 참조", learning.get("used_today", 0)),
             ("최근 학습", format_datetime_kst(latest.get("created_at"), empty="없음")),
             ("최근 수정", format_datetime_kst(latest.get("updated_at"), empty="없음")),
         )
         for column, (label, value) in zip(columns, values):
             column.metric(label, value)
+        st.caption(
+            "생성/승격은 Learning row 생성 건수(판매자답변 style-only 포함), "
+            "참조는 답변 생성 검색에서 선택된 고유 Learning 항목 수입니다. Naver POST 건수와는 독립적입니다."
+        )
         distribution = learning.get("quality_distribution") or {}
         quality = " · ".join(
             f"{'★' * rating} {distribution.get(rating, 0)}"

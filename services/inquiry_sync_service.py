@@ -5,6 +5,7 @@ import traceback
 from typing import Any, Callable, Iterable
 
 from repositories.inquiry_repository import InquiryRepository
+from repositories.auto_post_repository import AutoPostRepository
 from repositories.log_repository import LogRepository, mask_sensitive_data
 from repositories.naver_posted_answer_repository import (
     NaverPostedAnswerRepository,
@@ -230,12 +231,21 @@ class InquirySyncService:
         log_repository: LogRepository,
         *,
         automatic_drafts: AutomaticDraftService | None = None,
+        automatic_processing_enabled: Callable[[], bool] | None = None,
         learning: LearningService | None = None,
     ) -> None:
         self.inquiries = inquiry_repository
         self.workflow = workflow_repository
         self.logs = log_repository
         self.automatic_drafts = automatic_drafts
+        self.automatic_processing_enabled = (
+            automatic_processing_enabled
+            or (lambda: bool(
+                AutoPostRepository(self.inquiries.database)
+                .settings()
+                .get("auto_processing_enabled")
+            ))
+        )
         self.learning = learning or LearningService(inquiry_repository.database)
 
     def sync(
@@ -401,12 +411,13 @@ class InquirySyncService:
                             "network_call_count": 0,
                         },
                     )
-                if self.automatic_drafts is not None:
-                    # Run every synchronized inquiry through the idempotent
-                    # automatic pipeline.  This also recovers an older,
-                    # unchanged unanswered inquiry whose Draft was never
-                    # created; existing/answered inquiries are safely skipped
-                    # by AutomaticDraftService without repeating lookups.
+                if (
+                    self.automatic_drafts is not None
+                    and self.automatic_processing_enabled()
+                ):
+                    # Only the persisted server-wide runtime switch may enter
+                    # this compatibility path. Production Auto Sync uses the
+                    # durable event/scheduler pipeline instead.
                     failed_stage = "AUTOMATIC_DRAFT"
                     automatic = self.automatic_drafts.ensure_for_inquiry(
                         upsert.inquiry_id,

@@ -14,7 +14,6 @@ from services.inquiry_sync_service import InquirySyncService
 from services.inquiry_sync_trace import InquirySyncTrace
 from services.work_queue_service import WorkItem, WorkQueueError, load_work_queue
 from services.naver_inquiry_sync_service import NaverInquirySyncService
-from services.automatic_draft_service import AutomaticDraftService
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,6 @@ class InquirySyncOrchestrator:
             InquiryRepository(database),
             WorkflowRepository(database),
             LogRepository(database),
-            automatic_drafts=AutomaticDraftService(database),
         )
         self.logs = LogRepository(database)
 
@@ -80,7 +78,6 @@ class InquirySyncOrchestrator:
             from_datetime = to_datetime - timedelta(days=int(days))
             result = NaverInquirySyncService(
                 self.database,
-                automatic_drafts=AutomaticDraftService(self.database),
             ).sync_inquiries(
                 stores=targets,
                 from_datetime=from_datetime,

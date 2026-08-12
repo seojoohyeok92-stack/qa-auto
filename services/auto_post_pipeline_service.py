@@ -9,18 +9,20 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.post_review_repository import PostReviewRepository
+from repositories.workflow_repository import WorkflowRepository
+from services.auto_processing_eligibility_service import (
+    AUTO_POSTABLE_ROUTES,
+    AutoProcessingEligibility,
+    AutoProcessingEligibilityService,
+)
 from services.automatic_draft_service import AutomaticDraftService
 from services.naver_post_service import NaverPostService
 from services.dps_agent_client import get_dps_session_status
 from workflow.models import InquiryStatus
+from workflow.models import StepCode
 
 
-AUTO_POST_ROUTES = {
-    "TEMPLATE", "SAFE_RULE", "PRODUCT_DB", "GPT_FALLBACK", "GPT_DIRECT",
-    "ORDER_ID_REQUEST", "ORDER_LOOKUP_FAILED", "DELIVERY_ORDER_NOT_FOUND",
-    "DPS_LOOKUP_FAILED", "DELIVERY_DATE_UNCONFIRMED",
-    "DELIVERY_WITH_INSTALLATION_DATE", "REVIEW_REQUIRED_SAFE_DRAFT",
-}
+AUTO_POST_ROUTES = set(AUTO_POSTABLE_ROUTES)
 
 
 @dataclass(frozen=True)
@@ -52,10 +54,12 @@ class AutoPostPipelineService:
         self.answers = AnswerRepository(database)
         self.auto = AutoPostRepository(database)
         self.reviews = PostReviewRepository(database)
+        self.workflows = WorkflowRepository(database)
         self.logs = LogRepository(database)
         self.drafts = draft_service or AutomaticDraftService(database)
         self.posts = post_service or NaverPostService(database)
         self.dps_status_provider = dps_status_provider or get_dps_session_status
+        self.eligibility = AutoProcessingEligibilityService()
         if confirmation_service is not None:
             self.confirmation = confirmation_service
         elif post_service is None:
@@ -68,6 +72,47 @@ class AutoPostPipelineService:
             # Injected post services are Mock/DryRun test paths and must never
             # cause an accidental external read.
             self.confirmation = None
+
+    def _hold_for_review(
+        self,
+        inquiry_id: int,
+        decision: AutoProcessingEligibility,
+        *,
+        run_id: str,
+    ) -> None:
+        self.inquiries.update_status(inquiry_id, InquiryStatus.NEEDS_ATTENTION)
+        details = {
+            "auto_post_run_id": run_id,
+            "decision": decision.decision,
+            "stage": decision.stage,
+            "reasons": list(decision.reasons),
+            "network_call_count": 0,
+        }
+        try:
+            step = self.workflows.get_step(inquiry_id, StepCode.STAFF_REVIEW)
+            if str(step.get("step_status") or "").upper() in {"PENDING", "RUNNING"}:
+                self.workflows.mark_needs_review(
+                    inquiry_id,
+                    StepCode.STAFF_REVIEW,
+                    error_code=(decision.reasons[0] if decision.reasons else decision.decision),
+                    message="Automatic processing stopped for staff review.",
+                    metadata=details,
+                )
+        except (LookupError, ValueError):
+            # The inquiry status and durable activity event remain the source
+            # of truth for legacy workflows whose review step is terminal.
+            pass
+        self.logs.record_inquiry(
+            inquiry_id,
+            (
+                "AUTO_PROCESSING_BLOCKED"
+                if decision.decision == "BLOCKED"
+                else "AUTO_PROCESSING_REVIEW_REQUIRED"
+            ),
+            "Automatic processing stopped before Naver POST.",
+            level="WARNING",
+            details=details,
+        )
 
     @staticmethod
     def _route(draft: dict[str, Any]) -> str:
@@ -233,8 +278,17 @@ class AutoPostPipelineService:
                 if draft is None or not str(draft.get("original_answer") or "").strip():
                     raise ValueError("DRAFT_REQUIRED")
                 route = self._route(draft)
-                if not route or route not in AUTO_POST_ROUTES:
-                    raise ValueError("ROUTE_UNIDENTIFIED")
+                eligibility = self.eligibility.evaluate(
+                    inquiry=fresh,
+                    draft=draft,
+                    route=route,
+                )
+                if not eligibility.safe:
+                    counters["skipped_count"] += 1
+                    self._hold_for_review(
+                        inquiry_id, eligibility, run_id=run_id
+                    )
+                    continue
                 dps_block = self._dps_session_block_reason(draft)
                 if dps_block:
                     counters["skipped_count"] += 1
@@ -315,6 +369,17 @@ class AutoPostPipelineService:
                         inquiry_id, "AUTO_POST_SKIPPED_ALREADY_ANSWERED",
                         "네이버에 이미 답변이 있어 로컬 상태만 동기화했습니다.",
                         details={"auto_post_run_id": run_id},
+                    )
+                elif result.status == "BLOCKED":
+                    counters["skipped_count"] += 1
+                    self._hold_for_review(
+                        inquiry_id,
+                        AutoProcessingEligibility(
+                            "REVIEW_REQUIRED",
+                            "PREFLIGHT",
+                            (str(result.error_code or "PREFLIGHT_FAILED"),),
+                        ),
+                        run_id=run_id,
                     )
                 else:
                     unknown = result.status == "POST_UNKNOWN"

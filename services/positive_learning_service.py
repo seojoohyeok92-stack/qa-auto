@@ -108,6 +108,17 @@ class PositiveLearningService:
             ).fetchone()
             if corrected is not None:
                 return {"saved": False, "reason": "CORRECTED_LEARNING_EXISTS"}
+            negative = connection.execute(
+                """
+                SELECT 1 FROM learning_feedback
+                WHERE inquiry_id=? AND active=1
+                  AND learning_signal_type IN ('NEGATIVE','INTENT_CORRECTION')
+                LIMIT 1
+                """,
+                (int(inquiry_id),),
+            ).fetchone()
+            if negative is not None:
+                return {"saved": False, "reason": "NEGATIVE_FEEDBACK_EXISTS"}
         saved = self.learning.capture_auto_unchanged_accepted(
             inquiry_id=int(inquiry_id),
             version_id=int(version["id"]),

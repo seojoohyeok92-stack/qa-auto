@@ -226,7 +226,7 @@ def test_every_supported_route_is_auto_finalized_posted_and_queued_for_review(
     inquiry_id = make_inquiry(database)
     make_draft(
         database, inquiry_id, route=route,
-        needs_review=route in {"SAFE_RULE", "REVIEW_REQUIRED_SAFE_DRAFT"},
+        needs_review=False,
     )
     client = MockClient()
     outcome = AutoPostPipelineService(
@@ -279,7 +279,7 @@ def test_minimum_technical_validation_blocks_without_network(
     outcome = AutoPostPipelineService(
         database, post_service=post_service(database, client)
     ).run_pending(run_id="RUN-1", owner_id="OWNER-1", max_retries=1)
-    assert outcome.failed_count == 1
+    assert outcome.skipped_count == 1
     assert client.calls == 0
     events = [
         row["details_json"]
@@ -324,7 +324,7 @@ def test_one_failure_does_not_stop_next_inquiry(tmp_path) -> None:
     outcome = AutoPostPipelineService(
         database, post_service=post_service(database, client)
     ).run_pending(run_id="RUN-1", owner_id="OWNER-1", max_retries=1)
-    assert outcome.failed_count == 1
+    assert outcome.skipped_count == 1
     assert outcome.succeeded_count == 1
     assert InquiryRepository(database).get(second)["post_status"] == "POSTED"
 
