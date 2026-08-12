@@ -238,6 +238,25 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     assert "NAVER_POSTED" in captions
     assert "Source of Truth" in captions
     assert "답변 ID ANSWER-100" in captions
+    rendered = "\n".join(item.value for item in app.markdown)
+    assert "source-naver" in rendered
+    assert "현재 표시: <b>네이버 실제 등록 답변</b>" in rendered
+    assert "Source: NAVER_POSTED" in rendered
+
+    expected_views = (
+        ("Program Answer", "program", "PROGRAM_GENERATED"),
+        ("직원 수정본", "staff", "STAFF_EDITED"),
+        ("네이버 실제 등록 답변", "naver", "NAVER_POSTED"),
+        ("Final Answer", "final", "FINAL_ANSWER"),
+    )
+    for label, tone, provenance in expected_views:
+        app.segmented_control[0].set_value(label)
+        app.run(timeout=40)
+        assert app.segmented_control[0].value == label
+        rendered = "\n".join(item.value for item in app.markdown)
+        assert f"source-{tone}" in rendered
+        assert f"현재 표시: <b>{label}</b>" in rendered
+        assert f"Source: {provenance}" in rendered
     app.segmented_control[0].set_value("Program Answer")
     app.run(timeout=40)
     assert "Program Answer" in app.text_area[0].value

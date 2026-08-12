@@ -88,6 +88,44 @@ class LearningRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
+    def active_human_verified_for_answer(
+        self,
+        *,
+        inquiry_id: int,
+        answer_provenance: str,
+        answer_reference_id: int,
+    ) -> list[dict[str, Any]]:
+        """Return active human-verified positives for one persisted answer reference."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM learning_examples
+                WHERE inquiry_id=? AND active=1
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.learning_signal_type'),
+                      'POSITIVE'
+                  )='POSITIVE'
+                  AND json_extract(metadata_json, '$.human_verified')=1
+                  AND json_extract(metadata_json, '$.answer_provenance')=?
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.answer_reference_id'),
+                      CASE
+                        WHEN json_extract(metadata_json, '$.answer_provenance')='NAVER_POSTED'
+                          THEN json_extract(metadata_json, '$.naver_posted_answer_id')
+                        ELSE answer_draft_id
+                      END
+                  )=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (
+                    int(inquiry_id),
+                    str(answer_provenance),
+                    int(answer_reference_id),
+                ),
+            ).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
     def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(

@@ -289,6 +289,22 @@ def test_answer_tabs_have_readable_dark_theme_states_and_accents() -> None:
     assert "button:disabled" in scope
     assert "background: #122234 !important" in scope
     assert "color: #e8eff7 !important" in scope
+    for tone, background in (
+        ("program", "#244b91"),
+        ("staff", "#176b62"),
+        ("naver", "#8a4a1f"),
+        ("final", "#57418f"),
+    ):
+        assert f":has(.source-{tone})" in scope
+        assert f"background: {background} !important" in scope
+        assert f"st-key-answer_source_body_{tone}_" in scope
+    assert ".answer-source-marker" in scope
+    assert "현재 표시:" in Path("ui/review_workspace.py").read_text(
+        encoding="utf-8"
+    )
+    assert "Source:" in Path("ui/review_workspace.py").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_answer_body_tokens_cover_editable_placeholder_and_read_only() -> None:

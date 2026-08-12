@@ -5,11 +5,15 @@ import json
 import re
 from typing import Any
 
+from answer.answer_format import format_final_answer
 from answer.answer_provenance import AnswerProvenance
+from answer.learning_conflict import LearningConflictError
+from answer.positive_learning import normalize_positive_reason
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository, utc_now
 from repositories.learning_repository import LearningRepository
+from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_posted_answer_repository import (
     NaverPostedAnswerRepository,
@@ -50,9 +54,62 @@ class LearningService:
         self.inquiries = InquiryRepository(database)
         self.answers = AnswerRepository(database)
         self.repository = LearningRepository(database)
+        self.feedback_repository = LearningFeedbackRepository(database)
         self.logs = LogRepository(database)
         self.privacy = LearningPrivacyService()
         self.quality = LearningQualityService()
+
+    def assert_positive_allowed(
+        self,
+        *,
+        inquiry_id: int,
+        answer_provenance: str | AnswerProvenance,
+        answer_reference_id: int,
+        answer: str,
+    ) -> None:
+        """Protect the exact persisted answer from opposite active signals."""
+
+        provenance = (
+            answer_provenance
+            if isinstance(answer_provenance, AnswerProvenance)
+            else AnswerProvenance(str(answer_provenance))
+        )
+        masked_answer = self.privacy.mask(format_final_answer(str(answer or "")))
+        rows = self.feedback_repository.active_dashboard_evaluation(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=provenance.value,
+            original_answer_reference_id=int(answer_reference_id),
+        )
+        conflict = next(
+            (
+                row
+                for row in rows
+                if row.get("learning_signal_type") == "NEGATIVE"
+                and str(row.get("original_answer_masked") or "") == masked_answer
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise LearningConflictError(
+                "이 답변은 이미 Negative Learning으로 평가되었습니다. "
+                "같은 답변을 그대로 승인할 수 없습니다. "
+                "답변을 수정한 후 직원 수정본을 승인해주세요.",
+                conflict=conflict,
+            )
+
+    @staticmethod
+    def _positive_review_metadata(
+        *,
+        answer_reference_id: int,
+        positive_reason: str = "",
+        positive_note: str = "",
+    ) -> dict[str, Any]:
+        reason = normalize_positive_reason(positive_reason)
+        return {
+            "answer_reference_id": int(answer_reference_id),
+            "positive_reason": reason.value if reason is not None else None,
+            "positive_note": str(positive_note or "").strip() or None,
+        }
 
     @staticmethod
     def _metadata(draft: dict[str, Any]) -> dict[str, Any]:
@@ -139,7 +196,15 @@ class LearningService:
             "active": True,
         }
 
-    def capture_approved(self, *, inquiry_id: int, draft_id: int, history_id: int | None = None) -> dict[str, Any] | None:
+    def capture_approved(
+        self,
+        *,
+        inquiry_id: int,
+        draft_id: int,
+        history_id: int | None = None,
+        positive_reason: str = "",
+        positive_note: str = "",
+    ) -> dict[str, Any] | None:
         inquiry, draft = self.inquiries.get(inquiry_id), self.answers.get(draft_id)
         if not inquiry or not draft or str(draft.get("review_status")).upper() != "APPROVED":
             return None
@@ -149,6 +214,17 @@ class LearningService:
         if not final:
             return None
         source = "APPROVED_EDITED" if str(draft.get("edited_answer") or "").strip() else "APPROVED_UNEDITED"
+        provenance = (
+            AnswerProvenance.STAFF_EDITED
+            if source == "APPROVED_EDITED"
+            else AnswerProvenance.PROGRAM_GENERATED
+        )
+        self.assert_positive_allowed(
+            inquiry_id=inquiry_id,
+            answer_provenance=provenance,
+            answer_reference_id=draft_id,
+            answer=final,
+        )
         example = self._build(inquiry=inquiry, draft=draft, learning_source=source, answer=final, history_id=history_id)
         if example is None:
             return None
@@ -157,6 +233,11 @@ class LearningService:
             "human_verified": True,
             "verified_by": inquiry.get("approved_by"),
             "verified_at": inquiry.get("approved_at") or utc_now(),
+            **self._positive_review_metadata(
+                answer_reference_id=draft_id,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
+            ),
         }
         existing = self.repository.get_by_source_key(example["source_key"])
         if existing is not None:
@@ -192,6 +273,8 @@ class LearningService:
         inquiry_id: int,
         draft_id: int,
         human_verified: bool = False,
+        positive_reason: str = "",
+        positive_note: str = "",
         actor: str = "직원",
     ) -> dict[str, Any] | None:
         """Save an internal correction without claiming it was posted to Naver."""
@@ -209,6 +292,13 @@ class LearningService:
         corrected = str(draft.get("edited_answer") or "").strip()
         if not customer_truth or not corrected or corrected == customer_truth:
             return None
+        if human_verified:
+            self.assert_positive_allowed(
+                inquiry_id=inquiry_id,
+                answer_provenance=AnswerProvenance.STAFF_EDITED,
+                answer_reference_id=draft_id,
+                answer=corrected,
+            )
         example = self._build(
             inquiry=inquiry,
             draft=draft,
@@ -228,13 +318,23 @@ class LearningService:
             "naver_posted_answer_id": int(posted["id"]),
             "customer_truth_remains_naver_posted": True,
             "human_verified": bool(human_verified),
+            **self._positive_review_metadata(
+                answer_reference_id=draft_id,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
+            ),
             "verified_by": str(actor or "직원") if human_verified else None,
             "verified_at": utc_now() if human_verified else None,
         }
         return self.repository.upsert(example)
 
     def capture_verified_posted_answer(
-        self, *, inquiry_id: int, actor: str
+        self,
+        *,
+        inquiry_id: int,
+        actor: str,
+        positive_reason: str = "",
+        positive_note: str = "",
     ) -> dict[str, Any] | None:
         """Promote only the customer-visible Naver answer after human review."""
 
@@ -247,6 +347,12 @@ class LearningService:
         answer = str(posted.get("answer_body") or "").strip()
         if posted.get("fetch_status") != "AVAILABLE" or not answer:
             return None
+        self.assert_positive_allowed(
+            inquiry_id=inquiry_id,
+            answer_provenance=AnswerProvenance.NAVER_POSTED,
+            answer_reference_id=int(posted["id"]),
+            answer=answer,
+        )
         example = self._build(
             inquiry=inquiry,
             draft=None,
@@ -274,6 +380,11 @@ class LearningService:
                     "verified_at": utc_now(),
                     "naver_posted_answer_id": int(posted["id"]),
                     "customer_facing_truth": True,
+                    **self._positive_review_metadata(
+                        answer_reference_id=int(posted["id"]),
+                        positive_reason=positive_reason,
+                        positive_note=positive_note,
+                    ),
                 },
             }
         )

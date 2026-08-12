@@ -16,6 +16,7 @@ from services.quality_metrics_service import QualityMetricsService
 from services.learning_service import LearningService
 from services.learning_feedback_service import LearningFeedbackService
 from answer.answer_format import format_final_answer
+from answer.answer_provenance import AnswerProvenance
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
 
@@ -242,7 +243,12 @@ class ApprovalService:
         return self.answers.get(draft_id) or updated
 
     def approve_posted_answer(
-        self, *, inquiry_id: int, actor: str = "관리자"
+        self,
+        *,
+        inquiry_id: int,
+        actor: str = "관리자",
+        positive_reason: str = "",
+        positive_note: str = "",
     ) -> dict[str, Any]:
         """Human-verify the Naver answer for Learning without reposting it."""
 
@@ -254,7 +260,10 @@ class ApprovalService:
         saved = LearningService(
             self.database
         ).capture_verified_posted_answer(
-            inquiry_id=int(inquiry_id), actor=actor
+            inquiry_id=int(inquiry_id),
+            actor=actor,
+            positive_reason=positive_reason,
+            positive_note=positive_note,
         )
         if saved is None:
             raise ApprovalError("검증할 네이버 실제 등록 답변이 없습니다.")
@@ -281,9 +290,18 @@ class ApprovalService:
         correction_reason: str = "",
         correction_note: str = "",
         corrected_intent: str = "",
+        positive_reason: str = "",
+        positive_note: str = "",
     ) -> dict[str, Any]:
         """Approve an internal correction without changing the Naver answer."""
 
+        learning = LearningService(self.database)
+        learning.assert_positive_allowed(
+            inquiry_id=inquiry_id,
+            answer_provenance=AnswerProvenance.STAFF_EDITED,
+            answer_reference_id=draft_id,
+            answer=edited_answer,
+        )
         self.save_edited_answer(
             inquiry_id=inquiry_id,
             draft_id=draft_id,
@@ -293,11 +311,13 @@ class ApprovalService:
             correction_note=correction_note,
             corrected_intent=corrected_intent,
         )
-        saved = LearningService(self.database).capture_posted_staff_correction(
+        saved = learning.capture_posted_staff_correction(
             inquiry_id=inquiry_id,
             draft_id=draft_id,
             human_verified=True,
             actor=actor,
+            positive_reason=positive_reason,
+            positive_note=positive_note,
         )
         if saved is None:
             raise ApprovalError("학습할 직원 수정 답변이 없습니다.")
@@ -370,12 +390,25 @@ class ApprovalService:
         correction_reason: str = "",
         correction_note: str = "",
         corrected_intent: str = "",
+        positive_reason: str = "",
+        positive_note: str = "",
     ) -> ApprovalOutcome:
         draft, _ = self._assert_editable(inquiry_id, draft_id)
-        self._start_review(inquiry_id)
         final_answer = format_final_answer(
             str(draft.get("edited_answer") or draft.get("original_answer") or "")
         )
+        learning = LearningService(self.database)
+        learning.assert_positive_allowed(
+            inquiry_id=inquiry_id,
+            answer_provenance=(
+                AnswerProvenance.STAFF_EDITED
+                if str(draft.get("edited_answer") or "").strip()
+                else AnswerProvenance.PROGRAM_GENERATED
+            ),
+            answer_reference_id=draft_id,
+            answer=final_answer,
+        )
+        self._start_review(inquiry_id)
         updated, history = self.approvals.approve(
             inquiry_id=inquiry_id,
             draft_id=draft_id,
@@ -413,10 +446,12 @@ class ApprovalService:
             approved=True,
         )
         try:
-            LearningService(self.database).capture_approved(
+            learning.capture_approved(
                 inquiry_id=inquiry_id,
                 draft_id=draft_id,
                 history_id=int(history["id"]),
+                positive_reason=positive_reason,
+                positive_note=positive_note,
             )
             if correction_reason:
                 LearningFeedbackService(

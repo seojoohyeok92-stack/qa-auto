@@ -11,11 +11,13 @@ from answer.learning_feedback import (
 )
 from answer.answer_provenance import AnswerProvenance
 from answer.answer_format import format_final_answer
+from answer.learning_conflict import LearningConflictError
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
+from repositories.learning_repository import LearningRepository
 from repositories.naver_posted_answer_repository import (
     NaverPostedAnswerRepository,
 )
@@ -194,6 +196,35 @@ class LearningFeedbackService:
         original = format_final_answer(original)
         if not original:
             raise ValueError("평가할 답변 본문이 없습니다.")
+        masked_original = self.privacy.mask(original)
+        positive_provenances = [provenance.value]
+        if provenance is AnswerProvenance.FINAL_ANSWER:
+            positive_provenances.extend(
+                [
+                    AnswerProvenance.PROGRAM_GENERATED.value,
+                    AnswerProvenance.STAFF_EDITED.value,
+                ]
+            )
+        positive_repository = LearningRepository(self.database)
+        positive_conflict = next(
+            (
+                row
+                for candidate_provenance in positive_provenances
+                for row in positive_repository.active_human_verified_for_answer(
+                    inquiry_id=int(inquiry_id),
+                    answer_provenance=candidate_provenance,
+                    answer_reference_id=reference_id,
+                )
+                if str(row.get("final_answer") or "") == masked_original
+            ),
+            None,
+        )
+        if positive_conflict is not None:
+            raise LearningConflictError(
+                "이 답변은 이미 Human Verified Positive Learning으로 승인되었습니다. "
+                "동일한 답변을 Negative Learning으로 저장할 수 없습니다.",
+                conflict=positive_conflict,
+            )
         reason = normalize_reason(correction_reason)
         intent = str(corrected_intent or "").strip().upper()
         if reason is CorrectionReason.ROUTING_ERROR and not intent:
@@ -218,7 +249,7 @@ class LearningFeedbackService:
             "original_answer_source": provenance.value,
             "original_answer_reference_id": reference_id,
             "question_masked": self.privacy.mask(question),
-            "original_answer_masked": self.privacy.mask(original),
+            "original_answer_masked": masked_original,
             "corrected_answer_masked": None,
             "metadata_json": {
                 "actor": str(actor or "직원"),

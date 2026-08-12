@@ -13,6 +13,7 @@ import streamlit.components.v1 as components
 
 from answer.answer_format import format_final_answer
 from answer.answer_provenance import AnswerProvenance
+from answer.learning_conflict import LearningConflictError
 from answer.learning_feedback import (
     CORRECTION_REASON_BY_LABEL,
     CORRECTION_REASON_LABELS,
@@ -20,6 +21,11 @@ from answer.learning_feedback import (
     CorrectionReason,
 )
 from answer.exceptions import AnswerAlreadyPostedError
+from answer.positive_learning import (
+    POSITIVE_REASON_BY_LABEL,
+    POSITIVE_REASON_LABELS,
+    PositiveReason,
+)
 from config import NaverPostSettings
 from core.time_utils import format_datetime_kst, format_datetime_minute_kst
 from repositories.answer_repository import AnswerRepository
@@ -66,6 +72,22 @@ from ui.uat_presenters import answer_source_label
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+ANSWER_VIEW_PRESENTATION: dict[str, tuple[str, str]] = {
+    "Program Answer": ("PROGRAM_GENERATED", "program"),
+    "직원 수정본": ("STAFF_EDITED", "staff"),
+    "네이버 실제 등록 답변": ("NAVER_POSTED", "naver"),
+    "Final Answer": ("FINAL_ANSWER", "final"),
+}
+
+
+def answer_view_presentation(selected_view: str | None) -> tuple[str, str, str]:
+    label = str(selected_view or "Program Answer")
+    provenance, tone = ANSWER_VIEW_PRESENTATION.get(
+        label, ANSWER_VIEW_PRESENTATION["Program Answer"]
+    )
+    return label, provenance, tone
 
 
 def _processing_plan_for_inquiry(
@@ -626,19 +648,31 @@ def approval_learning_trace(
         "positive_learning": accepted is not None,
         "positive_learning_id": (accepted or {}).get("id"),
         "learning_source": (accepted or {}).get("learning_source"),
+        "positive_reason": metadata.get("positive_reason"),
+        "positive_note": metadata.get("positive_note"),
+        "verified_at": metadata.get("verified_at")
+        or (accepted or {}).get("created_at"),
         "negative_count": len(negative),
         "intent_correction_count": len(intent),
         "latest_reason": (negative[0].get("correction_reason") if negative else None),
-        "final_reference_id": (
+        "final_reference_id": metadata.get("answer_reference_id")
+        or (
             metadata.get("naver_posted_answer_id")
             if provenance == AnswerProvenance.NAVER_POSTED.value
-            else (accepted or {}).get("answer_draft_id")
-            or (draft or {}).get("id")
+            else (accepted or {}).get("answer_draft_id") or (draft or {}).get("id")
         ),
         "reference": (
             f"LEARNING:{accepted['id']}" if accepted is not None else None
         ),
     }
+
+
+def _positive_reason_label(value: object) -> str:
+    try:
+        reason = PositiveReason(str(value))
+    except (TypeError, ValueError):
+        return "-"
+    return POSITIVE_REASON_LABELS[reason]
 
 
 def build_gpt_diagnostics(
@@ -1087,127 +1121,141 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         if source_answered:
             answer_views.append("네이버 실제 등록 답변")
         answer_views.append("Final Answer")
-        selected_view = st.segmented_control(
-            "답변 보기",
-            answer_views,
-            default=(
-                None
-                if view_key in st.session_state
-                else "Final Answer"
-                if approval_complete
-                else "네이버 실제 등록 답변"
-                if source_answered
-                else "직원 수정본"
-                if draft and not approved
-                else "Final Answer"
-                if approved
-                else "Program Answer"
-            ),
-            key=view_key,
-            label_visibility="collapsed",
-            width="stretch",
-        )
+        with st.container(key=f"answer_source_tabs_{inquiry_id}"):
+            selected_view = st.segmented_control(
+                "답변 보기",
+                answer_views,
+                default=(
+                    None
+                    if view_key in st.session_state
+                    else "Final Answer"
+                    if approval_complete
+                    else "네이버 실제 등록 답변"
+                    if source_answered
+                    else "직원 수정본"
+                    if draft and not approved
+                    else "Final Answer"
+                    if approved
+                    else "Program Answer"
+                ),
+                key=view_key,
+                label_visibility="collapsed",
+                width="stretch",
+            )
+            view_label, view_provenance, view_tone = answer_view_presentation(
+                selected_view
+            )
+            st.markdown(
+                f'<div class="answer-source-marker source-{view_tone}">'
+                f'<span>현재 표시: <b>{escape(view_label)}</b></span>'
+                f'<small>Source: {escape(view_provenance)}</small>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
         edit_key = (
             f"staff_edit_{inquiry_id}_{draft['id']}"
             if draft
             else f"staff_edit_{inquiry_id}_empty"
         )
-        if selected_view == "직원 수정본" and draft:
-            if edit_key not in st.session_state:
-                st.session_state[edit_key] = str(
-                    draft.get("edited_answer")
-                    or posted_answer_body
-                    or draft.get("original_answer")
-                    or ""
-                )
-            st.text_area(
-                "직원 수정본",
-                height=360,
-                key=edit_key,
-                disabled=(
-                    not can_edit
-                    or (not source_answered and (posted or approved))
-                ),
-                label_visibility="collapsed",
-                on_change=_autosave_staff_edit,
-                args=(
-                    str(database.path),
-                    inquiry_id,
-                    int(draft["id"]),
-                    edit_key,
-                    actor,
-                ),
-            )
-            st.caption(
-                "내부 교정 및 Learning용 수정입니다. 네이버에 재등록되지 않습니다."
-                if source_answered
-                else "변경 내용은 자동 저장되며 임시 저장으로 즉시 확정할 수 있습니다."
-            )
-        elif selected_view == "네이버 실제 등록 답변":
-            if posted_answer_available:
+        with st.container(
+            key=f"answer_source_body_{view_tone}_{inquiry_id}"
+        ):
+            if selected_view == "직원 수정본" and draft:
+                if edit_key not in st.session_state:
+                    st.session_state[edit_key] = str(
+                        draft.get("edited_answer")
+                        or posted_answer_body
+                        or draft.get("original_answer")
+                        or ""
+                    )
                 st.text_area(
-                    "네이버 실제 등록 답변",
-                    value=posted_answer_body,
+                    "직원 수정본",
+                    height=360,
+                    key=edit_key,
+                    disabled=(
+                        not can_edit
+                        or (not source_answered and (posted or approved))
+                    ),
+                    label_visibility="collapsed",
+                    on_change=_autosave_staff_edit,
+                    args=(
+                        str(database.path),
+                        inquiry_id,
+                        int(draft["id"]),
+                        edit_key,
+                        actor,
+                    ),
+                )
+                st.caption(
+                    "내부 교정 및 Learning용 수정입니다. 네이버에 재등록되지 않습니다."
+                    if source_answered
+                    else "변경 내용은 자동 저장되며 임시 저장으로 즉시 확정할 수 있습니다."
+                )
+            elif selected_view == "네이버 실제 등록 답변":
+                if posted_answer_available:
+                    st.text_area(
+                        "네이버 실제 등록 답변",
+                        value=posted_answer_body,
+                        height=360,
+                        disabled=True,
+                        label_visibility="collapsed",
+                        key=f"naver_posted_answer_{inquiry_id}_{posted_answer_record['id']}",
+                    )
+                    posted_metadata = ["NAVER_POSTED", "Source of Truth"]
+                    if posted_answer_record.get("posted_at"):
+                        posted_metadata.append(
+                            "등록 "
+                            + format_datetime_kst(posted_answer_record.get("posted_at"))
+                        )
+                    if posted_answer_record.get("answer_id"):
+                        posted_metadata.append(
+                            f"답변 ID {posted_answer_record['answer_id']}"
+                        )
+                    if posted_answer_record.get("source_api"):
+                        posted_metadata.append(
+                            f"Source {posted_answer_record['source_api']}"
+                        )
+                    st.caption(" · ".join(posted_metadata))
+                else:
+                    st.warning(
+                        "네이버에서는 답변완료 상태이지만 현재 조회 응답에 "
+                        "실제 답변 본문이 없어 NOT_FETCHED로 기록했습니다. "
+                        "Program Answer를 대신 표시하지 않습니다."
+                    )
+            elif selected_view == "Final Answer":
+                st.text_area(
+                    "Final Answer",
+                    value=final_answer or "승인 후 Final Answer가 생성됩니다.",
                     height=360,
                     disabled=True,
                     label_visibility="collapsed",
-                    key=f"naver_posted_answer_{inquiry_id}_{posted_answer_record['id']}",
+                    key=(
+                        f"final_answer_{inquiry_id}_"
+                        f"{draft['id'] if draft else 'empty'}_{approved}"
+                    ),
                 )
-                posted_metadata = ["NAVER_POSTED", "Source of Truth"]
-                if posted_answer_record.get("posted_at"):
-                    posted_metadata.append(
-                        "등록 "
-                        + format_datetime_kst(posted_answer_record.get("posted_at"))
-                    )
-                if posted_answer_record.get("answer_id"):
-                    posted_metadata.append(
-                        f"답변 ID {posted_answer_record['answer_id']}"
-                    )
-                if posted_answer_record.get("source_api"):
-                    posted_metadata.append(
-                        f"Source {posted_answer_record['source_api']}"
-                    )
-                st.caption(" · ".join(posted_metadata))
+                if approval_complete:
+                    final_metadata = [
+                        f"Source {approval_trace.get('provenance') or 'UNKNOWN'}",
+                        "Human Verified "
+                        + ("YES" if approval_trace.get("human_verified") else "NO"),
+                    ]
+                    if approval_trace.get("approved_at"):
+                        final_metadata.append(
+                            "승인 "
+                            + format_datetime_kst(approval_trace.get("approved_at"))
+                        )
+                    if approval_trace.get("reference"):
+                        final_metadata.append(str(approval_trace["reference"]))
+                    st.caption(" · ".join(final_metadata))
             else:
-                st.warning(
-                    "네이버에서는 답변완료 상태이지만 현재 조회 응답에 "
-                    "실제 답변 본문이 없어 NOT_FETCHED로 기록했습니다. "
-                    "Program Answer를 대신 표시하지 않습니다."
+                rendered_program_text = st.text_area(
+                    "Program Answer",
+                    height=360,
+                    disabled=True,
+                    label_visibility="collapsed",
+                    key=draft_session_key,
                 )
-        elif selected_view == "Final Answer":
-            st.text_area(
-                "Final Answer",
-                value=final_answer or "승인 후 Final Answer가 생성됩니다.",
-                height=360,
-                disabled=True,
-                label_visibility="collapsed",
-                key=(
-                    f"final_answer_{inquiry_id}_"
-                    f"{draft['id'] if draft else 'empty'}_{approved}"
-                ),
-            )
-            if approval_complete:
-                final_metadata = [
-                    f"Source {approval_trace.get('provenance') or 'UNKNOWN'}",
-                    "Human Verified "
-                    + ("YES" if approval_trace.get("human_verified") else "NO"),
-                ]
-                if approval_trace.get("approved_at"):
-                    final_metadata.append(
-                        "승인 "
-                        + format_datetime_kst(approval_trace.get("approved_at"))
-                    )
-                if approval_trace.get("reference"):
-                    final_metadata.append(str(approval_trace["reference"]))
-                st.caption(" · ".join(final_metadata))
-        else:
-            rendered_program_text = st.text_area(
-                "Program Answer",
-                height=360,
-                disabled=True,
-                label_visibility="collapsed",
-                key=draft_session_key,
-            )
 
         if approval_complete:
             st.markdown(
@@ -1217,6 +1265,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 f'<span>승인 시각: {escape(format_datetime_kst(approval_trace.get("approved_at")))}</span>'
                 f'<span>Human Verified: {"YES" if approval_trace.get("human_verified") else "NO"}</span>'
                 f'<span>Positive Learning: {"반영 완료" if approval_trace.get("positive_learning") else "저장 확인 필요"}</span>'
+                f'<span>Learning ID: {escape(str(approval_trace.get("positive_learning_id") or "-"))}</span>'
+                f'<span>Reference: {escape(str(approval_trace.get("final_reference_id") or "-"))}</span>'
+                f'<span>좋은 이유: {escape(_positive_reason_label(approval_trace.get("positive_reason")))}</span>'
+                f'<span>승인 메모: {escape(str(approval_trace.get("positive_note") or "-"))}</span>'
+                f'<span>Verified At: {escape(format_datetime_kst(approval_trace.get("verified_at")))}</span>'
                 f'<span>Negative: {int(approval_trace.get("negative_count") or 0)}</span>'
                 f'<span>Intent Correction: {int(approval_trace.get("intent_correction_count") or 0)}</span>'
                 "</div>",
@@ -1227,6 +1280,36 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "Learning에서 확인 · 문의 ID "
                     f"{inquiry_id} · {approval_trace['reference']} · "
                     f"Source {approval_trace.get('learning_source') or '-'}"
+                )
+
+        positive_reason = ""
+        positive_note = ""
+        if not approval_complete:
+            with st.expander("Positive Learning 설정", expanded=False):
+                st.caption(
+                    "선택 사항입니다. 입력하지 않고 승인해도 기존 Human Verified "
+                    "Positive Learning이 정상 저장됩니다."
+                )
+                positive_reason_label = st.selectbox(
+                    "좋은 이유 (선택)",
+                    ["선택 안 함", *[
+                        POSITIVE_REASON_LABELS[reason]
+                        for reason in PositiveReason
+                    ]],
+                    key=f"positive_reason_{inquiry_id}",
+                )
+                selected_positive_reason = POSITIVE_REASON_BY_LABEL.get(
+                    positive_reason_label
+                )
+                positive_reason = (
+                    selected_positive_reason.value
+                    if selected_positive_reason is not None
+                    else ""
+                )
+                positive_note = st.text_input(
+                    "승인 메모 / 다음 유사 문의 참고사항 (선택)",
+                    key=f"positive_note_{inquiry_id}",
+                    placeholder="왜 좋은 답변인지, 유사 문의에서 참고할 내용을 기록",
                 )
 
         correction_reason = ""
@@ -1852,6 +1935,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_reason=correction_reason,
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
@@ -1864,6 +1949,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             ApprovalService(database).approve_posted_answer(
                 inquiry_id=inquiry_id,
                 actor=actor,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
@@ -1880,6 +1967,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_reason=correction_reason,
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
@@ -1954,7 +2043,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             "요청 처리 중 오류가 발생했습니다. 저장된 초안은 새로고침 후 "
             "다시 확인할 수 있습니다."
         )
-    except (ApprovalError, AnswerAlreadyPostedError, ValueError) as error:
+    except (
+        ApprovalError,
+        AnswerAlreadyPostedError,
+        LearningConflictError,
+        ValueError,
+    ) as error:
         st.error(str(error))
     except Exception as error:
         record_runtime_exception(

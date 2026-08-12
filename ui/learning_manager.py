@@ -32,7 +32,10 @@ def _search_blob(row: dict[str, Any]) -> str:
             row.get("signal_type"),
             row.get("learning_signal_type"),
             metadata.get("answer_provenance"),
+            metadata.get("answer_reference_id"),
             metadata.get("verified_by"),
+            metadata.get("positive_reason"),
+            metadata.get("positive_note"),
         )
     ).lower()
 
@@ -198,8 +201,24 @@ def render_learning_manager(database: Database | None) -> None:
                     "학습 답변": row["final_answer"],
                     "Source": row["learning_source"],
                     "Provenance": row.get("provenance") or "UNKNOWN",
+                    "Answer Reference": (row.get("metadata_json") or {}).get(
+                        "answer_reference_id"
+                    )
+                    or row.get("answer_draft_id"),
                     "Signal": row.get("signal_type") or "POSITIVE",
                     "Human Verified": "YES" if row.get("human_verified") else "NO",
+                    "Positive Reason": (row.get("metadata_json") or {}).get(
+                        "positive_reason"
+                    )
+                    or "-",
+                    "Positive Note": (row.get("metadata_json") or {}).get(
+                        "positive_note"
+                    )
+                    or "-",
+                    "Verified At": format_datetime_kst(
+                        (row.get("metadata_json") or {}).get("verified_at"),
+                        empty="-",
+                    ),
                     "품질": row["quality_score"],
                     "사용": row["usage_count"],
                     "마지막 사용": format_datetime_kst(
