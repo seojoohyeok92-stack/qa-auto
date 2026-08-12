@@ -2128,6 +2128,8 @@ def _render_inquiry_detail(
             legacy_posted_answer.get("content")
             or legacy_posted_answer.get("answerContent")
         )
+    product_name = display_value(inquiry.get("product_name"))
+    option_name = display_value(inquiry.get("option_name"))
     st.markdown(
         '<div class="inquiry-detail-layout"><div class="official-fields two">'
         + _field("문의 ID", inquiry.get("source_question_id"))
@@ -2156,6 +2158,17 @@ def _render_inquiry_detail(
             or order_snapshot.get("delivery_method"),
         )
         + "</div>"
+        + '<div class="inquiry-product-overview">'
+        + '<div class="inquiry-product-overview-item product-name-full">'
+        + '<span>상품명</span><p title="'
+        + escape(product_name, quote=True)
+        + '">'
+        + escape(product_name)
+        + "</p></div>"
+        + '<div class="inquiry-product-overview-item product-option-full">'
+        + '<span>상품 옵션</span><p>'
+        + escape(option_name)
+        + "</p></div></div>"
         + '<div class="official-copy-block inquiry-content-scroll"><span>문의 내용</span><p>'
         + escape(display_value(inquiry.get("content")))
         + "</p></div></div>",

@@ -142,6 +142,13 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     at.run(timeout=30)
     assert len(at.text_area) == 1
     assert at.text_area[0].value == "Program 본문"
+    at.segmented_control[0].set_value("Final Answer")
+    at.run(timeout=30)
+    assert at.segmented_control[0].value == "Final Answer"
+    assert "네이버 실제 등록 답변" not in at.segmented_control[0].options
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert "source-final" in rendered
+    assert "Source: FINAL_ANSWER" in rendered
 
 
 def test_inquiry_detail_prioritizes_large_question_body(tmp_path: Path) -> None:
@@ -163,8 +170,74 @@ _render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
     rendered = "\n".join(item.value for item in at.markdown)
     assert "inquiry-detail-layout" in rendered
     assert "official-fields two" in rendered
+    assert "inquiry-product-overview" in rendered
+    assert '<span>상품명</span><p title="대형 TV">대형 TV</p>' in rendered
+    assert '<span>상품 옵션</span><p>-</p>' in rendered
     assert "inquiry-content-scroll" in rendered
     assert "문의 내용" in rendered
+
+
+def test_inquiry_detail_shows_full_wrapped_product_name_and_option(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "long-product.db"
+    database = Database(path)
+    database.initialize()
+    inquiry_id = seed_inquiry(database, "Q-LONG-PRODUCT")
+    product_name = "[공동구매] 삼성 오디세이 G5 68.4cm 게이밍 모니터 " * 12
+    option_name = "화이트 / 27인치"
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET product_name=?, option_name=? WHERE id=?",
+            (product_name, option_name, inquiry_id),
+        )
+    at = run(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_inquiry_detail
+db=Database(r"{path}")
+db.initialize()
+_render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert product_name in rendered
+    assert option_name in rendered
+    assert "product-name-full" in rendered
+    assert "product-option-full" in rendered
+    assert rendered.index("inquiry-product-overview") < rendered.index(
+        "inquiry-content-scroll"
+    )
+
+
+def test_inquiry_detail_preserves_extremely_long_product_name(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "extreme-product.db"
+    database = Database(path)
+    database.initialize()
+    inquiry_id = seed_inquiry(database, "Q-EXTREME-PRODUCT")
+    product_name = "초장문상품명ABC123" * 300
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET product_name=? WHERE id=?",
+            (product_name, inquiry_id),
+        )
+    at = run(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_inquiry_detail
+db=Database(r"{path}")
+db.initialize()
+_render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert product_name in rendered
 
 
 def test_inquiry_detail_renders_long_question_without_truncating_source(
@@ -275,6 +348,18 @@ def test_workspace_css_stretches_detail_row_and_expands_question_body() -> None:
     assert "overflow-y: auto !important" in css
     assert "@media (max-width: 1199px)" in css
     assert "max-height: 360px !important" in css
+    product_scope = css[
+        css.index(".inquiry-product-overview {") : css.index(
+            ".inquiry-detail-layout .inquiry-content-scroll"
+        )
+    ]
+    assert "max-height: 150px" in product_scope
+    assert "overflow-y: auto !important" in product_scope
+    assert "white-space: normal !important" in product_scope
+    assert "overflow-wrap: anywhere !important" in product_scope
+    assert "word-break: break-word !important" in product_scope
+    assert "text-overflow: clip !important" in product_scope
+    assert "text-overflow: ellipsis" not in product_scope
 
 
 def test_answer_tabs_have_readable_dark_theme_states_and_accents() -> None:
@@ -282,21 +367,21 @@ def test_answer_tabs_have_readable_dark_theme_states_and_accents() -> None:
     scope = css[css.index("/* The tab accent communicates provenance") :]
     for accent in ("#7299ff", "#61e5c7", "#ffad66", "#a995ff"):
         assert accent in scope
+    assert 'button[kind="segmented_controlActive"]' in scope
+    assert 'button[data-testid="stBaseButton-segmented_controlActive"]' in scope
     assert 'button[aria-pressed="true"]' in scope
     assert '[role="radio"][aria-checked="true"]' in scope
+    assert "border: 2px solid var(--answer-selected-accent) !important" in scope
+    assert "background: #111f2d !important" in scope
+    assert "box-shadow: 0 0 0 1px var(--answer-selected-accent)" in scope
+    assert "nth-of-type" not in scope[: scope.index(".answer-source-marker")]
     assert "button:hover" in scope
     assert "button:focus-visible" in scope
     assert "button:disabled" in scope
     assert "background: #122234 !important" in scope
     assert "color: #e8eff7 !important" in scope
-    for tone, background in (
-        ("program", "#244b91"),
-        ("staff", "#176b62"),
-        ("naver", "#8a4a1f"),
-        ("final", "#57418f"),
-    ):
+    for tone in ("program", "staff", "naver", "final"):
         assert f":has(.source-{tone})" in scope
-        assert f"background: {background} !important" in scope
         assert f"st-key-answer_source_body_{tone}_" in scope
     assert ".answer-source-marker" in scope
     assert "현재 표시:" in Path("ui/review_workspace.py").read_text(
