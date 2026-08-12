@@ -270,6 +270,38 @@ def test_dashboard_negative_only_keeps_positive_candidates_empty(tmp_path) -> No
     assert LearningRepository(database).candidates(store_code="OJE_PLUS") == []
 
 
+def test_dashboard_negative_duplicate_click_reuses_persisted_feedback(
+    tmp_path,
+) -> None:
+    database, inquiry_id, draft = make_context(tmp_path)
+    service = LearningFeedbackService(database)
+    first = service.capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=AnswerProvenance.PROGRAM_GENERATED,
+        original_answer_reference_id=draft["id"],
+        correction_reason=CorrectionReason.FACT_ERROR,
+        correction_note="최초 메모",
+    )
+    second = service.capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=AnswerProvenance.PROGRAM_GENERATED,
+        original_answer_reference_id=draft["id"],
+        correction_reason=CorrectionReason.FACT_ERROR,
+        correction_note="최종 메모",
+    )
+
+    assert [row["id"] for row in second] == [row["id"] for row in first]
+    persisted = LearningFeedbackRepository(
+        database
+    ).active_dashboard_evaluation(
+        inquiry_id=inquiry_id,
+        original_answer_source="PROGRAM_GENERATED",
+        original_answer_reference_id=draft["id"],
+    )
+    assert len(persisted) == 1
+    assert persisted[0]["correction_note"] == "최종 메모"
+
+
 def test_dashboard_routing_negative_creates_intent_correction(tmp_path) -> None:
     database, inquiry_id, draft = make_context(tmp_path)
     saved = LearningFeedbackService(database).capture_dashboard_negative(
@@ -334,6 +366,13 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     reason = next(item for item in app.selectbox if item.label == "잘못된 이유")
     reason.set_value("사실 오류")
     app.run(timeout=40)
+    note = next(
+        item
+        for item in app.text_input
+        if item.label == "Negative 상세 메모 (선택)"
+    )
+    note.set_value("확인되지 않은 배송일을 단정함")
+    app.run(timeout=40)
     save = next(
         button for button in app.button
         if button.label == "Negative Learning 저장"
@@ -348,6 +387,34 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     assert feedback[0]["original_answer_source"] == "PROGRAM_GENERATED"
     assert feedback[0]["original_answer_reference_id"] == draft["id"]
     assert LearningRepository(database).candidates(store_code="OJE_PLUS") == []
+    rendered = "\n".join(item.value for item in app.markdown)
+    for expected in (
+        "Negative Learning 저장 완료",
+        f"Feedback ID <b>{feedback[0]['id']}</b>",
+        "사실 오류 (FACT_ERROR)",
+        "확인되지 않은 배송일을 단정함",
+        "평가 Answer provenance <b>PROGRAM_GENERATED</b>",
+        f"Reference <b>{draft['id']}</b>",
+        f"Learning Manager 검색 · Inquiry {inquiry_id}",
+        "저장 시각",
+    ):
+        assert expected in rendered
+
+    fresh_app = AppTest.from_string(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_answer_panel
+db=Database(r"{database.path}")
+db.initialize()
+_render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
+'''
+    ).run(timeout=40)
+    assert not fresh_app.exception
+    fresh_rendered = "\n".join(item.value for item in fresh_app.markdown)
+    assert "Negative Learning 저장 완료" in fresh_rendered
+    assert f"Feedback ID <b>{feedback[0]['id']}</b>" in fresh_rendered
+    assert "확인되지 않은 배송일을 단정함" in fresh_rendered
 
 
 def test_feedback_migration_is_idempotent_and_legacy_rows_remain_positive(

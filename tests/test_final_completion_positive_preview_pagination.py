@@ -273,10 +273,10 @@ render_review_workspace(items, len(items), db, page_size=15)
 ''').run(timeout=60)
     assert not app.exception
     assert app.session_state["dashboard_page"] == 1
-    app.button(key="dashboard_page_next").click().run(timeout=60)
+    app.button(key="dashboard_page_number_2").click().run(timeout=60)
     assert not app.exception
     assert app.session_state["dashboard_page"] == 2
     assert app.session_state["historical_page"] == 9
     assert app.session_state["selected_inquiry_key"] is not None
-    app.button(key="dashboard_page_previous").click().run(timeout=60)
+    app.button(key="dashboard_page_number_1").click().run(timeout=60)
     assert app.session_state["dashboard_page"] == 1

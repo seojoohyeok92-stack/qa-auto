@@ -285,31 +285,68 @@ def paginate_items(
     return items[start : start + safe_size], safe_page, total_pages
 
 
+PAGINATION_GROUP_SIZE = 10
+
+
+def pagination_group(
+    current_page: int, total_pages: int, group_size: int = PAGINATION_GROUP_SIZE
+) -> tuple[tuple[int, ...], int, int]:
+    """Return visible pages and the previous/next group landing pages."""
+    safe_total = max(1, int(total_pages))
+    safe_current = min(max(1, int(current_page)), safe_total)
+    safe_group_size = max(1, int(group_size))
+    group_start = ((safe_current - 1) // safe_group_size) * safe_group_size + 1
+    group_end = min(group_start + safe_group_size - 1, safe_total)
+    previous_group_page = max(1, group_start - safe_group_size)
+    next_group_page = min(safe_total, group_end + 1)
+    return (
+        tuple(range(group_start, group_end + 1)),
+        previous_group_page,
+        next_group_page,
+    )
+
+
 def _render_pagination(current_page: int, total_pages: int) -> None:
-    previous, page_label, next_page = st.columns(
-        [1, 2.2, 1], gap="small", vertical_alignment="center"
+    pages, previous_group_page, next_group_page = pagination_group(
+        current_page, total_pages
     )
-    if previous.button(
-        "이전",
-        disabled=current_page <= 1,
-        key="dashboard_page_previous",
-        width="stretch",
-    ):
-        st.session_state["dashboard_page"] = current_page - 1
-        st.rerun()
-    page_label.markdown(
-        f'<div class="pagination-label"><b>{current_page}</b> / '
-        f'{total_pages} 페이지</div>',
-        unsafe_allow_html=True,
-    )
-    if next_page.button(
-        "다음",
-        disabled=current_page >= total_pages,
-        key="dashboard_page_next",
-        width="stretch",
-    ):
-        st.session_state["dashboard_page"] = current_page + 1
-        st.rerun()
+    with st.container(key="dashboard_pagination"):
+        columns = st.columns(
+            [1.15, *([0.62] * len(pages)), 1.15, 1.65],
+            gap="small",
+            vertical_alignment="center",
+        )
+        if columns[0].button(
+            "이전",
+            disabled=pages[0] == 1,
+            key="dashboard_page_previous",
+            width="stretch",
+        ):
+            st.session_state["dashboard_page"] = previous_group_page
+            st.rerun()
+        for column, page_number in zip(columns[1 : 1 + len(pages)], pages):
+            if column.button(
+                str(page_number),
+                type="primary" if page_number == current_page else "secondary",
+                key=f"dashboard_page_number_{page_number}",
+                width="stretch",
+            ):
+                st.session_state["dashboard_page"] = page_number
+                st.rerun()
+        next_column = columns[1 + len(pages)]
+        if next_column.button(
+            "다음",
+            disabled=pages[-1] >= total_pages,
+            key="dashboard_page_next",
+            width="stretch",
+        ):
+            st.session_state["dashboard_page"] = next_group_page
+            st.rerun()
+        columns[-1].markdown(
+            f'<div class="pagination-label"><b>{current_page}</b> / '
+            f'{total_pages} 페이지</div>',
+            unsafe_allow_html=True,
+        )
 
 
 INQUIRY_LIST_WIDTHS = [1.15, 0.78, 1.55, 2.3, 1.2, 0.82, 1.7]
@@ -445,6 +482,55 @@ def _show_notice() -> None:
     level, message = notice
     getattr(st, level if level in {"success", "error", "warning"} else "info")(
         message
+    )
+
+
+def _render_negative_learning_saved(
+    rows: list[dict[str, Any]], *, inquiry_id: int
+) -> None:
+    """Render only repository-backed dashboard feedback state."""
+    if not rows:
+        return
+    primary = next(
+        (
+            row
+            for row in rows
+            if row.get("learning_signal_type") == "NEGATIVE"
+        ),
+        rows[0],
+    )
+    reason_code = str(primary.get("correction_reason") or "UNKNOWN")
+    try:
+        reason_label = CORRECTION_REASON_LABELS[CorrectionReason(reason_code)]
+    except ValueError:
+        reason_label = reason_code
+    feedback_ids = ", ".join(str(row.get("id")) for row in rows)
+    signals = ", ".join(
+        str(row.get("learning_signal_type") or "UNKNOWN") for row in rows
+    )
+    provenance = str(primary.get("original_answer_source") or "UNKNOWN")
+    reference_id = primary.get("original_answer_reference_id")
+    note = str(primary.get("correction_note") or "-")
+    corrected_intent = str(primary.get("corrected_intent") or "-")
+    saved_at = format_datetime_kst(
+        primary.get("updated_at") or primary.get("created_at"), empty="-"
+    )
+    st.markdown(
+        '<div class="negative-learning-saved-card">'
+        '<strong>Negative Learning 저장 완료</strong>'
+        f'<span>Feedback ID <b>{escape(feedback_ids)}</b></span>'
+        f'<span>Signal <b>{escape(signals)}</b></span>'
+        f'<span>잘못된 이유 <b>{escape(reason_label)} ({escape(reason_code)})</b></span>'
+        f'<span>상세 메모 <b>{escape(note)}</b></span>'
+        f'<span>평가 Answer provenance <b>{escape(provenance)}</b></span>'
+        f'<span>Reference <b>{escape(str(reference_id))}</b></span>'
+        f'<span>교정 Intent <b>{escape(corrected_intent)}</b></span>'
+        f'<span>저장 시각 <b>{escape(saved_at)}</b></span>'
+        '<small>Learning Manager 검색 · '
+        f'Inquiry {int(inquiry_id)} · Reference {escape(str(reference_id))} · '
+        f'Feedback {escape(feedback_ids)}</small>'
+        "</div>",
+        unsafe_allow_html=True,
     )
 
 
@@ -1245,6 +1331,26 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         negative_reason = ""
         negative_note = ""
         negative_intent = ""
+        feedback_repository = LearningFeedbackRepository(database)
+        persisted_negative = (
+            feedback_repository.active_dashboard_evaluation(
+                inquiry_id=inquiry_id,
+                original_answer_source=evaluation_source,
+                original_answer_reference_id=evaluation_reference_id,
+            )
+            if evaluation_source is not None
+            and evaluation_reference_id is not None
+            else []
+        )
+        if not persisted_negative:
+            persisted_negative = (
+                feedback_repository.latest_active_dashboard_evaluation(
+                    inquiry_id
+                )
+            )
+        _render_negative_learning_saved(
+            persisted_negative, inquiry_id=inquiry_id
+        )
         with st.expander("이 답변이 잘못됨", expanded=False):
             st.caption(
                 "현재 선택한 답변을 삭제하지 않고 Negative Learning으로 기록합니다. "
@@ -1576,9 +1682,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     generated_draft_id: int | None = None
     try:
         if negative_save:
-            saved_feedback = LearningFeedbackService(
-                database
-            ).capture_dashboard_negative(
+            LearningFeedbackService(database).capture_dashboard_negative(
                 inquiry_id=inquiry_id,
                 original_answer_source=str(evaluation_source),
                 original_answer_reference_id=int(evaluation_reference_id),
@@ -1586,14 +1690,6 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_note=negative_note,
                 corrected_intent=negative_intent,
                 actor=actor,
-            )
-            signals = ", ".join(
-                str(row.get("learning_signal_type"))
-                for row in saved_feedback
-            )
-            st.session_state["approval_ui_notice"] = (
-                "success",
-                f"Learning 저장 완료 · {signals}",
             )
             st.rerun()
         if generate:
@@ -2887,11 +2983,12 @@ def render_review_workspace(
         ):
             first = (resolved_page - 1) * page_size + 1 if total_count else 0
             last = min(resolved_page * page_size, total_count)
-            st.caption(
-                f"검색 결과 {total_count:,}건 · 현재 {first:,}–{last:,}건 표시 · "
-                f"{resolved_page} / {resolved_total_pages} 페이지"
-            )
-            _render_list_header(total_count)
+            with st.container(key="official_inquiry_list_header"):
+                st.caption(
+                    f"검색 결과 {total_count:,}건 · 현재 {first:,}–{last:,}건 표시 · "
+                    f"{resolved_page} / {resolved_total_pages} 페이지"
+                )
+                _render_list_header(total_count)
             with st.container(
                 height=500, key="official_inquiry_rows_scroll"
             ):

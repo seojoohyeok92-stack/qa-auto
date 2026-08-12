@@ -6,7 +6,7 @@ from streamlit.testing.v1 import AppTest
 
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
-from ui.review_workspace import paginate_items
+from ui.review_workspace import paginate_items, pagination_group
 
 
 def run(code: str) -> AppTest:
@@ -39,6 +39,30 @@ def test_pagination_uses_supported_page_sizes_and_clamps() -> None:
     page, current, total = paginate_items(items, 99, 10)
     assert [item["id"] for item in page] == [20, 21, 22]
     assert (current, total) == (3, 3)
+
+
+def test_pagination_groups_cover_boundaries_and_last_page() -> None:
+    expected_first = tuple(range(1, 11))
+    for current in (1, 5, 10):
+        pages, previous, next_page = pagination_group(current, 151)
+        assert pages == expected_first
+        assert previous == 1
+        assert next_page == 11
+
+    pages, previous, next_page = pagination_group(11, 151)
+    assert pages == tuple(range(11, 21))
+    assert previous == 1
+    assert next_page == 21
+
+    pages, previous, next_page = pagination_group(149, 151)
+    assert pages == tuple(range(141, 151))
+    assert previous == 131
+    assert next_page == 151
+
+    pages, previous, next_page = pagination_group(151, 151)
+    assert pages == (151,)
+    assert previous == 141
+    assert next_page == 151
 
 
 def test_workspace_python_order_matches_operations_grid(
@@ -411,13 +435,125 @@ render_review_workspace(items, len(items), db, page_size=10)
 '''
     )
     assert not at.exception
-    next_button = next(button for button in at.button if button.label == "다음")
-    assert not next_button.disabled
-    next_button.click()
+    assert at.button(key="dashboard_page_previous").disabled
+    at.button(key="dashboard_page_number_2").click()
     at.run(timeout=30)
     assert any(
         "2</b> / 2 페이지" in item.value for item in at.markdown
     )
+
+
+def test_grouped_pagination_direct_and_group_navigation(tmp_path: Path) -> None:
+    path = tmp_path / "grouped-pages.db"
+    database = Database(path)
+    database.initialize()
+    seed_inquiry(database)
+    at = run(
+        f'''
+import streamlit as st
+from app import dashboard_work_items_from_database
+from repositories.database import Database
+from ui.review_workspace import render_review_workspace
+db=Database(r"{path}")
+db.initialize()
+st.session_state.setdefault("dashboard_page", 1)
+items=dashboard_work_items_from_database(db)
+render_review_workspace(
+    items, 2265, db, page_size=15,
+    current_page=st.session_state["dashboard_page"], total_pages=151,
+)
+'''
+    )
+    assert not at.exception
+    assert [at.button(key=f"dashboard_page_number_{page}").label for page in range(1, 11)] == [
+        str(page) for page in range(1, 11)
+    ]
+    assert at.button(key="dashboard_page_previous").disabled
+    assert not at.button(key="dashboard_page_next").disabled
+    assert at.button(key="dashboard_page_number_1").proto.type == "primary"
+
+    at.button(key="dashboard_page_number_5").click().run(timeout=30)
+    assert at.session_state["dashboard_page"] == 5
+    assert at.button(key="dashboard_page_number_5").proto.type == "primary"
+
+    at.button(key="dashboard_page_next").click().run(timeout=30)
+    assert at.session_state["dashboard_page"] == 11
+    assert at.button(key="dashboard_page_number_11").proto.type == "primary"
+    assert at.button(key="dashboard_page_number_20").label == "20"
+
+    at.button(key="dashboard_page_previous").click().run(timeout=30)
+    assert at.session_state["dashboard_page"] == 1
+
+
+def test_grouped_pagination_last_group_disables_next(tmp_path: Path) -> None:
+    path = tmp_path / "last-page.db"
+    database = Database(path)
+    database.initialize()
+    seed_inquiry(database)
+    at = run(
+        f'''
+import streamlit as st
+from app import dashboard_work_items_from_database
+from repositories.database import Database
+from ui.review_workspace import render_review_workspace
+db=Database(r"{path}")
+db.initialize()
+st.session_state.setdefault("dashboard_page", 151)
+items=dashboard_work_items_from_database(db)
+render_review_workspace(
+    items, 2265, db, page_size=15,
+    current_page=st.session_state["dashboard_page"], total_pages=151,
+)
+'''
+    )
+    assert not at.exception
+    assert at.button(key="dashboard_page_number_151").proto.type == "primary"
+    assert at.button(key="dashboard_page_next").disabled
+    assert not at.button(key="dashboard_page_previous").disabled
+    assert not any(
+        button.key and button.key.startswith("dashboard_page_number_15")
+        and button.key != "dashboard_page_number_151"
+        for button in at.button
+    )
+
+
+def test_page_number_click_drives_database_limit_and_offset(tmp_path: Path) -> None:
+    path = tmp_path / "database-page-click.db"
+    database = Database(path)
+    database.initialize()
+    for index in range(35):
+        seed_inquiry(database, f"Q-{index:02d}")
+    at = run(
+        f'''
+import streamlit as st
+from app import _dashboard_work_items_from_rows
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import render_review_workspace
+db=Database(r"{path}")
+db.initialize()
+st.session_state.setdefault("dashboard_page", 1)
+rows, total, total_pages = InquiryRepository(db).dashboard_page(
+    store_codes=["STORE"], source="ALL", queues=[], priorities=[],
+    answer_status="ALL", delivery_only=False, search_query="",
+    start_date="2026-07-30", end_date="2026-07-30", kpi_filter=None,
+    page=st.session_state["dashboard_page"], page_size=10,
+)
+st.write("VISIBLE_FIRST", rows[0]["source_question_id"], "VISIBLE_COUNT", len(rows))
+render_review_workspace(
+    _dashboard_work_items_from_rows(rows), total, db, page_size=10,
+    current_page=st.session_state["dashboard_page"], total_pages=total_pages,
+)
+'''
+    )
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert "Q-34" in rendered
+    at.button(key="dashboard_page_number_3").click().run(timeout=30)
+    assert at.session_state["dashboard_page"] == 3
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert "Q-14" in rendered
+    assert "VISIBLE_COUNT `10`" in rendered
 
 
 def test_phase8_2_css_contains_desktop_and_fallback_layout() -> None:
@@ -430,5 +566,10 @@ def test_phase8_2_css_contains_desktop_and_fallback_layout() -> None:
         "min-height: 455px",
         "@media (max-width: 1199px)",
         "white-space: nowrap",
+        "st-key-official_inquiry_list_header",
+        "padding: 16px 14px 12px !important",
+        "st-key-dashboard_pagination",
+        "overflow-x: auto !important",
+        "min-width: 700px",
     ):
         assert fragment in css

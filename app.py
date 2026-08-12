@@ -40,6 +40,7 @@ from ui.dashboard import (
 )
 from ui.inquiries import render_inquiries_page
 from ui.activity_log_panel import render_activity_log_panel
+from ui.build_info import render_build_footer
 from ui.gpt_governance_panel import render_gpt_governance_panel
 from ui.local_auth_panel import ensure_local_identity
 from ui.review_workspace import paginate_items, render_review_workspace
@@ -970,6 +971,7 @@ def main() -> None:
         render_dashboard_page(
             configured_stores, work_items, load_errors, database
         )
+        render_build_footer()
         return
     if current_page == "inquiries":
         if load_errors:

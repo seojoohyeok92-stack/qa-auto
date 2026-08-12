@@ -71,6 +71,60 @@ class LearningFeedbackRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
+    def active_dashboard_evaluation(
+        self,
+        *,
+        inquiry_id: int,
+        original_answer_source: str,
+        original_answer_reference_id: int,
+    ) -> list[dict[str, Any]]:
+        """Return persisted active feedback for one evaluated dashboard answer."""
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM learning_feedback
+                WHERE inquiry_id=? AND source='DASHBOARD_NEGATIVE_REVIEW'
+                  AND original_answer_source=?
+                  AND original_answer_reference_id=? AND active=1
+                ORDER BY CASE learning_signal_type
+                    WHEN 'NEGATIVE' THEN 0
+                    WHEN 'INTENT_CORRECTION' THEN 1
+                    ELSE 2 END,
+                    id
+                """,
+                (
+                    int(inquiry_id),
+                    str(original_answer_source),
+                    int(original_answer_reference_id),
+                ),
+            ).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
+    def latest_active_dashboard_evaluation(
+        self, inquiry_id: int
+    ) -> list[dict[str, Any]]:
+        """Return the latest persisted dashboard evaluation for an inquiry."""
+        with self.database.connection() as connection:
+            target = connection.execute(
+                """
+                SELECT original_answer_source, original_answer_reference_id
+                FROM learning_feedback
+                WHERE inquiry_id=? AND source='DASHBOARD_NEGATIVE_REVIEW'
+                  AND learning_signal_type='NEGATIVE' AND active=1
+                ORDER BY updated_at DESC, id DESC LIMIT 1
+                """,
+                (int(inquiry_id),),
+            ).fetchone()
+        if target is None:
+            return []
+        return self.active_dashboard_evaluation(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=str(target["original_answer_source"]),
+            original_answer_reference_id=int(
+                target["original_answer_reference_id"]
+            ),
+        )
+
     def for_historical_case(self, case_id: int) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(

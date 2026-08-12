@@ -2901,6 +2901,51 @@ input,
   overflow-wrap: anywhere;
 }
 
+.negative-learning-saved-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 12px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(244, 180, 64, 0.34);
+  border-radius: 9px;
+  background: rgba(244, 180, 64, 0.08);
+}
+
+.negative-learning-saved-card strong,
+.negative-learning-saved-card small {
+  grid-column: 1 / -1;
+}
+
+.negative-learning-saved-card strong {
+  color: #ffd078;
+  font-size: 14px;
+}
+
+.negative-learning-saved-card span,
+.negative-learning-saved-card small {
+  color: #b8c6d5;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.negative-learning-saved-card span b {
+  color: #f3f7fb;
+}
+
+.dashboard-build-footer {
+  width: 100%;
+  margin: 12px 0 2px;
+  padding: 5px 2px 0;
+  border-top: 1px solid rgba(130, 158, 190, 0.12);
+  color: #718294;
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 /* The tab accent communicates provenance; answer text stays neutral/readable. */
 [class*="st-key-answer_workspace_view_"] [data-baseweb="button-group"],
 [class*="st-key-answer_workspace_view_"] [role="radiogroup"] {
@@ -3018,4 +3063,65 @@ input,
   .approval-result-card {
     grid-template-columns: 1fr;
   }
+}
+
+/* Inquiry list header and grouped pagination: final cascade overrides. */
+[class*="st-key-official_inquiry_list_panel"] > div:first-child {
+  box-sizing: border-box !important;
+  padding: 16px 14px 12px !important;
+  overflow-y: visible !important;
+  overflow-x: hidden !important;
+}
+
+[class*="st-key-official_inquiry_list_header"] {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-top: 2px;
+  overflow: visible !important;
+}
+
+[class*="st-key-official_inquiry_list_header"] [data-testid="stCaptionContainer"] {
+  margin: 0 0 4px !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  line-height: 1.45 !important;
+}
+
+[class*="st-key-dashboard_pagination"] {
+  width: 100%;
+  max-width: 100%;
+  padding-top: 4px;
+  overflow-x: auto !important;
+  overflow-y: visible !important;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+[class*="st-key-dashboard_pagination"] [data-testid="stHorizontalBlock"] {
+  min-width: 700px;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+}
+
+[class*="st-key-dashboard_pagination"] .stButton > button {
+  min-width: 34px;
+  min-height: 34px !important;
+  padding: 4px 7px !important;
+  white-space: nowrap !important;
+}
+
+[class*="st-key-dashboard_pagination"] [data-testid="stBaseButton-primary"] {
+  border-color: #55aaff !important;
+  color: #ffffff !important;
+  background: #225f99 !important;
+  box-shadow: 0 0 0 1px rgba(85, 170, 255, 0.3) !important;
+}
+
+[class*="st-key-dashboard_pagination"] button:disabled {
+  border-color: #293847 !important;
+  color: #718294 !important;
+  background: #111d29 !important;
+  opacity: 0.72 !important;
 }
