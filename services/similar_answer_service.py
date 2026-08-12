@@ -7,6 +7,7 @@ from typing import Any
 
 from repositories.learning_repository import LearningRepository
 from services.learning_privacy_service import LearningPrivacyService
+from services.product_fact_guard import same_stable_product
 
 
 TOKEN = re.compile(r"[가-힣A-Za-z0-9]{2,}")
@@ -63,11 +64,26 @@ class SimilarAnswerService:
         self, question: str, *, store_code: str | None = None,
         intent: str | None = None, product_name: str | None = None,
         model_code: str | None = None, inquiry_type: str | None = None,
+        product_id: str | None = None,
+        product_fact_sensitive: bool = False,
         limit: int = 3, minimum_relevance: float = 0.24,
     ) -> list[dict[str, Any]]:
         query = normalize_learning_question(self.privacy.mask(question))
         ranked: list[tuple[float, dict[str, Any]]] = []
         for item in self.repository.candidates(store_code=store_code):
+            if product_fact_sensitive:
+                metadata = item.get("metadata_json")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                if not metadata.get("human_verified") or not same_stable_product(
+                    current_product_id=product_id,
+                    candidate_product_id=item.get("source_product_id"),
+                    current_model_code=model_code,
+                    candidate_model_code=item.get("model_code"),
+                ):
+                    # Detailed answer bodies from another/unknown product or
+                    # unverified examples are not safe facts. Global style
+                    # aggregation below remains available.
+                    continue
             relevance = self._similarity(query, str(item["question_normalized"]))
             relevance += 0.10 if intent and item.get("intent") == intent else 0
             relevance += 0.08 if product_name and item.get("product_name") == product_name else 0
@@ -107,6 +123,7 @@ class SimilarAnswerService:
                     (item.get("metadata_json") or {}).get("historical_case_id")
                     if isinstance(item.get("metadata_json"), dict) else None
                 ),
+                "source_product_id": item.get("source_product_id"),
             }
             (seller if item["style_only"] else approved).append(payload)
         features = Counter()

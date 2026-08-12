@@ -102,6 +102,14 @@ class AutoProcessingEligibilityService:
             reasons.append(f"ROUTE_{normalized_route or 'UNKNOWN'}")
         if bool(metadata.get("requires_manual_review")):
             reasons.append("ANSWER_REQUIRES_MANUAL_REVIEW")
+        product_guard_value = metadata.get("product_fact_guard")
+        product_guard = (
+            product_guard_value if isinstance(product_guard_value, dict) else {}
+        )
+        if product_guard.get("sensitive") and not product_guard.get(
+            "current_fact_verified"
+        ):
+            reasons.append("PRODUCT_FACT_NOT_VERIFIED")
         if bool(plan.get("needs_staff_review")):
             reasons.append("PROCESSING_PLAN_REQUIRES_REVIEW")
         if bool(plan.get("is_high_risk")) or bool(analysis.get("manual_review_required")):

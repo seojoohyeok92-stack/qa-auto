@@ -19,6 +19,9 @@ from answer.learning_feedback import (
     CORRECTION_REASON_LABELS,
     INTENT_OPTIONS,
     CorrectionReason,
+    EXCLUSION_REASON_BY_LABEL,
+    EXCLUSION_REASON_LABELS,
+    ExclusionReason,
 )
 from answer.exceptions import AnswerAlreadyPostedError
 from answer.positive_learning import (
@@ -556,6 +559,39 @@ def _render_negative_learning_saved(
     )
 
 
+def _render_excluded_learning_saved(
+    rows: list[dict[str, Any]], *, inquiry_id: int
+) -> None:
+    """Render persisted EXCLUDED state for the exact selected answer."""
+    if not rows:
+        return
+    row = rows[0]
+    reason_code = str(row.get("correction_reason") or "UNKNOWN")
+    try:
+        reason_label = EXCLUSION_REASON_LABELS[ExclusionReason(reason_code)]
+    except ValueError:
+        reason_label = reason_code
+    metadata = row.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    st.markdown(
+        '<div class="excluded-learning-saved-card">'
+        '<strong>학습 제외 저장 완료</strong>'
+        f'<span>Feedback ID <b>{escape(str(row.get("id")))}</b></span>'
+        '<span>Signal <b>EXCLUDED</b></span>'
+        f'<span>제외 사유 <b>{escape(reason_label)} ({escape(reason_code)})</b></span>'
+        f'<span>상세 메모 <b>{escape(str(row.get("correction_note") or "-"))}</b></span>'
+        f'<span>Answer provenance <b>{escape(str(row.get("original_answer_source") or "UNKNOWN"))}</b></span>'
+        f'<span>Reference <b>{escape(str(row.get("original_answer_reference_id") or "-"))}</b></span>'
+        f'<span>Status <b>{escape(str(metadata.get("status") or "ACTIVE"))}</b></span>'
+        f'<span>저장 시각 <b>{escape(format_datetime_kst(row.get("updated_at") or row.get("created_at"), empty="-"))}</b></span>'
+        '<small>Learning Manager 검색 · '
+        f'Inquiry {int(inquiry_id)} · Reference {escape(str(row.get("original_answer_reference_id") or "-"))} · '
+        f'Feedback {escape(str(row.get("id")))}</small>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def approval_learning_trace(
     database: Database,
     *,
@@ -579,6 +615,20 @@ def approval_learning_trace(
         ).upper()
         == "POSITIVE"
     ]
+    revoked = next(
+        (
+            row
+            for row in examples
+            if str((row.get("metadata_json") or {}).get("learning_status") or "").upper()
+            == "REVOKED"
+        ),
+        None,
+    )
+    revoked_metadata = (
+        revoked.get("metadata_json")
+        if revoked and isinstance(revoked.get("metadata_json"), dict)
+        else {}
+    )
     if source_answered:
         accepted = next(
             (
@@ -664,6 +714,13 @@ def approval_learning_trace(
         "reference": (
             f"LEARNING:{accepted['id']}" if accepted is not None else None
         ),
+        "revoked_learning_id": (revoked or {}).get("id"),
+        "revoked_learning_reason": revoked_metadata.get("revoke_reason"),
+        "revoked_learning_at": revoked_metadata.get("revoked_at"),
+        "revoked_learning_provenance": revoked_metadata.get("answer_provenance"),
+        "revoked_learning_reference_id": revoked_metadata.get("answer_reference_id")
+        or revoked_metadata.get("naver_posted_answer_id")
+        or (revoked or {}).get("answer_draft_id"),
     }
 
 
@@ -1281,6 +1338,20 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     f"{inquiry_id} · {approval_trace['reference']} · "
                     f"Source {approval_trace.get('learning_source') or '-'}"
                 )
+        elif approval_trace.get("revoked_learning_id"):
+            st.markdown(
+                '<div class="approval-cancelled-card">'
+                '<strong>승인 취소 완료</strong>'
+                '<span>현재 상태: 검토 대기</span>'
+                '<span>Positive Learning: 비활성화</span>'
+                f'<span>Learning ID: {escape(str(approval_trace["revoked_learning_id"]))}</span>'
+                f'<span>Source: {escape(str(approval_trace.get("revoked_learning_provenance") or "-"))}</span>'
+                f'<span>Reference: {escape(str(approval_trace.get("revoked_learning_reference_id") or "-"))}</span>'
+                f'<span>취소 사유: {escape(str(approval_trace.get("revoked_learning_reason") or "-"))}</span>'
+                f'<span>Revoked At: {escape(format_datetime_kst(approval_trace.get("revoked_learning_at")))}</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
         positive_reason = ""
         positive_note = ""
@@ -1488,6 +1559,85 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 key=f"negative_save_{inquiry_id}_{selected_view}",
                 width="stretch",
             )
+
+        excluded_save = False
+        excluded_revoke = False
+        excluded_reason = ""
+        excluded_note = ""
+        excluded_revoke_reason = ""
+        persisted_excluded = (
+            feedback_repository.active_dashboard_feedback(
+                inquiry_id=inquiry_id,
+                original_answer_source=evaluation_source,
+                original_answer_reference_id=evaluation_reference_id,
+                signal_types=("EXCLUDED",),
+            )
+            if evaluation_source is not None
+            and evaluation_reference_id is not None
+            else []
+        )
+        display_excluded = persisted_excluded or (
+            feedback_repository.latest_active_dashboard_exclusion(inquiry_id)
+        )
+        _render_excluded_learning_saved(
+            display_excluded, inquiry_id=inquiry_id
+        )
+        with st.expander("학습 제외", expanded=False):
+            st.caption(
+                "좋고 나쁨을 평가하지 않고, 선택한 답변을 향후 Learning과 자동 승격에서 제외합니다. 원본 답변은 삭제하지 않습니다."
+            )
+            st.caption(
+                "평가 대상 · "
+                + (
+                    f"{evaluation_source} · Reference {evaluation_reference_id}"
+                    if evaluation_source and evaluation_reference_id is not None
+                    else "현재 탭에 평가 가능한 답변 없음"
+                )
+            )
+            if persisted_excluded:
+                excluded_revoke_reason = st.text_input(
+                    "학습 제외 취소 사유",
+                    key=f"excluded_revoke_reason_{inquiry_id}_{selected_view}",
+                    max_chars=1_000,
+                )
+                excluded_revoke = st.button(
+                    "학습 제외 취소",
+                    disabled=not str(excluded_revoke_reason or "").strip(),
+                    key=f"excluded_revoke_{inquiry_id}_{selected_view}",
+                    width="stretch",
+                )
+            else:
+                excluded_reason_label = st.selectbox(
+                    "제외 사유",
+                    ["선택 안 함", *[
+                        EXCLUSION_REASON_LABELS[reason]
+                        for reason in ExclusionReason
+                    ]],
+                    key=f"excluded_reason_{inquiry_id}_{selected_view}",
+                )
+                selected_excluded_reason = EXCLUSION_REASON_BY_LABEL.get(
+                    excluded_reason_label
+                )
+                excluded_reason = (
+                    selected_excluded_reason.value
+                    if selected_excluded_reason is not None
+                    else ""
+                )
+                excluded_note = st.text_input(
+                    "학습 제외 상세 메모 (선택)",
+                    key=f"excluded_note_{inquiry_id}_{selected_view}",
+                    max_chars=1_000,
+                )
+                excluded_save = st.button(
+                    "학습 제외 저장",
+                    disabled=(
+                        evaluation_source is None
+                        or evaluation_reference_id is None
+                        or not excluded_reason
+                    ),
+                    key=f"excluded_save_{inquiry_id}_{selected_view}",
+                    width="stretch",
+                )
 
         run = (diagnostics or {}).get("provider_run") or {}
         confirmed_facts = (
@@ -1706,13 +1856,20 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             _render_gpt_diagnostics(draft, provider_run)
 
     bottom_left, bottom_actions = st.columns([3.1, 2.0], gap="medium")
+    cancel_available = bool(approval_complete and can_approve)
     with bottom_left:
         cancel_reason = st.text_input(
             "승인 취소 사유",
             placeholder="승인 취소 시 사유를 입력해 주세요.",
-            disabled=posted or not approved,
+            disabled=not cancel_available,
+            max_chars=1_000,
             key=f"cancel_reason_{inquiry_id}",
             label_visibility="collapsed",
+        )
+        cancel_confirmed = st.checkbox(
+            "승인을 취소하면 Human Verified Positive Learning이 비활성화됩니다.",
+            disabled=not cancel_available,
+            key=f"cancel_confirm_{inquiry_id}",
         )
     action_columns = bottom_actions.columns(3, gap="small")
     copy = action_columns[0].button(
@@ -1727,7 +1884,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     )
     cancel = action_columns[1].button(
         "승인 취소",
-        disabled=not draft or posted or not approved or not can_approve,
+        disabled=(
+            not cancel_available
+            or not str(cancel_reason or "").strip()
+            or not cancel_confirmed
+        ),
         width="stretch",
         key=f"review_cancel_{inquiry_id}",
     )
@@ -1764,6 +1925,23 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     generation_correlation_id: str | None = None
     generated_draft_id: int | None = None
     try:
+        if excluded_save:
+            LearningFeedbackService(database).capture_dashboard_excluded(
+                inquiry_id=inquiry_id,
+                original_answer_source=str(evaluation_source),
+                original_answer_reference_id=int(evaluation_reference_id),
+                exclusion_reason=excluded_reason,
+                exclusion_note=excluded_note,
+                actor=actor,
+            )
+            st.rerun()
+        if excluded_revoke and persisted_excluded:
+            LearningFeedbackService(database).revoke_dashboard_excluded(
+                feedback_id=int(persisted_excluded[0]["id"]),
+                reason=excluded_revoke_reason,
+                actor=actor,
+            )
+            st.rerun()
         if negative_save:
             LearningFeedbackService(database).capture_dashboard_negative(
                 inquiry_id=inquiry_id,
@@ -1976,16 +2154,25 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "승인 완료했습니다. 네이버 등록은 잠금 상태입니다.",
             )
             st.rerun()
-        if cancel and draft:
-            ApprovalService(database).cancel_approval(
+        if cancel:
+            outcome = ApprovalService(database).cancel_approval_with_learning(
                 inquiry_id=inquiry_id,
-                draft_id=int(draft["id"]),
+                draft_id=int(draft["id"]) if draft is not None else None,
                 reason=cancel_reason,
                 actor=actor,
+                learning_id=approval_trace.get("positive_learning_id"),
+            )
+            st.session_state[pending_answer_view_key] = (
+                "직원 수정본" if draft is not None else "Program Answer"
             )
             st.session_state["approval_ui_notice"] = (
                 "success",
-                "승인을 취소했습니다.",
+                "승인을 취소했습니다. Human Verified Positive Learning을 비활성화했습니다."
+                + (
+                    f" Learning ID: {outcome.learning['id']}"
+                    if outcome.learning is not None
+                    else ""
+                ),
             )
             st.rerun()
         if copy:

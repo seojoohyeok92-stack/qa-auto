@@ -38,6 +38,7 @@ from services.phase9_answer_policy import apply_phase9_rule_policy
 from services.gpt_governance_service import GovernedHybridAnswerService
 from services.uat_order_service import UatOrderService
 from services.order_service import lookup_general_order_id
+from services.product_fact_guard import classify_product_fact
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
 
@@ -2126,6 +2127,46 @@ class AnswerService:
                 or result.metadata.get("generation_mode")
                 or plan.selected_answer_route
             ).upper()
+            product_fact_guard = classify_product_fact(
+                request.question,
+                inquiry_type=phase9_analysis.inquiry_type.value,
+                inquiry_subtype=phase9_analysis.inquiry_subtype,
+                product_id=request.metadata.get("product_id"),
+                product_name=request.product_name,
+                option_name=request.option_name,
+            )
+            current_fact_verified = bool(
+                product_fact_guard.sensitive and final_route == "PRODUCT_DB"
+            )
+            guard_metadata = {
+                **product_fact_guard.to_dict(),
+                "current_fact_verified": current_fact_verified,
+                "current_fact_source": "PRODUCT_DB" if current_fact_verified else None,
+                "auto_post_allowed": (
+                    not product_fact_guard.sensitive or current_fact_verified
+                ),
+            }
+            result.metadata["product_fact_guard"] = guard_metadata
+            if product_fact_guard.sensitive and not current_fact_verified:
+                # The draft may still be useful to staff, but no Product DB
+                # miss/GPT route may assert a past model's fact automatically.
+                result.status = AnswerStatus.NEEDS_REVIEW
+                result.auto_answerable = False
+                result.needs_review = True
+                result.metadata["requires_manual_review"] = True
+                result.metadata["product_fact_guard_reason"] = (
+                    "CURRENT_PRODUCT_FACT_NOT_VERIFIED"
+                )
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "PRODUCT_FACT_REVIEW_REQUIRED",
+                    "현재 상품의 검증된 사실을 확보하지 못해 직원 검토로 전환했습니다.",
+                    level="WARNING",
+                    details={
+                        "selected_answer_route": final_route,
+                        **guard_metadata,
+                    },
+                )
             plan = plan.finalized(
                 final_route,
                 generation_mode=str(

@@ -78,6 +78,7 @@ def answer_request_from_inquiry(row: dict[str, Any]) -> AnswerRequest:
             _first(raw.get("existing_answer"), raw.get("answer"))
         ),
         metadata={
+            "product_id": row.get("product_id"),
             "source_type": row.get("source_type"),
             "inquiry_title": row.get("title"),
             "inquiry_content": row.get("content"),
@@ -160,6 +161,7 @@ def answer_request_from_work_item(
             work_item.get("existing_answer")
         ),
         metadata={
+            "product_id": work_item.get("product_id"),
             "source_type": work_item.get("source"),
             "inquiry_title": work_item.get("title"),
             "inquiry_content": work_item.get("content"),

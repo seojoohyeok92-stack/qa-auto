@@ -1,0 +1,5 @@
+[client]
+# Streamlit 1.61.x binds Ctrl+C to the developer Clear caches dialog when
+# developer tools are enabled. Viewer mode keeps the normal browser Copy
+# shortcut while leaving st.cache_data and st.cache_resource fully enabled.
+toolbarMode = "viewer"

@@ -11,6 +11,7 @@ from repositories.log_repository import LogRepository
 from services.similar_answer_service import SimilarAnswerService
 from services.historical_case_service import HistoricalCaseService
 from repositories.learning_provenance_repository import LearningProvenanceRepository
+from services.product_fact_guard import classify_product_fact, same_stable_product
 
 
 class LearningContextService:
@@ -28,13 +29,23 @@ class LearningContextService:
         inquiry = self.inquiries.get(int(inquiry_id)) if inquiry_id is not None else None
         inquiry = inquiry or {}
         intent_data = intent.to_dict()
+        guard = classify_product_fact(
+            facts.inquiry.get("question"),
+            inquiry_type=inquiry.get("inquiry_type") or facts.inquiry.get("type"),
+            inquiry_subtype=facts.inquiry.get("inquiry_subtype"),
+            product_id=inquiry.get("product_id") or facts.product.get("product_id"),
+            product_name=inquiry.get("product_name") or facts.product.get("name"),
+            option_name=inquiry.get("option_name") or facts.product.get("option_name"),
+        )
         context = self.search.context(
             str(facts.inquiry.get("question") or ""),
             store_code=inquiry.get("store_code"),
             intent=intent_data.get("category") or intent_data.get("primary_intent"),
             product_name=inquiry.get("product_name") or facts.product.get("name"),
-            model_code=None,
+            model_code=guard.model_code,
             inquiry_type=inquiry.get("inquiry_type") or facts.inquiry.get("type"),
+            product_id=guard.product_id,
+            product_fact_sensitive=guard.sensitive,
         )
         historical = self.historical.search(
             str(facts.inquiry.get("question") or ""),
@@ -43,6 +54,17 @@ class LearningContextService:
             inquiry_type=inquiry.get("inquiry_type") or facts.inquiry.get("type"),
             limit=5,
         )
+        if guard.sensitive:
+            historical = [
+                item
+                for item in historical
+                if same_stable_product(
+                    current_product_id=guard.product_id,
+                    candidate_product_id=item.get("product_id"),
+                    current_model_code=guard.model_code,
+                    candidate_model_code=None,
+                )
+            ]
         learning_references = [
             *context["similar_approved_answers"],
             *context["seller_style_examples"],
@@ -81,6 +103,12 @@ class LearningContextService:
                 "HISTORICAL_VERIFIED_LEARNING",
             ],
             "time_dependent_claims_require_current_facts": True,
+        }
+        context["product_fact_guard"] = {
+            **guard.to_dict(),
+            "cross_product_answer_bodies_excluded": guard.sensitive,
+            "same_product_detailed_examples_only": guard.sensitive,
+            "learning_role": "STYLE_AND_STRUCTURE_ONLY_WITHOUT_CURRENT_FACT",
         }
         if inquiry_id is not None:
             context_run_id = self.provenance.record_context(

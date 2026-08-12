@@ -37,6 +37,44 @@ class LearningSignalType(str, Enum):
     EXCLUDED = "EXCLUDED"
 
 
+class ExclusionReason(str, Enum):
+    ONE_TIME_EXCEPTION = "ONE_TIME_EXCEPTION"
+    CUSTOMER_SPECIFIC = "CUSTOMER_SPECIFIC"
+    TEST_OR_MEANINGLESS = "TEST_OR_MEANINGLESS"
+    NOT_REUSABLE = "NOT_REUSABLE"
+    LEGACY_POLICY = "LEGACY_POLICY"
+    NOT_GENERALIZABLE = "NOT_GENERALIZABLE"
+    QUALITY_UNDETERMINED = "QUALITY_UNDETERMINED"
+    OTHER = "OTHER"
+
+
+EXCLUSION_REASON_LABELS: dict[ExclusionReason, str] = {
+    ExclusionReason.ONE_TIME_EXCEPTION: "일회성 예외",
+    ExclusionReason.CUSTOMER_SPECIFIC: "특정 고객에게만 적용",
+    ExclusionReason.TEST_OR_MEANINGLESS: "테스트/스팸/무의미 문의",
+    ExclusionReason.NOT_REUSABLE: "향후 재사용 부적절",
+    ExclusionReason.LEGACY_POLICY: "정책 변경 전 과거 답변",
+    ExclusionReason.NOT_GENERALIZABLE: "일반화 불가능",
+    ExclusionReason.QUALITY_UNDETERMINED: "품질 판단 불가",
+    ExclusionReason.OTHER: "기타",
+}
+
+EXCLUSION_REASON_BY_LABEL = {
+    label: reason for reason, label in EXCLUSION_REASON_LABELS.items()
+}
+
+
+def normalize_exclusion_reason(
+    value: str | ExclusionReason,
+) -> ExclusionReason:
+    if isinstance(value, ExclusionReason):
+        return value
+    normalized = str(value or "").strip()
+    if normalized in EXCLUSION_REASON_BY_LABEL:
+        return EXCLUSION_REASON_BY_LABEL[normalized]
+    return ExclusionReason(normalized.upper())
+
+
 class FeedbackType(str, Enum):
     STAFF_CORRECTION = "STAFF_CORRECTION"
     HISTORICAL_REVIEW = "HISTORICAL_REVIEW"

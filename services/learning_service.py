@@ -75,7 +75,7 @@ class LearningService:
             else AnswerProvenance(str(answer_provenance))
         )
         masked_answer = self.privacy.mask(format_final_answer(str(answer or "")))
-        rows = self.feedback_repository.active_dashboard_evaluation(
+        rows = self.feedback_repository.active_dashboard_feedback(
             inquiry_id=int(inquiry_id),
             original_answer_source=provenance.value,
             original_answer_reference_id=int(answer_reference_id),
@@ -84,16 +84,19 @@ class LearningService:
             (
                 row
                 for row in rows
-                if row.get("learning_signal_type") == "NEGATIVE"
+                if row.get("learning_signal_type") in {"NEGATIVE", "EXCLUDED"}
                 and str(row.get("original_answer_masked") or "") == masked_answer
             ),
             None,
         )
         if conflict is not None:
+            signal = str(conflict.get("learning_signal_type") or "NEGATIVE")
             raise LearningConflictError(
-                "이 답변은 이미 Negative Learning으로 평가되었습니다. "
-                "같은 답변을 그대로 승인할 수 없습니다. "
-                "답변을 수정한 후 직원 수정본을 승인해주세요.",
+                (
+                    "이 답변은 이미 학습 제외로 평가되었습니다. 제외를 취소한 후 승인해 주세요."
+                    if signal == "EXCLUDED"
+                    else "이 답변은 이미 Negative Learning으로 평가되었습니다. 같은 답변을 그대로 승인할 수 없습니다. 답변을 수정한 후 승인해 주세요."
+                ),
                 conflict=conflict,
             )
 

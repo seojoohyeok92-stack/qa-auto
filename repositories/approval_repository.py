@@ -224,12 +224,6 @@ class ApprovalRepository:
                 raise LookupError(f"Inquiry not found: {inquiry_id}")
             if draft is None or int(draft["inquiry_id"]) != inquiry_id:
                 raise LookupError(f"Answer draft not found: {draft_id}")
-            if str(inquiry["post_status"]).upper() == "POSTED" or bool(
-                draft["posted"]
-            ):
-                raise AnswerAlreadyPostedError(
-                    "등록 완료된 문의는 승인을 취소할 수 없습니다."
-                )
             if str(inquiry["approval_status"]) != "APPROVED":
                 raise ValueError("승인 완료 상태에서만 승인 취소가 가능합니다.")
             connection.execute(

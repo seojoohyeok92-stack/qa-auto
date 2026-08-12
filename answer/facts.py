@@ -75,8 +75,14 @@ def build_answer_facts(
             "question": request.question,
             "source_type": request.metadata.get("source_type"),
             "registered_at": request.metadata.get("registered_at"),
+            "inquiry_subtype": (
+                request.metadata.get("phase9_analysis", {}).get("inquiry_subtype")
+                if isinstance(request.metadata.get("phase9_analysis"), dict)
+                else None
+            ),
         },
         product={
+            "product_id": request.metadata.get("product_id") or None,
             "name": request.product_name or None,
             "option_name": request.option_name or None,
         },

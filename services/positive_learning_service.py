@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from answer.answer_format import format_final_answer
 from config import PositiveLearningSettings
 from repositories.database import Database
 from repositories.learning_repository import deserialize_json
@@ -110,7 +111,7 @@ class PositiveLearningService:
                 return {"saved": False, "reason": "CORRECTED_LEARNING_EXISTS"}
             negative = connection.execute(
                 """
-                SELECT 1 FROM learning_feedback
+                SELECT learning_signal_type FROM learning_feedback
                 WHERE inquiry_id=? AND active=1
                   AND learning_signal_type IN ('NEGATIVE','INTENT_CORRECTION')
                 LIMIT 1
@@ -119,6 +120,21 @@ class PositiveLearningService:
             ).fetchone()
             if negative is not None:
                 return {"saved": False, "reason": "NEGATIVE_FEEDBACK_EXISTS"}
+            excluded = connection.execute(
+                """
+                SELECT 1 FROM learning_feedback
+                WHERE inquiry_id=? AND active=1
+                  AND learning_signal_type='EXCLUDED'
+                  AND original_answer_masked=?
+                LIMIT 1
+                """,
+                (
+                    int(inquiry_id),
+                    self.learning.privacy.mask(format_final_answer(answer)),
+                ),
+            ).fetchone()
+            if excluded is not None:
+                return {"saved": False, "reason": "EXCLUDED_FEEDBACK_EXISTS"}
         saved = self.learning.capture_auto_unchanged_accepted(
             inquiry_id=int(inquiry_id),
             version_id=int(version["id"]),

@@ -11,6 +11,7 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
+from repositories.learning_repository import LearningRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.quality_metrics_service import QualityMetricsService
 from services.learning_service import LearningService
@@ -32,6 +33,7 @@ class ApprovalLockedError(ApprovalError):
 class ApprovalOutcome:
     draft: dict[str, Any]
     history: dict[str, Any]
+    learning: dict[str, Any] | None = None
 
 
 class ApprovalService:
@@ -480,23 +482,96 @@ class ApprovalService:
         self,
         *,
         inquiry_id: int,
-        draft_id: int,
+        draft_id: int | None,
         reason: str,
         actor: str = "관리자",
     ) -> ApprovalOutcome:
-        updated, history = self.approvals.cancel_approval(
+        return self.cancel_approval_with_learning(
             inquiry_id=inquiry_id,
             draft_id=draft_id,
-            actor=actor,
             reason=reason,
+            actor=actor,
         )
-        try:
-            LearningService(self.database).deactivate_draft(draft_id)
-            LearningFeedbackRepository(
-                self.database
-            ).deactivate_for_draft(draft_id)
-        except Exception:
-            pass
+
+    def cancel_approval_with_learning(
+        self,
+        *,
+        inquiry_id: int,
+        draft_id: int | None,
+        reason: str,
+        actor: str = "관리자",
+        learning_id: int | None = None,
+    ) -> ApprovalOutcome:
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            raise ValueError("승인 취소 사유를 입력해 주세요.")
+        repository = LearningRepository(self.database)
+        target = repository.get(int(learning_id)) if learning_id is not None else None
+        if learning_id is not None and target is None:
+            raise LookupError(f"Learning not found: {learning_id}")
+        if learning_id is None:
+            target = next(
+                (
+                    row
+                    for row in repository.for_inquiry(inquiry_id)
+                    if row.get("active")
+                    and bool((row.get("metadata_json") or {}).get("human_verified"))
+                    and (
+                        draft_id is None
+                        or row.get("answer_draft_id") in {None, int(draft_id)}
+                    )
+                ),
+                None,
+            )
+        if target is not None and int(target["inquiry_id"]) != int(inquiry_id):
+            raise ValueError("승인 취소 Learning이 문의와 일치하지 않습니다.")
+        if (
+            target is not None
+            and draft_id is not None
+            and target.get("answer_draft_id") is not None
+            and int(target["answer_draft_id"]) != int(draft_id)
+        ):
+            raise ValueError("승인 취소 Learning이 Answer Draft와 일치하지 않습니다.")
+        if target is not None and (
+            not target.get("active")
+            or not bool((target.get("metadata_json") or {}).get("human_verified"))
+        ):
+            raise ValueError("활성 Human Verified Positive Learning만 취소할 수 있습니다.")
+
+        state = self.approvals.get_inquiry_approval(inquiry_id)
+        if str(state.get("approval_status") or "").upper() == "APPROVED":
+            if draft_id is None:
+                raise ApprovalError("승인 취소 대상 Draft가 없습니다.")
+            updated, history = self.approvals.cancel_approval(
+                inquiry_id=inquiry_id,
+                draft_id=int(draft_id),
+                actor=actor,
+                reason=clean_reason,
+            )
+        elif target is not None:
+            history = self.approvals.record_action(
+                inquiry_id=inquiry_id,
+                answer_draft_id=int(draft_id) if draft_id is not None else None,
+                action="APPROVAL_CANCELLED",
+                actor=actor,
+                reason=clean_reason,
+                previous_status="APPROVED",
+                new_status="PENDING",
+            )
+            updated = self.answers.get(int(draft_id)) if draft_id is not None else None
+            updated = updated or {}
+        else:
+            raise ApprovalError("취소할 승인 또는 Human Verified Positive Learning이 없습니다.")
+
+        revoked = None
+        if target is not None:
+            revoked = repository.revoke_human_verified(
+                learning_id=int(target["id"]),
+                inquiry_id=inquiry_id,
+                reason=clean_reason,
+                actor=actor,
+                approval_history_id=int(history["id"]),
+            )
         step = self.workflows.get_step(inquiry_id, StepCode.STAFF_REVIEW)
         if StepStatus(step["step_status"]) is StepStatus.COMPLETED:
             self.workflows.restart_completed_step(
@@ -519,6 +594,7 @@ class ApprovalService:
                 "status": "PENDING",
                 "reason": reason,
                 "draft_id": draft_id,
+                "learning_example_id": (revoked or {}).get("id"),
             },
         )
-        return ApprovalOutcome(updated, history)
+        return ApprovalOutcome(updated, history, revoked)

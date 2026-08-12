@@ -100,6 +100,66 @@ class LearningFeedbackRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
+    def active_dashboard_feedback(
+        self,
+        *,
+        inquiry_id: int,
+        original_answer_source: str,
+        original_answer_reference_id: int,
+        signal_types: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [
+            int(inquiry_id),
+            str(original_answer_source),
+            int(original_answer_reference_id),
+        ]
+        signal_clause = ""
+        if signal_types:
+            normalized = tuple(str(value).upper() for value in signal_types)
+            signal_clause = (
+                " AND learning_signal_type IN ("
+                + ",".join("?" for _ in normalized)
+                + ")"
+            )
+            params.extend(normalized)
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM learning_feedback
+                WHERE inquiry_id=?
+                  AND source IN ('DASHBOARD_NEGATIVE_REVIEW','DASHBOARD_EXCLUDED')
+                  AND original_answer_source=?
+                  AND original_answer_reference_id=? AND active=1
+                  {signal_clause}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
+    def latest_active_dashboard_exclusion(
+        self, inquiry_id: int
+    ) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            target = connection.execute(
+                """
+                SELECT original_answer_source, original_answer_reference_id
+                FROM learning_feedback
+                WHERE inquiry_id=? AND source='DASHBOARD_EXCLUDED'
+                  AND learning_signal_type='EXCLUDED' AND active=1
+                ORDER BY updated_at DESC, id DESC LIMIT 1
+                """,
+                (int(inquiry_id),),
+            ).fetchone()
+        if target is None:
+            return []
+        return self.active_dashboard_feedback(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=str(target["original_answer_source"]),
+            original_answer_reference_id=int(target["original_answer_reference_id"]),
+            signal_types=("EXCLUDED",),
+        )
+
     def latest_active_dashboard_evaluation(
         self, inquiry_id: int
     ) -> list[dict[str, Any]]:
@@ -194,6 +254,51 @@ class LearningFeedbackRepository:
                 ),
             )
         return int(cursor.rowcount)
+
+    def revoke_dashboard_exclusion(
+        self, *, feedback_id: int, reason: str, actor: str
+    ) -> dict[str, Any]:
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            raise ValueError("학습 제외 취소 사유를 입력해 주세요.")
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM learning_feedback
+                WHERE id=? AND source='DASHBOARD_EXCLUDED'
+                  AND learning_signal_type='EXCLUDED'
+                """,
+                (int(feedback_id),),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Excluded feedback not found: {feedback_id}")
+            if not bool(row["active"]):
+                raise ValueError("이미 취소된 학습 제외 기록입니다.")
+            metadata = deserialize_json(row["metadata_json"])
+            metadata.update(
+                {
+                    "status": "REVOKED",
+                    "revoke_reason": clean_reason[:1_000],
+                    "revoked_by": str(actor or "직원").strip() or "직원",
+                }
+            )
+            connection.execute(
+                """
+                UPDATE learning_feedback
+                SET active=0, metadata_json=json_set(
+                        ?, '$.revoked_at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    ),
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id=?
+                """,
+                (serialize_json(metadata), int(feedback_id)),
+            )
+            updated = connection.execute(
+                "SELECT * FROM learning_feedback WHERE id=?", (int(feedback_id),)
+            ).fetchone()
+        result = self._row(updated)
+        assert result is not None
+        return result
 
     def deactivate_for_draft(self, draft_id: int) -> int:
         with self.database.transaction() as connection:

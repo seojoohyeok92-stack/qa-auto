@@ -178,7 +178,7 @@ def test_reset_restores_program_answer_state(
     assert reset["review_status"] == "PENDING"
 
 
-def test_posted_inquiry_blocks_edit_cancel_and_delete(
+def test_posted_inquiry_allows_internal_cancel_but_still_blocks_edit_and_delete(
     database: Database, inquiry_id: int, draft: dict
 ) -> None:
     service = ApprovalService(database)
@@ -192,12 +192,15 @@ def test_posted_inquiry_blocks_edit_cancel_and_delete(
             "UPDATE answer_drafts SET posted=1 WHERE id=?",
             (draft["id"],),
         )
-    with pytest.raises(AnswerAlreadyPostedError):
-        service.cancel_approval(
-            inquiry_id=inquiry_id,
-            draft_id=draft["id"],
-            reason="취소 불가",
-        )
+    cancelled = service.cancel_approval(
+        inquiry_id=inquiry_id,
+        draft_id=draft["id"],
+        reason="내부 검증 승인 취소",
+    )
+    assert cancelled.draft["final_answer"] is None
+    assert ApprovalRepository(database).get_inquiry_approval(inquiry_id)[
+        "post_status"
+    ] == "POSTED"
     with pytest.raises(AnswerAlreadyPostedError):
         service.save_edited_answer(
             inquiry_id=inquiry_id,

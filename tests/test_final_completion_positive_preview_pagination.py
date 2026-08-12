@@ -255,6 +255,30 @@ def test_positive_learning_rejects_pre_promotion_edit_and_negative(tmp_path) -> 
     assert LearningRepository(negative_db).count() == 0
 
 
+def test_positive_learning_rejects_exact_excluded_answer_after_seven_days(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 7, tzinfo=UTC)
+    database = Database(tmp_path / "excluded-before-seven.db")
+    database.initialize()
+    inquiry_id, _, answer = _posted(
+        database, posted_at=(now - timedelta(days=10)).isoformat()
+    )
+    active = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    LearningFeedbackService(database).capture_dashboard_excluded(
+        inquiry_id=inquiry_id,
+        original_answer_source="PROGRAM_GENERATED",
+        original_answer_reference_id=int(active["id"]),
+        exclusion_reason="NOT_REUSABLE",
+        actor="tester",
+    )
+    excluded = PositiveLearningService(
+        database, settings=SimpleNamespace(observation_days=7)
+    ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
+    assert excluded["reason"] == "EXCLUDED_FEEDBACK_EXISTS"
+    assert LearningRepository(database).count() == 0
+
+
 def test_dashboard_pagination_apptest_keeps_page_and_separates_historical_state(tmp_path) -> None:
     path = tmp_path / "dashboard.db"
     database = Database(path); database.initialize()

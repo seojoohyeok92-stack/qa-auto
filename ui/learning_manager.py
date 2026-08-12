@@ -31,11 +31,16 @@ def _search_blob(row: dict[str, Any]) -> str:
             row.get("original_answer_source"),
             row.get("signal_type"),
             row.get("learning_signal_type"),
+            row.get("correction_reason"),
+            row.get("correction_note"),
             metadata.get("answer_provenance"),
             metadata.get("answer_reference_id"),
             metadata.get("verified_by"),
             metadata.get("positive_reason"),
             metadata.get("positive_note"),
+            metadata.get("learning_status"),
+            metadata.get("revoke_reason"),
+            metadata.get("revoked_by"),
         )
     ).lower()
 
@@ -97,7 +102,7 @@ def render_learning_manager(database: Database | None) -> None:
     feedback_repository = LearningFeedbackRepository(database)
     summary = repository.manager_summary()
     feedback_summary = feedback_repository.manager_summary()
-    metrics = st.columns(5, gap="small")
+    metrics = st.columns(6, gap="small")
     metric_values = (
         (
             "저장된 Positive",
@@ -123,6 +128,11 @@ def render_learning_manager(database: Database | None) -> None:
             "Intent Correction",
             feedback_summary.get("INTENT_CORRECTION", 0),
             "직원이 문의 유형 또는 route를 교정한 신호",
+        ),
+        (
+            "Excluded",
+            feedback_summary.get("EXCLUDED", 0),
+            "좋고 나쁨을 평가하지 않고 Learning 재사용에서 제외한 답변",
         ),
     )
     for column, (label, value, help_text) in zip(metrics, metric_values):
@@ -207,6 +217,10 @@ def render_learning_manager(database: Database | None) -> None:
                     or row.get("answer_draft_id"),
                     "Signal": row.get("signal_type") or "POSITIVE",
                     "Human Verified": "YES" if row.get("human_verified") else "NO",
+                    "Status": (row.get("metadata_json") or {}).get(
+                        "learning_status"
+                    )
+                    or ("ACTIVE" if row.get("active") else "INACTIVE"),
                     "Positive Reason": (row.get("metadata_json") or {}).get(
                         "positive_reason"
                     )
@@ -217,6 +231,18 @@ def render_learning_manager(database: Database | None) -> None:
                     or "-",
                     "Verified At": format_datetime_kst(
                         (row.get("metadata_json") or {}).get("verified_at"),
+                        empty="-",
+                    ),
+                    "Revoke Reason": (row.get("metadata_json") or {}).get(
+                        "revoke_reason"
+                    )
+                    or "-",
+                    "Revoked By": (row.get("metadata_json") or {}).get(
+                        "revoked_by"
+                    )
+                    or "-",
+                    "Revoked At": format_datetime_kst(
+                        (row.get("metadata_json") or {}).get("revoked_at"),
                         empty="-",
                     ),
                     "품질": row["quality_score"],
@@ -247,7 +273,7 @@ def render_learning_manager(database: Database | None) -> None:
         human_verified=selected_verified,
         signal_type=selected_signal,
     )
-    st.subheader("Negative / Intent Feedback")
+    st.subheader("Negative / Intent / Excluded Feedback")
     st.caption(
         "이 표의 답변은 Positive 예제가 아니며, 잘못된 이유와 intent 교정 추적에만 사용됩니다."
     )
@@ -268,6 +294,20 @@ def render_learning_manager(database: Database | None) -> None:
                     "사유": row.get("correction_reason") or "",
                     "올바른 Intent": row.get("corrected_intent") or "",
                     "메모": row.get("correction_note") or "",
+                    "Status": (row.get("metadata_json") or {}).get("status")
+                    or ("ACTIVE" if row.get("active") else "INACTIVE"),
+                    "Revoke Reason": (row.get("metadata_json") or {}).get(
+                        "revoke_reason"
+                    )
+                    or "-",
+                    "Revoked By": (row.get("metadata_json") or {}).get(
+                        "revoked_by"
+                    )
+                    or "-",
+                    "Revoked At": format_datetime_kst(
+                        (row.get("metadata_json") or {}).get("revoked_at"),
+                        empty="-",
+                    ),
                     "상태": "활성" if row.get("active") else "비활성",
                     "생성": format_datetime_kst(row.get("created_at")),
                 }

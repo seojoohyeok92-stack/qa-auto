@@ -5,9 +5,11 @@ from typing import Any
 
 from answer.learning_feedback import (
     CorrectionReason,
+    ExclusionReason,
     FeedbackType,
     LearningSignalType,
     normalize_reason,
+    normalize_exclusion_reason,
 )
 from answer.answer_provenance import AnswerProvenance
 from answer.answer_format import format_final_answer
@@ -40,6 +42,43 @@ class LearningFeedbackService:
         return hashlib.sha256(
             "|".join(str(part or "") for part in parts).encode("utf-8")
         ).hexdigest()
+
+    def _dashboard_answer(
+        self,
+        *,
+        inquiry_id: int,
+        original_answer_source: str | AnswerProvenance,
+        original_answer_reference_id: int,
+    ) -> tuple[dict[str, Any], AnswerProvenance, int, int | None, str]:
+        inquiry = self.inquiries.get(int(inquiry_id))
+        if inquiry is None:
+            raise LookupError("문의를 찾을 수 없습니다.")
+        provenance = AnswerProvenance(str(original_answer_source))
+        reference_id = int(original_answer_reference_id)
+        draft = self.answers.get(reference_id)
+        posted = NaverPostedAnswerRepository(self.database).current(int(inquiry_id))
+        if provenance is AnswerProvenance.PROGRAM_GENERATED:
+            if draft is None or int(draft["inquiry_id"]) != int(inquiry_id):
+                raise LookupError("평가할 Program Answer를 찾을 수 없습니다.")
+            original, draft_id = str(draft.get("original_answer") or ""), reference_id
+        elif provenance is AnswerProvenance.STAFF_EDITED:
+            if draft is None or int(draft["inquiry_id"]) != int(inquiry_id):
+                raise LookupError("평가할 직원 수정본을 찾을 수 없습니다.")
+            original, draft_id = str(draft.get("edited_answer") or ""), reference_id
+        elif provenance is AnswerProvenance.FINAL_ANSWER:
+            if draft is None or int(draft["inquiry_id"]) != int(inquiry_id):
+                raise LookupError("평가할 Final Answer를 찾을 수 없습니다.")
+            original, draft_id = str(draft.get("final_answer") or ""), reference_id
+        elif provenance is AnswerProvenance.NAVER_POSTED:
+            if posted is None or int(posted["id"]) != reference_id:
+                raise LookupError("평가할 네이버 실제 등록 답변을 찾을 수 없습니다.")
+            original, draft_id = str(posted.get("answer_body") or ""), None
+        else:
+            raise ValueError("Dashboard에서 평가할 수 없는 답변 출처입니다.")
+        original = format_final_answer(original)
+        if not original:
+            raise ValueError("평가할 답변 본문이 없습니다.")
+        return inquiry, provenance, reference_id, draft_id, original
 
     def _signals(
         self, reason: CorrectionReason, *, excluded: bool = False
@@ -198,6 +237,22 @@ class LearningFeedbackService:
             raise ValueError("평가할 답변 본문이 없습니다.")
         masked_original = self.privacy.mask(original)
         positive_provenances = [provenance.value]
+        excluded_conflict = next(
+            iter(
+                self.repository.active_dashboard_feedback(
+                    inquiry_id=int(inquiry_id),
+                    original_answer_source=provenance.value,
+                    original_answer_reference_id=reference_id,
+                    signal_types=("EXCLUDED",),
+                )
+            ),
+            None,
+        )
+        if excluded_conflict is not None:
+            raise LearningConflictError(
+                "이 답변은 이미 학습 제외로 평가되었습니다. 제외를 취소한 후 평가해 주세요.",
+                conflict=excluded_conflict,
+            )
         if provenance is AnswerProvenance.FINAL_ANSWER:
             positive_provenances.extend(
                 [
@@ -280,6 +335,113 @@ class LearningFeedbackService:
             )
             for signal in self._signals(reason)
         ]
+
+    def capture_dashboard_excluded(
+        self,
+        *,
+        inquiry_id: int,
+        original_answer_source: str | AnswerProvenance,
+        original_answer_reference_id: int,
+        exclusion_reason: str | ExclusionReason,
+        exclusion_note: str = "",
+        actor: str = "직원",
+    ) -> dict[str, Any]:
+        inquiry, provenance, reference_id, draft_id, original = self._dashboard_answer(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=original_answer_source,
+            original_answer_reference_id=int(original_answer_reference_id),
+        )
+        masked_original = self.privacy.mask(original)
+        positive_provenances = [provenance.value]
+        if provenance is AnswerProvenance.FINAL_ANSWER:
+            positive_provenances.extend(
+                [
+                    AnswerProvenance.PROGRAM_GENERATED.value,
+                    AnswerProvenance.STAFF_EDITED.value,
+                ]
+            )
+        positive_repository = LearningRepository(self.database)
+        positive_conflict = next(
+            (
+                row
+                for candidate_provenance in positive_provenances
+                for row in positive_repository.active_for_answer(
+                    inquiry_id=int(inquiry_id),
+                    answer_provenance=candidate_provenance,
+                    answer_reference_id=reference_id,
+                )
+                if str(row.get("final_answer") or "") == masked_original
+            ),
+            None,
+        )
+        if positive_conflict is not None:
+            raise LearningConflictError(
+                "이 답변에는 활성 Positive Learning이 있습니다. 먼저 승인을 취소해 주세요.",
+                conflict=positive_conflict,
+            )
+        negative_conflict = next(
+            (
+                row
+                for row in self.repository.active_dashboard_feedback(
+                    inquiry_id=int(inquiry_id),
+                    original_answer_source=provenance.value,
+                    original_answer_reference_id=reference_id,
+                    signal_types=("NEGATIVE", "INTENT_CORRECTION"),
+                )
+                if str(row.get("original_answer_masked") or "") == masked_original
+            ),
+            None,
+        )
+        if negative_conflict is not None:
+            raise LearningConflictError(
+                "이 답변은 이미 Negative Learning으로 평가되었습니다.",
+                conflict=negative_conflict,
+            )
+        reason = normalize_exclusion_reason(exclusion_reason)
+        question = "\n".join(
+            value
+            for value in (
+                str(inquiry.get("title") or "").strip(),
+                str(inquiry.get("content") or "").strip(),
+            )
+            if value
+        )
+        return self.repository.upsert(
+            {
+                "source_key": self._source_key(
+                    "DASHBOARD_EXCLUDED", inquiry_id, provenance.value, reference_id
+                ),
+                "feedback_type": FeedbackType.STAFF_CORRECTION.value,
+                "correction_reason": reason.value,
+                "correction_note": str(exclusion_note or "").strip() or None,
+                "corrected_intent": None,
+                "learning_signal_type": LearningSignalType.EXCLUDED.value,
+                "source": "DASHBOARD_EXCLUDED",
+                "inquiry_id": int(inquiry_id),
+                "answer_draft_id": draft_id,
+                "historical_case_id": None,
+                "original_answer_source": provenance.value,
+                "original_answer_reference_id": reference_id,
+                "question_masked": self.privacy.mask(question),
+                "original_answer_masked": masked_original,
+                "corrected_answer_masked": None,
+                "metadata_json": {
+                    "actor": str(actor or "직원"),
+                    "status": "ACTIVE",
+                    "evaluated_answer_provenance": provenance.value,
+                    "positive_learning_created": False,
+                    "not_a_negative_evaluation": True,
+                },
+                "active": True,
+            }
+        )
+
+    def revoke_dashboard_excluded(
+        self, *, feedback_id: int, reason: str, actor: str = "직원"
+    ) -> dict[str, Any]:
+        return self.repository.revoke_dashboard_exclusion(
+            feedback_id=int(feedback_id), reason=reason, actor=actor
+        )
 
     def capture_historical_review(
         self,

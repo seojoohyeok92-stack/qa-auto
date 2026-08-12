@@ -74,6 +74,72 @@ class LearningRepository:
             ).fetchone()
         return self._row(row)
 
+    def get(self, learning_id: int) -> dict[str, Any] | None:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(learning_id),),
+            ).fetchone()
+        return self._row(row)
+
+    def revoke_human_verified(
+        self,
+        *,
+        learning_id: int,
+        inquiry_id: int,
+        reason: str,
+        actor: str,
+        approval_history_id: int,
+    ) -> dict[str, Any]:
+        """Soft-revoke one exact Human Verified Positive Learning row."""
+
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            raise ValueError("승인 취소 사유를 입력해 주세요.")
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=? AND inquiry_id=?",
+                (int(learning_id), int(inquiry_id)),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Learning not found: {learning_id}")
+            metadata = deserialize_json(row["metadata_json"])
+            if not bool(row["active"]) or not bool(metadata.get("human_verified")):
+                raise ValueError("활성 Human Verified Positive Learning만 취소할 수 있습니다.")
+            connection.execute(
+                """
+                UPDATE learning_examples
+                SET active=0,
+                    metadata_json=json_set(
+                        COALESCE(metadata_json, '{}'),
+                        '$.human_verified', 0,
+                        '$.learning_status', 'REVOKED',
+                        '$.verification_revoked', 1,
+                        '$.revoked_from_human_verified', 1,
+                        '$.revoke_reason', ?,
+                        '$.revoked_by', ?,
+                        '$.revoked_at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        '$.revoke_approval_history_id', ?
+                    ),
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id=? AND inquiry_id=?
+                """,
+                (
+                    clean_reason[:1_000],
+                    str(actor or "관리자").strip() or "관리자",
+                    int(approval_history_id),
+                    int(learning_id),
+                    int(inquiry_id),
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(learning_id),),
+            ).fetchone()
+        result = self._row(updated)
+        assert result is not None
+        return result
+
     def for_inquiry(self, inquiry_id: int) -> list[dict[str, Any]]:
         """Return every Learning example for one inquiry, newest first."""
 
@@ -126,18 +192,57 @@ class LearningRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
-    def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
+    def active_for_answer(
+        self,
+        *,
+        inquiry_id: int,
+        answer_provenance: str,
+        answer_reference_id: int,
+    ) -> list[dict[str, Any]]:
+        """Return active Positive rows for one exact persisted answer identity."""
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM learning_examples
-                WHERE active=1
+                WHERE inquiry_id=? AND active=1
                   AND COALESCE(
                       json_extract(metadata_json, '$.learning_signal_type'),
                       'POSITIVE'
                   )='POSITIVE'
-                  AND (store_code=? OR store_code IS NULL OR ? IS NULL)
-                ORDER BY rating DESC, quality_score DESC, created_at DESC
+                  AND json_extract(metadata_json, '$.answer_provenance')=?
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.answer_reference_id'),
+                      CASE
+                        WHEN json_extract(metadata_json, '$.answer_provenance')='NAVER_POSTED'
+                          THEN json_extract(metadata_json, '$.naver_posted_answer_id')
+                        ELSE answer_draft_id
+                      END
+                  )=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (int(inquiry_id), str(answer_provenance), int(answer_reference_id)),
+            ).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
+    def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT learning_examples.*, inquiries.product_id AS source_product_id
+                FROM learning_examples
+                LEFT JOIN inquiries ON inquiries.id=learning_examples.inquiry_id
+                WHERE learning_examples.active=1
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.learning_signal_type'),
+                      'POSITIVE'
+                  )='POSITIVE'
+                  AND (
+                      learning_examples.store_code=?
+                      OR learning_examples.store_code IS NULL OR ? IS NULL
+                  )
+                ORDER BY learning_examples.rating DESC,
+                         learning_examples.quality_score DESC,
+                         learning_examples.created_at DESC
                 LIMIT ?
                 """,
                 (store_code, store_code, max(1, min(int(limit), 500))),
