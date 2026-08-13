@@ -651,6 +651,38 @@ class DpsWindowsAgent:
         self.keepalive_due = due
         return due
 
+    def _keepalive_retry_snapshot(
+        self,
+        *,
+        now_epoch: float | None = None,
+    ) -> tuple[str | None, bool]:
+        attempt_epoch = _iso_epoch(self.last_keepalive_attempt_at)
+        if attempt_epoch is None:
+            return None, False
+        successful_activity_epoch = _iso_epoch(self.last_dps_activity_at)
+        if (
+            successful_activity_epoch is not None
+            and successful_activity_epoch >= attempt_epoch
+        ):
+            return None, False
+        cooldown_seconds = max(
+            60,
+            self.session_settings.keepalive_retry_cooldown_minutes * 60,
+        )
+        retry_due_epoch = attempt_epoch + cooldown_seconds
+        current = time.time() if now_epoch is None else float(now_epoch)
+        return _iso_from_epoch(retry_due_epoch), current < retry_due_epoch
+
+    def _record_keepalive_attempt(self) -> None:
+        self.last_keepalive_attempt_at = _iso_from_epoch(time.time())
+        self.keepalive_deferred_reason = None
+        self._save_state()
+
+    def _record_keepalive_retry_reason(self, reason: str) -> None:
+        normalized = str(reason or "KEEPALIVE_FAILED").upper()
+        self.keepalive_deferred_reason = f"{normalized}_RETRY_COOLDOWN"[:200]
+        self._save_state()
+
     def _record_dps_activity(
         self,
         activity_type: str,
@@ -780,6 +812,36 @@ class DpsWindowsAgent:
             passive_result = self._passive_monitor_session(trigger=trigger)
             if not keepalive_enabled or not (force_keepalive or due):
                 return passive_result
+            retry_due_at, retry_deferred = self._keepalive_retry_snapshot()
+            if not force_keepalive and retry_deferred:
+                urgent = self._keepalive_is_urgent()
+                reason = (
+                    self.keepalive_deferred_reason
+                    or "KEEPALIVE_FAILURE_RETRY_COOLDOWN"
+                )
+                if not str(reason).endswith("_RETRY_COOLDOWN"):
+                    reason = f"{reason}_RETRY_COOLDOWN"
+                self.keepalive_deferred_reason = str(reason)[:200]
+                self.last_monitor_event = (
+                    "SESSION_KEEPALIVE_URGENT"
+                    if urgent
+                    else "KEEPALIVE_RETRY_DEFERRED"
+                )
+                self._save_state()
+                return {
+                    **passive_result,
+                    "keepalive_due": True,
+                    "keepalive_retry_deferred": True,
+                    "keepalive_retry_due_at": retry_due_at,
+                    "keepalive_retry_cooldown_seconds": (
+                        self.session_settings.keepalive_retry_cooldown_minutes * 60
+                    ),
+                    "keepalive_deferred_reason": self.keepalive_deferred_reason,
+                    "keepalive_urgency": (
+                        "SESSION_KEEPALIVE_URGENT" if urgent else None
+                    ),
+                    "deferred": True,
+                }
         return self._active_monitor_session(
             keepalive_enabled=keepalive_enabled,
             keepalive_interval_seconds=keepalive_interval_seconds,
@@ -798,6 +860,15 @@ class DpsWindowsAgent:
         """Inspect DPS session and optionally perform one read-only reload."""
 
         keepalive_requested = bool(keepalive_enabled or force_keepalive)
+        keepalive_attempt_planned = bool(
+            force_keepalive
+            or (
+                keepalive_enabled
+                and self._refresh_keepalive_schedule(
+                    interval_seconds=keepalive_interval_seconds
+                )
+            )
+        )
         if self.actual_lookup_waiting.is_set() or not self.lookup_gate.acquire(
             blocking=False
         ):
@@ -855,6 +926,8 @@ class DpsWindowsAgent:
                     gui_resource=guard_state.to_dict(),
                     keepalive_performed=False,
                 )
+            if keepalive_attempt_planned:
+                self._record_keepalive_attempt()
             previous = self.tab_manager.capture_previous_context()
             self._record_gui_operation(self.lookup_gate_owner or "MONITOR")
             with self.lock:
@@ -866,6 +939,8 @@ class DpsWindowsAgent:
                         or "CONNECTION_FAILED"
                     )
                     status = self._monitor_status_for(error_code=code)
+                    if keepalive_attempt_planned:
+                        self._record_keepalive_retry_reason(code)
                     self._set_monitor_state(
                         status,
                         event="CONNECTION_CHECK_FAILED",
@@ -886,6 +961,10 @@ class DpsWindowsAgent:
                 )
                 if status != "READY":
                     self.runtime_login_confirmed = False
+                    if keepalive_attempt_planned:
+                        self._record_keepalive_retry_reason(
+                            str(state.get("login_state") or status)
+                        )
                     self._set_monitor_state(
                         status,
                         event="LOGIN_STATE_CHECKED",
@@ -922,8 +1001,6 @@ class DpsWindowsAgent:
                 if self.actual_lookup_waiting.is_set():
                     return self._defer_keepalive("ACTUAL_LOOKUP_WAITING")
 
-                self.last_keepalive_attempt_at = now_iso()
-                self.keepalive_deferred_reason = None
                 valid, checks = self.tab_manager.validate_selected_candidate(candidate)
                 if not valid:
                     return self._record_keepalive_failure(
@@ -946,6 +1023,7 @@ class DpsWindowsAgent:
                     login_state=str(refreshed.get("login_state") or ""),
                 )
                 if refreshed_status == "LOGIN_REQUIRED":
+                    self._record_keepalive_retry_reason("LOGIN_REQUIRED")
                     self._set_monitor_state(
                         "LOGIN_REQUIRED",
                         event="KEEPALIVE_LOGIN_REQUIRED",
@@ -992,6 +1070,10 @@ class DpsWindowsAgent:
                 "DPS session monitor failed: error_type=%s",
                 error.__class__.__name__,
             )
+            if keepalive_attempt_planned:
+                self._record_keepalive_retry_reason(
+                    "DPS_SESSION_MONITOR_FAILED"
+                )
             self._set_monitor_state(
                 "CONNECTION_FAILED",
                 event="MONITOR_EXCEPTION",
@@ -1041,6 +1123,7 @@ class DpsWindowsAgent:
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.consecutive_keepalive_failures += 1
+        self._record_keepalive_retry_reason(code)
         status = (
             "CONNECTION_FAILED"
             if self.consecutive_keepalive_failures >= 2
@@ -1934,6 +2017,9 @@ class DpsWindowsAgent:
         next_keepalive_due_at, keepalive_due = (
             self._keepalive_schedule_snapshot()
         )
+        keepalive_retry_due_at, keepalive_retry_deferred = (
+            self._keepalive_retry_snapshot()
+        )
         config = self.store.load()
         runtime = self.connection
         hwnd_valid: bool | None = None
@@ -2012,6 +2098,11 @@ class DpsWindowsAgent:
                 self.session_settings.keepalive_interval_minutes
             ),
             keepalive_deferred_reason=self.keepalive_deferred_reason,
+            keepalive_retry_due_at=keepalive_retry_due_at,
+            keepalive_retry_deferred=keepalive_retry_deferred,
+            keepalive_retry_cooldown_seconds=(
+                self.session_settings.keepalive_retry_cooldown_minutes * 60
+            ),
             consecutive_keepalive_failures=self.consecutive_keepalive_failures,
             keepalive_lock_skips=self.keepalive_lock_skips,
             last_monitor_event=self.last_monitor_event,

@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from config import DpsSessionSettings
 from dps import agent_server
 from dps.agent_server import DpsWindowsAgent
@@ -130,6 +132,7 @@ def test_due_and_free_extends_session_and_resets_due(
     monkeypatch.setattr(agent_server.time, "time", lambda: NOW)
     agent, manager, _ = make_agent(tmp_path)
     set_activity(agent, 40 * 60)
+    agent.consecutive_keepalive_failures = 1
 
     result = agent.monitor_session(
         keepalive_enabled=True, keepalive_interval_seconds=40 * 60
@@ -143,6 +146,13 @@ def test_due_and_free_extends_session_and_resets_due(
         NOW + 40 * 60
     )
     assert agent.keepalive_due is False
+    assert agent.consecutive_keepalive_failures == 0
+
+    passive = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    assert passive["code"] == "PASSIVE_SESSION_MONITORED"
+    assert manager.click_login_time_extension.call_count == 1
 
 
 def test_busy_deferred_without_gui_or_failure_increment(
@@ -205,7 +215,7 @@ def test_failed_keepalive_does_not_reset_activity(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(agent_server.time, "time", lambda: NOW)
-    agent, _, _ = make_agent(tmp_path, extension_result=False)
+    agent, manager, guard = make_agent(tmp_path, extension_result=False)
     set_activity(agent, 40 * 60)
     before = agent.last_dps_activity_at
 
@@ -216,6 +226,14 @@ def test_failed_keepalive_does_not_reset_activity(
     assert result["code"] == "KEEPALIVE_UNAVAILABLE"
     assert agent.last_dps_activity_at == before
     assert agent.keepalive_due is True
+
+    retry = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    assert retry["keepalive_retry_deferred"] is True
+    assert guard.calls == 1
+    assert manager.capture_previous_context.call_count == 1
+    assert manager.click_login_time_extension.call_count == 1
 
 
 def test_logout_does_not_click_or_attempt_login(
@@ -237,7 +255,237 @@ def test_logout_does_not_click_or_attempt_login(
     )
 
     assert result["session_status"] == "LOGIN_REQUIRED"
+    assert agent.last_keepalive_attempt_at == agent_server._iso_from_epoch(NOW)
+    assert (
+        agent.keepalive_deferred_reason
+        == "LOGIN_REQUIRED_RETRY_COOLDOWN"
+    )
     manager.click_login_time_extension.assert_not_called()
+
+
+def test_login_required_retry_cooldown_is_passive_until_expiry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    current = [NOW]
+    monkeypatch.setattr(agent_server.time, "time", lambda: current[0])
+    agent, manager, guard = make_agent(tmp_path)
+    set_activity(agent, 40 * 60)
+    agent._detect_candidate_state = Mock(  # type: ignore[method-assign]
+        return_value={
+            "login_state": "LOGIN_REQUIRED",
+            "login_reason": "login form found",
+            "current_page": "LOGIN",
+        }
+    )
+
+    first = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    current[0] += 60
+    second = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    current[0] += 4 * 60 - 1
+    third = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+
+    assert first["session_status"] == "LOGIN_REQUIRED"
+    assert second["code"] == "PASSIVE_SESSION_MONITORED"
+    assert second["keepalive_retry_deferred"] is True
+    assert second["keepalive_retry_due_at"] == agent_server._iso_from_epoch(
+        NOW + 5 * 60
+    )
+    assert third["keepalive_retry_deferred"] is True
+    assert guard.calls == 1
+    assert manager.capture_previous_context.call_count == 1
+    manager.click_login_time_extension.assert_not_called()
+
+    current[0] += 1
+    after_expiry = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    assert after_expiry["session_status"] == "LOGIN_REQUIRED"
+    assert guard.calls == 2
+    assert manager.capture_previous_context.call_count == 2
+
+
+def test_force_keepalive_bypasses_retry_cooldown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    current = [NOW]
+    monkeypatch.setattr(agent_server.time, "time", lambda: current[0])
+    agent, manager, guard = make_agent(tmp_path)
+    set_activity(agent, 40 * 60)
+    agent._detect_candidate_state = Mock(  # type: ignore[method-assign]
+        return_value={
+            "login_state": "LOGIN_REQUIRED",
+            "login_reason": "login form found",
+            "current_page": "LOGIN",
+        }
+    )
+    agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    current[0] += 60
+
+    forced = agent.monitor_session(
+        keepalive_enabled=True,
+        keepalive_interval_seconds=40 * 60,
+        force_keepalive=True,
+    )
+
+    assert forced["session_status"] == "LOGIN_REQUIRED"
+    assert guard.calls == 2
+    assert manager.capture_previous_context.call_count == 2
+
+
+def test_retry_cooldown_preserves_urgent_signal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(agent_server.time, "time", lambda: NOW)
+    agent, manager, guard = make_agent(tmp_path)
+    set_activity(agent, 56 * 60)
+    agent.last_keepalive_attempt_at = agent_server._iso_from_epoch(NOW - 60)
+    agent.keepalive_deferred_reason = "LOGIN_REQUIRED_RETRY_COOLDOWN"
+
+    result = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+
+    assert result["keepalive_retry_deferred"] is True
+    assert result["keepalive_urgency"] == "SESSION_KEEPALIVE_URGENT"
+    assert agent.last_monitor_event == "SESSION_KEEPALIVE_URGENT"
+    assert guard.calls == 0
+    manager.capture_previous_context.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    ["DPS_TAB_NOT_FOUND", "AGENT_CONNECTION_FAILED"],
+)
+def test_connection_failure_uses_retry_cooldown(
+    tmp_path: Path, monkeypatch, failure_code: str
+) -> None:
+    current = [NOW]
+    monkeypatch.setattr(agent_server.time, "time", lambda: current[0])
+    agent, manager, guard = make_agent(tmp_path)
+    set_activity(agent, 40 * 60)
+    agent._select_current_dps = Mock(  # type: ignore[method-assign]
+        return_value=(
+            None,
+            {
+                "success": False,
+                "code": failure_code,
+                "message": "DPS connection failed",
+            },
+        )
+    )
+
+    first = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    current[0] += 60
+    second = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+
+    assert first["code"] == failure_code
+    assert second["keepalive_retry_deferred"] is True
+    assert (
+        second["keepalive_deferred_reason"]
+        == f"{failure_code}_RETRY_COOLDOWN"
+    )
+    assert guard.calls == 1
+    assert manager.capture_previous_context.call_count == 1
+
+
+def test_persisted_failed_attempt_defers_retry_after_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    current = [NOW + 60]
+    monkeypatch.setattr(agent_server.time, "time", lambda: current[0])
+    store = ConnectionStore(
+        tmp_path / "connection.json", tmp_path / "state.json"
+    )
+    store.save_agent_state(
+        {
+            "last_dps_activity_at": agent_server._iso_from_epoch(
+                NOW - 40 * 60
+            ),
+            "last_keepalive_attempt_at": agent_server._iso_from_epoch(NOW),
+            "keepalive_deferred_reason": "LOGIN_REQUIRED_RETRY_COOLDOWN",
+        }
+    )
+    manager = Manager()
+    guard = Guard("FREE")
+    agent = DpsWindowsAgent(
+        store=store,
+        tab_manager=manager,
+        ui_automation=SimpleNamespace(),
+        gui_guard=guard,
+        session_settings=DpsSessionSettings(
+            keepalive_enabled=True,
+            keepalive_interval_minutes=40,
+            passive_monitor_enabled=True,
+        ),
+    )
+
+    result = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+
+    assert result["keepalive_retry_deferred"] is True
+    assert result["passive"] is True
+    assert guard.calls == 0
+    manager.capture_previous_context.assert_not_called()
+
+
+def test_retry_cooldown_does_not_block_actual_lookup_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(agent_server.time, "time", lambda: NOW + 60)
+    agent, _, _ = make_agent(tmp_path)
+    agent.last_dps_activity_at = agent_server._iso_from_epoch(NOW - 40 * 60)
+    agent.last_keepalive_attempt_at = agent_server._iso_from_epoch(NOW)
+    agent.keepalive_deferred_reason = "LOGIN_REQUIRED_RETRY_COOLDOWN"
+
+    acquired = agent._acquire_actual_lookup_gate(timeout=0)
+    try:
+        assert acquired is True
+        assert agent.lookup_gate_owner == "LOOKUP"
+    finally:
+        if acquired:
+            agent._release_actual_lookup_gate()
+
+
+def test_status_exposes_retry_cooldown_without_gui(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(agent_server.time, "time", lambda: NOW + 60)
+    agent, manager, guard = make_agent(tmp_path)
+    agent.last_dps_activity_at = agent_server._iso_from_epoch(NOW - 40 * 60)
+    agent.last_keepalive_attempt_at = agent_server._iso_from_epoch(NOW)
+
+    status = agent.status()
+
+    assert status["keepalive_retry_deferred"] is True
+    assert status["keepalive_retry_due_at"] == agent_server._iso_from_epoch(
+        NOW + 5 * 60
+    )
+    assert status["keepalive_retry_cooldown_seconds"] == 5 * 60
+    assert guard.calls == 0
+    manager.capture_previous_context.assert_not_called()
+
+
+def test_retry_cooldown_setting_loads_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DPS_SESSION_KEEPALIVE_RETRY_COOLDOWN_MINUTES", "10"
+    )
+    assert (
+        DpsSessionSettings.from_environment().keepalive_retry_cooldown_minutes
+        == 10
+    )
 
 
 def test_lookup_lock_defers_keepalive_without_gui(
