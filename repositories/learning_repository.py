@@ -30,7 +30,46 @@ class LearningRepository:
         return result
 
     @staticmethod
-    def _upsert_with_connection(connection: Any, example: dict[str, Any]) -> Any:
+    def _is_human_authority(row: Any) -> bool:
+        """Return whether a Learning row has ever held human authority."""
+
+        values = dict(row)
+        raw_metadata = values.get("metadata_json")
+        metadata = (
+            raw_metadata
+            if isinstance(raw_metadata, dict)
+            else deserialize_json(raw_metadata)
+        )
+        return bool(
+            metadata.get("human_verified")
+            or metadata.get("revoked_from_human_verified")
+            or metadata.get("verification_revoked")
+            or str(values.get("validator_result") or "").upper()
+            == "HUMAN_VERIFIED_NAVER_POSTED"
+        )
+
+    @classmethod
+    def _upsert_with_connection(
+        cls,
+        connection: Any,
+        example: dict[str, Any],
+        *,
+        allow_human_authority_update: bool = False,
+    ) -> Any:
+        existing = connection.execute(
+            "SELECT * FROM learning_examples WHERE source_key=?",
+            (example["source_key"],),
+        ).fetchone()
+        if (
+            existing is not None
+            and cls._is_human_authority(existing)
+            and not allow_human_authority_update
+        ):
+            # Auto Sync/rebuild/import all use the ordinary upsert path.  Once
+            # a person has verified this exact source key, those weaker
+            # automatic observations must not downgrade or resurrect it.
+            return existing
+
         columns = (
             "source_key", "inquiry_id", "answer_draft_id",
             "approval_history_id", "learning_source",
@@ -79,6 +118,10 @@ class LearningRepository:
     ) -> dict[str, Any]:
         """Persist a Positive only if no opposite exact-answer signal exists."""
 
+        if not self._is_human_authority(example):
+            raise ValueError(
+                "Human-verified upsert requires explicit human authority metadata."
+            )
         metadata = example.get("metadata_json") or {}
         inquiry_id = int(example["inquiry_id"])
         reference_id = int(
@@ -113,7 +156,11 @@ class LearningRepository:
                         "동일한 답변의 Negative/EXCLUDED 상태가 이미 저장되었습니다.",
                         conflict=details,
                     )
-            row = self._upsert_with_connection(connection, example)
+            row = self._upsert_with_connection(
+                connection,
+                example,
+                allow_human_authority_update=True,
+            )
         result = self._row(row)
         assert result is not None
         return result

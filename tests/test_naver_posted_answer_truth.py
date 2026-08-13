@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 
 from streamlit.testing.v1 import AppTest
 
@@ -10,7 +12,7 @@ from config import NaverSyncSettings, StoreConfig
 from repositories.answer_repository import AnswerRepository
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
-from repositories.inquiry_repository import InquiryRepository
+from repositories.inquiry_repository import InquiryRepository, serialize_json
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
 from repositories.naver_posted_answer_repository import (
@@ -18,6 +20,7 @@ from repositories.naver_posted_answer_repository import (
 )
 from services.approval_service import ApprovalService
 from services.automatic_draft_service import AutomaticDraftService
+from services.learning_service import LearningService
 from services.naver_inquiry_sync_service import NaverInquirySyncService
 from ui.review_workspace import approval_learning_trace
 
@@ -380,3 +383,158 @@ def test_posted_answer_migration_is_idempotent(tmp_path) -> None:
     database = _database(tmp_path)
     assert database.initialize() == []
     assert database.migration_versions() == list(range(1, 24))
+
+
+def test_human_verified_naver_learning_survives_sync_and_rebuild(tmp_path) -> None:
+    database, inquiry_id, _draft_row = _answered_with_existing_draft(tmp_path)
+    repository = LearningRepository(database)
+    verified = ApprovalService(database).approve_posted_answer(
+        inquiry_id=inquiry_id,
+        actor="staff-authority",
+    )
+    before = repository.get(int(verified["id"]))
+    assert before is not None
+
+    posted = NaverPostedAnswerRepository(database).current(inquiry_id)
+    assert posted is not None
+    _sync(
+        database,
+        _payload(answered=True, answer=str(posted["answer_body"])),
+    )
+    inquiry = InquiryRepository(database).get(inquiry_id)
+    assert inquiry is not None
+    raw = dict(inquiry.get("raw_json") or {})
+    raw["sellerAnswer"] = str(posted["answer_body"])
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET raw_json=? WHERE id=?",
+            (serialize_json(raw), inquiry_id),
+        )
+    imported = LearningService(database).import_existing_seller_answers()
+
+    after = repository.get(int(verified["id"]))
+    assert imported["saved"] == 1
+    assert after == before
+    assert after["validator_result"] == "HUMAN_VERIFIED_NAVER_POSTED"
+    assert after["metadata_json"]["human_verified"] is True
+    assert after["metadata_json"]["facts_authority"] == (
+        "HUMAN_VERIFIED_NAVER_POSTED"
+    )
+    assert after["rating"] == 5
+    assert after["quality_score"] == 1.0
+    assert after["style_only"] is False
+    assert after["active"] is True
+
+
+def test_generic_source_answered_upsert_cannot_downgrade_human_authority(
+    tmp_path,
+) -> None:
+    database, inquiry_id, _draft_row = _answered_with_existing_draft(tmp_path)
+    repository = LearningRepository(database)
+    verified = ApprovalService(database).approve_posted_answer(
+        inquiry_id=inquiry_id,
+        actor="staff-authority",
+    )
+    before = repository.get(int(verified["id"]))
+    assert before is not None
+
+    automatic = {
+        **before,
+        "validator_result": "SOURCE_ANSWERED",
+        "rating": 3,
+        "quality_score": 0.6,
+        "style_only": True,
+        "active": True,
+        "metadata_json": {
+            "facts_authority": "STYLE_ONLY",
+            "learning_signal_type": "POSITIVE",
+            "answer_provenance": "NAVER_POSTED",
+        },
+    }
+    returned = repository.upsert(automatic)
+
+    assert returned == before
+    assert repository.get(int(verified["id"])) == before
+
+
+def test_revoked_human_authority_is_not_resurrected_by_automatic_import(
+    tmp_path,
+) -> None:
+    database, inquiry_id, _draft_row = _answered_with_existing_draft(tmp_path)
+    repository = LearningRepository(database)
+    verified = ApprovalService(database).approve_posted_answer(
+        inquiry_id=inquiry_id,
+        actor="staff-authority",
+    )
+    revoked = repository.revoke_human_verified(
+        learning_id=int(verified["id"]),
+        inquiry_id=inquiry_id,
+        reason="human decision revoked",
+        actor="staff-authority",
+        approval_history_id=1,
+    )
+    before = repository.get(int(revoked["id"]))
+    assert before is not None
+
+    LearningService(database).import_existing_seller_answers()
+
+    after = repository.get(int(revoked["id"]))
+    assert after == before
+    assert after["active"] is False
+    assert after["metadata_json"]["human_verified"] == 0
+    assert after["metadata_json"]["revoked_from_human_verified"] == 1
+    assert after["metadata_json"]["learning_status"] == "REVOKED"
+
+
+def test_human_verified_authority_wins_concurrent_source_answered_upsert(
+    tmp_path,
+) -> None:
+    database, inquiry_id, _draft_row = _answered_with_existing_draft(tmp_path)
+    repository = LearningRepository(database)
+    automatic = repository.for_inquiry(inquiry_id)[0]
+    posted = NaverPostedAnswerRepository(database).current(inquiry_id)
+    assert posted is not None
+    human = {
+        **automatic,
+        "validator_result": "HUMAN_VERIFIED_NAVER_POSTED",
+        "rating": 5,
+        "quality_score": 1.0,
+        "style_only": False,
+        "metadata_json": {
+            **automatic["metadata_json"],
+            "facts_authority": "HUMAN_VERIFIED_NAVER_POSTED",
+            "human_verified": True,
+            "verified_by": "staff-authority",
+            "verified_at": "2026-08-13T00:00:00Z",
+            "answer_reference_id": int(posted["id"]),
+            "naver_posted_answer_id": int(posted["id"]),
+        },
+    }
+    start = Barrier(2)
+
+    def automatic_upsert() -> dict:
+        start.wait()
+        return LearningRepository(database).upsert(automatic)
+
+    def human_upsert() -> dict:
+        start.wait()
+        return LearningRepository(database).upsert_human_verified_atomic(
+            human,
+            feedback_answer_sources=("NAVER_POSTED",),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [
+            executor.submit(automatic_upsert),
+            executor.submit(human_upsert),
+        ]
+        for future in results:
+            future.result(timeout=10)
+
+    final = repository.get(int(automatic["id"]))
+    assert final is not None
+    assert final["validator_result"] == "HUMAN_VERIFIED_NAVER_POSTED"
+    assert final["metadata_json"]["human_verified"] is True
+    assert final["rating"] == 5
+    assert final["quality_score"] == 1.0
+    assert final["style_only"] is False
