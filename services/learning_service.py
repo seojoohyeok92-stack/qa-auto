@@ -243,8 +243,15 @@ class LearningService:
             ),
         }
         existing = self.repository.get_by_source_key(example["source_key"])
+        feedback_sources = (
+            provenance.value,
+            AnswerProvenance.FINAL_ANSWER.value,
+        )
         if existing is not None:
-            existing = self.repository.upsert(example)
+            existing = self.repository.upsert_human_verified_atomic(
+                example,
+                feedback_answer_sources=feedback_sources,
+            )
             self.logs.record_inquiry(
                 inquiry_id,
                 "LEARNING_RECORD_SKIPPED",
@@ -256,7 +263,10 @@ class LearningService:
                 },
             )
             return existing
-        saved = self.repository.upsert(example)
+        saved = self.repository.upsert_human_verified_atomic(
+            example,
+            feedback_answer_sources=feedback_sources,
+        )
         self.logs.record_inquiry(
             inquiry_id,
             "LEARNING_RECORD_CREATED",
@@ -329,6 +339,14 @@ class LearningService:
             "verified_by": str(actor or "직원") if human_verified else None,
             "verified_at": utc_now() if human_verified else None,
         }
+        if human_verified:
+            return self.repository.upsert_human_verified_atomic(
+                example,
+                feedback_answer_sources=(
+                    AnswerProvenance.STAFF_EDITED.value,
+                    AnswerProvenance.FINAL_ANSWER.value,
+                ),
+            )
         return self.repository.upsert(example)
 
     def capture_verified_posted_answer(
@@ -391,7 +409,10 @@ class LearningService:
                 },
             }
         )
-        return self.repository.upsert(example)
+        return self.repository.upsert_human_verified_atomic(
+            example,
+            feedback_answer_sources=(AnswerProvenance.NAVER_POSTED.value,),
+        )
 
     def import_existing_seller_answers(self, *, limit: int | None = None) -> dict[str, int]:
         sql = "SELECT id FROM inquiries WHERE source_answered=1 ORDER BY id"

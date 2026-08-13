@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from answer.exceptions import AnswerAlreadyPostedError
+from answer.exceptions import AnswerAlreadyPostedError, StaleAnswerStateError
 from repositories.answer_repository import AnswerRepository
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
@@ -154,12 +154,18 @@ class ApprovalService:
         correction_reason: str = "",
         correction_note: str = "",
         corrected_intent: str = "",
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         draft, state = self._assert_editable(
             inquiry_id,
             draft_id,
             allow_source_answered_internal_edit=True,
         )
+        if (
+            expected_updated_at is not None
+            and str(draft.get("updated_at")) != str(expected_updated_at)
+        ):
+            raise StaleAnswerStateError()
         inquiry = self.inquiries.get(inquiry_id) or {}
         internal_posted_correction = bool(inquiry.get("source_answered"))
         clean = format_final_answer(str(edited_answer or ""))
@@ -184,7 +190,11 @@ class ApprovalService:
                         draft_id=draft_id,
                     )
             return draft
-        updated = self.answers.save_edited_answer(draft_id, clean)
+        updated = self.answers.save_edited_answer(
+            draft_id,
+            clean,
+            expected_updated_at=expected_updated_at,
+        )
         if not internal_posted_correction:
             self.answers.update_review_status(draft_id, "IN_REVIEW")
             self.inquiries.update_status(inquiry_id, InquiryStatus.REVIEW_PENDING)
@@ -294,6 +304,7 @@ class ApprovalService:
         corrected_intent: str = "",
         positive_reason: str = "",
         positive_note: str = "",
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         """Approve an internal correction without changing the Naver answer."""
 
@@ -312,6 +323,7 @@ class ApprovalService:
             correction_reason=correction_reason,
             correction_note=correction_note,
             corrected_intent=corrected_intent,
+            expected_updated_at=expected_updated_at,
         )
         saved = learning.capture_posted_staff_correction(
             inquiry_id=inquiry_id,
@@ -394,6 +406,7 @@ class ApprovalService:
         corrected_intent: str = "",
         positive_reason: str = "",
         positive_note: str = "",
+        expected_updated_at: str | None = None,
     ) -> ApprovalOutcome:
         draft, _ = self._assert_editable(inquiry_id, draft_id)
         final_answer = format_final_answer(
@@ -416,6 +429,16 @@ class ApprovalService:
             draft_id=draft_id,
             final_answer=final_answer,
             actor=actor,
+            expected_draft_updated_at=expected_updated_at,
+            evaluated_answer_sources=(
+                (
+                    AnswerProvenance.STAFF_EDITED.value
+                    if str(draft.get("edited_answer") or "").strip()
+                    else AnswerProvenance.PROGRAM_GENERATED.value
+                ),
+                AnswerProvenance.FINAL_ANSWER.value,
+            ),
+            evaluated_answer_masked=learning.privacy.mask(final_answer),
         )
         self.workflows.initialize_steps(inquiry_id)
         step = self.workflows.get_step(inquiry_id, StepCode.STAFF_REVIEW)
@@ -501,6 +524,7 @@ class ApprovalService:
         reason: str,
         actor: str = "관리자",
         learning_id: int | None = None,
+        expected_updated_at: str | None = None,
     ) -> ApprovalOutcome:
         clean_reason = str(reason or "").strip()
         if not clean_reason:
@@ -547,6 +571,7 @@ class ApprovalService:
                 draft_id=int(draft_id),
                 actor=actor,
                 reason=clean_reason,
+                expected_draft_updated_at=expected_updated_at,
             )
         elif target is not None:
             history = self.approvals.record_action(

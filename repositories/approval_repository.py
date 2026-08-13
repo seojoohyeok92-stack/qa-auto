@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from answer.exceptions import AnswerAlreadyPostedError
+from answer.exceptions import AnswerAlreadyPostedError, StaleAnswerStateError
+from answer.learning_conflict import LearningConflictError
 from repositories.database import Database
-from repositories.inquiry_repository import utc_now
+from repositories.inquiry_repository import deserialize_json, utc_now
 
 
 class ApprovalRepository:
@@ -129,6 +130,9 @@ class ApprovalRepository:
         draft_id: int,
         final_answer: str,
         actor: str,
+        expected_draft_updated_at: str | None = None,
+        evaluated_answer_sources: tuple[str, ...] = (),
+        evaluated_answer_masked: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         clean_answer = str(final_answer or "").strip()
         if not clean_answer:
@@ -145,7 +149,7 @@ class ApprovalRepository:
             ).fetchone()
             draft = connection.execute(
                 """
-                SELECT inquiry_id, posted, review_status
+                SELECT inquiry_id, posted, review_status, updated_at
                 FROM answer_drafts WHERE id = ?
                 """,
                 (draft_id,),
@@ -160,6 +164,41 @@ class ApprovalRepository:
                 raise AnswerAlreadyPostedError(
                     "등록 완료된 문의는 승인 상태를 변경할 수 없습니다."
                 )
+            if str(inquiry["approval_status"] or "").upper() == "APPROVED":
+                raise StaleAnswerStateError()
+            if (
+                expected_draft_updated_at is not None
+                and str(draft["updated_at"]) != str(expected_draft_updated_at)
+            ):
+                raise StaleAnswerStateError()
+            sources = tuple(str(value) for value in evaluated_answer_sources)
+            if sources and evaluated_answer_masked is not None:
+                placeholders = ",".join("?" for _ in sources)
+                conflict = connection.execute(
+                    f"""
+                    SELECT * FROM learning_feedback
+                    WHERE inquiry_id=? AND active=1
+                      AND source IN ('DASHBOARD_NEGATIVE_REVIEW','DASHBOARD_EXCLUDED')
+                      AND learning_signal_type IN ('NEGATIVE','EXCLUDED')
+                      AND original_answer_reference_id=?
+                      AND original_answer_source IN ({placeholders})
+                      AND original_answer_masked=?
+                    ORDER BY updated_at DESC, id DESC LIMIT 1
+                    """,
+                    (
+                        int(inquiry_id), int(draft_id), *sources,
+                        str(evaluated_answer_masked),
+                    ),
+                ).fetchone()
+                if conflict is not None:
+                    details = dict(conflict)
+                    details["metadata_json"] = deserialize_json(
+                        details.get("metadata_json")
+                    )
+                    raise LearningConflictError(
+                        "동일한 답변의 평가 상태가 이미 변경되었습니다.",
+                        conflict=details,
+                    )
             previous = str(inquiry["approval_status"] or "PENDING")
             connection.execute(
                 """
@@ -199,6 +238,7 @@ class ApprovalRepository:
         draft_id: int,
         actor: str,
         reason: str,
+        expected_draft_updated_at: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         clean_actor = str(actor or "").strip() or "관리자"
         clean_reason = str(reason or "").strip()
@@ -215,7 +255,7 @@ class ApprovalRepository:
             ).fetchone()
             draft = connection.execute(
                 """
-                SELECT inquiry_id, posted, review_status
+                SELECT inquiry_id, posted, review_status, updated_at
                 FROM answer_drafts WHERE id = ?
                 """,
                 (draft_id,),
@@ -224,6 +264,11 @@ class ApprovalRepository:
                 raise LookupError(f"Inquiry not found: {inquiry_id}")
             if draft is None or int(draft["inquiry_id"]) != inquiry_id:
                 raise LookupError(f"Answer draft not found: {draft_id}")
+            if (
+                expected_draft_updated_at is not None
+                and str(draft["updated_at"]) != str(expected_draft_updated_at)
+            ):
+                raise StaleAnswerStateError()
             if str(inquiry["approval_status"]) != "APPROVED":
                 raise ValueError("승인 완료 상태에서만 승인 취소가 가능합니다.")
             connection.execute(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from answer.learning_conflict import LearningConflictError
 from repositories.database import Database
 from repositories.inquiry_repository import deserialize_json, serialize_json
 
@@ -22,6 +23,14 @@ class LearningRepository:
         return result
 
     def upsert(self, example: dict[str, Any]) -> dict[str, Any]:
+        with self.database.transaction() as connection:
+            row = self._upsert_with_connection(connection, example)
+        result = self._row(row)
+        assert result is not None
+        return result
+
+    @staticmethod
+    def _upsert_with_connection(connection: Any, example: dict[str, Any]) -> Any:
         columns = (
             "source_key", "inquiry_id", "answer_draft_id",
             "approval_history_id", "learning_source",
@@ -47,21 +56,64 @@ class LearningRepository:
         assignments = ", ".join(
             f"{column}=excluded.{column}" for column in columns if column != "source_key"
         )
+        connection.execute(
+            f"""
+            INSERT INTO learning_examples ({', '.join(columns)})
+            VALUES ({', '.join('?' for _ in columns)})
+            ON CONFLICT(source_key) DO UPDATE SET
+                {assignments},
+                updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            """,
+            values,
+        )
+        return connection.execute(
+            "SELECT * FROM learning_examples WHERE source_key=?",
+            (example["source_key"],),
+        ).fetchone()
+
+    def upsert_human_verified_atomic(
+        self,
+        example: dict[str, Any],
+        *,
+        feedback_answer_sources: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Persist a Positive only if no opposite exact-answer signal exists."""
+
+        metadata = example.get("metadata_json") or {}
+        inquiry_id = int(example["inquiry_id"])
+        reference_id = int(
+            metadata.get("answer_reference_id")
+            or metadata.get("naver_posted_answer_id")
+            or example.get("answer_draft_id")
+        )
+        masked_answer = str(example.get("final_answer") or "")
+        sources = tuple(str(value) for value in feedback_answer_sources)
         with self.database.transaction() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO learning_examples ({', '.join(columns)})
-                VALUES ({', '.join('?' for _ in columns)})
-                ON CONFLICT(source_key) DO UPDATE SET
-                    {assignments},
-                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                """,
-                values,
-            )
-            row = connection.execute(
-                "SELECT * FROM learning_examples WHERE source_key=?",
-                (example["source_key"],),
-            ).fetchone()
+            if sources:
+                placeholders = ",".join("?" for _ in sources)
+                conflict = connection.execute(
+                    f"""
+                    SELECT * FROM learning_feedback
+                    WHERE inquiry_id=? AND active=1
+                      AND source IN ('DASHBOARD_NEGATIVE_REVIEW','DASHBOARD_EXCLUDED')
+                      AND learning_signal_type IN ('NEGATIVE','EXCLUDED')
+                      AND original_answer_reference_id=?
+                      AND original_answer_source IN ({placeholders})
+                      AND original_answer_masked=?
+                    ORDER BY updated_at DESC, id DESC LIMIT 1
+                    """,
+                    (inquiry_id, reference_id, *sources, masked_answer),
+                ).fetchone()
+                if conflict is not None:
+                    details = dict(conflict)
+                    details["metadata_json"] = deserialize_json(
+                        details.get("metadata_json")
+                    )
+                    raise LearningConflictError(
+                        "동일한 답변의 Negative/EXCLUDED 상태가 이미 저장되었습니다.",
+                        conflict=details,
+                    )
+            row = self._upsert_with_connection(connection, example)
         result = self._row(row)
         assert result is not None
         return result

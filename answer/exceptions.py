@@ -24,3 +24,16 @@ class AnswerAlreadyPostedError(AnswerEngineError):
 
 class AnswerGenerationInProgressError(AnswerEngineError):
     """Another generation attempt is already running for the inquiry."""
+
+
+class StaleAnswerStateError(AnswerEngineError):
+    """A write was based on an older persisted answer state."""
+
+    def __init__(
+        self,
+        message: str = (
+            "다른 사용자가 이 답변을 이미 변경했습니다. "
+            "최신 상태를 다시 불러온 후 확인해주세요."
+        ),
+    ) -> None:
+        super().__init__(message)

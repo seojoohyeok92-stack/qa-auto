@@ -23,7 +23,7 @@ from answer.learning_feedback import (
     EXCLUSION_REASON_LABELS,
     ExclusionReason,
 )
-from answer.exceptions import AnswerAlreadyPostedError
+from answer.exceptions import AnswerAlreadyPostedError, StaleAnswerStateError
 from answer.positive_learning import (
     POSITIVE_REASON_BY_LABEL,
     POSITIVE_REASON_LABELS,
@@ -48,8 +48,13 @@ from repositories.gpt_provider_run_repository import GptProviderRunRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.answer_service import AnswerService, is_valid_draft
 from services.automatic_draft_service import AutomaticDraftService
-from services.approval_service import ApprovalError, ApprovalService
+from services.approval_service import (
+    ApprovalError,
+    ApprovalLockedError,
+    ApprovalService,
+)
 from services.learning_feedback_service import LearningFeedbackService
+from services.learning_privacy_service import LearningPrivacyService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
 from services.dps_agent_client import get_dps_agent_status
 from services.local_auth_service import Permission
@@ -481,6 +486,7 @@ def _autosave_staff_edit(
     draft_id: int,
     state_key: str,
     actor: str,
+    expected_updated_at: str,
 ) -> None:
     try:
         database = Database(database_path)
@@ -491,11 +497,14 @@ def _autosave_staff_edit(
             edited_answer=str(st.session_state.get(state_key) or ""),
             actor=actor,
             autosave=True,
+            expected_updated_at=expected_updated_at,
         )
         st.session_state["approval_ui_notice"] = (
             "success",
             "직원 수정본이 자동 저장되었습니다.",
         )
+    except (StaleAnswerStateError, ApprovalLockedError) as error:
+        st.session_state["approval_ui_notice"] = ("warning", str(error))
     except Exception as error:
         st.session_state["approval_ui_notice"] = ("error", str(error))
 
@@ -557,6 +566,10 @@ def _render_negative_learning_saved(
         "</div>",
         unsafe_allow_html=True,
     )
+    st.caption(
+        "Repository status: "
+        + ("ACTIVE" if primary.get("active") else "REVOKED")
+    )
 
 
 def _render_excluded_learning_saved(
@@ -590,6 +603,10 @@ def _render_excluded_learning_saved(
         "</div>",
         unsafe_allow_html=True,
     )
+    st.caption(
+        "Repository status: "
+        + ("ACTIVE" if row.get("active") else "REVOKED")
+    )
 
 
 def approval_learning_trace(
@@ -608,6 +625,7 @@ def approval_learning_trace(
         row
         for row in examples
         if row.get("active")
+        and bool((row.get("metadata_json") or {}).get("human_verified"))
         and str(
             (row.get("metadata_json") or {}).get(
                 "learning_signal_type", "POSITIVE"
@@ -615,12 +633,74 @@ def approval_learning_trace(
         ).upper()
         == "POSITIVE"
     ]
+    identities: list[tuple[str, int, str]] = []
+    privacy = LearningPrivacyService()
+    if source_answered:
+        posted = NaverPostedAnswerRepository(database).current(inquiry_id)
+        if posted is not None and str(posted.get("answer_body") or "").strip():
+            identities.append(
+                (
+                    AnswerProvenance.NAVER_POSTED.value,
+                    int(posted["id"]),
+                    privacy.mask(format_final_answer(posted["answer_body"])),
+                )
+            )
+        if draft is not None and str(draft.get("edited_answer") or "").strip():
+            identities.insert(
+                0,
+                (
+                    AnswerProvenance.STAFF_EDITED.value,
+                    int(draft["id"]),
+                    privacy.mask(format_final_answer(draft["edited_answer"])),
+                ),
+            )
+    elif draft is not None:
+        expected_provenance = (
+            AnswerProvenance.STAFF_EDITED.value
+            if str(draft.get("edited_answer") or "").strip()
+            else AnswerProvenance.PROGRAM_GENERATED.value
+        )
+        body = (
+            draft.get("final_answer")
+            or draft.get("edited_answer")
+            or draft.get("original_answer")
+            or ""
+        )
+        identities.append(
+            (
+                expected_provenance,
+                int(draft["id"]),
+                privacy.mask(format_final_answer(body)),
+            )
+        )
+
+    def matches_identity(row: dict[str, Any]) -> bool:
+        row_metadata = row.get("metadata_json") or {}
+        row_provenance = str(row_metadata.get("answer_provenance") or "")
+        row_reference = (
+            row_metadata.get("answer_reference_id")
+            or row_metadata.get("naver_posted_answer_id")
+            or row.get("answer_draft_id")
+        )
+        return any(
+            row_provenance == expected_provenance
+            and row_reference is not None
+            and int(row_reference) == expected_reference
+            and privacy.mask(
+                format_final_answer(str(row.get("final_answer") or ""))
+            )
+            == expected_body
+            for expected_provenance, expected_reference, expected_body in identities
+        )
+
+    accepted = next((row for row in positives if matches_identity(row)), None)
     revoked = next(
         (
             row
             for row in examples
             if str((row.get("metadata_json") or {}).get("learning_status") or "").upper()
             == "REVOKED"
+            and matches_identity(row)
         ),
         None,
     )
@@ -629,25 +709,6 @@ def approval_learning_trace(
         if revoked and isinstance(revoked.get("metadata_json"), dict)
         else {}
     )
-    if source_answered:
-        accepted = next(
-            (
-                row
-                for row in positives
-                if bool((row.get("metadata_json") or {}).get("human_verified"))
-            ),
-            None,
-        )
-    else:
-        accepted = next(
-            (
-                row
-                for row in positives
-                if draft is None
-                or row.get("answer_draft_id") in {None, draft.get("id")}
-            ),
-            None,
-        )
     repository_approved = str(
         approval_state.get("approval_status") or "PENDING"
     ).upper() == "APPROVED"
@@ -697,11 +758,15 @@ def approval_learning_trace(
         "human_verified": human_verified,
         "positive_learning": accepted is not None,
         "positive_learning_id": (accepted or {}).get("id"),
+        "positive_active": bool((accepted or {}).get("active")),
+        "positive_status": "ACTIVE" if accepted is not None else None,
         "learning_source": (accepted or {}).get("learning_source"),
         "positive_reason": metadata.get("positive_reason"),
         "positive_note": metadata.get("positive_note"),
         "verified_at": metadata.get("verified_at")
         or (accepted or {}).get("created_at"),
+        "verified_by": metadata.get("verified_by")
+        or approval_state.get("approved_by"),
         "negative_count": len(negative),
         "intent_correction_count": len(intent),
         "latest_reason": (negative[0].get("correction_reason") if negative else None),
@@ -1241,6 +1306,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                         int(draft["id"]),
                         edit_key,
                         actor,
+                        str(draft.get("updated_at") or ""),
                     ),
                 )
                 st.caption(
@@ -1323,10 +1389,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 f'<span>Human Verified: {"YES" if approval_trace.get("human_verified") else "NO"}</span>'
                 f'<span>Positive Learning: {"반영 완료" if approval_trace.get("positive_learning") else "저장 확인 필요"}</span>'
                 f'<span>Learning ID: {escape(str(approval_trace.get("positive_learning_id") or "-"))}</span>'
+                f'<span>Status: {escape(str(approval_trace.get("positive_status") or "UNKNOWN"))}</span>'
                 f'<span>Reference: {escape(str(approval_trace.get("final_reference_id") or "-"))}</span>'
                 f'<span>좋은 이유: {escape(_positive_reason_label(approval_trace.get("positive_reason")))}</span>'
                 f'<span>승인 메모: {escape(str(approval_trace.get("positive_note") or "-"))}</span>'
                 f'<span>Verified At: {escape(format_datetime_kst(approval_trace.get("verified_at")))}</span>'
+                f'<span>Verified By: {escape(str(approval_trace.get("verified_by") or "-"))}</span>'
                 f'<span>Negative: {int(approval_trace.get("negative_count") or 0)}</span>'
                 f'<span>Intent Correction: {int(approval_trace.get("intent_correction_count") or 0)}</span>'
                 "</div>",
@@ -1486,6 +1554,54 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         negative_note = ""
         negative_intent = ""
         feedback_repository = LearningFeedbackRepository(database)
+        active_identity_feedback = (
+            feedback_repository.active_dashboard_feedback(
+                inquiry_id=inquiry_id,
+                original_answer_source=evaluation_source,
+                original_answer_reference_id=evaluation_reference_id,
+                signal_types=("NEGATIVE", "INTENT_CORRECTION", "EXCLUDED"),
+            )
+            if evaluation_source is not None
+            and evaluation_reference_id is not None
+            else []
+        )
+        evaluation_conflict_active = bool(active_identity_feedback)
+        approval_identity_sources: tuple[str, ...] = ()
+        approval_identity_reference: int | None = None
+        if source_answered and posted_answer_record is not None:
+            if draft is not None and str(draft.get("edited_answer") or "").strip():
+                approval_identity_sources = (
+                    AnswerProvenance.STAFF_EDITED.value,
+                    AnswerProvenance.FINAL_ANSWER.value,
+                )
+                approval_identity_reference = int(draft["id"])
+            else:
+                approval_identity_sources = (AnswerProvenance.NAVER_POSTED.value,)
+                approval_identity_reference = int(posted_answer_record["id"])
+        elif draft is not None:
+            approval_identity_sources = (
+                (
+                    AnswerProvenance.STAFF_EDITED.value
+                    if str(draft.get("edited_answer") or "").strip()
+                    else AnswerProvenance.PROGRAM_GENERATED.value
+                ),
+                AnswerProvenance.FINAL_ANSWER.value,
+            )
+            approval_identity_reference = int(draft["id"])
+        approval_conflict_active = bool(
+            approval_identity_reference is not None
+            and any(
+                feedback_repository.active_dashboard_feedback(
+                    inquiry_id=inquiry_id,
+                    original_answer_source=identity_source,
+                    original_answer_reference_id=approval_identity_reference,
+                    signal_types=(
+                        "NEGATIVE", "INTENT_CORRECTION", "EXCLUDED"
+                    ),
+                )
+                for identity_source in approval_identity_sources
+            )
+        )
         persisted_negative = (
             feedback_repository.active_dashboard_evaluation(
                 inquiry_id=inquiry_id,
@@ -1496,12 +1612,31 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             and evaluation_reference_id is not None
             else []
         )
+        if (
+            not persisted_negative
+            and evaluation_source is not None
+            and evaluation_reference_id is not None
+        ):
+            persisted_negative = feedback_repository.dashboard_feedback_history(
+                inquiry_id=inquiry_id,
+                original_answer_source=evaluation_source,
+                original_answer_reference_id=evaluation_reference_id,
+                signal_types=("NEGATIVE", "INTENT_CORRECTION"),
+            )
         if not persisted_negative:
             persisted_negative = (
                 feedback_repository.latest_active_dashboard_evaluation(
                     inquiry_id
                 )
             )
+        if not persisted_negative:
+            persisted_negative = [
+                row
+                for row in reversed(feedback_repository.for_inquiry(inquiry_id))
+                if row.get("source") == "DASHBOARD_NEGATIVE_REVIEW"
+                and row.get("learning_signal_type")
+                in {"NEGATIVE", "INTENT_CORRECTION"}
+            ]
         _render_negative_learning_saved(
             persisted_negative, inquiry_id=inquiry_id
         )
@@ -1555,6 +1690,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     evaluation_source is None
                     or evaluation_reference_id is None
                     or not negative_reason
+                    or evaluation_conflict_active
                 ),
                 key=f"negative_save_{inquiry_id}_{selected_view}",
                 width="stretch",
@@ -1576,9 +1712,31 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             and evaluation_reference_id is not None
             else []
         )
-        display_excluded = persisted_excluded or (
-            feedback_repository.latest_active_dashboard_exclusion(inquiry_id)
-        )
+        display_excluded = persisted_excluded
+        if (
+            not display_excluded
+            and evaluation_source is not None
+            and evaluation_reference_id is not None
+        ):
+            display_excluded = feedback_repository.dashboard_feedback_history(
+                inquiry_id=inquiry_id,
+                original_answer_source=evaluation_source,
+                original_answer_reference_id=evaluation_reference_id,
+                signal_types=("EXCLUDED",),
+            )
+        if not display_excluded:
+            display_excluded = (
+                feedback_repository.latest_active_dashboard_exclusion(
+                    inquiry_id
+                )
+            )
+        if not display_excluded:
+            display_excluded = [
+                row
+                for row in reversed(feedback_repository.for_inquiry(inquiry_id))
+                if row.get("source") == "DASHBOARD_EXCLUDED"
+                and row.get("learning_signal_type") == "EXCLUDED"
+            ]
         _render_excluded_learning_saved(
             display_excluded, inquiry_id=inquiry_id
         )
@@ -1634,6 +1792,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                         evaluation_source is None
                         or evaluation_reference_id is None
                         or not excluded_reason
+                        or evaluation_conflict_active
                     ),
                     key=f"excluded_save_{inquiry_id}_{selected_view}",
                     width="stretch",
@@ -1896,6 +2055,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         "승인",
         disabled=(
             not can_approve
+            or approval_conflict_active
             or (
                 (
                     not posted_answer_available
@@ -2098,6 +2258,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_reason=correction_reason,
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
+                expected_updated_at=str(draft.get("updated_at") or ""),
             )
             st.session_state["approval_ui_notice"] = (
                 "success",
@@ -2115,6 +2276,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 corrected_intent=corrected_intent,
                 positive_reason=positive_reason,
                 positive_note=positive_note,
+                expected_updated_at=str(draft.get("updated_at") or ""),
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
@@ -2147,6 +2309,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 corrected_intent=corrected_intent,
                 positive_reason=positive_reason,
                 positive_note=positive_note,
+                expected_updated_at=str(draft.get("updated_at") or ""),
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
@@ -2161,6 +2324,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 reason=cancel_reason,
                 actor=actor,
                 learning_id=approval_trace.get("positive_learning_id"),
+                expected_updated_at=(
+                    str(draft.get("updated_at") or "")
+                    if draft is not None
+                    else None
+                ),
             )
             st.session_state[pending_answer_view_key] = (
                 "직원 수정본" if draft is not None else "Program Answer"
@@ -2230,10 +2398,19 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             "요청 처리 중 오류가 발생했습니다. 저장된 초안은 새로고침 후 "
             "다시 확인할 수 있습니다."
         )
+    except (StaleAnswerStateError, ApprovalLockedError) as error:
+        st.session_state["approval_ui_notice"] = ("warning", str(error))
+        st.rerun()
+    except LearningConflictError as error:
+        st.session_state["approval_ui_notice"] = (
+            "warning",
+            "다른 사용자가 이 답변의 상태를 이미 변경했습니다. "
+            "최신 상태를 다시 불러왔습니다. " + str(error),
+        )
+        st.rerun()
     except (
         ApprovalError,
         AnswerAlreadyPostedError,
-        LearningConflictError,
         ValueError,
     ) as error:
         st.error(str(error))

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from answer.answer_format import format_final_answer
-from answer.exceptions import AnswerAlreadyPostedError
+from answer.exceptions import AnswerAlreadyPostedError, StaleAnswerStateError
 from answer.models import AnswerResult, AnswerStatus
 from repositories.database import Database
 from repositories.inquiry_repository import (
@@ -357,6 +357,8 @@ class AnswerRepository:
         draft_id: int,
         field_name: str,
         value: str | None,
+        *,
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         allowed_fields = {
             "edited_answer",
@@ -370,7 +372,7 @@ class AnswerRepository:
             stored_value = format_final_answer(value)
         with self.database.transaction() as connection:
             row = connection.execute(
-                "SELECT posted FROM answer_drafts WHERE id = ?",
+                "SELECT posted, updated_at FROM answer_drafts WHERE id = ?",
                 (draft_id,),
             ).fetchone()
             if row is None:
@@ -379,6 +381,11 @@ class AnswerRepository:
                 raise AnswerAlreadyPostedError(
                     "등록된 답변 초안은 변경할 수 없습니다."
                 )
+            if (
+                expected_updated_at is not None
+                and str(row["updated_at"]) != str(expected_updated_at)
+            ):
+                raise StaleAnswerStateError()
             connection.execute(
                 f"""
                 UPDATE answer_drafts
@@ -396,22 +403,28 @@ class AnswerRepository:
         self,
         draft_id: int,
         edited_answer: str | None,
+        *,
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         return self._update_unposted(
             draft_id,
             "edited_answer",
             edited_answer,
+            expected_updated_at=expected_updated_at,
         )
 
     def save_final_answer(
         self,
         draft_id: int,
         final_answer: str | None,
+        *,
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         return self._update_unposted(
             draft_id,
             "final_answer",
             final_answer,
+            expected_updated_at=expected_updated_at,
         )
 
     def update_review_status(

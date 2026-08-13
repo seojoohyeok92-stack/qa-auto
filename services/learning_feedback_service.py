@@ -314,14 +314,8 @@ class LearningFeedbackService:
             },
             "active": True,
         }
-        self.repository.deactivate_dashboard_evaluation(
-            inquiry_id=int(inquiry_id),
-            original_answer_source=provenance.value,
-            original_answer_reference_id=reference_id,
-        )
-        return [
-            self.repository.upsert(
-                {
+        feedbacks = [
+            {
                     **common,
                     "source_key": self._source_key(
                         "DASHBOARD_NEGATIVE",
@@ -332,9 +326,13 @@ class LearningFeedbackService:
                     ),
                     "learning_signal_type": signal.value,
                 }
-            )
             for signal in self._signals(reason)
         ]
+        return self.repository.save_dashboard_evaluation_atomic(
+            feedbacks,
+            requested_signal="NEGATIVE",
+            positive_answer_sources=tuple(positive_provenances),
+        )
 
     def capture_dashboard_excluded(
         self,
@@ -406,8 +404,7 @@ class LearningFeedbackService:
             )
             if value
         )
-        return self.repository.upsert(
-            {
+        feedback = {
                 "source_key": self._source_key(
                     "DASHBOARD_EXCLUDED", inquiry_id, provenance.value, reference_id
                 ),
@@ -434,7 +431,11 @@ class LearningFeedbackService:
                 },
                 "active": True,
             }
-        )
+        return self.repository.save_dashboard_evaluation_atomic(
+            [feedback],
+            requested_signal="EXCLUDED",
+            positive_answer_sources=tuple(positive_provenances),
+        )[0]
 
     def revoke_dashboard_excluded(
         self, *, feedback_id: int, reason: str, actor: str = "직원"
