@@ -459,16 +459,22 @@ class DpsUiAutomation:
         if url_available and not dps_url_found:
             state = "DPS_PAGE_INVALID"
             reason = "읽은 URL이 DPS 도메인 또는 /dpsweb/ 경로와 불일치"
-        elif login_ui_failure or (signals["login_page"] and dps_url_found):
+        elif login_ui_failure:
             state = "LOGIN_REQUIRED"
-            reason = (
-                "아이디/비밀번호 또는 OTP 로그인 UI 발견"
-                if login_ui_failure
-                else "로그인 URL 키워드 발견"
-            )
+            reason = "아이디/비밀번호 또는 OTP 로그인 UI 발견"
         elif home_ui_found:
             state = "LOGGED_IN"
-            reason = "logout_found" if signals["logout_found"] else "DPS 홈 UI 요소 발견"
+            reason = (
+                "logout_found"
+                if signals["logout_found"]
+                else "DPS 홈 UI 요소 발견"
+            )
+        elif signals["login_page"] and dps_url_found:
+            # DPS may keep /login.do in the address bar after a successful
+            # manual login.  Treat that stale URL as logged out only when no
+            # strong authenticated UI (logout/menu/widgets) is present.
+            state = "LOGIN_REQUIRED"
+            reason = "로그인 URL 키워드 발견 (로그인 성공 UI 없음)"
         elif not dps_url_found and not dps_ui_found:
             state = "DPS_PAGE_INVALID"
             reason = "유효한 DPS URL과 DPS 관련 UI 요소를 모두 찾지 못함"

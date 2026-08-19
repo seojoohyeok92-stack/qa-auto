@@ -164,6 +164,8 @@ class PromptBuilder:
                 "do_not_expose_internal_status": True,
                 "do_not_guess_dates": True,
                 "do_not_request_excess_personal_information": True,
+                "active_positive_learning_is_grounded_reference": True,
+                "answer_supported_parts_even_if_other_parts_are_missing": True,
             },
             "customer_inquiry": facts.inquiry.get("question"),
             "inquiry_analysis": (
@@ -198,6 +200,18 @@ class PromptBuilder:
                 "avoid_repetition": True,
             },
             "confirmed_facts": confirmed_facts,
+            "learning_usage_policy": {
+                "approved_learning_allowed_for": [
+                    "stable policy", "installation method", "product guidance",
+                    "after-service policy", "promotion policy",
+                ],
+                "approved_learning_forbidden_for": [
+                    "current order status", "current delivery status",
+                    "current installation date",
+                ],
+                "seller_style_examples_are_facts": False,
+                "partial_answer_required_for_supported_subquestions": True,
+            },
             "installation_date_instructions": (
                 [
                     "확정된 설치예정일이 있으면 고객에게 자연스럽게 안내한다.",

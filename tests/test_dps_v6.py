@@ -185,9 +185,24 @@ class LoginDetectionTests(unittest.TestCase):
         self.assertEqual(result["menu_hits"], ["경영정보", "구매", "판매"])
         self.assertEqual(result["widget_hits"], ["주문/배송", "구매"])
 
-    def test_login_url_is_login_required(self) -> None:
+    def test_stale_login_url_with_logout_control_is_logged_in(self) -> None:
         window = FakeWindow()
         window.elements = [FakeElement("로그아웃", "Button")]
+
+        result = DpsUiAutomation().detect_login_state(
+            window,
+            url="https://dps2u.co.kr/dpsweb/login.do",
+        )
+
+        self.assertEqual(result["state"], "LOGGED_IN")
+        self.assertEqual(result["reason"], "logout_found")
+
+    def test_login_url_with_explicit_credentials_is_login_required(self) -> None:
+        window = FakeWindow()
+        window.elements = [
+            FakeElement("아이디", "Edit"),
+            FakeElement("비밀번호", "Edit"),
+        ]
 
         result = DpsUiAutomation().detect_login_state(
             window,
@@ -237,6 +252,21 @@ class LoginDetectionTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "LOGGED_IN")
         self.assertIn("로그아웃", result["dps_ui_hits"])
+
+    def test_logged_in_internal_sales_detail_page_is_not_login_required(self) -> None:
+        window = FakeWindow()
+        window.elements = [
+            FakeElement("로그아웃", "Button"),
+            FakeElement("판매상세", "Text"),
+            FakeElement("주문/배송", "Hyperlink"),
+        ]
+
+        result = DpsUiAutomation().detect_login_state(
+            window,
+            url="https://dps2u.co.kr/dpsweb/sales/detail.do?id=masked",
+        )
+
+        self.assertEqual(result["state"], "LOGGED_IN")
 
     def test_page_invalid_requires_no_valid_dps_url_and_no_dps_ui(self) -> None:
         window = FakeWindow()

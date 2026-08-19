@@ -11,6 +11,32 @@ from services.product_fact_guard import same_stable_product
 
 
 TOKEN = re.compile(r"[가-힣A-Za-z0-9]{2,}")
+SEMANTIC_CONCEPTS = {
+    "SELF_INSTALLATION": (r"자가\s*설치",),
+    "TECHNICIAN_INSTALLATION": (
+        r"기사(?:님)?[^\n]{0,12}설치",
+        r"설치\s*해\s*주",
+        r"방문\s*설치",
+    ),
+    "WALL_MOUNT_INSTALLATION": (r"벽\s*걸이", r"벽걸이"),
+    "INSTALLATION_FEE": (r"설치\s*비", r"설치[^\n]{0,12}(?:가격|비용|포함)"),
+    "DELIVERY_SCHEDULE": (
+        r"(?:배송|도착|설치)[^\n]{0,16}(?:언제|예정|일정|며칠|얼마나)",
+        r"(?:언제|며칠|얼마나)[^\n]{0,16}(?:배송|도착|설치|받)",
+        r"(?:받|수령)[^\n]{0,16}(?:언제|예정|며칠|얼마나|걸리)",
+        r"주문[^\n]{0,20}(?:받|수령|걸리)",
+        r"기다리(?:다|고|는|기)",
+    ),
+    "AFTER_SERVICE": (r"(?:a\s*/?\s*s|에이에스|서비스\s*센터)",),
+    "PANEL_TYPE": (r"(?:패널|led|qled|oled)",),
+    "POINT_PROMOTION": (r"(?:네이버\s*)?포인트", r"프로모션|이벤트"),
+}
+CONTEXT_ANCHOR_CONCEPTS = {
+    "WALL_MOUNT_INSTALLATION",
+    "AFTER_SERVICE",
+    "PANEL_TYPE",
+    "POINT_PROMOTION",
+}
 
 
 def normalize_learning_question(value: object) -> str:
@@ -27,7 +53,20 @@ class SimilarAnswerService:
         left_tokens, right_tokens = set(TOKEN.findall(left)), set(TOKEN.findall(right))
         jaccard = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
         sequence = SequenceMatcher(None, left, right).ratio()
-        return 0.65 * jaccard + 0.35 * sequence
+        left_concepts = SimilarAnswerService._semantic_concepts(left)
+        right_concepts = SimilarAnswerService._semantic_concepts(right)
+        concept_overlap = len(left_concepts & right_concepts) / max(
+            min(len(left_concepts), len(right_concepts)), 1
+        )
+        return 0.65 * jaccard + 0.35 * sequence + 0.18 * concept_overlap
+
+    @staticmethod
+    def _semantic_concepts(value: str) -> set[str]:
+        return {
+            concept
+            for concept, patterns in SEMANTIC_CONCEPTS.items()
+            if any(re.search(pattern, value, re.IGNORECASE) for pattern in patterns)
+        }
 
     @staticmethod
     def _source_priority(item: dict[str, Any]) -> int:
@@ -67,10 +106,32 @@ class SimilarAnswerService:
         product_id: str | None = None,
         product_fact_sensitive: bool = False,
         limit: int = 3, minimum_relevance: float = 0.24,
+        candidate_pool: list[dict[str, Any]] | None = None,
+        candidate_diagnostics: dict[str, int] | None = None,
     ) -> list[dict[str, Any]]:
         query = normalize_learning_question(self.privacy.mask(question))
         ranked: list[tuple[float, dict[str, Any]]] = []
-        for item in self.repository.candidates(store_code=store_code):
+        candidates = (
+            candidate_pool
+            if candidate_pool is not None
+            else self.repository.candidates(store_code=store_code, limit=2000)
+        )
+        diagnostics = candidate_diagnostics or self.repository.candidate_diagnostics(
+            store_code=store_code
+        )
+        rejection_counts = {
+            "FILTERED_BY_PRODUCT": 0,
+            "BELOW_SIMILARITY_THRESHOLD": 0,
+            "CONTEXT_POLICY_REJECTED": 0,
+        }
+        type_mismatch_count = 0
+        query_concepts = self._semantic_concepts(query)
+        required_context = query_concepts & CONTEXT_ANCHOR_CONCEPTS
+        for item in candidates:
+            if inquiry_type and item.get("inquiry_type") != inquiry_type:
+                # Inquiry type is intentionally a relevance signal, not a hard
+                # equality filter. Taxonomies differ between old and new data.
+                type_mismatch_count += 1
             if product_fact_sensitive:
                 metadata = item.get("metadata_json")
                 metadata = metadata if isinstance(metadata, dict) else {}
@@ -83,7 +144,14 @@ class SimilarAnswerService:
                     # Detailed answer bodies from another/unknown product or
                     # unverified examples are not safe facts. Global style
                     # aggregation below remains available.
+                    rejection_counts["FILTERED_BY_PRODUCT"] += 1
                     continue
+            candidate_concepts = self._semantic_concepts(
+                str(item["question_normalized"])
+            )
+            if required_context and not required_context.issubset(candidate_concepts):
+                rejection_counts["CONTEXT_POLICY_REJECTED"] += 1
+                continue
             relevance = self._similarity(query, str(item["question_normalized"]))
             relevance += 0.10 if intent and item.get("intent") == intent else 0
             relevance += 0.08 if product_name and item.get("product_name") == product_name else 0
@@ -93,14 +161,37 @@ class SimilarAnswerService:
                 safe = dict(item)
                 safe["relevance"] = round(relevance, 4)
                 ranked.append((relevance, safe))
+            else:
+                rejection_counts["BELOW_SIMILARITY_THRESHOLD"] += 1
         ranked.sort(
             key=lambda pair: (
-                self._source_priority(pair[1]), pair[0],
+                pair[0], self._source_priority(pair[1]),
                 pair[1]["rating"], pair[1]["created_at"],
             ),
             reverse=True,
         )
         selected = [item for _, item in ranked[: max(0, min(limit, 3))]]
+        self.last_trace = {
+            "query": query,
+            "product": product_name,
+            "inquiry_type": inquiry_type,
+            "candidate_count": len(candidates),
+            "active_candidates": diagnostics["active_candidates"],
+            # Keep diagnostic logs bounded. These are the candidates that
+            # actually passed relevance ranking, not every repository row.
+            "candidate_ids": [int(item[1]["id"]) for item in ranked[:20]],
+            "above_threshold_count": len(ranked),
+            "selected_count": len(selected),
+            "selected_learning_ids": [int(item["id"]) for item in selected],
+            "minimum_relevance": minimum_relevance,
+            "inquiry_type_mismatch_signal_count": type_mismatch_count,
+            "rejection_counts": {
+                "FILTERED_BY_VALIDITY": diagnostics["filtered_by_validity"],
+                "REVOKED": diagnostics["revoked"],
+                "NEGATIVE_EXCLUDED": diagnostics["negative_excluded"],
+                **rejection_counts,
+            },
+        }
         self.repository.mark_used([int(item["id"]) for item in selected])
         return selected
 
@@ -145,4 +236,5 @@ class SimilarAnswerService:
                 "typical_closing": next((v for (k, v), _ in features.most_common() if k == "closing"), ""),
                 "average_sentence_length": round(sum(lengths) / len(lengths), 1) if lengths else None,
             },
+            "learning_retrieval": dict(getattr(self, "last_trace", {})),
         }

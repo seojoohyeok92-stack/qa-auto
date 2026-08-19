@@ -198,6 +198,11 @@ def render_answer_learning_provenance(
     database: Database, *, draft_id: int, outcome: str | None = None,
 ) -> None:
     rows = LearningProvenanceRepository(database).for_draft(int(draft_id))
+    st.caption(
+        f"Learning 참고: 사용함 · {len(rows)}건"
+        if rows
+        else "Learning 참고: 없음"
+    )
     with st.expander("이번 답변에 사용된 Learning", expanded=False):
         if not rows:
             st.info("이 답변에는 기록된 Learning/Historical Context가 없습니다.")

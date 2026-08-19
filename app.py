@@ -13,6 +13,7 @@ from config import (
 )
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
+from repositories.dashboard_preferences_repository import DashboardPreferencesRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_sync_repository import NaverSyncRepository
@@ -43,6 +44,7 @@ from ui.activity_log_panel import render_activity_log_panel
 from ui.build_info import render_build_footer
 from ui.gpt_governance_panel import render_gpt_governance_panel
 from ui.local_auth_panel import ensure_local_identity
+from ui.session_identity import current_identity
 from ui.review_workspace import paginate_items, render_review_workspace
 from ui.uat_panel import render_uat_panel
 from ui.auto_post_panel import render_auto_post_controls
@@ -59,6 +61,19 @@ from ui.production_dashboard import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _restore_persisted_admin_mode(database: Database | None) -> bool:
+    """Restore durable admin navigation after Streamlit widget cleanup."""
+
+    identity = current_identity()
+    if database is None or str(identity.get("role") or "").upper() != "ADMIN":
+        return False
+    username = str(identity.get("username") or "local-admin")
+    enabled = bool(DashboardPreferencesRepository(database).admin_mode(username))
+    if enabled:
+        st.session_state["production_admin_mode"] = True
+    return enabled
 
 
 st.set_page_config(
@@ -932,11 +947,15 @@ def main() -> None:
         ensure_dps_session_monitor()
     configured_stores = get_configured_stores()
     current_page = str(st.session_state.get("current_page") or "dashboard")
+    persisted_admin_mode = _restore_persisted_admin_mode(database)
     refresh_requested = False
 
     if (
         current_page != "dashboard"
-        and not st.session_state.get("production_admin_mode", False)
+        and not (
+            st.session_state.get("production_admin_mode", False)
+            or persisted_admin_mode
+        )
     ):
         st.session_state["current_page"] = "dashboard"
         current_page = "dashboard"

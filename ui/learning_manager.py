@@ -243,6 +243,7 @@ def _paginate_rows(
 
 def _learning_filter_changed() -> None:
     st.session_state["current_page"] = "learning"
+    st.session_state["production_admin_mode"] = True
     st.session_state["learning_manager_positive_page"] = 1
     st.session_state["learning_manager_feedback_page"] = 1
 
@@ -319,14 +320,21 @@ def _render_validity_editor(
     end_at = to_kst(row.get("valid_until"))
     st.markdown("**학습 유효성 관리**")
     st.caption(f"현재 상태: {validity_summary(row)} ({row.get('validity_status', 'ACTIVE')})")
+    # A radio inside a Streamlit form does not rerun until submit, so the
+    # TEMPORARY-only fields could never become visible on first selection.
+    # Keep the selector outside while retaining one atomic save form.
+    validity_type = st.radio(
+        "학습 유효성",
+        ["PERMANENT", "TEMPORARY"],
+        index=1 if current_type == "TEMPORARY" else 0,
+        format_func=lambda value: "기간성" if value == "TEMPORARY" else "영구",
+        horizontal=True,
+        key=f"{key_prefix}_validity_type_{learning_id}",
+        on_change=lambda: st.session_state.update(
+            current_page="learning", production_admin_mode=True
+        ),
+    )
     with st.form(f"{key_prefix}_validity_form_{learning_id}"):
-        validity_type = st.radio(
-            "학습 유효성",
-            ["PERMANENT", "TEMPORARY"],
-            index=1 if current_type == "TEMPORARY" else 0,
-            format_func=lambda value: "기간성" if value == "TEMPORARY" else "영구",
-            horizontal=True,
-        )
         event_name = ""
         valid_from: date | None = None
         valid_until: date | None = None
@@ -481,6 +489,10 @@ def _render_section(
 
 def render_learning_manager(database: Database | None) -> None:
     st.session_state["current_page"] = "learning"
+    # The admin-mode toggle lives on Dashboard and Streamlit removes widget
+    # state when that widget is not rendered. Keep the authorized manager
+    # route stable for all manager-local reruns.
+    st.session_state["production_admin_mode"] = True
     st.title("Learning Manager")
     st.caption(
         "Positive Learning과 Negative/의도 교정/학습 제외 상태를 실제 문의 접수시간 "

@@ -89,6 +89,12 @@ INSTALLATION_GENERAL_WORDS = (
     "설치 조건",
     "설치 가능",
     "브라켓",
+    "자가설치",
+    "자가 설치",
+    "기사님이 설치",
+    "기사 설치",
+    "방문설치",
+    "방문 설치",
 )
 PRODUCT_GENERAL_WORDS = (
     "사양",
@@ -101,6 +107,19 @@ PRODUCT_GENERAL_WORDS = (
     "모델",
     "지원하나요",
     "가능한가요",
+    "HDMI",
+    "hdmi",
+    "패널",
+    "LED",
+    "QLED",
+    "OLED",
+    "인치",
+    "A/S",
+    "a/s",
+    "에이에스",
+    "네이버포인트",
+    "네이버 포인트",
+    "무빙스타일",
 )
 CANCEL_WORDS = ("취소", "반품", "교환", "환불")
 SCHEDULE_CHANGE_WORDS = (
@@ -231,6 +250,19 @@ class InquiryAnalysisService:
             )
         ):
             return "DELIVERY_DATE"
+        if any(
+            token in compact
+            for token in (
+                "자가설치",
+                "기사님이설치",
+                "기사님설치",
+                "기사설치",
+                "설치해주시",
+                "설치해주나",
+                "방문설치",
+            )
+        ):
+            return "INSTALLATION_METHOD"
         notification = any(
             re.sub(r"\s+", "", word) in compact
             for word in NOTIFICATION_POLICY_WORDS
@@ -286,6 +318,17 @@ class InquiryAnalysisService:
             return "DELIVERY_DATE"
         if any(token in compact for token in ("배송조회", "배송상태", "출고상태")):
             return "DELIVERY_STATUS"
+        if "예정일" in compact and (
+            re.search(r"\d{1,2}(?:월|[./-])\d{1,2}", compact)
+            or any(
+                token in compact
+                for token in ("말일까지", "말일", "언제", "가능할까요", "기다리")
+            )
+        ):
+            # Existing-order questions often omit the nouns 배송/설치 after
+            # mentioning a promised date.  The date/deadline combination is
+            # still an authoritative schedule lookup intent.
+            return "DELIVERY_DATE"
         return None
 
     @staticmethod
@@ -434,15 +477,25 @@ class InquiryAnalysisService:
             confidence = 0.96
             manual = False
             reasons.append("주문 상태 확인 표현을 찾았습니다.")
-        elif any(word in question for word in INSTALLATION_GENERAL_WORDS):
+        elif detected_intent == "INSTALLATION_METHOD" or any(
+            word in question for word in INSTALLATION_GENERAL_WORDS
+        ):
             kind = InquiryType.INSTALLATION_GENERAL
-            subtype = "GENERAL_INSTALLATION_GUIDANCE"
+            subtype = (
+                "INSTALLATION_METHOD"
+                if detected_intent == "INSTALLATION_METHOD"
+                else "GENERAL_INSTALLATION_GUIDANCE"
+            )
             requires_order = False
             requires_dps = False
             strategy = AnswerStrategy.GENERAL_GUIDANCE
             confidence = 0.94
             manual = False
-            reasons.append("특정 주문과 무관한 설치 일반 문의입니다.")
+            reasons.append(
+                "설치 주체·자가설치 여부를 묻는 설치방법 문의입니다."
+                if detected_intent == "INSTALLATION_METHOD"
+                else "특정 주문과 무관한 설치 일반 문의입니다."
+            )
         elif any(word in question for word in PRODUCT_GENERAL_WORDS):
             kind = InquiryType.PRODUCT_GENERAL
             subtype = "PRODUCT_SPEC_OR_FEATURE"
@@ -520,7 +573,7 @@ class InquiryAnalysisService:
                     if order_present
                     else "확인된 네이버 일반 주문번호가 없습니다."
                 )
-        elif not requires_order_id:
+        elif not requires_order_id and not validated:
             order_status = OrderIdStatus.NOT_REQUIRED
 
         selected = self._selected_keys(effective_kind, strategy)

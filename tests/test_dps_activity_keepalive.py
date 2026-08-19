@@ -294,7 +294,7 @@ def test_login_required_retry_cooldown_is_passive_until_expiry(
     assert second["code"] == "PASSIVE_SESSION_MONITORED"
     assert second["keepalive_retry_deferred"] is True
     assert second["keepalive_retry_due_at"] == agent_server._iso_from_epoch(
-        NOW + 5 * 60
+        NOW + 40 * 60
     )
     assert third["keepalive_retry_deferred"] is True
     assert guard.calls == 1
@@ -302,6 +302,14 @@ def test_login_required_retry_cooldown_is_passive_until_expiry(
     manager.click_login_time_extension.assert_not_called()
 
     current[0] += 1
+    after_five_minutes = agent.monitor_session(
+        keepalive_enabled=True, keepalive_interval_seconds=40 * 60
+    )
+    assert after_five_minutes["keepalive_retry_deferred"] is True
+    assert guard.calls == 1
+    assert manager.capture_previous_context.call_count == 1
+
+    current[0] += 35 * 60
     after_expiry = agent.monitor_session(
         keepalive_enabled=True, keepalive_interval_seconds=40 * 60
     )
@@ -471,9 +479,9 @@ def test_status_exposes_retry_cooldown_without_gui(
 
     assert status["keepalive_retry_deferred"] is True
     assert status["keepalive_retry_due_at"] == agent_server._iso_from_epoch(
-        NOW + 5 * 60
+        NOW + 40 * 60
     )
-    assert status["keepalive_retry_cooldown_seconds"] == 5 * 60
+    assert status["keepalive_retry_cooldown_seconds"] == 40 * 60
     assert guard.calls == 0
     manager.capture_previous_context.assert_not_called()
 

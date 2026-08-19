@@ -201,7 +201,7 @@ class DpsSessionSettings:
     monitor_interval_seconds: int = 60
     keepalive_interval_minutes: int = 40
     keepalive_urgent_minutes: int = 55
-    keepalive_retry_cooldown_minutes: int = 5
+    keepalive_retry_cooldown_minutes: int = 40
     passive_idle_enabled: bool = True
     passive_monitor_enabled: bool = True
     on_demand_connect_enabled: bool = True
@@ -228,7 +228,7 @@ class DpsSessionSettings:
                 "DPS_SESSION_KEEPALIVE_URGENT_MINUTES", 55, minimum=10
             ),
             keepalive_retry_cooldown_minutes=_env_int(
-                "DPS_SESSION_KEEPALIVE_RETRY_COOLDOWN_MINUTES", 5, minimum=1
+                "DPS_SESSION_KEEPALIVE_RETRY_COOLDOWN_MINUTES", 40, minimum=1
             ),
             passive_idle_enabled=get_env_bool(
                 "DPS_PASSIVE_IDLE_ENABLED", default=True

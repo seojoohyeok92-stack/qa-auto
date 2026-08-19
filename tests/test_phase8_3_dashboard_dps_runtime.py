@@ -27,7 +27,7 @@ def add_inquiry(
     order_id: str | None = "2026073000000001",
     product_order_id: str | None = "2026073000000099",
     order_date: str | None = "2026-07-25",
-    content: str = "일반 문의입니다.",
+    content: str = "언제 설치되나요?",
 ) -> int:
     inquiry_id = InquiryRepository(database).upsert_work_item(
         {

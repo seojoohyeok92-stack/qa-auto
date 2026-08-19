@@ -1103,8 +1103,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     )
     if not inquiry_analysis.requires_order_lookup:
         st.info(
-            "이 문의는 배송·설치 문의가 아니므로 주문 및 DPS 조회 없이 "
-            "답변을 생성합니다."
+            "주문번호는 보존되며, 이 문의 의도에는 주문 및 DPS 조회 없이 "
+            "답변을 생성합니다(조회 불필요)."
         )
     elif not inquiry_analysis.order_id_validated:
         st.info(
@@ -1224,12 +1224,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
         if phase9_analysis:
+            displayed_order_id = str(inquiry.get("order_id") or "").strip()
             st.caption(
                 " · ".join(
                     (
                         f"유형: {phase9_analysis.get('inquiry_type') or '-'}",
                         f"전략: {phase9_analysis.get('answer_strategy') or '-'}",
-                        f"주문번호: {phase9_analysis.get('order_id_status') or '-'}",
+                        f"주문번호: {displayed_order_id or phase9_analysis.get('order_id_status') or '-'}",
+                        "DPS 조회: 필요"
+                        if phase9_analysis.get("requires_dps_lookup")
+                        else "DPS 조회: 불필요",
                         "직원 검토 필요"
                         if phase9_analysis.get("manual_review_required")
                         or phase9_validator.get("status") == "REVIEW_REQUIRED"
@@ -2561,7 +2565,13 @@ def _render_inquiry_detail(
     if database is not None and inquiry.get("id") is not None:
         analysis = detail_plan or _processing_plan_for_inquiry(database, inquiry)
         if not analysis.requires_order_lookup:
-            st.info("이 문의의 주문 조회 단계는 해당 없음(SKIPPED)입니다.")
+            if analysis.order_id:
+                st.info(
+                    f"주문번호 {analysis.order_id}는 보존되어 있으며, "
+                    "이 문의 의도에는 주문 조회가 필요하지 않습니다 (SKIPPED)."
+                )
+            else:
+                st.info("이 문의의 주문 조회 단계는 해당 없음(SKIPPED)입니다.")
             return
         result_key = f"dashboard_order_result_{inquiry['id']}"
         order_columns = st.columns([1.15, 1.85], gap="small")
@@ -2622,7 +2632,10 @@ def _dps_status_label(
     in_progress: bool,
     has_order_id: bool,
     has_order_date: bool,
+    lookup_required: bool = True,
 ) -> str:
+    if not lookup_required:
+        return "조회 불필요"
     if in_progress:
         return "조회 중"
     if not has_order_id or not has_order_date:
@@ -2637,13 +2650,18 @@ def _dps_status_label(
         return "조회 성공 / 결과 없음"
     if status == "AGENT_OFFLINE":
         return "Agent 연결 실패"
-    if status == "TIMEOUT":
+    if status == "TIMEOUT" or "TIMEOUT" in error_code:
         return "timeout"
-    if any(
-        marker in error_code
-        for marker in ("LOGIN", "OTP", "DPS_TAB", "CHROME")
-    ):
+    if any(marker in error_code for marker in ("LOGIN", "OTP")):
         return "로그인 필요"
+    if any(marker in error_code for marker in ("DPS_TAB", "CHROME")):
+        return "DPS 탭 없음"
+    if "PAGE" in error_code or "NAVIGATION" in error_code:
+        return "DPS 화면 준비 안 됨"
+    if any(marker in error_code for marker in ("ELEMENT", "INPUT_NOT_FOUND")):
+        return "DPS UI 요소 없음"
+    if "AUTOMATION" in error_code:
+        return "DPS 자동화 오류"
     return "오류"
 
 
@@ -2667,6 +2685,10 @@ def _dps_error_message(
         return "Chrome에서 DPS 로그인을 먼저 완료해 주세요."
     if any(marker in code for marker in ("CHROME", "DPS_TAB")):
         return "DPS가 열린 Chrome 창을 먼저 연결해 주세요."
+    if "PAGE" in code or "NAVIGATION" in code:
+        return "DPS 로그인 상태는 유지되지만 주문조회 화면 준비에 실패했습니다."
+    if any(marker in code for marker in ("ELEMENT", "INPUT_NOT_FOUND")):
+        return "DPS 로그인 상태는 유지되지만 필요한 조회 UI 요소를 찾지 못했습니다."
     if code in {"NO_DPS_RESULT", "LOOKUP_RESULT_NOT_FOUND"}:
         return "주문번호에 해당하는 DPS 결과가 없습니다."
     if error is not None:
@@ -2686,6 +2708,14 @@ def _render_dps(database: Database, inquiry: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
         st.info("이 문의의 DPS 조회 단계는 해당 없음(SKIPPED)입니다.")
+        st.markdown(
+            '<div class="official-fields two">'
+            + _field("조회상태", "조회 불필요")
+            + _field("주문번호", analysis.order_id or "-")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        return
     repository = DpsRepository(database)
     progress_by_inquiry = _inquiry_session_map("dps_lookup_in_progress")
     result_by_inquiry = _inquiry_session_map("dps_result")
@@ -2711,6 +2741,7 @@ def _render_dps(database: Database, inquiry: dict[str, Any]) -> None:
         in_progress=in_progress,
         has_order_id=bool(order_id) and not order_is_product,
         has_order_date=bool(order_date),
+        lookup_required=analysis.requires_dps_lookup,
     )
     cache_used = (
         bool(latest.get("cached"))

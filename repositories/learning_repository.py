@@ -335,7 +335,10 @@ class LearningRepository:
         return [self._row(row) for row in rows if row is not None]
 
     def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
-        safe_limit = max(1, min(int(limit), 500))
+        # The live store has more than 500 ACTIVE rows.  Callers that perform
+        # relevance ranking must be able to inspect the complete usable pool;
+        # the default remains bounded for legacy/style aggregation callers.
+        safe_limit = max(1, min(int(limit), 2000))
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         with self.database.connection() as connection:
             rows = connection.execute(
@@ -378,6 +381,48 @@ class LearningRepository:
             if (item := self._row(row)) is not None
             and is_learning_usable(item)
         ][:safe_limit]
+
+    def candidate_diagnostics(self, *, store_code: str | None) -> dict[str, int]:
+        """Summarize why rows cannot enter the ACTIVE Positive candidate pool."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM learning_examples
+                WHERE store_code=? OR store_code IS NULL OR ? IS NULL
+                """,
+                (store_code, store_code),
+            ).fetchall()
+        counts = {
+            "repository_rows": len(rows),
+            "active_candidates": 0,
+            "filtered_by_validity": 0,
+            "revoked": 0,
+            "negative_excluded": 0,
+        }
+        for raw in rows:
+            item = self._row(raw)
+            if item is None:
+                continue
+            metadata = item.get("metadata_json")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            signal = str(metadata.get("learning_signal_type") or "POSITIVE").upper()
+            if signal != "POSITIVE":
+                counts["negative_excluded"] += 1
+                continue
+            if not item.get("active"):
+                if metadata.get("verification_revoked") or str(
+                    metadata.get("learning_status") or ""
+                ).upper() == "REVOKED":
+                    counts["revoked"] += 1
+                else:
+                    counts["negative_excluded"] += 1
+                continue
+            if not is_learning_usable(item):
+                counts["filtered_by_validity"] += 1
+                continue
+            counts["active_candidates"] += 1
+        return counts
 
     def update_validity(
         self,

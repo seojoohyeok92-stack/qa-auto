@@ -535,9 +535,11 @@ class DpsWindowsAgent:
         )
 
     def _record_gui_operation(self, operation_type: str) -> None:
+        normalized = str(operation_type or "UNKNOWN").upper()[:100]
         self.last_gui_operation_at = now_iso()
-        self.last_gui_operation_type = str(operation_type or "UNKNOWN")[:100]
+        self.last_gui_operation_type = normalized
         self._save_state()
+        LOGGER.info("DPS_UI_ACTIVATION reason=%s", normalized)
 
     @staticmethod
     def _monitor_status_for(
@@ -654,6 +656,7 @@ class DpsWindowsAgent:
     def _keepalive_retry_snapshot(
         self,
         *,
+        interval_seconds: int | None = None,
         now_epoch: float | None = None,
     ) -> tuple[str | None, bool]:
         attempt_epoch = _iso_epoch(self.last_keepalive_attempt_at)
@@ -668,6 +671,11 @@ class DpsWindowsAgent:
         cooldown_seconds = max(
             60,
             self.session_settings.keepalive_retry_cooldown_minutes * 60,
+            int(
+                interval_seconds
+                if interval_seconds is not None
+                else self.session_settings.keepalive_interval_minutes * 60
+            ),
         )
         retry_due_epoch = attempt_epoch + cooldown_seconds
         current = time.time() if now_epoch is None else float(now_epoch)
@@ -819,7 +827,9 @@ class DpsWindowsAgent:
                 if keepalive_enabled and not due:
                     LOGGER.info("DPS_KEEPALIVE_SKIPPED reason=RECENT_ACTIVITY")
                 return passive_result
-            retry_due_at, retry_deferred = self._keepalive_retry_snapshot()
+            retry_due_at, retry_deferred = self._keepalive_retry_snapshot(
+                interval_seconds=keepalive_interval_seconds
+            )
             if not force_keepalive and retry_deferred:
                 urgent = self._keepalive_is_urgent()
                 reason = (
@@ -841,7 +851,10 @@ class DpsWindowsAgent:
                     "keepalive_retry_deferred": True,
                     "keepalive_retry_due_at": retry_due_at,
                     "keepalive_retry_cooldown_seconds": (
-                        self.session_settings.keepalive_retry_cooldown_minutes * 60
+                        max(
+                            self.session_settings.keepalive_retry_cooldown_minutes * 60,
+                            int(keepalive_interval_seconds),
+                        )
                     ),
                     "keepalive_deferred_reason": self.keepalive_deferred_reason,
                     "keepalive_urgency": (
@@ -2114,7 +2127,10 @@ class DpsWindowsAgent:
             keepalive_retry_due_at=keepalive_retry_due_at,
             keepalive_retry_deferred=keepalive_retry_deferred,
             keepalive_retry_cooldown_seconds=(
-                self.session_settings.keepalive_retry_cooldown_minutes * 60
+                max(
+                    self.session_settings.keepalive_retry_cooldown_minutes * 60,
+                    self.session_settings.keepalive_interval_minutes * 60,
+                )
             ),
             consecutive_keepalive_failures=self.consecutive_keepalive_failures,
             keepalive_lock_skips=self.keepalive_lock_skips,

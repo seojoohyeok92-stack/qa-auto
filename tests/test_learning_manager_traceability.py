@@ -4,6 +4,7 @@ from streamlit.testing.v1 import AppTest
 
 from answer.learning_feedback import CorrectionReason
 from answer.models import AnswerResult, AnswerStatus
+from core.time_utils import to_kst
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
@@ -426,3 +427,98 @@ render_learning_manager(db)
     )
     assert not app.exception
     assert app.session_state["learning_manager_positive_selected_id"] == expected_id
+
+
+def test_learning_manager_all_local_reruns_keep_manager_route(tmp_path) -> None:
+    database = Database(tmp_path / "learning-manager-route.db")
+    database.initialize()
+    for index in range(25):
+        _approved_staff_learning(
+            tmp_path, database=database, name=f"route-{index:02d}"
+        )
+    app = AppTest.from_string(
+        f'''
+import streamlit as st
+from repositories.database import Database
+from ui.learning_manager import render_learning_manager
+st.session_state.setdefault("current_page", "learning")
+st.session_state.setdefault("production_admin_mode", True)
+if st.session_state.get("current_page") == "learning" and st.session_state.get("production_admin_mode"):
+    db=Database(r"{database.path}")
+    db.initialize()
+    render_learning_manager(db)
+else:
+    st.title("Dashboard Home")
+'''
+    ).run(timeout=40)
+
+    next_button = next(
+        item for item in app.button
+        if item.key == "learning_manager_positive_next"
+    )
+    next_button.click()
+    app = app.run(timeout=40)
+    assert not app.exception
+    assert app.session_state["current_page"] == "learning"
+    assert app.title[0].value == "Learning Manager"
+    assert app.session_state["learning_manager_positive_page"] == 2
+
+    validity_filter = next(
+        item for item in app.selectbox if item.key == "learning_manager_validity"
+    )
+    validity_filter.set_value("PERMANENT")
+    app = app.run(timeout=40)
+    assert not app.exception
+    assert app.session_state["current_page"] == "learning"
+    assert app.title[0].value == "Learning Manager"
+
+
+def test_temporary_validity_fields_save_restore_and_keep_route(tmp_path) -> None:
+    database, _, _ = _approved_staff_learning(tmp_path)
+    learning_id = int(LearningRepository(database).manager_rows()[0]["id"])
+    app = AppTest.from_string(
+        f'''
+import streamlit as st
+from repositories.database import Database
+from ui.learning_manager import render_learning_manager
+st.session_state.setdefault("current_page", "learning")
+st.session_state.setdefault("production_admin_mode", True)
+db=Database(r"{database.path}")
+db.initialize()
+render_learning_manager(db)
+'''
+    ).run(timeout=40)
+
+    validity_type = next(
+        item for item in app.radio
+        if item.key == f"learning_manager_positive_validity_type_{learning_id}"
+    )
+    validity_type.set_value("TEMPORARY")
+    app = app.run(timeout=40)
+    event = next(item for item in app.text_input if item.label == "이벤트명")
+    event.set_value("삼성 감사제")
+    dates = {item.label: item for item in app.date_input}
+    dates["유효 시작일"].set_value("2026-08-01")
+    dates["유효 종료일"].set_value("2026-08-31")
+    note = next(item for item in app.text_area if item.label == "운영 메모")
+    note.set_value("행사 기간에만 사용하는 검증 답변")
+    save = next(item for item in app.button if item.label == "유효성 저장")
+    save.click()
+    app = app.run(timeout=40)
+
+    assert not app.exception
+    assert app.session_state["current_page"] == "learning"
+    assert app.title[0].value == "Learning Manager"
+    saved = LearningRepository(database).get(learning_id)
+    assert saved is not None
+    assert saved["validity_type"] == "TEMPORARY"
+    assert saved["event_name"] == "삼성 감사제"
+    assert to_kst(saved["valid_from"]).date().isoformat() == "2026-08-01"
+    assert to_kst(saved["valid_until"]).date().isoformat() == "2026-08-31"
+    assert saved["validity_note"] == "행사 기간에만 사용하는 검증 답변"
+
+    restored_event = next(item for item in app.text_input if item.label == "이벤트명")
+    restored_dates = {item.label: item.value for item in app.date_input}
+    assert restored_event.value == "삼성 감사제"
+    assert str(restored_dates["유효 시작일"]) == "2026-08-01"
+    assert str(restored_dates["유효 종료일"]) == "2026-08-31"
