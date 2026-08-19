@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import os
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock, Timer
@@ -65,6 +66,11 @@ class NaverAutoPostScheduler:
         self._started = False
         self._running = False
         self._started_event_logged = False
+        self._draft_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="qa-auto-draft",
+        )
+        self._draft_futures: dict[int, Future[Any]] = {}
 
     @property
     def started(self) -> bool:
@@ -172,6 +178,72 @@ class NaverAutoPostScheduler:
             )
             self._schedule(self.tick_seconds)
 
+    def _prewarm_pending_drafts(
+        self,
+        pipeline: AutoPostPipelineService,
+        *,
+        exclude_inquiry_ids: set[int],
+    ) -> None:
+        """Generate queued drafts concurrently while POST remains serial.
+
+        A slow DPS UI lookup must not occupy the only path capable of
+        classifying and drafting unrelated non-DPS inquiries. Chrome UI
+        interaction remains protected by the DPS Agent single-flight lock.
+        """
+        drafts = getattr(pipeline, "drafts", None)
+        ensure = getattr(drafts, "ensure_for_inquiry", None)
+        if not callable(ensure):
+            return
+        pending = self.events.pending_inquiry_ids(
+            exclude_inquiry_ids=exclude_inquiry_ids,
+            limit=25,
+        )
+        answer_service = getattr(drafts, "answer_service", None)
+        ranked: list[tuple[bool, int]] = []
+        for inquiry_id in pending:
+            requires_dps = False
+            try:
+                inquiry = answer_service.inquiries.get(inquiry_id)
+                if inquiry is not None:
+                    requires_dps = bool(
+                        answer_service.plans.create(
+                            inquiry
+                        ).requires_dps_lookup
+                    )
+            except Exception:
+                # Prewarming is an optimization. The canonical pipeline still
+                # performs every safety check if lightweight ranking fails.
+                requires_dps = False
+            ranked.append((requires_dps, inquiry_id))
+        with self._guard:
+            for requires_dps, inquiry_id in sorted(ranked):
+                if inquiry_id in self._draft_futures:
+                    continue
+                self._draft_futures[inquiry_id] = (
+                    self._draft_executor.submit(
+                        ensure,
+                        inquiry_id,
+                        correlation_id=f"prewarm-{uuid.uuid4()}",
+                    )
+                )
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "AUTOMATIC_DRAFT_PREWARM_QUEUED",
+                    "다른 문의의 DPS 조회와 독립적으로 초안 생성을 예약했습니다.",
+                    details={"requires_dps_lookup": requires_dps},
+                )
+
+    def _await_prewarmed_draft(self, inquiry_id: int) -> Any | None:
+        with self._guard:
+            future = self._draft_futures.get(int(inquiry_id))
+        if future is None:
+            return None
+        try:
+            return future.result()
+        finally:
+            with self._guard:
+                self._draft_futures.pop(int(inquiry_id), None)
+
     def run_once(
         self,
         *,
@@ -231,6 +303,11 @@ class NaverAutoPostScheduler:
                 claimed_any = True
                 inquiry_id = int(event["inquiry_id"])
                 processed_inquiry_ids.add(inquiry_id)
+                self._prewarm_pending_drafts(
+                    pipeline,
+                    exclude_inquiry_ids=processed_inquiry_ids,
+                )
+                prewarmed = self._await_prewarmed_draft(inquiry_id)
                 self.logs.record_inquiry(
                     inquiry_id,
                     "AUTO_SYNC_EVENT_PROCESSING",
@@ -238,13 +315,22 @@ class NaverAutoPostScheduler:
                     details={"event_id": event["id"], "trigger": trigger},
                 )
                 try:
-                    outcome = pipeline.run_pending(
-                        run_id=run_id,
-                        owner_id=self.owner_id,
-                        max_retries=int(settings["max_retries"]),
-                        inquiry_ids=[inquiry_id],
-                    )
-                    item = outcome.to_dict()
+                    if getattr(prewarmed, "status", None) == "FAILED":
+                        item = {
+                            "processed_count": 1,
+                            "succeeded_count": 0,
+                            "failed_count": 1,
+                            "unknown_count": 0,
+                            "skipped_count": 0,
+                        }
+                    else:
+                        outcome = pipeline.run_pending(
+                            run_id=run_id,
+                            owner_id=self.owner_id,
+                            max_retries=int(settings["max_retries"]),
+                            inquiry_ids=[inquiry_id],
+                        )
+                        item = outcome.to_dict()
                 except TypeError as error:
                     if "inquiry_ids" not in str(error):
                         raise

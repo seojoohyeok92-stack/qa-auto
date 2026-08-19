@@ -93,6 +93,27 @@ class PromptBuilder:
             "missing_information": ["string"],
             "requires_review": "boolean",
             "warnings": ["string"],
+            "learning_usage": [
+                {
+                    "learning_id": "integer",
+                    "matched_subquestion": "string",
+                    "answer_supported": "boolean",
+                    "reason": "string",
+                }
+            ],
+            "subquestion_results": [
+                {
+                    "subquestion": "string",
+                    "status": {
+                        "enum": [
+                            "ANSWERABLE", "NEEDS_DPS",
+                            "NO_RELIABLE_SOURCE", "CONFLICT",
+                        ]
+                    },
+                    "learning_ids": ["integer"],
+                    "answered": "boolean",
+                }
+            ],
         },
         "SELF_REVIEW": {
             "passed": "boolean",
@@ -211,6 +232,9 @@ class PromptBuilder:
                 ],
                 "seller_style_examples_are_facts": False,
                 "partial_answer_required_for_supported_subquestions": True,
+                "subquestion_evidence_is_binding": True,
+                "answerable_items_must_not_be_replaced_by_blanket_uncertainty": True,
+                "report_each_learning_id_actually_used": True,
             },
             "installation_date_instructions": (
                 [

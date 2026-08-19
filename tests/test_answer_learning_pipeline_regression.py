@@ -7,12 +7,14 @@ import pytest
 from answer.facts import AnswerFacts
 from answer.hybrid_models import Emotion, IntentResult
 from answer.inquiry_analysis import AnswerStrategy, InquiryType, OrderIdStatus
-from answer.models import AnswerRequest
+from answer.models import AnswerRequest, AnswerResult, AnswerStatus
+from answer.providers.fake_gpt_provider import FakeGptProvider
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_repository import LearningRepository
 from services.draft_generation_service import DraftGenerationService
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.hybrid_answer_service import HybridAnswerService
 from services.learning_context_service import LearningContextService
 
 
@@ -238,6 +240,14 @@ def test_known_active_learning_is_selected_attached_and_sent_to_provider(tmp_pat
     ).generate(facts(target_id, customer_question), intent)
     assert captured["context"]["similar_approved_answers"][0]["learning_example_id"] == learning_id
     assert result.answer == "검증된 설치 방식 안내입니다."
+    assert result.learning_usage == (
+        {
+            "learning_id": learning_id,
+            "matched_subquestion": customer_question,
+            "answer_supported": True,
+            "reason": "ANSWER_TEXT_MATCHED_ATTACHED_LEARNING",
+        },
+    )
 
 
 def test_compound_questions_retrieve_learning_per_subquestion(tmp_path) -> None:
@@ -278,6 +288,191 @@ def test_compound_questions_retrieve_learning_per_subquestion(tmp_path) -> None:
     assert all(item.get("matched_subquestion") for item in context["similar_approved_answers"])
 
 
+def test_compound_blanket_avoidance_recovers_only_learning_grounded_items(
+    tmp_path,
+) -> None:
+    database, source_id, target_id = make_database(tmp_path)
+    repository = LearningRepository(database)
+    install_id = add_learning(
+        repository,
+        source_id=source_id,
+        source_key="recover-install",
+        question="기사님이 설치해주시나요?",
+        answer="배송기사가 방문 설치하는 상품입니다.",
+    )
+    as_id = add_learning(
+        repository,
+        source_id=source_id,
+        source_key="recover-as",
+        question="7일 이후 A/S는 어디에 신청하나요?",
+        answer="7일 이후 제품 A/S는 제조사 서비스센터로 접수합니다.",
+    )
+    questions = (
+        "기사님이 설치까지 해주시나요?",
+        "7일 이후에는 어디에 A/S를 신청하나요?",
+        "현재 주문은 언제 설치되나요?",
+    )
+    intent = IntentResult(
+        "COMPOUND", questions, Emotion.NORMAL, "NORMAL", 0.95, False, ""
+    )
+    context = LearningContextService(database).build(
+        facts(target_id, " ".join(questions)), intent
+    )
+
+    class AvoidingProvider:
+        def generate_json(self, *, task, prompt, context):
+            return {
+                "answer": (
+                    "현재 확인된 정보만으로 안내하기 어렵습니다. "
+                    "판매처에 추가 확인해 주세요."
+                ),
+                "confidence": 0.4,
+                "used_facts": [],
+                "missing_information": list(questions),
+                "requires_review": True,
+                "warnings": [],
+            }
+
+    result = DraftGenerationService(
+        AvoidingProvider(), learning_context_provider=lambda *_: context
+    ).generate(facts(target_id, " ".join(questions)), intent)
+
+    assert "배송기사가 방문 설치" in result.answer
+    assert "제조사 서비스센터" in result.answer
+    assert "현재 주문은 언제 설치되나요?" in result.missing_information
+    assert {item["learning_id"] for item in result.learning_usage} == {
+        install_id,
+        as_id,
+    }
+    assert all(item["answer_supported"] for item in result.learning_usage)
+    assert result.learning_recovery_used is True
+    schedule = next(
+        item for item in result.subquestion_results
+        if item["subquestion"] == "현재 주문은 언제 설치되나요?"
+    )
+    assert schedule["status"] == "NEEDS_DPS"
+    assert schedule["answered"] is False
+
+
+def test_620_active_learning_ranks_five_relevant_and_uses_them(tmp_path) -> None:
+    database, source_id, target_id = make_database(tmp_path)
+    repository = LearningRepository(database)
+    relevant = (
+        ("scale-install", "기사님이 설치해주시나요?", "검증 설치 정책"),
+        ("scale-wall", "벽걸이 설치비가 포함되나요?", "검증 벽걸이 비용 정책"),
+        ("scale-as", "7일 이후 A/S는 어디에 신청하나요?", "검증 A/S 정책"),
+        ("scale-panel", "TV 패널이 LED인가요 QLED인가요?", "검증 패널 안내"),
+        ("scale-point", "네이버 포인트 적용되나요?", "검증 포인트 정책"),
+    )
+    relevant_ids = {
+        add_learning(
+            repository,
+            source_id=source_id,
+            source_key=key,
+            question=question,
+            answer=answer,
+        )
+        for key, question, answer in relevant
+    }
+    for index in range(615):
+        add_learning(
+            repository,
+            source_id=source_id,
+            source_key=f"irrelevant-{index}",
+            question=f"무관한 생활용품 색상 교환 포장 문의 {index}",
+            answer=f"무관 답변 {index}",
+        )
+    questions = (
+        "기사님이 오시면 설치까지 해주시나요?",
+        "벽걸이 설치 비용도 포함인가요?",
+        "일주일 뒤 A/S는 어디에 접수하나요?",
+        "패널은 LED QLED 중 무엇인가요?",
+        "네이버포인트 혜택도 적용되나요?",
+    )
+    intent = IntentResult(
+        "COMPOUND", questions, Emotion.NORMAL, "NORMAL", 0.95, False, ""
+    )
+    compound_facts = facts(target_id, " ".join(questions))
+    context = LearningContextService(database).build(compound_facts, intent)
+
+    assert context["learning_retrieval"]["candidate_count"] == 620
+    assert relevant_ids <= set(
+        context["learning_retrieval"]["selected_learning_ids"]
+    )
+
+    class AvoidingProvider:
+        def generate_json(self, *, task, prompt, context):
+            return {
+                "answer": "현재 확인된 정보만으로 안내하기 어렵습니다. 판매처에 확인해 주세요.",
+                "confidence": 0.3,
+                "used_facts": [],
+                "missing_information": list(questions),
+                "requires_review": True,
+                "warnings": [],
+            }
+
+    result = DraftGenerationService(
+        AvoidingProvider(), learning_context_provider=lambda *_: context
+    ).generate(compound_facts, intent)
+
+    assert relevant_ids == {
+        item["learning_id"] for item in result.learning_usage
+    }
+    assert len(result.learning_usage) == 5
+    assert all(answer in result.answer for _, _, answer in relevant)
+    assert "무관 답변" not in result.answer
+    assert result.requires_review is False
+
+    provider = FakeGptProvider(
+        responses={
+            "DRAFT": {
+                "answer": "현재 확인된 정보만으로 안내하기 어렵습니다. 판매처에 확인해 주세요.",
+                "confidence": 0.3,
+                "used_facts": [],
+                "missing_information": list(questions),
+                "requires_review": True,
+                "warnings": [],
+            }
+        }
+    )
+    hybrid = HybridAnswerService(
+        provider,
+        learning_context_provider=lambda *_: context,
+    ).generate(
+        AnswerRequest(
+            inquiry_id=target_id,
+            question_id="SCALE-HYBRID",
+            store_code="OJE_PLUS",
+            inquiry_type="CUSTOMER_INQUIRY",
+            question=" ".join(questions),
+            product_name="삼성 TV",
+            order_id=ORDER_ID,
+            metadata={
+                "dps": {
+                    "lookup_required": False,
+                    "lookup_status": "NOT_REQUIRED",
+                    "warnings": [],
+                }
+            },
+        ),
+        AnswerResult(
+            status=AnswerStatus.NEEDS_REVIEW,
+            category="COMPOUND",
+            reason="test fallback",
+            answer="직원 확인이 필요합니다.",
+            provider="rules",
+            auto_answerable=False,
+            needs_review=True,
+        ),
+    )
+    assert hybrid.fallback_used is False
+    assert hybrid.validation and hybrid.validation.passed
+    assert hybrid.result.provider == "fake_gpt_hybrid"
+    assert len(
+        hybrid.result.metadata["hybrid"]["draft"]["learning_usage"]
+    ) == 5
+
+
 def test_expired_temporary_learning_is_excluded_from_candidates(tmp_path) -> None:
     database, source_id, target_id = make_database(tmp_path)
     repository = LearningRepository(database)
@@ -305,6 +500,45 @@ def test_expired_temporary_learning_is_excluded_from_candidates(tmp_path) -> Non
     assert trace["rejection_counts"]["FILTERED_BY_VALIDITY"] == 1
     assert trace["selected_count"] == 0
     assert context["similar_approved_answers"] == []
+
+
+def test_current_order_date_is_never_recovered_from_learning(tmp_path) -> None:
+    database, source_id, target_id = make_database(tmp_path)
+    repository = LearningRepository(database)
+    add_learning(
+        repository,
+        source_id=source_id,
+        source_key="historical-current-date",
+        question="현재 주문은 언제 설치되나요?",
+        answer="2026년 8월 25일 설치 예정입니다.",
+    )
+    question = "현재 주문은 언제 설치되나요?"
+    intent = IntentResult(
+        "INSTALL_DATE", (question,), Emotion.NORMAL, "NORMAL", 0.95, False, ""
+    )
+    context = LearningContextService(database).build(
+        facts(target_id, question), intent
+    )
+    assert context["subquestion_evidence"][0]["status"] == "NEEDS_DPS"
+    assert context["subquestion_evidence"][0]["learning_ids"] == []
+
+    class Provider:
+        def generate_json(self, *, task, prompt, context):
+            return {
+                "answer": "현재 확인된 정보만으로 안내하기 어렵습니다. 추가 확인이 필요합니다.",
+                "confidence": 0.3,
+                "used_facts": [],
+                "missing_information": [question],
+                "requires_review": True,
+                "warnings": [],
+            }
+
+    result = DraftGenerationService(
+        Provider(), learning_context_provider=lambda *_: context
+    ).generate(facts(target_id, question), intent)
+    assert "2026년 8월 25일" not in result.answer
+    assert result.learning_usage == ()
+    assert result.learning_recovery_used is False
 
 
 @pytest.mark.parametrize(

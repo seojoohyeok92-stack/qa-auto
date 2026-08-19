@@ -171,6 +171,7 @@ def test_hybrid_emits_required_success_events() -> None:
         "GPT_RESPONSE_NORMALIZED",
         "GPT_RESPONSE_RECEIVED",
         "GPT_DRAFT_CREATED",
+        "LEARNING_ANSWER_USAGE_EVALUATED",
         "GPT_PROVIDER_FINISHED",
         "GPT_SELF_REVIEW",
         "GPT_VALIDATOR_STARTED",

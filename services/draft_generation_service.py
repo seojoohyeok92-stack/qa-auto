@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from answer.facts import AnswerFacts
@@ -90,7 +91,182 @@ class DraftGenerationService:
             ),
             context=self.prompt_builder.safe_payload(context),
         )
+        raw = self._apply_learning_grounded_recovery(
+            raw, learning_context
+        )
         return self.parse(raw)
+
+    @staticmethod
+    def _apply_learning_grounded_recovery(
+        raw: dict[str, Any],
+        learning_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Recover only policy/product subquestions grounded by Active Learning.
+
+        This deliberately cannot supply a current order status or date.  It is
+        used when the provider received mapped, verified Learning but still
+        returned one blanket uncertainty answer for every sub-question.
+        """
+
+        if not isinstance(raw, dict):
+            return raw
+        approved = {
+            int(item["learning_example_id"]): item
+            for item in learning_context.get(
+                "similar_approved_answers", []
+            )
+            if item.get("learning_example_id") is not None
+        }
+        evidence = list(
+            learning_context.get("subquestion_evidence") or []
+        )
+        answerable = [
+            item for item in evidence
+            if item.get("status") == "ANSWERABLE"
+            and item.get("learning_ids")
+        ]
+        if not approved or not answerable:
+            return raw
+
+        reported_usage = raw.get("learning_usage")
+        valid_usage = []
+        if isinstance(reported_usage, list):
+            for item in reported_usage:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    learning_id = int(item.get("learning_id"))
+                except (TypeError, ValueError):
+                    continue
+                selected = approved.get(learning_id)
+                if selected is None:
+                    continue
+                matched = str(item.get("matched_subquestion") or "")
+                if matched != str(
+                    selected.get("matched_subquestion") or ""
+                ):
+                    continue
+                valid_usage.append(
+                    {
+                        "learning_id": learning_id,
+                        "matched_subquestion": matched,
+                        "answer_supported": bool(
+                            item.get("answer_supported")
+                        ),
+                        "reason": str(item.get("reason") or "")[:300],
+                    }
+                )
+        answer = str(raw.get("answer") or "")
+        avoidance_markers = (
+            "현재 확인된 정보만으로", "안내하기 어렵", "확인할 수 없",
+            "판매처에", "담당자 확인", "직원 검토", "추가 확인",
+        )
+        blanket_avoidance = sum(
+            marker in answer for marker in avoidance_markers
+        ) >= 2
+        if not valid_usage and answer and not blanket_avoidance:
+            # Providers predating the learning_usage contract may still use a
+            # selected answer verbatim. Record that as observed use instead of
+            # confusing retrieval/attachment with actual answer support.
+            for item in answerable:
+                question = str(item.get("subquestion") or "")
+                for learning_id in item.get("learning_ids") or []:
+                    selected = approved.get(int(learning_id))
+                    learned_answer = str(
+                        (selected or {}).get("answer") or ""
+                    ).strip()
+                    if learned_answer and learned_answer in answer:
+                        valid_usage.append(
+                            {
+                                "learning_id": int(learning_id),
+                                "matched_subquestion": question,
+                                "answer_supported": True,
+                                "reason": "ANSWER_TEXT_MATCHED_ATTACHED_LEARNING",
+                            }
+                        )
+                        break
+        if valid_usage and any(
+            item["answer_supported"] for item in valid_usage
+        ) and not blanket_avoidance:
+            copied = dict(raw)
+            copied["learning_usage"] = valid_usage
+            return copied
+        if not blanket_avoidance:
+            return raw
+
+        answer_parts: list[str] = []
+        usage: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        answered_questions: set[str] = set()
+        for item in answerable:
+            question = str(item.get("subquestion") or "").strip()
+            selected = next(
+                (
+                    approved.get(int(learning_id))
+                    for learning_id in item.get("learning_ids") or []
+                    if int(learning_id) in approved
+                ),
+                None,
+            )
+            learned_answer = str(
+                (selected or {}).get("answer") or ""
+            ).strip()
+            # Never recover time-dependent order facts from Learning.
+            if not learned_answer or re.search(
+                r"(?<!\d)20\d{2}[년./-]\s*\d{1,2}(?:[월./-]\s*\d{1,2}일?)?",
+                learned_answer,
+            ):
+                continue
+            learning_id = int(selected["learning_example_id"])
+            answer_parts.append(learned_answer)
+            answered_questions.add(question)
+            usage.append(
+                {
+                    "learning_id": learning_id,
+                    "matched_subquestion": question,
+                    "answer_supported": True,
+                    "reason": "ACTIVE_POSITIVE_LEARNING_GROUNDED_RECOVERY",
+                }
+            )
+
+        if not answer_parts:
+            return raw
+        for item in evidence:
+            question = str(item.get("subquestion") or "").strip()
+            results.append(
+                {
+                    "subquestion": question,
+                    "status": item.get("status"),
+                    "learning_ids": list(item.get("learning_ids") or []),
+                    "answered": question in answered_questions,
+                }
+            )
+        unresolved = [
+            str(item.get("subquestion") or "").strip()
+            for item in evidence
+            if str(item.get("subquestion") or "").strip()
+            not in answered_questions
+        ]
+        if unresolved:
+            answer_parts.append(
+                "그 외 현재 주문의 일정이나 확인 가능한 근거가 없는 항목은 "
+                "추가 확인이 필요합니다."
+            )
+        copied = dict(raw)
+        copied.update(
+            {
+                "answer": "\n\n".join(dict.fromkeys(answer_parts)),
+                "confidence": max(0.75, float(raw.get("confidence") or 0)),
+                "learning_usage": usage,
+                "subquestion_results": results,
+                "missing_information": unresolved,
+                "requires_review": bool(unresolved),
+                "warnings": list(raw.get("warnings") or [])
+                + ["LEARNING_GROUNDED_PARTIAL_RECOVERY"],
+                "learning_recovery_used": True,
+            }
+        )
+        return copied
 
     @staticmethod
     def parse(raw: dict[str, Any]) -> DraftResult:
@@ -112,4 +288,17 @@ class DraftGenerationService:
             missing_information=list_fields["missing_information"],
             requires_review=bool(raw.get("requires_review")),
             warnings=list_fields["warnings"],
+            learning_usage=tuple(
+                dict(item)
+                for item in raw.get("learning_usage", [])
+                if isinstance(item, dict)
+            ),
+            subquestion_results=tuple(
+                dict(item)
+                for item in raw.get("subquestion_results", [])
+                if isinstance(item, dict)
+            ),
+            learning_recovery_used=bool(
+                raw.get("learning_recovery_used")
+            ),
         )

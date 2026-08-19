@@ -203,6 +203,53 @@ def test_failures_are_distinct_and_need_attention(
     assert inquiry["workflow_status"] == "NEEDS_ATTENTION"
 
 
+def test_manual_dps_lookup_reopens_skipped_step_then_succeeds(
+    database: Database,
+) -> None:
+    inquiry_id = add_inquiry(database, "배송은 언제 오나요?")
+    workflows = WorkflowRepository(database)
+    workflows.skip_step(
+        inquiry_id,
+        StepCode.DPS_LOOKUP,
+        metadata={"reason": "PREVIOUS_PLAN_NOT_REQUIRED"},
+    )
+
+    outcome = service(database, FakeClient(success_response())).enrich(
+        request(inquiry_id, "배송은 언제 오나요?"),
+        force_refresh=True,
+    )
+
+    assert outcome.metadata["lookup_status"] == "SUCCESS"
+    assert workflows.get_step(
+        inquiry_id, StepCode.DPS_LOOKUP
+    )["step_status"] == "COMPLETED"
+
+
+def test_manual_dps_lookup_reopens_skipped_step_then_records_failure(
+    database: Database,
+) -> None:
+    inquiry_id = add_inquiry(database, "배송은 언제 오나요?")
+    workflows = WorkflowRepository(database)
+    workflows.skip_step(
+        inquiry_id,
+        StepCode.DPS_LOOKUP,
+        metadata={"reason": "PREVIOUS_PLAN_NOT_REQUIRED"},
+    )
+
+    outcome = service(
+        database,
+        FakeClient({"success": False, "code": "AGENT_READ_TIMEOUT"}),
+    ).enrich(
+        request(inquiry_id, "배송은 언제 오나요?"),
+        force_refresh=True,
+    )
+
+    assert outcome.metadata["lookup_status"] == "TIMEOUT"
+    assert workflows.get_step(
+        inquiry_id, StepCode.DPS_LOOKUP
+    )["step_status"] == "FAILED"
+
+
 def test_sensitive_raw_values_are_not_stored_or_logged(database: Database) -> None:
     inquiry_id = add_inquiry(database, "배송은 언제 오나요?")
     raw = success_response()
@@ -228,6 +275,41 @@ def test_success_date_is_in_answer_and_draft_is_saved(database: Database) -> Non
     assert "2026년 8월 3일" in outcome.result.answer
     assert outcome.result.metadata["dps"]["lookup_status"] == "SUCCESS"
     assert len(AnswerRepository(database).history_for_inquiry(inquiry_id)) == 1
+
+
+def test_promised_deadline_question_runs_dps_and_uses_authoritative_date(
+    database: Database,
+) -> None:
+    question = (
+        "예정일이 8/25일이라던 것 같은데 말일까지 가능할까요? "
+        "잊어먹고 있으면 오겠지 했는데 기다리다 지쳐가네요."
+    )
+    inquiry_id = add_inquiry(
+        database,
+        question,
+        source_id="PROMISED-DEADLINE-E2E",
+    )
+    client = FakeClient(success_response())
+
+    outcome = AnswerService(
+        database,
+        dps_enrichment=service(database, client),
+    ).generate_for_inquiry(inquiry_id)
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["order_id"] == "2026072912345678"
+    assert outcome.result.metadata["phase9"]["analysis"][
+        "detected_intent"
+    ] == "DELIVERY_DATE"
+    assert outcome.result.metadata["phase9"]["analysis"][
+        "order_id_status"
+    ] == "VALIDATED"
+    assert outcome.result.metadata["dps"]["lookup_status"] == "SUCCESS"
+    assert outcome.result.metadata["selected_answer_route"] == (
+        "DELIVERY_WITH_INSTALLATION_DATE"
+    )
+    assert "2026년 8월 3일" in outcome.result.answer
+    assert "8월 25일" not in outcome.result.answer
 
 
 def test_change_request_is_never_auto_answerable(database: Database) -> None:

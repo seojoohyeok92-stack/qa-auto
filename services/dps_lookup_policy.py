@@ -128,6 +128,12 @@ LOOKUP_PATTERNS = (
     "기사님 언제",
     "기사님 몇 시",
     "기사님 몇시",
+    # Promised-date/deadline wording seen in real Naver inquiries. These do
+    # not necessarily repeat the words 배송/설치 in every sentence.
+    "예정일",
+    "말일까지",
+    "기다리다 지쳐",
+    "기다리다",
 )
 
 
@@ -175,7 +181,29 @@ class DpsLookupPolicy:
         general_segments = tuple(
             segment for segment in segments if segment not in dps_segments
         )
-        required = bool(dps_segments) or requires_dps_lookup(request.question)
+        processing_plan = request.metadata.get("processing_plan")
+        processing_plan = (
+            processing_plan if isinstance(processing_plan, dict) else {}
+        )
+        plan_requires_dps = bool(
+            processing_plan.get("requires_dps_lookup")
+            and processing_plan.get("is_delivery")
+        )
+        required = bool(
+            dps_segments
+            or requires_dps_lookup(request.question)
+            or plan_requires_dps
+        )
+        if plan_requires_dps and required and not dps_segments:
+            # The canonical phase-9 analysis has already identified a
+            # schedule inquiry. The lower UI policy must not silently turn it
+            # back into NOT_REQUIRED merely because its legacy phrase list is
+            # narrower. Preserve partial-answer behavior whenever a matching
+            # segment exists; only use the full question as a last resort.
+            dps_segments = segments or (
+                (request.question,) if request.question else ()
+            )
+            general_segments = ()
         change = is_change_request(request.question)
         order_id = str(request.order_id or "").strip() or None
         if not required:

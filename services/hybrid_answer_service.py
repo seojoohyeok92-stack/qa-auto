@@ -343,6 +343,44 @@ class HybridAnswerService:
                     },
                 )
             )
+            events.append(
+                HybridEvent(
+                    "LEARNING_ANSWER_USAGE_EVALUATED",
+                    "선택 Learning의 실제 답변 근거 사용 여부를 확인했습니다.",
+                    level=(
+                        "WARNING"
+                        if draft.learning_recovery_used
+                        else "INFO"
+                    ),
+                    details={
+                        "used_count": sum(
+                            1
+                            for item in draft.learning_usage
+                            if item.get("answer_supported")
+                        ),
+                        "learning_usage": [
+                            {
+                                "learning_id": item.get("learning_id"),
+                                "matched_subquestion": item.get(
+                                    "matched_subquestion"
+                                ),
+                                "answer_supported": bool(
+                                    item.get("answer_supported")
+                                ),
+                                "reason": item.get("reason"),
+                            }
+                            for item in draft.learning_usage
+                        ],
+                        "subquestion_results": [
+                            dict(item)
+                            for item in draft.subquestion_results
+                        ],
+                        "learning_recovery_used": (
+                            draft.learning_recovery_used
+                        ),
+                    },
+                )
+            )
             if (
                 analysis is not None
                 and analysis.answer_strategy

@@ -147,6 +147,39 @@ class AutoPostEventRepository:
             ).fetchone()
         return dict(claimed) if claimed else None
 
+    def pending_inquiry_ids(
+        self,
+        *,
+        exclude_inquiry_ids: Iterable[int] = (),
+        limit: int = 25,
+    ) -> list[int]:
+        """Return queued inquiry ids without claiming their POST events."""
+        excluded = tuple(
+            dict.fromkeys(int(value) for value in exclude_inquiry_ids)
+        )
+        where = ""
+        parameters: list[Any] = []
+        if excluded:
+            where = " AND inquiry_id NOT IN ({})".format(
+                ",".join("?" for _ in excluded)
+            )
+            parameters.extend(excluded)
+        parameters.append(max(1, min(int(limit), 100)))
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT inquiry_id
+                FROM auto_sync_events
+                WHERE status IN ('PENDING','RETRY_BY_SCHEDULER')
+                  {where}
+                ORDER BY CASE status WHEN 'PENDING' THEN 0 ELSE 1 END,
+                         created_at, id
+                LIMIT ?
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return [int(row["inquiry_id"]) for row in rows]
+
     def complete(self, event_id: int, *, owner_id: str) -> bool:
         now = _stamp()
         with self.database.transaction() as connection:

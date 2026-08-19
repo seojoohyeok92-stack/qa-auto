@@ -288,6 +288,11 @@ def test_agent_completed_and_failed_states_are_saved() -> None:
             agent.lookup(request_id=request_id, order_id="order-1")
         assert agent.lookup_jobs[request_id]["job_status"] == expected
         assert agent.lookup_jobs[request_id]["completed_at"]
+        checkpoints = agent.lookup_jobs[request_id]["checkpoint_history"]
+        assert checkpoints[0]["checkpoint"] == "LOOKUP_REQUEST_RECEIVED"
+        assert checkpoints[-1]["checkpoint"] == "LOOKUP_RESPONSE_SENT"
+        assert all("elapsed_ms" in item for item in checkpoints)
+        assert all("total_elapsed_ms" in item for item in checkpoints)
 
 
 def test_agent_job_ttl_cleanup_preserves_running() -> None:

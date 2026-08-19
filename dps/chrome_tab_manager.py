@@ -534,7 +534,11 @@ class ChromeTabManager:
         foreground = self.foreground_hwnd()
         selected_title = self.selected_tab_title(candidate.window)
         address = self.current_address(candidate.window)
-        ui_matches = self.page_ui_matches_dps(candidate.window)
+        # The address, HWND and selected TabItem are the authoritative safety
+        # gates here.  A full descendant scan was diagnostic-only but this
+        # method is called repeatedly around every lookup interaction; on the
+        # real DPS page it added several seconds each time.
+        ui_matches = None
         selected_identity_matches = bool(
             selected_title
             and selected_title.casefold() == candidate.tab_title.casefold()

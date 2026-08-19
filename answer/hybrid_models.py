@@ -39,10 +39,16 @@ class DraftResult:
     missing_information: tuple[str, ...] = ()
     requires_review: bool = False
     warnings: tuple[str, ...] = ()
+    learning_usage: tuple[dict[str, Any], ...] = ()
+    subquestion_results: tuple[dict[str, Any], ...] = ()
+    learning_recovery_used: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for key in ("used_facts", "missing_information", "warnings"):
+        for key in (
+            "used_facts", "missing_information", "warnings",
+            "learning_usage", "subquestion_results",
+        ):
             result[key] = list(result[key])
         return result
 

@@ -2987,6 +2987,8 @@ class DpsUiAutomation:
                 "온라인판매 주문번호 입력에 실패했습니다.",
                 {"error": error.__class__.__name__},
             )
+        if progress_callback:
+            progress_callback("ORDER_NUMBER_ENTERED")
 
         # Rewalk the tree and resolve the field again; stale UIA objects are not trusted.
         verified_edit = self.find_order_edit(window)
@@ -3282,6 +3284,8 @@ class DpsUiAutomation:
                     ensure_ascii=False,
                 ),
             )
+            if progress_callback:
+                progress_callback("SEARCH_CLICKED")
         except Exception as error:
             self.logger.exception("조회 버튼 실행 실패")
             return self._failure(
@@ -3365,6 +3369,9 @@ class DpsUiAutomation:
             )
         if progress_callback:
             progress_callback("LIST_RESULT_FOUND")
+            progress_callback("SEARCH_RESULT_FOUND")
+            if parsed["data"].get("dps_sales_number"):
+                progress_callback("DPS_SALES_NUMBER_FOUND")
         detail_lookup = {
             "attempted": False,
             "opened": False,
@@ -4275,13 +4282,23 @@ class DpsUiAutomation:
         self._detail_invocation_count += 1
         if progress_callback:
             progress_callback("DETAIL_LINK_OPENING")
+            progress_callback("DPS_SALES_NUMBER_CLICK_STARTED")
+        control_type = self._safe_element_info_value(
+            link, "control_type"
+        )
         try:
-            try:
-                link.invoke()
-                lookup["open_method"] = "invoke"
-            except Exception:
+            if control_type == "Hyperlink" and callable(
+                getattr(link, "click_input", None)
+            ):
                 link.click_input()
                 lookup["open_method"] = "click_input"
+            else:
+                try:
+                    link.invoke()
+                    lookup["open_method"] = "invoke"
+                except Exception:
+                    link.click_input()
+                    lookup["open_method"] = "click_input"
             lookup["invocation_count"] = 1
         except Exception as error:
             lookup["status"] = "DETAIL_OPEN_FAILED"
@@ -4297,6 +4314,7 @@ class DpsUiAutomation:
         detail_url = ""
         marker_hits: list[str] = []
         was_new_window = False
+        alternate_retry_done = False
         while time.monotonic() < deadline:
             time.sleep(0.25)
             try:
@@ -4340,6 +4358,40 @@ class DpsUiAutomation:
                     break
             if detail_window is not None:
                 break
+            # Chromium UIA may report invoke/click success even when a
+            # JavaScript hyperlink did not receive the browser click.  Retry
+            # only this already-verified sales link once; never rerun the
+            # order search from the beginning.
+            if (
+                not alternate_retry_done
+                and time.monotonic() >= deadline - max(1.0, timeout / 2)
+            ):
+                alternate_retry_done = True
+                retry_link, retry_diagnostics = self.find_dps_sales_link(
+                    purchase_window,
+                    expected_order_id=expected_order_id,
+                    dps_sales_number=dps_sales_number,
+                    matched_row_index=matched_row_index,
+                )
+                diagnostics["detail_link_retry"] = retry_diagnostics
+                if retry_link is not None:
+                    try:
+                        if lookup.get("open_method") == "click_input":
+                            retry_link.invoke()
+                            lookup["retry_open_method"] = "invoke"
+                        else:
+                            retry_link.click_input()
+                            lookup["retry_open_method"] = "click_input"
+                        lookup["invocation_count"] = 2
+                        diagnostics["detail_retry_count"] = 1
+                        if progress_callback:
+                            progress_callback(
+                                "DPS_SALES_NUMBER_CLICK_RETRY"
+                            )
+                    except Exception as retry_error:
+                        diagnostics["detail_retry_error"] = (
+                            retry_error.__class__.__name__
+                        )
         if detail_window is None:
             lookup["status"] = "DETAIL_OPEN_TIMEOUT"
             diagnostics["detail_page_markers"] = marker_hits
@@ -4372,6 +4424,7 @@ class DpsUiAutomation:
         )
         if progress_callback:
             progress_callback("DETAIL_OPENED")
+            progress_callback("DPS_SALES_DETAIL_OPENED")
         detail: dict[str, Any] | None = None
         try:
             if progress_callback:
@@ -4380,6 +4433,18 @@ class DpsUiAutomation:
                 detail_window, url=detail_url
             )
             detail = dict(snapshot["parsed"])
+            detail_items = list(detail.get("detail_items") or [])
+            if progress_callback and detail_items:
+                progress_callback("ITEM_ROWS_FOUND")
+            required_dates = [
+                item.get("required_delivery_date")
+                for item in detail_items
+                if item.get("required_delivery_date")
+            ]
+            if progress_callback and required_dates:
+                progress_callback("REQUIRED_DELIVERY_DATES_PARSED")
+                if len(set(required_dates)) == 1:
+                    progress_callback("INSTALLATION_DATE_SELECTED")
             lookup["parsed"] = bool(
                 detail.get("customer_info")
                 or detail.get("detail_items")

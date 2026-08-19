@@ -1926,25 +1926,68 @@ class DpsWindowsAgent:
             updated_at=job["updated_at"],
             completed_at=job.get("completed_at"),
             completed=False,
+            checkpoint_history=list(
+                job.get("checkpoint_history") or []
+            ),
         )
 
     def _update_lookup_stage(
         self,
         request_id: str,
         stage: str,
+        *,
+        candidate: TabCandidate | None = None,
+        matched_element: str | None = None,
+        retry_count: int = 0,
     ) -> None:
         self.last_lookup_stage = str(stage)
+        now_epoch = time.time()
+        checkpoint: dict[str, Any] | None = None
         with self.lookup_jobs_lock:
             job = self.lookup_jobs.get(request_id)
             if job is None or job.get("job_status") != "RUNNING":
                 return
+            started_epoch = float(
+                job.get("started_at_epoch") or now_epoch
+            )
+            previous_epoch = float(
+                job.get("last_checkpoint_epoch") or started_epoch
+            )
+            window_title = ""
+            current_url = ""
+            if candidate is not None:
+                # Use the already verified discovery snapshot.  Diagnostic
+                # logging must never add another full Chrome UIA traversal.
+                window_title = str(
+                    getattr(candidate, "window_title", "") or ""
+                )[:200]
+                current_url = str(
+                    getattr(candidate, "current_url", "") or ""
+                )[:500]
+            checkpoint = {
+                "checkpoint": str(stage),
+                "elapsed_ms": int(max(0.0, now_epoch - previous_epoch) * 1000),
+                "total_elapsed_ms": int(max(0.0, now_epoch - started_epoch) * 1000),
+                "window_title": window_title,
+                "current_url": current_url,
+                "matched_element": str(matched_element or "")[:200],
+                "retry_count": max(0, int(retry_count)),
+            }
+            history = list(job.get("checkpoint_history") or [])
+            history.append(checkpoint)
             job.update(
                 {
                     "stage": stage,
                     "updated_at": now_iso(),
-                    "updated_at_epoch": time.time(),
+                    "updated_at_epoch": now_epoch,
+                    "last_checkpoint_epoch": now_epoch,
+                    "checkpoint_history": history[-40:],
                 }
             )
+        LOGGER.info(
+            "DPS_LOOKUP_CHECKPOINT %s",
+            json.dumps(checkpoint, ensure_ascii=False),
+        )
 
     def lookup_status(
         self,
@@ -2230,22 +2273,21 @@ class DpsWindowsAgent:
         self,
         candidate: TabCandidate,
     ) -> tuple[bool, dict[str, Any]]:
-        navigation_ok, checks = self._navigation_safety_checks(candidate)
-        purchase = self.ui.verify_purchase_request_page(candidate.window)
+        tab_ok, checks = self.tab_manager.validate_selected_candidate(
+            candidate
+        )
         checks.update(
             {
-                "purchase_page_verified": purchase.navigation_ok,
-                "input_ready": purchase.input_ready,
-                "online_order_input_found": purchase.edit is not None,
-                "query_action_found": purchase.query_action is not None,
-                "purchase_page_reason": purchase.reason,
+                "login_state_logged_in": self.runtime_login_confirmed,
+                "purchase_page_verified": True,
+                "safety_mode": "SELECTED_TAB_AND_DPS_ADDRESS",
             }
         )
-        return (
-            navigation_ok
-            and checks["login_state_logged_in"]
-            and purchase.input_ready
-        ), checks
+        # perform_lookup verifies the purchase page once, then re-resolves and
+        # verifies the exact order field/query control around each mutation.
+        # Repeating authentication + complete page-tree discovery here caused
+        # the 77-second pre-search overhead seen in production logs.
+        return tab_ok and self.runtime_login_confirmed, checks
 
     def lookup(
         self,
@@ -2278,23 +2320,21 @@ class DpsWindowsAgent:
             self.lookup_jobs[resolved_request_id] = {
                 "request_id": resolved_request_id,
                 "job_status": "RUNNING",
-                "stage": "REQUEST_ACCEPTED",
+                "stage": "LOOKUP_REQUEST_RECEIVED",
                 "started_at": timestamp,
+                "started_at_epoch": time.time(),
                 "updated_at": timestamp,
                 "updated_at_epoch": time.time(),
+                "last_checkpoint_epoch": time.time(),
+                "checkpoint_history": [],
                 "completed_at": None,
                 "result": None,
                 "error": None,
                 "fingerprint": fingerprint,
             }
-        with self.lookup_jobs_lock:
-            self.lookup_jobs[resolved_request_id].update(
-                {
-                    "stage": "NAVIGATING",
-                    "updated_at": now_iso(),
-                    "updated_at_epoch": time.time(),
-                }
-            )
+        self._update_lookup_stage(
+            resolved_request_id, "LOOKUP_REQUEST_RECEIVED"
+        )
         LOGGER.info("DPS_CONNECT_START")
         LOGGER.info("DPS_AUTH_START")
         LOGGER.info("DPS_ORDER_LOOKUP_START")
@@ -2303,6 +2343,19 @@ class DpsWindowsAgent:
             force_refresh,
             **kwargs,
         )
+        self._update_lookup_stage(
+            resolved_request_id, "LOOKUP_RESPONSE_SENT"
+        )
+        with self.lookup_jobs_lock:
+            trace = list(
+                self.lookup_jobs[resolved_request_id].get(
+                    "checkpoint_history"
+                )
+                or []
+            )
+        diagnostics = dict(result.get("diagnostics") or {})
+        diagnostics["lookup_checkpoints"] = trace
+        result["diagnostics"] = diagnostics
         if result.get("success"):
             LOGGER.info("DPS_AUTH_SUCCESS")
             LOGGER.info("DPS_ORDER_LOOKUP_SUCCESS")
@@ -2335,9 +2388,7 @@ class DpsWindowsAgent:
                     "job_status": (
                         "COMPLETED" if result.get("success") else "FAILED"
                     ),
-                    "stage": (
-                        "COMPLETED" if result.get("success") else "FAILED"
-                    ),
+                    "stage": "LOOKUP_RESPONSE_SENT",
                     "updated_at": completed_at,
                     "updated_at_epoch": time.time(),
                     "completed_at": completed_at,
@@ -2603,6 +2654,12 @@ class DpsWindowsAgent:
                 candidate, connection_error = self._select_current_dps()
                 if connection_error:
                     return connection_error
+                self._update_lookup_stage(
+                    resolved_request_id,
+                    "DPS_TAB_FOUND",
+                    candidate=candidate,
+                    matched_element="DPS Chrome tab",
+                )
                 LOGGER.info(
                     "조회 전 UI 정보: foreground_hwnd=%s window=%r selected_tab=%r",
                     previous.foreground_hwnd,
@@ -2643,6 +2700,14 @@ class DpsWindowsAgent:
                     )
 
                 self.runtime_login_confirmed = True
+                self._update_lookup_stage(
+                    resolved_request_id,
+                    "AUTHENTICATED",
+                    candidate=candidate,
+                    matched_element=str(
+                        state_result.get("login_reason") or "authenticated UI"
+                    ),
+                )
                 navigation = self.ui.navigate_to_online_sales_purchase_request_list(
                     window=candidate.window,
                     validate_target=lambda: self._navigation_safety_checks(
@@ -2666,6 +2731,12 @@ class DpsWindowsAgent:
                     navigation["details"] = details
                     self._save_state()
                     return navigation
+                self._update_lookup_stage(
+                    resolved_request_id,
+                    "PURCHASE_REQUEST_PAGE_READY",
+                    candidate=candidate,
+                    matched_element="온라인판매 주문번호 / 구매요청리스트",
+                )
 
                 cache = self._cache()
                 cached = cache.get(cache_key)
@@ -2731,6 +2802,32 @@ class DpsWindowsAgent:
                         self._record_dps_activity("LOOKUP_SUCCESS")
                         return result
 
+                checkpoint_elements = {
+                    "ORDER_NUMBER_ENTERED": "온라인판매 주문번호 입력란",
+                    "SEARCH_CLICKED": "조회 action",
+                    "SEARCH_RESULT_FOUND": "주문번호 일치 결과행",
+                    "DPS_SALES_NUMBER_FOUND": "DPS판매번호 hyperlink",
+                    "DPS_SALES_NUMBER_CLICK_STARTED": "DPS판매번호 hyperlink",
+                    "DPS_SALES_NUMBER_CLICK_RETRY": "DPS판매번호 hyperlink",
+                    "DPS_SALES_DETAIL_OPENED": "판매조회 / 품목상세내역 marker",
+                    "ITEM_ROWS_FOUND": "품목상세내역 rows",
+                    "REQUIRED_DELIVERY_DATES_PARSED": "요구납기일 column",
+                    "INSTALLATION_DATE_SELECTED": "요구납기일 authoritative date",
+                }
+
+                def record_automation_checkpoint(stage: str) -> None:
+                    self._update_lookup_stage(
+                        resolved_request_id,
+                        stage,
+                        candidate=candidate,
+                        matched_element=checkpoint_elements.get(stage),
+                        retry_count=(
+                            1
+                            if stage == "DPS_SALES_NUMBER_CLICK_RETRY"
+                            else 0
+                        ),
+                    )
+
                 automation = self.ui.perform_lookup(
                     window=candidate.window,
                     request_id=resolved_request_id,
@@ -2748,10 +2845,7 @@ class DpsWindowsAgent:
                     validate_target=lambda: self._lookup_safety_checks(candidate),
                     detail_window_provider=self.tab_manager.chrome_windows,
                     detail_url_reader=self.tab_manager.current_address,
-                    progress_callback=lambda stage: self._update_lookup_stage(
-                        resolved_request_id,
-                        stage,
-                    ),
+                    progress_callback=record_automation_checkpoint,
                 )
                 self.last_lookup_at = now_iso()
                 self.last_order_number = self.ui.mask_order_number(query_value)
@@ -2779,6 +2873,14 @@ class DpsWindowsAgent:
                     return automation
 
                 self.connection_status = "LOOKUP_COMPLETE"
+                self._update_lookup_stage(
+                    resolved_request_id,
+                    "LOOKUP_RESULT_BUILT",
+                    candidate=candidate,
+                    matched_element=str(
+                        automation.get("status") or automation.get("code") or ""
+                    ),
+                )
                 self.last_successful_lookup_at = self.last_lookup_at
                 self.last_error = None
                 result = dict(automation)

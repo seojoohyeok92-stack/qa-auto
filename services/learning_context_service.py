@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from answer.facts import AnswerFacts
@@ -82,6 +83,10 @@ class LearningContextService:
             for key in ("similar_approved_answers", "seller_style_examples"):
                 for item in item_context[key]:
                     item["matched_subquestion"] = question
+                    item["attached_to_prompt"] = True
+                    item["why_selected"] = (
+                        "ACTIVE_VALIDITY_AND_RELEVANCE_THRESHOLD"
+                    )
             trace = dict(item_context.get("learning_retrieval") or {})
             trace["product_fact_sensitive"] = question_guard.sensitive
             subquestion_traces.append(trace)
@@ -110,6 +115,76 @@ class LearningContextService:
             "seller_style_examples": seller,
             "oje_style_rules": contexts[0]["oje_style_rules"] if contexts else {},
         }
+        confirmed_schedule = bool(
+            facts.installation.get("installation_date_confirmed")
+            and facts.installation.get("date")
+        )
+        current_order_present = bool(
+            str(facts.order.get("order_id") or "").strip()
+        )
+        evidence_map: list[dict[str, Any]] = []
+        for question in questions:
+            approved_for_question = [
+                item for item in approved
+                if item.get("matched_subquestion") == question
+            ]
+            explicit_current_schedule = bool(
+                re.search(
+                    r"(?:예정일|도착일|배송일|설치일|말일까지|기다리다|"
+                    r"내\s*주문|주문한\s*(?:제품|상품))",
+                    question,
+                    re.IGNORECASE,
+                )
+            )
+            asks_when = bool(
+                re.search(
+                    r"언제\s*(?:오|도착|배송|설치)",
+                    question,
+                    re.IGNORECASE,
+                )
+            )
+            # "구매하면 며칠" 같은 구매 전 일반 배송정책은 Learning으로
+            # 답할 수 있다. 현재 주문번호가 있거나 명시적으로 현재 일정/약속
+            # 날짜를 묻는 경우만 DPS authoritative fact가 필요하다.
+            schedule_specific = bool(
+                explicit_current_schedule
+                or (current_order_present and asks_when)
+            )
+            if schedule_specific and not confirmed_schedule:
+                status = "NEEDS_DPS"
+                evidence_ids: list[int] = []
+                source = "CURRENT_DPS_REQUIRED"
+            elif confirmed_schedule and schedule_specific:
+                status = "ANSWERABLE"
+                evidence_ids = []
+                source = "CURRENT_DPS"
+            elif approved_for_question:
+                status = "ANSWERABLE"
+                evidence_ids = [
+                    int(item["learning_example_id"])
+                    for item in approved_for_question
+                ]
+                source = "ACTIVE_POSITIVE_LEARNING"
+            else:
+                status = "NO_RELIABLE_SOURCE"
+                evidence_ids = []
+                source = None
+            evidence_map.append(
+                {
+                    "subquestion": question,
+                    "status": status,
+                    "source": source,
+                    "learning_ids": evidence_ids,
+                    "answer_required": status == "ANSWERABLE",
+                }
+            )
+        context["subquestion_evidence"] = evidence_map
+        context["subquestion_answer_policy"] = {
+            "ANSWERABLE": "Answer directly from the mapped evidence.",
+            "NEEDS_DPS": "Do not use Learning as the current order date.",
+            "NO_RELIABLE_SOURCE": "Only this item may request confirmation.",
+            "CONFLICT": "Do not choose between conflicting sources.",
+        }
         selected_ids = [
             int(item["learning_example_id"])
             for item in (*context["similar_approved_answers"], *context["seller_style_examples"])
@@ -122,6 +197,17 @@ class LearningContextService:
             "active_candidates": candidate_diagnostics.get("active_candidates", 0),
             "selected_count": len(selected_ids),
             "selected_learning_ids": selected_ids,
+            "selected": [
+                {
+                    "learning_id": int(item["learning_example_id"]),
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": item.get("relevance"),
+                    "why_selected": item.get("why_selected"),
+                    "attached_to_prompt": True,
+                    "answer_supported": None,
+                }
+                for item in context["similar_approved_answers"]
+            ],
             "subquestion_count": len(questions),
             "subquestions": subquestion_traces,
             "rejection_counts": {
@@ -229,6 +315,7 @@ class LearningContextService:
                 details={
                     **retrieval,
                     "context_attached": bool(result_count),
+                    "subquestion_evidence": evidence_map,
                 },
             )
             self.logs.record_inquiry(

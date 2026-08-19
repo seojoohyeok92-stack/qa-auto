@@ -193,6 +193,19 @@ class DpsEnrichmentService:
         step = self.workflows.get_step(inquiry_id, StepCode.DPS_LOOKUP)
         status = StepStatus(step["step_status"])
         metadata = {"force_refresh": force_refresh}
+        if status is StepStatus.SKIPPED:
+            # SKIPPED describes the classification decision made for an
+            # earlier answer attempt.  An explicit/manual lookup is a new
+            # attempt and must reopen the durable step before it can finish.
+            self.workflows.reopen_skipped_step(
+                inquiry_id,
+                StepCode.DPS_LOOKUP,
+                metadata={
+                    **metadata,
+                    "reason": "EXPLICIT_DPS_LOOKUP_AFTER_SKIP",
+                },
+            )
+            status = StepStatus.PENDING
         if status is StepStatus.PENDING:
             self.workflows.start_step(
                 inquiry_id, StepCode.DPS_LOOKUP, metadata=metadata
@@ -216,6 +229,20 @@ class DpsEnrichmentService:
         status = StepStatus(step["step_status"])
         if status is StepStatus.COMPLETED:
             return
+        if status is StepStatus.SKIPPED:
+            self.workflows.reopen_skipped_step(
+                inquiry_id,
+                StepCode.DPS_LOOKUP,
+                metadata={
+                    **dict(metadata),
+                    "reason": "DPS_RESULT_AVAILABLE_AFTER_SKIP",
+                },
+            )
+            self.workflows.start_step(
+                inquiry_id,
+                StepCode.DPS_LOOKUP,
+                metadata=dict(metadata),
+            )
         if status in {StepStatus.FAILED, StepStatus.NEEDS_REVIEW}:
             self.workflows.retry_step(
                 inquiry_id, StepCode.DPS_LOOKUP, metadata=dict(metadata)
@@ -300,6 +327,21 @@ class DpsEnrichmentService:
             self.workflows.initialize_steps(inquiry_id)
             step = self.workflows.get_step(inquiry_id, StepCode.DPS_LOOKUP)
             current = StepStatus(step["step_status"])
+            if current is StepStatus.SKIPPED:
+                self.workflows.reopen_skipped_step(
+                    inquiry_id,
+                    StepCode.DPS_LOOKUP,
+                    metadata={
+                        **metadata,
+                        "reason": "DPS_REVIEW_REQUIRED_AFTER_SKIP",
+                    },
+                )
+                self.workflows.start_step(
+                    inquiry_id,
+                    StepCode.DPS_LOOKUP,
+                    metadata=metadata,
+                )
+                current = StepStatus.RUNNING
             if current in {StepStatus.FAILED, StepStatus.NEEDS_REVIEW}:
                 self.workflows.retry_step(
                     inquiry_id, StepCode.DPS_LOOKUP, metadata=metadata

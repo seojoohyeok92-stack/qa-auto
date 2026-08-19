@@ -496,6 +496,78 @@ def test_duplicate_order_cell_centers_fall_back_to_parsed_row():
     assert diagnostic["duplicate_order_cell_fallback"] is True
 
 
+def test_sales_hyperlink_opens_detail_and_parses_multiple_item_dates():
+    automation = DpsUiAutomation()
+    purchase_window, link = _list_window()
+    detail_window = Window(
+        [
+            Element("판매조회", "Text"),
+            Element("품목상세내역", "Text"),
+            Element("요구납기일", "Text"),
+        ],
+        handle=20,
+    )
+    calls = {"count": 0}
+
+    def windows():
+        calls["count"] += 1
+        return (
+            [purchase_window]
+            if calls["count"] == 1
+            else [purchase_window, detail_window]
+        )
+
+    parsed_items = [
+        {"required_delivery_date": "2026-08-25"},
+        {"required_delivery_date": "2026-08-26"},
+    ]
+    automation.collect_sales_detail_snapshot = Mock(
+        return_value={
+            "parsed": {
+                "customer_info": {},
+                "detail_items": parsed_items,
+            },
+            "headers": ["요구납기일"],
+            "rows": [["2026-08-25"], ["2026-08-26"]],
+        }
+    )
+    progress: list[str] = []
+
+    result = automation.lookup_sales_detail(
+        purchase_window=purchase_window,
+        list_snapshot={},
+        list_data={
+            "dps_sales_number": "SALE-1",
+            "dps_query_value": "NAVER-1",
+        },
+        list_diagnostics={
+            "matched_row_index": 0,
+            "raw_rows": [["NAVER-1", "SALE-1"]],
+        },
+        expected_order_id="NAVER-1",
+        window_provider=windows,
+        url_reader=lambda window: (
+            "https://dps2u.co.kr/dpsweb/sd010_0050_DP_SSearchSalesMain.do"
+            if window is detail_window
+            else "https://dps2u.co.kr/purchase"
+        ),
+        timeout=1,
+        progress_callback=progress.append,
+    )
+
+    assert result["detail_lookup"]["parsed"] is True
+    assert result["detail_lookup"]["status"] == "DETAIL_CLOSED"
+    assert result["detail_lookup"]["invocation_count"] == 1
+    assert result["detail"]["detail_items"] == parsed_items
+    link.click_input.assert_called_once()
+    link.invoke.assert_not_called()
+    assert "DPS_SALES_NUMBER_CLICK_STARTED" in progress
+    assert "DPS_SALES_DETAIL_OPENED" in progress
+    assert "ITEM_ROWS_FOUND" in progress
+    assert "REQUIRED_DELIVERY_DATES_PARSED" in progress
+    assert "INSTALLATION_DATE_SELECTED" not in progress
+
+
 def test_other_row_sales_number_is_excluded():
     window, link = _list_window()
     other = Element(

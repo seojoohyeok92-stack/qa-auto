@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.learning_provenance_repository import LearningProvenanceRepository
 from services.learning_performance_service import LearningPerformanceService
@@ -198,8 +199,27 @@ def render_answer_learning_provenance(
     database: Database, *, draft_id: int, outcome: str | None = None,
 ) -> None:
     rows = LearningProvenanceRepository(database).for_draft(int(draft_id))
+    draft = AnswerRepository(database).get(int(draft_id)) or {}
+    metadata = draft.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    hybrid = metadata.get("hybrid")
+    hybrid = hybrid if isinstance(hybrid, dict) else {}
+    generated = hybrid.get("draft")
+    generated = generated if isinstance(generated, dict) else {}
+    usage = generated.get("learning_usage")
+    usage = usage if isinstance(usage, list) else []
+    supported_ids = {
+        int(item["learning_id"])
+        for item in usage
+        if isinstance(item, dict)
+        and item.get("learning_id") is not None
+        and item.get("answer_supported")
+    }
     st.caption(
-        f"Learning 참고: 사용함 · {len(rows)}건"
+        (
+            f"Learning 참고: 선택 {len(rows)}건 · 답변 근거 사용 "
+            f"{len(supported_ids)}건"
+        )
         if rows
         else "Learning 참고: 없음"
     )
@@ -222,6 +242,11 @@ def render_answer_learning_provenance(
             display.append({
                 "참고 자료": label,
                 "유사도": round(float(row.get("relevance") or 0), 2),
+                "답변 근거 사용": (
+                    "사용"
+                    if row.get("learning_example_id") in supported_ids
+                    else "미사용"
+                ),
                 "결과": outcome or "결과 확인 중",
             })
         st.dataframe(display, hide_index=True, width="stretch")
