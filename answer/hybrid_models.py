@@ -40,6 +40,7 @@ class DraftResult:
     requires_review: bool = False
     warnings: tuple[str, ...] = ()
     learning_usage: tuple[dict[str, Any], ...] = ()
+    historical_usage: tuple[dict[str, Any], ...] = ()
     subquestion_results: tuple[dict[str, Any], ...] = ()
     learning_recovery_used: bool = False
 
@@ -47,7 +48,7 @@ class DraftResult:
         result = asdict(self)
         for key in (
             "used_facts", "missing_information", "warnings",
-            "learning_usage", "subquestion_results",
+            "learning_usage", "historical_usage", "subquestion_results",
         ):
             result[key] = list(result[key])
         return result

@@ -84,11 +84,13 @@ class Element:
 class Window:
     def __init__(self, elements: list[Element], handle: int = 10):
         self.elements = elements
+        self.descendants_calls = 0
         self.handle = handle
         self.element_info = SimpleNamespace(handle=handle)
         self.close = Mock()
 
     def descendants(self, control_type=None):
+        self.descendants_calls += 1
         if control_type is None:
             return list(self.elements)
         return [
@@ -99,6 +101,20 @@ class Window:
 
     def window_text(self):
         return "판매조회"
+
+
+def test_result_snapshot_reuses_one_accessibility_tree_walk() -> None:
+    root = Element(
+        "result", "Document", top=400, bottom=800,
+        automation_id="RootWebArea",
+    )
+    header = Element("DPS sales number", "HeaderItem", top=420, parent=root)
+    row = Element("3140000000", "DataItem", top=460, parent=root)
+    value = Element("3140000000", "Text", top=460, parent=row)
+    window = Window([root, header, row, value])
+    snapshot = DpsUiAutomation().collect_result_snapshot(window)
+    assert window.descendants_calls == 1
+    assert snapshot["raw_result_texts"]
 
 
 @pytest.mark.parametrize(

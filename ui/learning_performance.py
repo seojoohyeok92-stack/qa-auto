@@ -215,10 +215,33 @@ def render_answer_learning_provenance(
         and item.get("learning_id") is not None
         and item.get("answer_supported")
     }
+    historical_usage = generated.get("historical_usage")
+    historical_usage = historical_usage if isinstance(historical_usage, list) else []
+    supported_historical_ids = {
+        int(item["historical_case_id"])
+        for item in historical_usage
+        if isinstance(item, dict)
+        and item.get("historical_case_id") is not None
+        and item.get("answer_supported")
+    }
+    usage_reasons = {
+        ("HISTORICAL", int(item["historical_case_id"])): str(
+            item.get("reason") or "Provider 미선택"
+        )
+        for item in historical_usage
+        if isinstance(item, dict) and item.get("historical_case_id") is not None
+    }
+    usage_reasons.update({
+        ("LEARNING", int(item["learning_id"])): str(
+            item.get("reason") or "Provider 미선택"
+        )
+        for item in usage
+        if isinstance(item, dict) and item.get("learning_id") is not None
+    })
     st.caption(
         (
             f"Learning 참고: 선택 {len(rows)}건 · 답변 근거 사용 "
-            f"{len(supported_ids)}건"
+            f"{len(supported_ids) + len(supported_historical_ids)}건"
         )
         if rows
         else "Learning 참고: 없음"
@@ -229,6 +252,16 @@ def render_answer_learning_provenance(
             return
         display = []
         for row in rows:
+            reference_id = (
+                int(row["historical_case_id"])
+                if row["reference_kind"] == "HISTORICAL"
+                else int(row["learning_example_id"])
+            )
+            used = (
+                reference_id in supported_historical_ids
+                if row["reference_kind"] == "HISTORICAL"
+                else reference_id in supported_ids
+            )
             if row["reference_kind"] == "HISTORICAL":
                 label = f"Historical Case #{row['historical_case_id']}"
             else:
@@ -244,10 +277,17 @@ def render_answer_learning_provenance(
                 "유사도": round(float(row.get("relevance") or 0), 2),
                 "답변 근거 사용": (
                     "사용"
-                    if row.get("learning_example_id") in supported_ids
+                    if used
                     else "미사용"
                 ),
-                "결과": outcome or "결과 확인 중",
+                "결과": (
+                    "사용"
+                    if used
+                    else "미사용 - " + usage_reasons.get(
+                        (str(row["reference_kind"]), reference_id),
+                        outcome or "Provider 미선택",
+                    )
+                ),
             })
         st.dataframe(display, hide_index=True, width="stretch")
         st.caption("실제 답변 생성 Prompt Context에 포함된 자료만 표시합니다.")

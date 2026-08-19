@@ -270,7 +270,8 @@ class HistoricalCaseRepository:
         params.append(max(1, min(int(limit), 1000)))
         with self.database.connection() as connection:
             rows = connection.execute(
-                f"SELECT * FROM historical_cases WHERE {' AND '.join(clauses)} ORDER BY inquiry_created_at DESC, id DESC LIMIT ?",
+                f"SELECT * FROM historical_cases WHERE {' AND '.join(clauses)} "
+                "ORDER BY julianday(COALESCE(inquiry_created_at, answer_updated_at, imported_at, created_at)) DESC, id DESC LIMIT ?",
                 tuple(params),
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]

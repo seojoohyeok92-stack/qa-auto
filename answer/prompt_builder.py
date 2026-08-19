@@ -101,6 +101,14 @@ class PromptBuilder:
                     "reason": "string",
                 }
             ],
+            "historical_usage": [
+                {
+                    "historical_case_id": "integer",
+                    "matched_subquestion": "string",
+                    "answer_supported": "boolean",
+                    "reason": "string",
+                }
+            ],
             "subquestion_results": [
                 {
                     "subquestion": "string",
@@ -231,10 +239,13 @@ class PromptBuilder:
                     "current installation date",
                 ],
                 "seller_style_examples_are_facts": False,
+                "safe_historical_learning_allowed_for_stable_knowledge": True,
+                "historical_learning_forbidden_for_current_order_facts": True,
                 "partial_answer_required_for_supported_subquestions": True,
                 "subquestion_evidence_is_binding": True,
                 "answerable_items_must_not_be_replaced_by_blanket_uncertainty": True,
                 "report_each_learning_id_actually_used": True,
+                "report_each_historical_case_id_actually_used": True,
             },
             "installation_date_instructions": (
                 [

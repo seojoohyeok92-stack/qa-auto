@@ -94,7 +94,60 @@ class DraftGenerationService:
         raw = self._apply_learning_grounded_recovery(
             raw, learning_context
         )
+        raw = self._validate_historical_usage(raw, learning_context)
         return self.parse(raw)
+
+    @staticmethod
+    def _validate_historical_usage(
+        raw: dict[str, Any], learning_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            return raw
+        attached = {
+            int(item["historical_case_id"]): item
+            for item in learning_context.get("historical_cases", [])
+            if item.get("historical_case_id") is not None
+        }
+        valid: list[dict[str, Any]] = []
+        reported = raw.get("historical_usage")
+        if isinstance(reported, list):
+            for item in reported:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    case_id = int(item.get("historical_case_id"))
+                except (TypeError, ValueError):
+                    continue
+                selected = attached.get(case_id)
+                if selected is None:
+                    continue
+                matched = str(item.get("matched_subquestion") or "")
+                if matched != str(selected.get("matched_subquestion") or ""):
+                    continue
+                valid.append({
+                    "historical_case_id": case_id,
+                    "matched_subquestion": matched,
+                    "answer_supported": bool(item.get("answer_supported")),
+                    "reason": str(item.get("reason") or "")[:300],
+                })
+        if not valid:
+            answer = str(raw.get("answer") or "")
+            for case_id, selected in attached.items():
+                reference = str(
+                    selected.get("answer_reference") or ""
+                ).strip()
+                if reference and reference in answer:
+                    valid.append({
+                        "historical_case_id": case_id,
+                        "matched_subquestion": str(
+                            selected.get("matched_subquestion") or ""
+                        ),
+                        "answer_supported": True,
+                        "reason": "ANSWER_TEXT_MATCHED_ATTACHED_HISTORICAL",
+                    })
+        copied = dict(raw)
+        copied["historical_usage"] = valid
+        return copied
 
     @staticmethod
     def _apply_learning_grounded_recovery(
@@ -117,15 +170,21 @@ class DraftGenerationService:
             )
             if item.get("learning_example_id") is not None
         }
+        historical = {
+            int(item["historical_case_id"]): item
+            for item in learning_context.get("historical_cases", [])
+            if item.get("historical_case_id") is not None
+            and (item.get("eligibility") or {}).get("context_eligible")
+        }
         evidence = list(
             learning_context.get("subquestion_evidence") or []
         )
         answerable = [
             item for item in evidence
             if item.get("status") == "ANSWERABLE"
-            and item.get("learning_ids")
+            and (item.get("learning_ids") or item.get("historical_case_ids"))
         ]
-        if not approved or not answerable:
+        if (not approved and not historical) or not answerable:
             return raw
 
         reported_usage = raw.get("learning_usage")
@@ -196,6 +255,7 @@ class DraftGenerationService:
 
         answer_parts: list[str] = []
         usage: list[dict[str, Any]] = []
+        historical_usage: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
         answered_questions: set[str] = set()
         for item in answerable:
@@ -208,8 +268,18 @@ class DraftGenerationService:
                 ),
                 None,
             )
+            selected_historical = next(
+                (
+                    historical.get(int(case_id))
+                    for case_id in item.get("historical_case_ids") or []
+                    if int(case_id) in historical
+                ),
+                None,
+            )
             learned_answer = str(
-                (selected or {}).get("answer") or ""
+                (selected or {}).get("answer")
+                or (selected_historical or {}).get("answer_reference")
+                or ""
             ).strip()
             # Never recover time-dependent order facts from Learning.
             if not learned_answer or re.search(
@@ -217,17 +287,29 @@ class DraftGenerationService:
                 learned_answer,
             ):
                 continue
-            learning_id = int(selected["learning_example_id"])
             answer_parts.append(learned_answer)
             answered_questions.add(question)
-            usage.append(
-                {
-                    "learning_id": learning_id,
-                    "matched_subquestion": question,
-                    "answer_supported": True,
-                    "reason": "ACTIVE_POSITIVE_LEARNING_GROUNDED_RECOVERY",
-                }
-            )
+            if selected is not None:
+                learning_id = int(selected["learning_example_id"])
+                usage.append(
+                    {
+                        "learning_id": learning_id,
+                        "matched_subquestion": question,
+                        "answer_supported": True,
+                        "reason": "ACTIVE_POSITIVE_LEARNING_GROUNDED_RECOVERY",
+                    }
+                )
+            elif selected_historical is not None:
+                historical_usage.append(
+                    {
+                        "historical_case_id": int(
+                            selected_historical["historical_case_id"]
+                        ),
+                        "matched_subquestion": question,
+                        "answer_supported": True,
+                        "reason": "SAFE_HISTORICAL_GROUNDED_RECOVERY",
+                    }
+                )
 
         if not answer_parts:
             return raw
@@ -258,6 +340,7 @@ class DraftGenerationService:
                 "answer": "\n\n".join(dict.fromkeys(answer_parts)),
                 "confidence": max(0.75, float(raw.get("confidence") or 0)),
                 "learning_usage": usage,
+                "historical_usage": historical_usage,
                 "subquestion_results": results,
                 "missing_information": unresolved,
                 "requires_review": bool(unresolved),
@@ -291,6 +374,11 @@ class DraftGenerationService:
             learning_usage=tuple(
                 dict(item)
                 for item in raw.get("learning_usage", [])
+                if isinstance(item, dict)
+            ),
+            historical_usage=tuple(
+                dict(item)
+                for item in raw.get("historical_usage", [])
                 if isinstance(item, dict)
             ),
             subquestion_results=tuple(

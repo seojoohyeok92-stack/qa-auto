@@ -108,9 +108,10 @@ def render_historical_case_manager(database: Database) -> None:
 
     latest = repository.recent_runs(limit=1)
     summary = repository.summary()
+    runtime_audit = service.audit_corpus()
     top = st.columns(6, gap="small")
     top[0].metric("전체 사례", summary["total"])
-    top[1].metric("Context 사용 가능", summary["auto_usable"])
+    top[1].metric("Context 사용 가능", runtime_audit["runtime_context_usable"])
     top[2].metric("검증 Learning", summary["learning_enabled"])
     top[3].metric("학습 제외", summary["learning_excluded"])
     top[4].metric("기존 승격 보존", summary["promoted"])
@@ -263,6 +264,7 @@ def render_historical_case_manager(database: Database) -> None:
         date_from=datetime.combine(manage_start, time.min, UTC).isoformat(),
         date_to=datetime.combine(manage_end, time.max, UTC).isoformat(),
     )
+    st.caption("정렬: 실제 문의 접수시간 최신순 · 동률 ID 내림차순")
     if not cases:
         st.info("조건에 맞는 과거 사례가 없습니다.")
         return
@@ -273,13 +275,20 @@ def render_historical_case_manager(database: Database) -> None:
                 "유형": row["inquiry_type"], "문의": str(row["question"])[:100],
                 "답변 있음": bool(row.get("seller_answer")),
                 "품질": row["quality_score"], "정책 위험": row["policy_risk"],
-                "Context 사용 가능": bool(
-                    row.get("active")
-                    and row.get("seller_answer")
-                    and float(row.get("quality_score") or 0) >= 0.50
-                    and str(row.get("policy_risk") or "").upper()
-                    not in {"HIGH", "BLOCK", "BLOCKED"}
-                ),
+                "Context 사용 가능": service.quality_policy.assess(
+                    question=str(row.get("question") or ""),
+                    answer=str(row.get("seller_answer") or ""),
+                    stored_quality=float(row.get("quality_score") or 0),
+                    policy_risk=str(row.get("policy_risk") or "NONE"),
+                    active=bool(row.get("active")),
+                ).context_eligible,
+                "Runtime 판정": service.quality_policy.assess(
+                    question=str(row.get("question") or ""),
+                    answer=str(row.get("seller_answer") or ""),
+                    stored_quality=float(row.get("quality_score") or 0),
+                    policy_risk=str(row.get("policy_risk") or "NONE"),
+                    active=bool(row.get("active")),
+                ).status,
                 "학습 상태": "검증 Learning" if row["active"] else "제외됨",
                 "검증 Learning": bool(row.get("active")),
                 "작성일": row.get("inquiry_created_at"),

@@ -53,9 +53,61 @@ class LearningContextService:
         candidate_pool = self.search.repository.candidates(
             store_code=store_code, limit=2000
         )
+        repository_candidate_count = len(candidate_pool)
         candidate_diagnostics = self.search.repository.candidate_diagnostics(
             store_code=store_code
         )
+        safe_candidate_pool: list[dict[str, Any]] = []
+        learning_quality_rejections: dict[str, int] = {}
+        for candidate in candidate_pool:
+            metadata = candidate.get("metadata_json")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            eligibility = self.historical.quality_policy.assess(
+                question=str(candidate.get("question_original_masked") or ""),
+                answer=str(candidate.get("final_answer") or ""),
+                stored_quality=float(candidate.get("quality_score") or 0),
+                policy_risk=str(metadata.get("policy_risk") or "NONE"),
+                active=bool(candidate.get("active")),
+                structured_temporary_valid=(
+                    str(candidate.get("validity_type") or "PERMANENT").upper()
+                    == "TEMPORARY"
+                ),
+            )
+            source = str(candidate.get("learning_source") or "").upper()
+            source_origin = str(metadata.get("source_origin") or "").upper()
+            explicitly_approved = bool(
+                (
+                    source in {"APPROVED_EDITED", "APPROVED_UNEDITED"}
+                    or metadata.get("human_verified") is True
+                )
+                and source_origin != "HISTORICAL_PROMOTED"
+            )
+            approval_overrides_soft_quality = bool(
+                explicitly_approved
+                and eligibility.status in {
+                    "QUESTION_ANSWER_MISMATCH",
+                    "LOW_RELEVANCE",
+                    "REVIEW_REQUIRED",
+                }
+            )
+            if not eligibility.context_eligible and not approval_overrides_soft_quality:
+                learning_quality_rejections[eligibility.status] = (
+                    learning_quality_rejections.get(eligibility.status, 0) + 1
+                )
+                continue
+            copied = dict(candidate)
+            copied["runtime_eligibility"] = {
+                **eligibility.to_dict(),
+                "context_eligible": True,
+                "status": (
+                    "SAFE_REUSABLE_APPROVED"
+                    if approval_overrides_soft_quality
+                    else eligibility.status
+                ),
+                "approval_override": approval_overrides_soft_quality,
+            }
+            safe_candidate_pool.append(copied)
+        candidate_pool = safe_candidate_pool
         contexts: list[dict[str, Any]] = []
         subquestion_traces: list[dict[str, Any]] = []
         for question in questions:
@@ -122,10 +174,68 @@ class LearningContextService:
         current_order_present = bool(
             str(facts.order.get("order_id") or "").strip()
         )
+        historical_by_id: dict[int, dict[str, Any]] = {}
+        historical_traces: list[dict[str, Any]] = []
+        for question in questions:
+            detailed = self.historical.search_detailed(
+                question,
+                store_code=store_code,
+                product_name=product_name,
+                inquiry_type=inquiry_type,
+                limit=2 if len(questions) > 1 else 3,
+            )
+            historical_traces.append({
+                key: value for key, value in detailed.items()
+                if key != "selected"
+            })
+            for item in detailed["selected"]:
+                copied = dict(item)
+                copied["matched_subquestion"] = question
+                case_id = int(copied["id"])
+                if (
+                    case_id not in historical_by_id
+                    or float(copied.get("relevance") or 0)
+                    > float(historical_by_id[case_id].get("relevance") or 0)
+                ):
+                    historical_by_id[case_id] = copied
+        historical = sorted(
+            historical_by_id.values(),
+            key=lambda item: float(item.get("relevance") or 0),
+            reverse=True,
+        )[:3]
+        if guard.sensitive:
+            historical = [
+                item for item in historical
+                if same_stable_product(
+                    current_product_id=guard.product_id,
+                    candidate_product_id=item.get("product_id"),
+                    current_model_code=guard.model_code,
+                    candidate_model_code=None,
+                )
+            ]
+        learning_references = [
+            *context["similar_approved_answers"],
+            *context["seller_style_examples"],
+        ]
+        promoted_case_ids = {
+            int(item["historical_case_id"])
+            for item in learning_references
+            if item.get("historical_case_id") is not None
+        }
+        historical = [
+            item for item in historical
+            if int(item["id"]) not in promoted_case_ids
+        ][:3]
+
         evidence_map: list[dict[str, Any]] = []
         for question in questions:
+            historical_ids: list[int] = []
             approved_for_question = [
                 item for item in approved
+                if item.get("matched_subquestion") == question
+            ]
+            historical_for_question = [
+                item for item in historical
                 if item.get("matched_subquestion") == question
             ]
             explicit_current_schedule = bool(
@@ -165,16 +275,25 @@ class LearningContextService:
                     for item in approved_for_question
                 ]
                 source = "ACTIVE_POSITIVE_LEARNING"
+            elif historical_for_question:
+                status = "ANSWERABLE"
+                evidence_ids = []
+                historical_ids = [
+                    int(item["id"]) for item in historical_for_question
+                ]
+                source = "SAFE_HISTORICAL_LEARNING"
             else:
                 status = "NO_RELIABLE_SOURCE"
                 evidence_ids = []
                 source = None
+                historical_ids = []
             evidence_map.append(
                 {
                     "subquestion": question,
                     "status": status,
                     "source": source,
                     "learning_ids": evidence_ids,
+                    "historical_case_ids": historical_ids,
                     "answer_required": status == "ANSWERABLE",
                 }
             )
@@ -193,7 +312,8 @@ class LearningContextService:
             "query": original_question,
             "product": product_name,
             "inquiry_type": inquiry_type,
-            "candidate_count": len(candidate_pool),
+            "candidate_count": repository_candidate_count,
+            "safe_candidate_count": len(candidate_pool),
             "active_candidates": candidate_diagnostics.get("active_candidates", 0),
             "selected_count": len(selected_ids),
             "selected_learning_ids": selected_ids,
@@ -214,58 +334,34 @@ class LearningContextService:
                 "FILTERED_BY_VALIDITY": candidate_diagnostics.get("filtered_by_validity", 0),
                 "REVOKED": candidate_diagnostics.get("revoked", 0),
                 "NEGATIVE_EXCLUDED": candidate_diagnostics.get("negative_excluded", 0),
+                "FILTERED_BY_RUNTIME_QUALITY": sum(
+                    learning_quality_rejections.values()
+                ),
+                **learning_quality_rejections,
             },
         }
         context["learning_retrieval"] = retrieval
-        historical = self.historical.search(
-            original_question,
-            store_code=inquiry.get("store_code"),
-            product_name=inquiry.get("product_name") or facts.product.get("name"),
-            inquiry_type=inquiry.get("inquiry_type") or facts.inquiry.get("type"),
-            limit=5,
-        )
-        if guard.sensitive:
-            historical = [
-                item
-                for item in historical
-                if same_stable_product(
-                    current_product_id=guard.product_id,
-                    candidate_product_id=item.get("product_id"),
-                    current_model_code=guard.model_code,
-                    candidate_model_code=None,
-                )
-            ]
-        learning_references = [
-            *context["similar_approved_answers"],
-            *context["seller_style_examples"],
-        ]
-        promoted_case_ids = {
-            int(item["historical_case_id"])
-            for item in learning_references
-            if item.get("historical_case_id") is not None
-        }
-        # A legacy-promoted case may be available through both repositories.
-        # Include it once, through its existing Learning provenance route.
-        historical = [
-            item for item in historical
-            if int(item["id"]) not in promoted_case_ids
-        ][:3]
         context["historical_cases"] = [
             {
                 "historical_case_id": int(item["id"]),
                 "question": item.get("question"),
                 "answer_style_reference": item.get("seller_answer"),
+                "answer_reference": item.get("seller_answer"),
                 "quality": item.get("quality_score"),
                 "policy_risk": item.get("policy_risk"),
                 "usage_notice": item.get("usage_notice"),
                 "relevance": item.get("relevance"),
+                "matched_subquestion": item.get("matched_subquestion"),
+                "eligibility": item.get("runtime_eligibility"),
+                "attached_to_prompt": True,
                 "source": item.get("reference_strength")
                 or "HISTORICAL_VERIFIED_LEARNING",
             }
             for item in historical
         ]
         context["historical_case_policy"] = {
-            "reference_only": True,
+            "safe_reusable_knowledge_allowed": True,
+            "runtime_eligibility_required": True,
             "never_use_as_current_fact": True,
             "current_authority_order": [
                 "RULE_AND_SAFETY", "CURRENT_ORDER", "CURRENT_DPS",
@@ -288,6 +384,24 @@ class LearningContextService:
                 "CURRENT_INSTALLATION_DATE",
             ],
         }
+        context["historical_retrieval"] = {
+            "query": original_question,
+            "subquestion_count": len(questions),
+            "candidate_count": max(
+                (int(item.get("candidate_count") or 0) for item in historical_traces),
+                default=0,
+            ),
+            "safe_candidate_count": max(
+                (
+                    int(item.get("safe_candidate_count") or 0)
+                    for item in historical_traces
+                ),
+                default=0,
+            ),
+            "selected_count": len(historical),
+            "selected_historical_case_ids": [int(item["id"]) for item in historical],
+            "subquestions": historical_traces,
+        }
         if inquiry_id is not None:
             self.logs.record_inquiry(
                 int(inquiry_id),
@@ -308,13 +422,15 @@ class LearningContextService:
             result_count = len(context["similar_approved_answers"]) + len(
                 context["seller_style_examples"]
             )
+            historical_count = len(context["historical_cases"])
             self.logs.record_inquiry(
                 int(inquiry_id),
                 "LEARNING_RETRIEVAL_COMPLETED",
                 "Learning 후보 선택 결과를 기록했습니다.",
                 details={
                     **retrieval,
-                    "context_attached": bool(result_count),
+                    "context_attached": bool(result_count or historical_count),
+                    "historical_context_attached": bool(historical_count),
                     "subquestion_evidence": evidence_map,
                 },
             )
@@ -361,6 +477,7 @@ class LearningContextService:
                         "historical_case_ids": [
                             item["historical_case_id"] for item in context["historical_cases"]
                         ],
+                        "subquestions": historical_traces,
                     },
                 )
         return context

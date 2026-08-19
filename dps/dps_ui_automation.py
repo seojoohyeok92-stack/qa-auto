@@ -1423,7 +1423,10 @@ class DpsUiAutomation:
             for item in all_elements
             if self._safe_element_info_value(item, "control_type") == "Edit"
         ]
-        raw_edits.extend(self._elements(window, "Edit"))
+        # A Chromium accessibility walk is expensive.  Reuse the same tree;
+        # only fall back to the typed query when the raw walk yielded no Edit.
+        if not raw_edits:
+            raw_edits.extend(self._elements(window, "Edit"))
         edits: list[Any] = []
         seen_edits: set[Any] = set()
         for edit in raw_edits:
@@ -3183,7 +3186,18 @@ class DpsUiAutomation:
                 )
 
         edit = verified_edit
-        query_action = self.find_query_action(window, order_edit=edit)
+        query_action = None
+        if (
+            not period_diagnostics["date_range_required"]
+            and page.query_action is not None
+            and self._visible_enabled(page.query_action)
+        ):
+            # The page was structurally verified before input and no calendar
+            # rerender occurred.  A cheap live-state check is sufficient;
+            # stale controls still fall back to structural resolution.
+            query_action = page.query_action
+        if query_action is None:
+            query_action = self.find_query_action(window, order_edit=edit)
         if query_action is None:
             return self._failure(
                 "QUERY_ACTION_NOT_FOUND",
@@ -3212,10 +3226,14 @@ class DpsUiAutomation:
                 checks,
             )
         final_value = self._read_edit_value(edit)
-        final_wrong_matches = self._edits_with_value(
-            window,
-            query_value,
-            selected_edit=edit,
+        final_wrong_matches = (
+            self._edits_with_value(
+                window,
+                query_value,
+                selected_edit=edit,
+            )
+            if period_diagnostics["date_range_required"]
+            else wrong_field_matches
         )
         if (
             str(final_value or "").strip() != query_value.strip()
@@ -3901,9 +3919,13 @@ class DpsUiAutomation:
         except Exception:
             return None
 
-    def _detail_records(self, window: Any) -> list[dict[str, Any]]:
+    def _detail_records(
+        self, window: Any, *, elements: list[Any] | None = None
+    ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for element in self._all_descendants(window):
+        for element in (
+            elements if elements is not None else self._all_descendants(window)
+        ):
             control_type = self._safe_element_info_value(
                 element, "control_type"
             )
@@ -3951,8 +3973,12 @@ class DpsUiAutomation:
     def _detail_table(
         self,
         window: Any,
+        *,
+        elements: list[Any] | None = None,
     ) -> tuple[list[str], list[list[str]]]:
-        elements = self._all_descendants(window)
+        elements = (
+            elements if elements is not None else self._all_descendants(window)
+        )
         possible_headers = [
             element
             for element in elements
@@ -4057,8 +4083,11 @@ class DpsUiAutomation:
         *,
         url: str = "",
     ) -> dict[str, Any]:
-        records = self._detail_records(window)
-        headers, rows = self._detail_table(window)
+        # Parse records and table geometry from one accessibility snapshot.
+        # Two full Chromium walks added latency without adding freshness.
+        elements = self._all_descendants(window)
+        records = self._detail_records(window, elements=elements)
+        headers, rows = self._detail_table(window, elements=elements)
         parsed = parse_flat_detail(
             records,
             table_headers=headers,
@@ -4497,6 +4526,13 @@ class DpsUiAutomation:
 
     def collect_result_snapshot(self, window: Any) -> dict[str, Any]:
         all_elements = self._all_descendants(window)
+        elements_by_type: dict[str, list[Any]] = {}
+        for element in all_elements:
+            control_type = self._safe_element_info_value(
+                element, "control_type"
+            )
+            if control_type:
+                elements_by_type.setdefault(control_type, []).append(element)
         result_roots = [
             element
             for element in all_elements
@@ -4524,7 +4560,10 @@ class DpsUiAutomation:
         table_headers: list[str] = []
         table_rows: list[list[str]] = []
         for control_type in RESULT_CONTROL_TYPES:
-            for element in self._elements(window, control_type):
+            typed_elements = elements_by_type.get(control_type)
+            if typed_elements is None and not all_elements:
+                typed_elements = self._elements(window, control_type)
+            for element in typed_elements or []:
                 try:
                     is_visible = getattr(element, "is_visible", None)
                     if callable(is_visible) and not is_visible():
@@ -4612,7 +4651,7 @@ class DpsUiAutomation:
             ),
         }
         snapshot["fingerprint"] = repr(self._result_signature(snapshot))
-        self.result_logger.info(
+        self.result_logger.debug(
             "dps_result_snapshot elements=%s",
             json.dumps(
                 [self._mask_diagnostic_record(value) for value in records],

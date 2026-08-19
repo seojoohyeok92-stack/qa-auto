@@ -14,6 +14,9 @@ from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.learning_repository import LearningRepository
 from services.learning_privacy_service import LearningPrivacyService
+from services.historical_learning_quality_service import (
+    HistoricalLearningQualityService,
+)
 from services.similar_answer_service import TOKEN, normalize_learning_question
 
 if TYPE_CHECKING:
@@ -69,6 +72,7 @@ class HistoricalCaseService:
         self.database = database
         self.repository = HistoricalCaseRepository(database)
         self.privacy = LearningPrivacyService()
+        self.quality_policy = HistoricalLearningQualityService()
         self.naver = naver_sync
 
     def _naver_service(self) -> "NaverInquirySyncService":
@@ -184,10 +188,25 @@ class HistoricalCaseService:
         score = 0.55
         score += 0.15 if recent else -0.10 if age_days is not None and age_days > 1095 else 0
         score += min(max(repeated, 0), 3) * 0.04
+        eligibility = self.quality_policy.assess(
+            question=question,
+            answer=answer,
+            stored_quality=score,
+            policy_risk="NONE",
+            active=True,
+        )
         score -= 0.25 if time_dependent else 0
         score -= 0.20 if definite else 0
         score -= 0.18 if sensitive else 0
         score -= 0.35 if too_short else 0
+        if eligibility.status == "QUESTION_ANSWER_MISMATCH":
+            score -= 0.42
+        elif eligibility.status in {
+            "TEMPORARY_OR_EXPIRED", "ORDER_SPECIFIC",
+        }:
+            score -= 0.28
+        elif eligibility.status == "REVIEW_REQUIRED":
+            score -= 0.18
         if not answer.strip():
             score = 0.0
         score = round(max(0.0, min(score, 1.0)), 4)
@@ -208,6 +227,7 @@ class HistoricalCaseService:
             "personal_information_masked": sensitive,
             "too_short": too_short,
             "facts_authority": "REFERENCE_ONLY",
+            "runtime_eligibility": eligibility.to_dict(),
         }
 
     def prepare_case(self, item: dict[str, Any], *, source_reference: str) -> dict[str, Any]:
@@ -461,39 +481,138 @@ class HistoricalCaseService:
         jaccard = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
         return 0.68 * jaccard + 0.32 * SequenceMatcher(None, left, right).ratio()
 
+    def search_detailed(
+        self, question: str, *, store_code: str | None = None,
+        product_name: str | None = None, inquiry_type: str | None = None,
+        limit: int = 4, include_risky: bool = False,
+    ) -> dict[str, Any]:
+        query = normalize_learning_question(self.privacy.mask(question))
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        candidates = self.repository.candidates(store_code=store_code)
+        rejection_counts: dict[str, int] = {}
+        rejected: list[dict[str, Any]] = []
+        for item in candidates:
+            risk = str(item.get("policy_risk") or "NONE").upper()
+            eligibility = self.quality_policy.assess(
+                question=str(item.get("question") or ""),
+                answer=str(item.get("seller_answer") or ""),
+                stored_quality=float(item.get("quality_score") or 0),
+                policy_risk=risk,
+                active=bool(item.get("active")),
+            )
+            if not eligibility.context_eligible:
+                rejection_counts[eligibility.status] = (
+                    rejection_counts.get(eligibility.status, 0) + 1
+                )
+                if len(rejected) < 12:
+                    rejected.append({
+                        "historical_case_id": int(item["id"]),
+                        "reason": eligibility.status,
+                        "details": list(eligibility.reasons),
+                    })
+                continue
+            lexical_relevance = self._similarity(
+                query, str(item.get("question_normalized") or "")
+            )
+            query_concepts = set(self.quality_policy.concepts(question))
+            candidate_concepts = set(eligibility.question_concepts)
+            concept_overlap = len(query_concepts & candidate_concepts) / max(
+                len(query_concepts), 1
+            )
+            # Keyword overlap alone cannot attach a semantically incompatible
+            # case.  Inquiry type and exact product remain ranking signals,
+            # never hard equality gates.
+            if query_concepts and candidate_concepts and concept_overlap == 0:
+                rejection_counts["LOW_RELEVANCE"] = (
+                    rejection_counts.get("LOW_RELEVANCE", 0) + 1
+                )
+                continue
+            relevance = (
+                0.55 * lexical_relevance + 0.30 * concept_overlap
+                if query_concepts and candidate_concepts
+                else lexical_relevance
+            )
+            relevance += 0.06 if product_name and item.get("product_name") == self.privacy.mask(product_name) else 0
+            relevance += 0.03 if inquiry_type and item.get("inquiry_type") == inquiry_type else 0
+            relevance += eligibility.trust_score * 0.10
+            # Preserve the legacy promotion score while all active Historical
+            # employee answers participate as verified, opt-out Learning.
+            relevance += 0.04 if item.get("promoted_learning_id") else 0
+            concept_compatible = bool(
+                not query_concepts
+                or not candidate_concepts
+                or concept_overlap >= 0.34
+            )
+            minimum_relevance = (
+                0.20 if query_concepts and candidate_concepts else 0.15
+            )
+            if relevance >= minimum_relevance and concept_compatible:
+                value = dict(item)
+                value["relevance"] = round(relevance, 4)
+                value["runtime_eligibility"] = eligibility.to_dict()
+                value["reference_strength"] = "HISTORICAL_VERIFIED_LEARNING"
+                value["usage_notice"] = "과거 표현/대응 참고 전용. 현재 Rule·주문·DPS·상품DB·Template이 우선합니다."
+                ranked.append((relevance, value))
+            else:
+                rejection_counts["LOW_RELEVANCE"] = (
+                    rejection_counts.get("LOW_RELEVANCE", 0) + 1
+                )
+        ranked.sort(
+            key=lambda pair: (pair[0], pair[1].get("quality_score") or 0, pair[1].get("inquiry_created_at") or ""),
+            reverse=True,
+        )
+        conflicting_ids: set[int] = set()
+        for index, (_, left) in enumerate(ranked):
+            for _, right in ranked[index + 1:]:
+                if self.quality_policy.contradicts(
+                    str(left.get("seller_answer") or ""),
+                    str(right.get("seller_answer") or ""),
+                ):
+                    conflicting_ids.update((int(left["id"]), int(right["id"])))
+        if conflicting_ids:
+            ranked = [
+                pair for pair in ranked
+                if int(pair[1]["id"]) not in conflicting_ids
+            ]
+            rejection_counts["CONFLICTING"] = len(conflicting_ids)
+            for case_id in sorted(conflicting_ids):
+                if len(rejected) >= 12:
+                    break
+                rejected.append({
+                    "historical_case_id": case_id,
+                    "reason": "CONFLICTING",
+                    "details": ["CONFLICTING_REUSABLE_POLICY"],
+                })
+        selected = [item for _, item in ranked[: max(1, min(int(limit), 5))]]
+        return {
+            "query": question,
+            "candidate_count": len(candidates),
+            "safe_candidate_count": len(ranked),
+            "selected_count": len(selected),
+            "selected": selected,
+            "rejection_counts": rejection_counts,
+            "rejected_samples": rejected,
+        }
+
     def search(
         self, question: str, *, store_code: str | None = None,
         product_name: str | None = None, inquiry_type: str | None = None,
         limit: int = 4, include_risky: bool = False,
     ) -> list[dict[str, Any]]:
-        query = normalize_learning_question(self.privacy.mask(question))
-        ranked: list[tuple[float, dict[str, Any]]] = []
-        for item in self.repository.candidates(store_code=store_code):
-            risk = str(item.get("policy_risk") or "NONE").upper()
-            if float(item.get("quality_score") or 0) < AUTO_REFERENCE_MIN_QUALITY:
-                continue
-            # This service feeds generation contexts.  Risky material remains
-            # visible in the repository/admin UI but is never retrievable here.
-            if risk in {"BLOCK", "BLOCKED", "HIGH"}:
-                continue
-            relevance = self._similarity(query, str(item.get("question_normalized") or ""))
-            relevance += 0.08 if product_name and item.get("product_name") == self.privacy.mask(product_name) else 0
-            relevance += 0.05 if inquiry_type and item.get("inquiry_type") == inquiry_type else 0
-            relevance += float(item.get("quality_score") or 0) * 0.12
-            # Preserve the legacy promotion score while all active Historical
-            # employee answers participate as verified, opt-out Learning.
-            relevance += 0.04 if item.get("promoted_learning_id") else 0
-            if relevance >= 0.20:
-                value = dict(item)
-                value["relevance"] = round(relevance, 4)
-                value["reference_strength"] = "HISTORICAL_VERIFIED_LEARNING"
-                value["usage_notice"] = "과거 표현/대응 참고 전용. 현재 Rule·주문·DPS·상품DB·Template이 우선합니다."
-                ranked.append((relevance, value))
-        ranked.sort(
-            key=lambda pair: (pair[0], pair[1].get("quality_score") or 0, pair[1].get("inquiry_created_at") or ""),
-            reverse=True,
+        return self.search_detailed(
+            question,
+            store_code=store_code,
+            product_name=product_name,
+            inquiry_type=inquiry_type,
+            limit=limit,
+            include_risky=include_risky,
+        )["selected"]
+
+    def audit_corpus(self, *, store_code: str | None = None) -> dict[str, Any]:
+        """Read-only runtime eligibility audit; never mutates Historical rows."""
+        return self.quality_policy.audit(
+            self.repository.list_cases(store_code=store_code, limit=1000)
         )
-        return [item for _, item in ranked[: max(1, min(int(limit), 5))]]
 
     def promote(self, case_id: int, *, actor: str) -> dict[str, Any]:
         case = self.repository.get(int(case_id))
