@@ -403,8 +403,29 @@ class LearningFeedbackRepository:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM learning_feedback
-                ORDER BY created_at DESC, id DESC LIMIT ?
+                SELECT lf.*,
+                       i.source_question_id, i.external_inquiry_id,
+                       i.source_created_at, i.registered_at,
+                       i.source_type AS inquiry_source_type,
+                       i.inquiry_type AS source_inquiry_type,
+                       i.product_name AS inquiry_product_name,
+                       i.title AS inquiry_title,
+                       i.content AS inquiry_content,
+                       COALESCE(
+                           i.source_created_at,
+                           i.registered_at,
+                           lf.created_at,
+                           lf.updated_at
+                       ) AS inquiry_occurred_at
+                FROM learning_feedback AS lf
+                LEFT JOIN inquiries AS i ON i.id=lf.inquiry_id
+                ORDER BY COALESCE(
+                             i.source_created_at,
+                             i.registered_at,
+                             lf.created_at
+                         ) DESC,
+                         lf.id DESC
+                LIMIT ?
                 """,
                 (max(1, min(int(limit), 2_000)),),
             ).fetchall()

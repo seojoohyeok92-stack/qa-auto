@@ -468,13 +468,36 @@ class LearningRepository:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, source_key, inquiry_id, answer_draft_id,
-                       approval_history_id, question_original_masked, gpt_draft,
-                       edited_answer, final_answer, learning_source,
-                       rating, quality_score, usage_count, last_used_at,
-                       active, metadata_json, created_at, updated_at
-                FROM learning_examples
-                ORDER BY created_at DESC, id DESC LIMIT ?
+                SELECT le.id, le.source_key, le.inquiry_id,
+                       le.answer_draft_id, le.approval_history_id,
+                       le.question_original_masked, le.gpt_draft,
+                       le.edited_answer, le.final_answer, le.learning_source,
+                       le.inquiry_type, le.product_name, le.validator_result,
+                       le.rating, le.quality_score, le.usage_count,
+                       le.last_used_at, le.active, le.metadata_json,
+                       le.created_at, le.updated_at,
+                       i.source_question_id, i.external_inquiry_id,
+                       i.source_created_at, i.registered_at,
+                       i.source_type AS inquiry_source_type,
+                       i.inquiry_type AS source_inquiry_type,
+                       i.product_name AS inquiry_product_name,
+                       i.title AS inquiry_title,
+                       i.content AS inquiry_content,
+                       COALESCE(
+                           i.source_created_at,
+                           i.registered_at,
+                           le.created_at,
+                           le.updated_at
+                       ) AS inquiry_occurred_at
+                FROM learning_examples AS le
+                LEFT JOIN inquiries AS i ON i.id=le.inquiry_id
+                ORDER BY COALESCE(
+                             i.source_created_at,
+                             i.registered_at,
+                             le.created_at
+                         ) DESC,
+                         le.id DESC
+                LIMIT ?
                 """,
                 (max(1, min(int(limit), 2000)),),
             ).fetchall()
