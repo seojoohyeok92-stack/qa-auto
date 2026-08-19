@@ -383,3 +383,46 @@ else:
     assert not app.exception
     assert app.session_state["current_page"] == "learning"
     assert app.title[0].value == "Learning Manager"
+
+
+def test_learning_detail_selection_uses_stable_learning_id(tmp_path) -> None:
+    database = Database(tmp_path / "learning-detail-selection.db")
+    database.initialize()
+    for name in ("first", "second", "third"):
+        _approved_staff_learning(tmp_path, database=database, name=name)
+    rows = LearningRepository(database).manager_rows()
+    selected_id = int(rows[1]["id"])
+    selected_number = rows[1]["source_question_id"]
+    app = AppTest.from_string(
+        f'''
+from repositories.database import Database
+from ui.learning_manager import render_learning_manager
+db=Database(r"{database.path}")
+db.initialize()
+render_learning_manager(db)
+'''
+    ).run(timeout=40)
+    detail = next(
+        item for item in app.selectbox
+        if item.label == "상세 조회 항목"
+        and item.key == "learning_manager_positive_selected_id"
+    )
+    detail.set_value(selected_id)
+    app = app.run(timeout=40)
+    assert not app.exception
+    assert app.session_state["learning_manager_positive_selected_id"] == selected_id
+    captions = "\n".join(item.value for item in app.caption)
+    assert selected_number in captions
+
+    # A filter that removes the selected ID must reset to the actual remaining
+    # ID instead of opening another row at the old display index.
+    query = next(item for item in app.text_input if item.key == "learning_manager_query")
+    query.set_value("TRACE-APPROVAL-first")
+    app = app.run(timeout=40)
+    remaining = LearningRepository(database).manager_rows()
+    expected_id = next(
+        int(row["id"])
+        for row in remaining if row["source_question_id"] == "TRACE-APPROVAL-first"
+    )
+    assert not app.exception
+    assert app.session_state["learning_manager_positive_selected_id"] == expected_id

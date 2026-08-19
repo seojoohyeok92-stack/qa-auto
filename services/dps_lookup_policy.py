@@ -42,11 +42,15 @@ class DpsSettings:
     connect_timeout_seconds: float = 7.0
     read_timeout_seconds: float = 100.0
     total_timeout_seconds: float = 120.0
+    refresh_interval_minutes: int = 30
     success_ttl_seconds: int = 1_800
     not_found_ttl_seconds: int = 300
 
     @classmethod
     def from_environment(cls) -> "DpsSettings":
+        refresh_minutes = int(
+            _positive_float("DPS_REFRESH_INTERVAL_MINUTES", 30)
+        )
         return cls(
             connect_timeout_seconds=_positive_float(
                 "DPS_CONNECT_TIMEOUT_SECONDS", 7.0
@@ -57,8 +61,13 @@ class DpsSettings:
             total_timeout_seconds=_positive_float(
                 "DPS_TOTAL_TIMEOUT_SECONDS", 120.0
             ),
+            refresh_interval_minutes=refresh_minutes,
+            # DPS is demand-driven rather than blindly polled. A successful
+            # order lookup is refreshed after this cache freshness interval.
             success_ttl_seconds=int(
-                _positive_float("DPS_SUCCESS_CACHE_TTL_SECONDS", 1_800)
+                _positive_float(
+                    "DPS_SUCCESS_CACHE_TTL_SECONDS", refresh_minutes * 60
+                )
             ),
             not_found_ttl_seconds=int(
                 _positive_float("DPS_NOT_FOUND_CACHE_TTL_SECONDS", 300)

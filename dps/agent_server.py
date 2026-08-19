@@ -702,6 +702,11 @@ class DpsWindowsAgent:
             now_epoch=current,
         )
         self._save_state()
+        LOGGER.info(
+            "DPS_ACTIVITY_UPDATED activity_type=%s last_dps_activity_at=%s",
+            normalized,
+            self.last_dps_activity_at,
+        )
 
     def _keepalive_is_urgent(self) -> bool:
         elapsed = self._elapsed_since_iso(self.last_dps_activity_at)
@@ -811,6 +816,8 @@ class DpsWindowsAgent:
         if self.session_settings.passive_monitor_enabled:
             passive_result = self._passive_monitor_session(trigger=trigger)
             if not keepalive_enabled or not (force_keepalive or due):
+                if keepalive_enabled and not due:
+                    LOGGER.info("DPS_KEEPALIVE_SKIPPED reason=RECENT_ACTIVITY")
                 return passive_result
             retry_due_at, retry_deferred = self._keepalive_retry_snapshot()
             if not force_keepalive and retry_deferred:
@@ -990,6 +997,7 @@ class DpsWindowsAgent:
                     )
                 )
                 if not due:
+                    LOGGER.info("DPS_KEEPALIVE_SKIPPED reason=RECENT_ACTIVITY")
                     return success(
                         "SESSION_MONITORED",
                         "DPS session is ready.",
@@ -1008,6 +1016,7 @@ class DpsWindowsAgent:
                         "DPS tab verification failed before keepalive.",
                         details=checks,
                     )
+                LOGGER.info("DPS_KEEPALIVE_START trigger=%s", trigger)
                 clicked, extension_code = (
                     self.tab_manager.click_login_time_extension(candidate.window)
                 )
@@ -1051,7 +1060,7 @@ class DpsWindowsAgent:
                 )
                 self._set_monitor_state("READY", event="KEEPALIVE_SUCCEEDED")
                 LOGGER.info(
-                    "DPS keepalive succeeded: trigger=%s last_keepalive_at=%s",
+                    "DPS_KEEPALIVE_SUCCESS trigger=%s last_keepalive_at=%s",
                     trigger,
                     self.last_keepalive_at,
                 )
@@ -1136,7 +1145,7 @@ class DpsWindowsAgent:
             error_type=code,
         )
         LOGGER.warning(
-            "DPS keepalive failed: error_type=%s consecutive_failures=%s",
+            "DPS_KEEPALIVE_FAILED error_type=%s consecutive_failures=%s",
             code,
             self.consecutive_keepalive_failures,
         )
@@ -2014,6 +2023,7 @@ class DpsWindowsAgent:
 
     def _status_unlocked(self) -> dict[str, Any]:
         remaining = self._session_remaining()
+        idle_seconds = self._elapsed_since_iso(self.last_dps_activity_at)
         next_keepalive_due_at, keepalive_due = (
             self._keepalive_schedule_snapshot()
         )
@@ -2091,6 +2101,9 @@ class DpsWindowsAgent:
             last_keepalive_at=self.last_keepalive_at,
             last_keepalive_attempt_at=self.last_keepalive_attempt_at,
             last_dps_activity_at=self.last_dps_activity_at,
+            dps_idle_minutes=(
+                round(idle_seconds / 60, 1) if idle_seconds is not None else None
+            ),
             next_keepalive_due_at=next_keepalive_due_at,
             keepalive_due=keepalive_due,
             keepalive_enabled=self.session_settings.keepalive_enabled,
@@ -2266,11 +2279,38 @@ class DpsWindowsAgent:
                     "updated_at_epoch": time.time(),
                 }
             )
+        LOGGER.info("DPS_CONNECT_START")
+        LOGGER.info("DPS_AUTH_START")
+        LOGGER.info("DPS_ORDER_LOOKUP_START")
         result = self._execute_lookup(
             order_number,
             force_refresh,
             **kwargs,
         )
+        if result.get("success"):
+            LOGGER.info("DPS_AUTH_SUCCESS")
+            LOGGER.info("DPS_ORDER_LOOKUP_SUCCESS")
+            result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            installation_date = (
+                result_data.get("installation_date")
+                or result_data.get("delivery_scheduled_date")
+                or result_data.get("requested_delivery_date")
+                or result.get("installation_date")
+            )
+            LOGGER.info(
+                "DPS_INSTALL_DATE_FOUND"
+                if installation_date
+                else "DPS_INSTALL_DATE_NOT_FOUND"
+            )
+        else:
+            error_code = str(result.get("code") or result.get("error_code") or "UNKNOWN_ERROR")
+            if "LOGIN" in error_code or "AUTH" in error_code:
+                LOGGER.warning("DPS_AUTH_FAILED error_type=%s", error_code)
+            elif "TIMEOUT" in error_code:
+                LOGGER.warning("DPS_TIMEOUT error_type=%s", error_code)
+            elif error_code.startswith("AGENT_") or "CONNECTION" in error_code:
+                LOGGER.warning("DPS_NETWORK_ERROR error_type=%s", error_code)
+            LOGGER.warning("DPS_ORDER_LOOKUP_FAILED error_type=%s", error_code)
         completed_at = now_iso()
         with self.lookup_jobs_lock:
             job = self.lookup_jobs[resolved_request_id]
@@ -3003,7 +3043,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = AGENT.monitor_session(
                     keepalive_enabled=bool(payload.get("keepalive")),
                     keepalive_interval_seconds=int(
-                        payload.get("keepalive_interval_seconds") or 1200
+                        payload.get("keepalive_interval_seconds") or 2400
                     ),
                     force_keepalive=bool(payload.get("force_keepalive")),
                     trigger=str(payload.get("trigger") or "API"),
@@ -3079,4 +3119,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    LOGGER.info(
+        "DPS_CONFIG_CHECK host_present=%s port_valid=%s project_root_resolved=%s",
+        bool(HOST),
+        1 <= PORT <= 65535,
+        PROJECT_ROOT.is_absolute(),
+    )
     main()

@@ -40,8 +40,15 @@ class ConnectionStore:
         logger: logging.Logger | None = None,
     ) -> None:
         configured = os.getenv("DPS_CONNECTION_FILE", "").strip()
-        self.path = path or (Path(configured) if configured else DEFAULT_CONNECTION_FILE)
-        self.state_path = state_path or DEFAULT_AGENT_STATE_FILE
+        configured_path = Path(configured) if configured else DEFAULT_CONNECTION_FILE
+        if configured and not configured_path.is_absolute():
+            configured_path = PROJECT_ROOT / configured_path
+        configured_state = os.getenv("DPS_AGENT_STATE_FILE", "").strip()
+        agent_state_path = Path(configured_state) if configured_state else DEFAULT_AGENT_STATE_FILE
+        if configured_state and not agent_state_path.is_absolute():
+            agent_state_path = PROJECT_ROOT / agent_state_path
+        self.path = path or configured_path
+        self.state_path = state_path or agent_state_path
         self.logger = logger or logging.getLogger(__name__)
         self._lock = threading.RLock()
 

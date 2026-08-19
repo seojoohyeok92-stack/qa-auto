@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from answer.learning_conflict import LearningConflictError
 from repositories.database import Database
 from repositories.inquiry_repository import deserialize_json, serialize_json
+from services.learning_validity_service import (
+    is_learning_usable,
+    normalize_validity_update,
+    validity_status,
+)
 
 
 class LearningRepository:
@@ -16,10 +22,15 @@ class LearningRepository:
         if row is None:
             return None
         result = dict(row)
-        for key in ("style_features_json", "metadata_json"):
+        for key in ("style_features_json", "metadata_json", "condition_json"):
             result[key] = deserialize_json(result.get(key))
         for key in ("posted", "auto_posted", "style_only", "active"):
             result[key] = bool(result[key])
+        # A few unit-test doubles model pre-migration rows. Production rows have
+        # this column after Database.initialize(), while the fallback preserves
+        # the backward-compatible PERMANENT/active interpretation.
+        result["validity_active"] = bool(result.get("validity_active", True))
+        result["validity_status"] = validity_status(result)
         return result
 
     def upsert(self, example: dict[str, Any]) -> dict[str, Any]:
@@ -324,6 +335,8 @@ class LearningRepository:
         return [self._row(row) for row in rows if row is not None]
 
     def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 500))
+        now = datetime.now(UTC).isoformat(timespec="milliseconds")
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
@@ -331,6 +344,17 @@ class LearningRepository:
                 FROM learning_examples
                 LEFT JOIN inquiries ON inquiries.id=learning_examples.inquiry_id
                 WHERE learning_examples.active=1
+                  AND learning_examples.validity_active=1
+                  AND (
+                      learning_examples.validity_type='PERMANENT'
+                      OR (
+                          learning_examples.validity_type='TEMPORARY'
+                          AND learning_examples.valid_from IS NOT NULL
+                          AND learning_examples.valid_until IS NOT NULL
+                          AND julianday(learning_examples.valid_from)<=julianday(?)
+                          AND julianday(learning_examples.valid_until)>=julianday(?)
+                      )
+                  )
                   AND COALESCE(
                       json_extract(metadata_json, '$.learning_signal_type'),
                       'POSITIVE'
@@ -344,9 +368,89 @@ class LearningRepository:
                          learning_examples.created_at DESC
                 LIMIT ?
                 """,
-                (store_code, store_code, max(1, min(int(limit), 500))),
+                (now, now, store_code, store_code, safe_limit),
             ).fetchall()
-        return [self._row(row) for row in rows]
+        # Keep the shared Python policy as a second guard if a legacy timestamp
+        # cannot be interpreted consistently by SQLite.
+        return [
+            item
+            for row in rows
+            if (item := self._row(row)) is not None
+            and is_learning_usable(item)
+        ][:safe_limit]
+
+    def update_validity(
+        self,
+        learning_id: int,
+        *,
+        validity_type: str,
+        event_name: str | None = None,
+        valid_from: object = None,
+        valid_until: object = None,
+        validity_active: bool = True,
+        validity_note: str | None = None,
+        condition: dict[str, Any] | None = None,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Update only the validity axis without changing Learning authority."""
+
+        values = normalize_validity_update(
+            validity_type=validity_type,
+            event_name=event_name,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            validity_active=validity_active,
+            validity_note=validity_note,
+            condition=condition,
+        )
+        expired_at = None if values["validity_active"] else datetime.now(UTC).isoformat(
+            timespec="milliseconds"
+        )
+        clauses = ["id=?"]
+        parameters: list[Any] = [
+            values["validity_type"],
+            values["event_name"],
+            values["valid_from"],
+            values["valid_until"],
+            int(values["validity_active"]),
+            expired_at,
+            values["validity_note"],
+            serialize_json(values["condition_json"]),
+            int(learning_id),
+        ]
+        if expected_updated_at is not None:
+            clauses.append("updated_at=?")
+            parameters.append(str(expected_updated_at))
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE learning_examples
+                SET validity_type=?, event_name=?, valid_from=?, valid_until=?,
+                    validity_active=?, expired_at=?, validity_note=?,
+                    condition_json=?,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE {' AND '.join(clauses)}
+                """,
+                tuple(parameters),
+            )
+            if cursor.rowcount != 1:
+                exists = connection.execute(
+                    "SELECT 1 FROM learning_examples WHERE id=?",
+                    (int(learning_id),),
+                ).fetchone()
+                if exists is None:
+                    raise LookupError(f"Learning not found: {learning_id}")
+                raise RuntimeError(
+                    "Learning 유효성 정보가 다른 사용자에 의해 변경되었습니다. "
+                    "목록을 새로고침한 뒤 다시 시도해 주세요."
+                )
+            row = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(learning_id),),
+            ).fetchone()
+        result = self._row(row)
+        assert result is not None
+        return result
 
     def mark_posted(self, inquiry_id: int, *, posted_at: str | None, auto_posted: bool) -> int:
         with self.database.transaction() as connection:
@@ -383,6 +487,7 @@ class LearningRepository:
             )
 
     def manager_summary(self) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat(timespec="milliseconds")
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
@@ -421,12 +526,21 @@ class LearningRepository:
                 """
                 SELECT COUNT(*) FROM learning_examples
                 WHERE active=1
+                  AND validity_active=1
+                  AND (
+                      validity_type='PERMANENT'
+                      OR (
+                          validity_type='TEMPORARY'
+                          AND julianday(valid_from)<=julianday(?)
+                          AND julianday(valid_until)>=julianday(?)
+                      )
+                  )
                   AND COALESCE(
                       json_extract(metadata_json, '$.learning_signal_type'),
                       'POSITIVE'
                   )='POSITIVE'
                 """
-            ).fetchone()[0])
+            , (now, now)).fetchone()[0])
         sources = {str(row["learning_source"]): int(row["count"]) for row in rows}
         return {
             "total": int(totals["total"] or 0),
@@ -470,9 +584,12 @@ class LearningRepository:
                 """
                 SELECT le.id, le.source_key, le.inquiry_id,
                        le.answer_draft_id, le.approval_history_id,
-                       le.question_original_masked, le.gpt_draft,
+                       le.question_original_masked, le.gpt_draft, le.seller_answer,
                        le.edited_answer, le.final_answer, le.learning_source,
                        le.inquiry_type, le.product_name, le.validator_result,
+                       le.validity_type, le.event_name, le.valid_from,
+                       le.valid_until, le.validity_active, le.expired_at,
+                       le.validity_note, le.condition_json,
                        le.rating, le.quality_score, le.usage_count,
                        le.last_used_at, le.active, le.metadata_json,
                        le.created_at, le.updated_at,
@@ -504,13 +621,16 @@ class LearningRepository:
         results = [dict(row) for row in rows]
         for row in results:
             row["active"] = bool(row["active"])
+            row["validity_active"] = bool(row["validity_active"])
             row["metadata_json"] = deserialize_json(row.get("metadata_json"))
+            row["condition_json"] = deserialize_json(row.get("condition_json"))
             metadata = row["metadata_json"]
             row["provenance"] = metadata.get("answer_provenance")
             row["human_verified"] = bool(metadata.get("human_verified"))
             row["signal_type"] = metadata.get(
                 "learning_signal_type", "POSITIVE"
             )
+            row["validity_status"] = validity_status(row)
         return results
 
     def deactivate_draft(self, draft_id: int) -> int:

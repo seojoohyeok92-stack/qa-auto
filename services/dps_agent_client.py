@@ -11,10 +11,20 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, urlencode
 
-AGENT_HOST = os.getenv("DPS_AGENT_HOST", "127.0.0.1")
-AGENT_PORT = int(os.getenv("DPS_AGENT_PORT", "8765"))
-BASE_URL = f"http://{AGENT_HOST}:{AGENT_PORT}"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _port_setting(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if 1 <= value <= 65535 else default
+
+
+AGENT_HOST = os.getenv("DPS_AGENT_HOST", "127.0.0.1").strip() or "127.0.0.1"
+AGENT_PORT = _port_setting("DPS_AGENT_PORT", 8765)
+BASE_URL = f"http://{AGENT_HOST}:{AGENT_PORT}"
 EXPECTED_AGENT_MODE = "WINDOWS_UI_AUTOMATION_TAB_V6_LOGIN_NAV"
 
 
@@ -275,15 +285,64 @@ def _normalized_session_status(status: dict[str, Any]) -> str:
     return "UNKNOWN"
 
 
+def dps_config_check() -> dict[str, Any]:
+    """Return non-secret runtime configuration diagnostics for operators."""
+
+    raw_port = os.getenv("DPS_AGENT_PORT", "8765").strip()
+    try:
+        valid_port = 1 <= int(raw_port) <= 65535
+    except ValueError:
+        valid_port = False
+    issues: list[str] = []
+    if not os.getenv("DPS_AGENT_HOST", "127.0.0.1").strip():
+        issues.append("DPS_AGENT_HOST_MISSING")
+    if not valid_port:
+        issues.append("DPS_AGENT_PORT_INVALID")
+    return {
+        "ok": not issues,
+        "diagnostic_code": "OK" if not issues else "CONFIG_ERROR",
+        "issues": issues,
+        "agent_host": AGENT_HOST,
+        "agent_port": AGENT_PORT,
+        "project_root": str(PROJECT_ROOT),
+        "platform_supported": os.name == "nt",
+    }
+
+
+def _diagnostic_code(status: dict[str, Any]) -> str:
+    config = dps_config_check()
+    if not config["ok"]:
+        return "CONFIG_ERROR"
+    session = _normalized_session_status(status)
+    code = str(status.get("code") or status.get("error_code") or "").upper()
+    if session == "READY":
+        return "OK"
+    if session == "LOGIN_REQUIRED":
+        return "AUTH_ERROR"
+    if "TIMEOUT" in code:
+        return "TIMEOUT"
+    if session == "CONNECTION_FAILED" or code.startswith("AGENT_"):
+        return "NETWORK_ERROR"
+    if session in {"CHROME_NOT_FOUND", "DPS_PAGE_NOT_FOUND"}:
+        return "CONFIG_ERROR"
+    return "UNKNOWN_ERROR"
+
+
 def get_dps_session_status() -> dict[str, Any]:
     status = get_dps_agent_status()
-    return {**status, "session_status": _normalized_session_status(status)}
+    config = dps_config_check()
+    return {
+        **status,
+        "session_status": _normalized_session_status(status),
+        "diagnostic_code": _diagnostic_code(status),
+        "config_check": config,
+    }
 
 
 def monitor_dps_session(
     *,
     keepalive: bool = False,
-    keepalive_interval_seconds: int = 1200,
+    keepalive_interval_seconds: int = 2400,
     force_keepalive: bool = False,
     trigger: str = "CLIENT",
 ) -> dict[str, Any]:

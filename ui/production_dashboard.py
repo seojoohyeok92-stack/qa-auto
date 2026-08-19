@@ -20,6 +20,7 @@ from repositories.dashboard_preferences_repository import (
 from services.dashboard_operations_service import DashboardOperationsService
 from services.auto_post_runtime_service import AutoPostRuntimeService
 from services.dps_agent_client import get_dps_session_status
+from services.dps_lookup_policy import DpsSettings
 from ui.session_identity import current_identity
 
 
@@ -206,6 +207,7 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
         f"DPS {_dps_session_label(dps_session.get('session_status'))}"
     )
     with st.expander(summary, expanded=False):
+        dps_lookup_settings = DpsSettings.from_environment()
         st.caption(
             "DPS 세션 "
             f"{_dps_session_label(dps_session.get('session_status'))} · "
@@ -213,6 +215,15 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
             f"{format_datetime_kst(dps_session.get('last_checked_at'), empty='없음')} · "
             "최근 Keepalive "
             f"{format_datetime_kst(dps_session.get('last_keepalive_at'), empty='없음')}"
+        )
+        st.caption(
+            "DPS 진단 "
+            f"{dps_session.get('diagnostic_code') or 'UNKNOWN_ERROR'} · "
+            "최근 실제 DPS 조작 "
+            f"{format_datetime_kst(dps_session.get('last_dps_activity_at'), empty='없음')} · "
+            f"Idle {dps_session.get('dps_idle_minutes') if dps_session.get('dps_idle_minutes') is not None else '-'}분 · "
+            f"세션 유지 기준 {dps_env.keepalive_interval_minutes}분 · "
+            f"DPS 데이터 갱신 {dps_lookup_settings.refresh_interval_minutes}분"
         )
         columns = st.columns(7, gap="small")
         details = (

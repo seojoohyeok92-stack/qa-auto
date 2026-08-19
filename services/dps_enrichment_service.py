@@ -350,6 +350,7 @@ class DpsEnrichmentService:
                 )
                 cached = None
             if cached is not None:
+                LOGGER.info("DPS_DATA_REFRESH_SKIPPED reason=FRESH_CACHE")
                 metadata = self._cache_metadata(cached)
                 metadata["change_request"] = decision.change_request
                 metadata["general_segments"] = list(decision.general_segments)
@@ -438,6 +439,7 @@ class DpsEnrichmentService:
         )
         lookup_started_at = datetime.now(UTC).isoformat(timespec="milliseconds")
         started = time.monotonic()
+        LOGGER.info("DPS_DATA_REFRESH_START")
         try:
             raw = self.client(
                 request_id=correlation_id,
@@ -499,6 +501,17 @@ class DpsEnrichmentService:
             normalized=normalized,
         )
         status = DpsLookupStatus(normalized["lookup_status"])
+        if status is DpsLookupStatus.SUCCESS:
+            LOGGER.info("DPS_DATA_REFRESH_SUCCESS")
+        elif status is DpsLookupStatus.NOT_FOUND:
+            LOGGER.info("DPS_DATA_REFRESH_SUCCESS result=ORDER_NOT_FOUND")
+        elif status is DpsLookupStatus.TIMEOUT:
+            LOGGER.warning("DPS_TIMEOUT error_type=%s", normalized.get("error_code"))
+        else:
+            LOGGER.warning(
+                "DPS_DATA_REFRESH_FAILED error_type=%s",
+                normalized.get("error_code") or status.value,
+            )
         normalized["change_request"] = decision.change_request
         normalized["general_segments"] = list(decision.general_segments)
         normalized["dps_segments"] = list(decision.dps_segments)

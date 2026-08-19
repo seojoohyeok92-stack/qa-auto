@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import streamlit as st
 
-from core.time_utils import format_datetime_kst, format_datetime_minute_kst
+from core.time_utils import format_datetime_kst, format_datetime_minute_kst, to_kst
 from repositories.database import Database
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
+from services.learning_validity_service import validity_summary
 
 
 INQUIRY_TYPE_LABELS = {
@@ -36,6 +38,7 @@ DEFAULT_COLUMNS = (
     "학습상태",
     "네이버 문의번호",
     "문의유형",
+    "유효성",
     "질문",
     "학습답변",
 )
@@ -75,6 +78,8 @@ def _search_blob(row: dict[str, Any]) -> str:
             row.get("learning_signal_type"),
             row.get("correction_reason"),
             row.get("correction_note"),
+            row.get("event_name"),
+            row.get("validity_note"),
             metadata.get("answer_provenance"),
             metadata.get("answer_reference_id"),
             metadata.get("verified_by"),
@@ -95,6 +100,8 @@ def _filter_rows(
     provenance: str = "ALL",
     human_verified: str = "ALL",
     signal_type: str = "ALL",
+    validity_type: str = "ALL",
+    validity_state: str = "ALL",
 ) -> list[dict[str, Any]]:
     needle = str(query or "").strip().lower()
     result: list[dict[str, Any]] = []
@@ -125,6 +132,14 @@ def _filter_rows(
         if human_verified == "YES" and not verified:
             continue
         if human_verified == "NO" and verified:
+            continue
+        if validity_type != "ALL" and str(
+            row.get("validity_type") or "PERMANENT"
+        ).upper() != validity_type:
+            continue
+        if validity_state != "ALL" and str(
+            row.get("validity_status") or "ACTIVE"
+        ).upper() != validity_state:
             continue
         result.append(row)
     return result
@@ -210,6 +225,7 @@ def _display_row(row: dict[str, Any]) -> dict[str, str]:
         "학습상태": _learning_status_label(row),
         "네이버 문의번호": _external_inquiry_number(row),
         "문의유형": _inquiry_type_label(row),
+        "유효성": validity_summary(row) if row.get("learning_source") else "-",
         "질문": _question(row),
         "학습답변": _learning_answer(row),
     }
@@ -287,30 +303,130 @@ def _render_default_table(rows: list[dict[str, Any]]) -> None:
             "학습상태": st.column_config.TextColumn(width="small"),
             "네이버 문의번호": st.column_config.TextColumn(width="medium"),
             "문의유형": st.column_config.TextColumn(width="small"),
+            "유효성": st.column_config.TextColumn(width="small"),
             "질문": st.column_config.TextColumn(width=320),
             "학습답변": st.column_config.TextColumn(width=480),
         },
     )
 
 
-def _render_details(rows: list[dict[str, Any]], *, key_prefix: str) -> None:
-    with st.expander("상세 정보", expanded=False):
-        selected = st.selectbox(
-            "상세 조회 항목",
-            range(len(rows)),
-            format_func=lambda index: (
-                f"{_external_inquiry_number(rows[index])} · "
-                f"{_learning_status_label(rows[index])} · "
-                f"{_question(rows[index])[:45]}"
-            ),
-            key=f"{key_prefix}_detail_row",
+def _render_validity_editor(
+    row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
+) -> None:
+    learning_id = int(row["id"])
+    current_type = str(row.get("validity_type") or "PERMANENT").upper()
+    start_at = to_kst(row.get("valid_from"))
+    end_at = to_kst(row.get("valid_until"))
+    st.markdown("**학습 유효성 관리**")
+    st.caption(f"현재 상태: {validity_summary(row)} ({row.get('validity_status', 'ACTIVE')})")
+    with st.form(f"{key_prefix}_validity_form_{learning_id}"):
+        validity_type = st.radio(
+            "학습 유효성",
+            ["PERMANENT", "TEMPORARY"],
+            index=1 if current_type == "TEMPORARY" else 0,
+            format_func=lambda value: "기간성" if value == "TEMPORARY" else "영구",
+            horizontal=True,
         )
-        row = rows[int(selected)]
+        event_name = ""
+        valid_from: date | None = None
+        valid_until: date | None = None
+        if validity_type == "TEMPORARY":
+            event_name = st.text_input("이벤트명", value=str(row.get("event_name") or ""))
+            dates = st.columns(2)
+            valid_from = dates[0].date_input(
+                "유효 시작일", value=start_at.date() if start_at else date.today()
+            )
+            valid_until = dates[1].date_input(
+                "유효 종료일", value=end_at.date() if end_at else date.today()
+            )
+        validity_note = st.text_area(
+            "운영 메모", value=str(row.get("validity_note") or "")
+        )
+        submitted = st.form_submit_button("유효성 저장", type="primary")
+    if submitted:
+        try:
+            repository.update_validity(
+                learning_id,
+                validity_type=validity_type,
+                event_name=event_name,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                validity_active=True,
+                validity_note=validity_note,
+                condition=row.get("condition_json") or {},
+                expected_updated_at=str(row.get("updated_at") or ""),
+            )
+        except (ValueError, LookupError, RuntimeError) as error:
+            st.error(str(error))
+        else:
+            st.toast("Learning 유효성 정보를 저장했습니다.")
+            st.session_state["current_page"] = "learning"
+            st.rerun()
+    if current_type == "TEMPORARY" and bool(row.get("validity_active", True)):
+        if st.button(
+            "지금 비활성화",
+            key=f"{key_prefix}_disable_{learning_id}",
+            help="Learning은 삭제하지 않고 신규 답변 후보에서 즉시 제외합니다.",
+        ):
+            try:
+                repository.update_validity(
+                    learning_id,
+                    validity_type="TEMPORARY",
+                    event_name=row.get("event_name"),
+                    valid_from=row.get("valid_from"),
+                    valid_until=row.get("valid_until"),
+                    validity_active=False,
+                    validity_note=row.get("validity_note"),
+                    condition=row.get("condition_json") or {},
+                    expected_updated_at=str(row.get("updated_at") or ""),
+                )
+            except (ValueError, LookupError, RuntimeError) as error:
+                st.error(str(error))
+            else:
+                st.toast("Learning을 비활성화했습니다. 과거 이력은 보존됩니다.")
+                st.session_state["current_page"] = "learning"
+                st.rerun()
+
+
+def _render_details(
+    rows: list[dict[str, Any]],
+    *,
+    key_prefix: str,
+    repository: LearningRepository | None = None,
+) -> None:
+    with st.expander("상세 정보", expanded=False):
+        row_by_id = {int(row["id"]): row for row in rows}
+        ids = list(row_by_id)
+        state_key = f"{key_prefix}_selected_id"
+        if st.session_state.get(state_key) not in ids:
+            st.session_state[state_key] = ids[0]
+        selected_id = st.selectbox(
+            "상세 조회 항목",
+            ids,
+            format_func=lambda learning_id: (
+                f"{_external_inquiry_number(row_by_id[learning_id])} · "
+                f"{_learning_status_label(row_by_id[learning_id])} · "
+                f"{_question(row_by_id[learning_id])[:45]}"
+            ),
+            key=state_key,
+        )
+        row = row_by_id[int(selected_id)]
         metadata = _metadata(row)
+        st.caption(
+            f"Learning ID {row.get('id')} · 문의일시 "
+            f"{format_datetime_kst(_inquiry_datetime(row))} · 네이버 문의번호 "
+            f"{_external_inquiry_number(row)}"
+        )
+        st.write(f"상품명: {row.get('inquiry_product_name') or row.get('product_name') or '-'}")
+        st.write(f"문의유형: {_inquiry_type_label(row)}")
         st.markdown("**질문 원문**")
         st.write(_question(row) or "-")
+        st.markdown("**실제 답변**")
+        st.write(row.get("seller_answer") or row.get("edited_answer") or "-")
         st.markdown("**학습답변 원문**")
         st.write(_learning_answer(row) or "-")
+        if repository is not None:
+            _render_validity_editor(row, repository, key_prefix=key_prefix)
         st.markdown("**고급 정보**")
         st.json(
             {
@@ -326,13 +442,27 @@ def _render_details(rows: list[dict[str, Any]], *, key_prefix: str) -> None:
                 "내부 Learning/Feedback ID": row.get("id"),
                 "내부 Inquiry ID": row.get("inquiry_id"),
                 "Draft ID": row.get("answer_draft_id") or "-",
+                "Human verified": _is_human_verified(row),
+                "학습 상태": _learning_status_label(row),
+                "유효성 상태": row.get("validity_status") or "ACTIVE",
+                "이벤트명": row.get("event_name") or "-",
+                "유효 시작": row.get("valid_from") or "-",
+                "유효 종료": row.get("valid_until") or "-",
+                "수동 활성": bool(row.get("validity_active", True)),
+                "만료/비활성 처리 시각": row.get("expired_at") or "-",
+                "생성일": row.get("created_at") or "-",
+                "수정일": row.get("updated_at") or "-",
+                "revoke 여부": not bool(row.get("active")),
+                "운영 메모": row.get("validity_note") or "-",
+                "조건 metadata": row.get("condition_json") or {},
             },
             expanded=False,
         )
 
 
 def _render_section(
-    rows: list[dict[str, Any]], *, page_size: int, key_prefix: str
+    rows: list[dict[str, Any]], *, page_size: int, key_prefix: str,
+    repository: LearningRepository | None = None,
 ) -> None:
     page_key = f"{key_prefix}_page"
     page_rows, current_page, total_pages = _paginate_rows(
@@ -346,7 +476,7 @@ def _render_section(
         total_pages=total_pages,
         key_prefix=key_prefix,
     )
-    _render_details(page_rows, key_prefix=key_prefix)
+    _render_details(page_rows, key_prefix=key_prefix, repository=repository)
 
 
 def render_learning_manager(database: Database | None) -> None:
@@ -433,6 +563,26 @@ def render_learning_manager(database: Database | None) -> None:
         key="learning_manager_page_size",
         on_change=_learning_filter_changed,
     )
+    validity_filters = st.columns(2, gap="small")
+    selected_validity = validity_filters[0].selectbox(
+        "유효성",
+        ["ALL", "PERMANENT", "TEMPORARY"],
+        format_func=lambda value: {
+            "ALL": "전체", "PERMANENT": "영구", "TEMPORARY": "기간성"
+        }[value],
+        key="learning_manager_validity",
+        on_change=_learning_filter_changed,
+    )
+    selected_validity_state = validity_filters[1].selectbox(
+        "유효 상태",
+        ["ALL", "ACTIVE", "SCHEDULED", "EXPIRED", "DISABLED"],
+        format_func=lambda value: {
+            "ALL": "전체", "ACTIVE": "활성", "SCHEDULED": "시작 전",
+            "EXPIRED": "만료", "DISABLED": "수동 비활성",
+        }[value],
+        key="learning_manager_validity_state",
+        on_change=_learning_filter_changed,
+    )
 
     positive = _filter_rows(
         positive_rows,
@@ -441,6 +591,8 @@ def render_learning_manager(database: Database | None) -> None:
         provenance=selected_provenance,
         human_verified=selected_verified,
         signal_type="POSITIVE",
+        validity_type=selected_validity,
+        validity_state=selected_validity_state,
     )
     st.subheader("Positive Learning")
     st.caption("승인된 Positive와 soft revoke 이력을 실제 문의시각 최신순으로 표시합니다.")
@@ -451,6 +603,7 @@ def render_learning_manager(database: Database | None) -> None:
             positive,
             page_size=int(page_size),
             key_prefix="learning_manager_positive",
+            repository=repository,
         )
 
     selected_signal = st.selectbox(

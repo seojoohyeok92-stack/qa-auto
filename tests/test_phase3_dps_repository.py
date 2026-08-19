@@ -20,9 +20,9 @@ def inquiry(database: Database) -> int:
 
 def test_migration_v2_is_reentrant_and_creates_lookup_table(tmp_path) -> None:
     database = Database(tmp_path / "migration.db")
-    assert database.initialize() == list(range(1, 24))
+    assert database.initialize() == list(range(1, 25))
     assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 24))
+    assert database.migration_versions() == list(range(1, 25))
     with database.connection() as connection:
         table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name = ?",

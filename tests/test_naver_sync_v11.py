@@ -519,7 +519,7 @@ def test_v11_migration_preserves_existing_inquiry_and_draft(
         )
     monkeypatch.setattr(database_module, "MIGRATIONS", all_migrations)
     assert old_database.initialize() == [
-        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
     ]
     stored = InquiryRepository(old_database).get(inquiry_id)
     assert stored["external_inquiry_id"] == "OLD-1"

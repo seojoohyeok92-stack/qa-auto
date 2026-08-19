@@ -1760,6 +1760,46 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        24,
+        (
+            """
+            ALTER TABLE learning_examples
+            ADD COLUMN validity_type TEXT NOT NULL DEFAULT 'PERMANENT'
+                CHECK (validity_type IN ('PERMANENT','TEMPORARY'))
+            """,
+            """
+            ALTER TABLE learning_examples ADD COLUMN event_name TEXT
+            """,
+            """
+            ALTER TABLE learning_examples ADD COLUMN valid_from TEXT
+            """,
+            """
+            ALTER TABLE learning_examples ADD COLUMN valid_until TEXT
+            """,
+            """
+            ALTER TABLE learning_examples
+            ADD COLUMN validity_active INTEGER NOT NULL DEFAULT 1
+                CHECK (validity_active IN (0,1))
+            """,
+            """
+            ALTER TABLE learning_examples ADD COLUMN expired_at TEXT
+            """,
+            """
+            ALTER TABLE learning_examples ADD COLUMN validity_note TEXT
+            """,
+            """
+            ALTER TABLE learning_examples
+            ADD COLUMN condition_json TEXT NOT NULL DEFAULT '{}'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_examples_validity
+            ON learning_examples(
+                active, validity_active, validity_type, valid_from, valid_until
+            )
+            """,
+        ),
+    ),
 )
 
 

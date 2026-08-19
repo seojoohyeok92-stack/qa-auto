@@ -32,7 +32,7 @@ class FakeTimer:
 
 def make_database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "runtime-v3.db")
-    assert database.initialize()[-1] == 23
+    assert database.initialize()[-1] == 24
     return database
 
 

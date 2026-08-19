@@ -1,10 +1,15 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent
+ENV_FILE = PROJECT_ROOT / ".env"
+# Streamlit and the Windows DPS Agent can be launched from another working
+# directory. Always resolve the project environment from the code location.
+load_dotenv(ENV_FILE)
 
 
 BASE_URL = "https://api.commerce.naver.com/external"
@@ -203,6 +208,11 @@ class DpsSessionSettings:
 
     @classmethod
     def from_environment(cls) -> "DpsSessionSettings":
+        idle_minutes = _env_int(
+            "DPS_SESSION_IDLE_MINUTES",
+            _env_int("DPS_SESSION_KEEPALIVE_INTERVAL_MINUTES", 40, minimum=10),
+            minimum=10,
+        )
         return cls(
             monitor_enabled=get_env_bool(
                 "DPS_SESSION_MONITOR_ENABLED", default=False
@@ -213,9 +223,7 @@ class DpsSessionSettings:
             monitor_interval_seconds=_env_int(
                 "DPS_SESSION_MONITOR_INTERVAL_SECONDS", 60, minimum=30
             ),
-            keepalive_interval_minutes=_env_int(
-                "DPS_SESSION_KEEPALIVE_INTERVAL_MINUTES", 40, minimum=10
-            ),
+            keepalive_interval_minutes=idle_minutes,
             keepalive_urgent_minutes=_env_int(
                 "DPS_SESSION_KEEPALIVE_URGENT_MINUTES", 55, minimum=10
             ),

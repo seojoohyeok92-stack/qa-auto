@@ -200,6 +200,7 @@ class NaverAutoSyncScheduler:
                 "이미 동기화가 진행 중이어서 자동 실행을 건너뛰었습니다.",
                 details={"active_lock_count": len(active_locks)},
             )
+            LOGGER.info("NAVER_SYNC_SKIPPED_LOCKED")
             self._schedule(self.tick_seconds)
             return {"status": "SKIPPED", "reason": "SYNC_IN_PROGRESS"}
 
@@ -209,6 +210,7 @@ class NaverAutoSyncScheduler:
             "예약된 네이버 문의 자동 동기화를 시작했습니다.",
             details={"interval_minutes": interval},
         )
+        LOGGER.info("NAVER_SYNC_START interval_minutes=%s", interval)
         try:
             outcome = self.service_factory(self.database).run(
                 sync_type="AUTO",
@@ -284,6 +286,14 @@ class NaverAutoSyncScheduler:
                     ),
                 },
             )
+            inserted_count = int(
+                value.get("inserted_count") or value.get("created_count") or 0
+            )
+            LOGGER.info(
+                "NAVER_SYNC_SUCCESS inserted_count=%s", inserted_count
+            )
+            if inserted_count == 0:
+                LOGGER.info("NAVER_SYNC_NO_NEW_INQUIRY")
             try:
                 from services.naver_auto_post_scheduler import (
                     ensure_auto_post_scheduler,
@@ -301,6 +311,12 @@ class NaverAutoSyncScheduler:
             return {"status": status, **value}
         except Exception as error:
             error_code = _error_code(error)
+            if "AUTH" in error_code.upper():
+                LOGGER.warning("NAVER_SYNC_AUTH_ERROR error_type=%s", error_code)
+            elif "TIMEOUT" in error_code.upper():
+                LOGGER.warning("NAVER_SYNC_TIMEOUT error_type=%s", error_code)
+            else:
+                LOGGER.warning("NAVER_SYNC_API_ERROR error_type=%s", error_code)
             self.runs.finish_auto_run(
                 owner_id=self.owner_id,
                 status="FAILED",
