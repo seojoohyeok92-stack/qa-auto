@@ -180,4 +180,6 @@ def test_attached_historical_and_actual_answer_use_are_distinct() -> None:
         "matched_subquestion": "기사님이 설치하나요?",
         "answer_supported": True,
         "reason": "SAFE_REUSABLE_POLICY",
+        "authority": "APPROVED",
+        "compatibility": {},
     },)

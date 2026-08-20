@@ -21,6 +21,10 @@ from repositories.naver_posted_answer_repository import (
 from services.learning_privacy_service import LearningPrivacyService
 from services.learning_quality_service import LearningQualityService
 from services.similar_answer_service import normalize_learning_question
+from services.learning_compatibility_service import (
+    extract_product_identity,
+    profile_knowledge,
+)
 
 
 STALE_POLICY = re.compile(r"(?:\d{1,3}(?:,\d{3})*\s*원|\d{4}[./-]\d{1,2}[./-]\d{1,2}|이벤트\s*(?:기간|마감))")
@@ -154,6 +158,17 @@ class LearningService:
             "AUTO_POST_REVIEWED_NO_CHANGE": AnswerProvenance.NAVER_POSTED.value,
         }.get(source, AnswerProvenance.HISTORICAL_VERIFIED.value)
         quality = self.quality.score(source, original, masked_answer)
+        product_identity = extract_product_identity(
+            product_id=inquiry.get("product_id"),
+            product_name=inquiry.get("product_name"),
+            model_code=metadata.get("model_code"),
+            option=inquiry.get("option_name"),
+        )
+        knowledge_profile = profile_knowledge(
+            question=masked_question,
+            answer=masked_answer,
+            identity=product_identity,
+        )
         digest = hashlib.sha256(
             f"{source}|{inquiry.get('id')}|{masked_question}|{masked_answer}".encode("utf-8")
         ).hexdigest()
@@ -195,6 +210,9 @@ class LearningService:
                 ),
                 "learning_signal_type": "POSITIVE",
                 "answer_provenance": answer_provenance,
+                "product_scope": knowledge_profile.scope,
+                "learning_topics": list(knowledge_profile.topics),
+                "product_identity": product_identity.to_dict(),
             },
             "active": True,
         }
@@ -619,6 +637,23 @@ class LearningService:
             return existing
         quality_score = max(0.0, min(float(case.get("quality_score") or 0), 1.0))
         rating = max(1, min(5, int(round(quality_score * 5))))
+        historical_identity = extract_product_identity(
+            product_id=case.get("product_id"),
+            product_name=case.get("product_name"),
+            metadata=(
+                case.get("metadata_json")
+                if isinstance(case.get("metadata_json"), dict) else {}
+            ),
+        )
+        historical_profile = profile_knowledge(
+            question=question,
+            answer=answer,
+            identity=historical_identity,
+            metadata=(
+                case.get("metadata_json")
+                if isinstance(case.get("metadata_json"), dict) else {}
+            ),
+        )
         example = {
             "source_key": source_key,
             "inquiry_id": case.get("inquiry_id"),
@@ -658,6 +693,9 @@ class LearningService:
                 "historical_fingerprint": case.get("fingerprint"),
                 "promoted_by": str(actor or "관리자"),
                 "policy_risk": case.get("policy_risk"),
+                "product_scope": historical_profile.scope,
+                "learning_topics": list(historical_profile.topics),
+                "product_identity": historical_identity.to_dict(),
             },
             "active": True,
         }

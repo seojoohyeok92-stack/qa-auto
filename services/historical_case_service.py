@@ -17,6 +17,10 @@ from services.learning_privacy_service import LearningPrivacyService
 from services.historical_learning_quality_service import (
     HistoricalLearningQualityService,
 )
+from services.learning_compatibility_service import (
+    LearningCompatibilityService,
+    extract_product_identity,
+)
 from services.similar_answer_service import TOKEN, normalize_learning_question
 
 if TYPE_CHECKING:
@@ -73,6 +77,7 @@ class HistoricalCaseService:
         self.repository = HistoricalCaseRepository(database)
         self.privacy = LearningPrivacyService()
         self.quality_policy = HistoricalLearningQualityService()
+        self.compatibility = LearningCompatibilityService()
         self.naver = naver_sync
 
     def _naver_service(self) -> "NaverInquirySyncService":
@@ -484,6 +489,8 @@ class HistoricalCaseService:
     def search_detailed(
         self, question: str, *, store_code: str | None = None,
         product_name: str | None = None, inquiry_type: str | None = None,
+        product_id: str | None = None, model_code: str | None = None,
+        option_name: str | None = None,
         limit: int = 4, include_risky: bool = False,
     ) -> dict[str, Any]:
         query = normalize_learning_question(self.privacy.mask(question))
@@ -491,6 +498,13 @@ class HistoricalCaseService:
         candidates = self.repository.candidates(store_code=store_code)
         rejection_counts: dict[str, int] = {}
         rejected: list[dict[str, Any]] = []
+        candidate_diagnostics: list[dict[str, Any]] = []
+        current_product = extract_product_identity(
+            product_id=product_id,
+            product_name=product_name,
+            model_code=model_code,
+            option=option_name,
+        )
         for item in candidates:
             risk = str(item.get("policy_risk") or "NONE").upper()
             eligibility = self.quality_policy.assess(
@@ -509,6 +523,44 @@ class HistoricalCaseService:
                         "historical_case_id": int(item["id"]),
                         "reason": eligibility.status,
                         "details": list(eligibility.reasons),
+                    })
+                continue
+            metadata = item.get("metadata_json")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            candidate_product = extract_product_identity(
+                product_id=item.get("product_id"),
+                product_name=item.get("product_name"),
+                metadata=metadata,
+            )
+            compatibility = self.compatibility.evaluate(
+                current_question=question,
+                current_product=current_product,
+                candidate_question=item.get("question"),
+                candidate_answer=item.get("seller_answer"),
+                candidate_product=candidate_product,
+                candidate_metadata=metadata,
+                authority="APPROVED",
+            )
+            diagnostic = {
+                "historical_case_id": int(item["id"]),
+                "lifecycle": "APPROVED",
+                "human_verified": True,
+                **compatibility.to_dict(),
+            }
+            if not compatibility.eligible:
+                reason = str(compatibility.reject_reason or "COMPATIBILITY_REJECTED")
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                diagnostic["reject_reason"] = reason
+                if len(candidate_diagnostics) < 40:
+                    candidate_diagnostics.append(diagnostic)
+                if len(rejected) < 12:
+                    rejected.append({
+                        "historical_case_id": int(item["id"]),
+                        "reason": reason,
+                        "details": [
+                            compatibility.product_match_reason,
+                            compatibility.topic_match_reason,
+                        ],
                     })
                 continue
             lexical_relevance = self._similarity(
@@ -535,6 +587,7 @@ class HistoricalCaseService:
             relevance += 0.06 if product_name and item.get("product_name") == self.privacy.mask(product_name) else 0
             relevance += 0.03 if inquiry_type and item.get("inquiry_type") == inquiry_type else 0
             relevance += eligibility.trust_score * 0.10
+            relevance += compatibility.score_adjustment
             # Preserve the legacy promotion score while all active Historical
             # employee answers participate as verified, opt-out Learning.
             relevance += 0.04 if item.get("promoted_learning_id") else 0
@@ -550,13 +603,24 @@ class HistoricalCaseService:
                 value = dict(item)
                 value["relevance"] = round(relevance, 4)
                 value["runtime_eligibility"] = eligibility.to_dict()
+                value["compatibility"] = compatibility.to_dict()
                 value["reference_strength"] = "HISTORICAL_VERIFIED_LEARNING"
                 value["usage_notice"] = "과거 표현/대응 참고 전용. 현재 Rule·주문·DPS·상품DB·Template이 우선합니다."
                 ranked.append((relevance, value))
+                diagnostic.update({
+                    "similarity": round(relevance, 4),
+                    "reject_reason": None,
+                })
             else:
                 rejection_counts["LOW_RELEVANCE"] = (
                     rejection_counts.get("LOW_RELEVANCE", 0) + 1
                 )
+                diagnostic.update({
+                    "similarity": round(relevance, 4),
+                    "reject_reason": "LOW_RELEVANCE",
+                })
+            if len(candidate_diagnostics) < 40:
+                candidate_diagnostics.append(diagnostic)
         ranked.sort(
             key=lambda pair: (pair[0], pair[1].get("quality_score") or 0, pair[1].get("inquiry_created_at") or ""),
             reverse=True,
@@ -592,17 +656,23 @@ class HistoricalCaseService:
             "selected": selected,
             "rejection_counts": rejection_counts,
             "rejected_samples": rejected,
+            "candidate_diagnostics": candidate_diagnostics,
         }
 
     def search(
         self, question: str, *, store_code: str | None = None,
         product_name: str | None = None, inquiry_type: str | None = None,
+        product_id: str | None = None, model_code: str | None = None,
+        option_name: str | None = None,
         limit: int = 4, include_risky: bool = False,
     ) -> list[dict[str, Any]]:
         return self.search_detailed(
             question,
             store_code=store_code,
             product_name=product_name,
+            product_id=product_id,
+            model_code=model_code,
+            option_name=option_name,
             inquiry_type=inquiry_type,
             limit=limit,
             include_risky=include_risky,

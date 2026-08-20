@@ -240,14 +240,14 @@ def test_known_active_learning_is_selected_attached_and_sent_to_provider(tmp_pat
     ).generate(facts(target_id, customer_question), intent)
     assert captured["context"]["similar_approved_answers"][0]["learning_example_id"] == learning_id
     assert result.answer == "검증된 설치 방식 안내입니다."
-    assert result.learning_usage == (
-        {
-            "learning_id": learning_id,
-            "matched_subquestion": customer_question,
-            "answer_supported": True,
-            "reason": "ANSWER_TEXT_MATCHED_ATTACHED_LEARNING",
-        },
-    )
+    assert len(result.learning_usage) == 1
+    usage = result.learning_usage[0]
+    assert usage["learning_id"] == learning_id
+    assert usage["matched_subquestion"] == customer_question
+    assert usage["answer_supported"] is True
+    assert usage["reason"] == "ANSWER_TEXT_MATCHED_ATTACHED_LEARNING"
+    assert usage["authority"] == "APPROVED"
+    assert usage["compatibility"]["topic_match"] == "MATCH"
 
 
 def test_compound_questions_retrieve_learning_per_subquestion(tmp_path) -> None:

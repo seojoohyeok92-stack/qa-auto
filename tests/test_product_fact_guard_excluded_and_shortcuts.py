@@ -148,13 +148,14 @@ def test_cross_product_learning_body_is_filtered_only_for_product_facts(
         model_code="MODEL50A",
         product_fact_sensitive=True,
     )[0]["final_answer"] == "HDMI 단자는 3개입니다."
-    # Common policy retrieval keeps the existing cross-product behavior.
+    # Caller hints cannot downgrade an intrinsically model-sensitive topic.
+    # HDMI remains product scoped even if a legacy caller passed False.
     assert search.search(
         "HDMI 단자가 몇 개인가요",
         store_code="OJE_PLUS",
         product_id="TV-43",
         product_fact_sensitive=False,
-    )
+    ) == []
 
 
 def test_unverified_product_fact_is_hard_blocked_from_auto_post() -> None:

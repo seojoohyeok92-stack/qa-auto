@@ -410,7 +410,10 @@ class LearningRepository:
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
-                SELECT learning_examples.*, inquiries.product_id AS source_product_id
+                SELECT learning_examples.*,
+                       inquiries.product_id AS source_product_id,
+                       inquiries.product_name AS source_product_name,
+                       inquiries.option_name AS source_option_name
                 FROM learning_examples
                 LEFT JOIN inquiries ON inquiries.id=learning_examples.inquiry_id
                 WHERE learning_examples.active=1

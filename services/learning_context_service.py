@@ -12,7 +12,7 @@ from repositories.log_repository import LogRepository
 from services.similar_answer_service import SimilarAnswerService
 from services.historical_case_service import HistoricalCaseService
 from repositories.learning_provenance_repository import LearningProvenanceRepository
-from services.product_fact_guard import classify_product_fact, same_stable_product
+from services.product_fact_guard import classify_product_fact
 
 
 class LearningContextService:
@@ -124,6 +124,9 @@ class LearningContextService:
                 model_code=question_guard.model_code,
                 inquiry_type=inquiry_type,
                 product_id=question_guard.product_id,
+                option_name=(
+                    inquiry.get("option_name") or facts.product.get("option_name")
+                ),
                 product_fact_sensitive=question_guard.sensitive,
                 limit=2 if len(questions) > 1 else 3,
                 candidate_pool=candidate_pool,
@@ -135,6 +138,7 @@ class LearningContextService:
                     item["attached_to_prompt"] = True
                     item["why_selected"] = (
                         "ACTIVE_VALIDITY_AND_RELEVANCE_THRESHOLD"
+                        "_AND_PRODUCT_TOPIC_COMPATIBILITY"
                     )
             trace = dict(item_context.get("learning_retrieval") or {})
             trace["product_fact_sensitive"] = question_guard.sensitive
@@ -178,6 +182,11 @@ class LearningContextService:
                 question,
                 store_code=store_code,
                 product_name=product_name,
+                product_id=guard.product_id,
+                model_code=guard.model_code,
+                option_name=(
+                    inquiry.get("option_name") or facts.product.get("option_name")
+                ),
                 inquiry_type=inquiry_type,
                 limit=2 if len(questions) > 1 else 3,
             )
@@ -200,16 +209,6 @@ class LearningContextService:
             key=lambda item: float(item.get("relevance") or 0),
             reverse=True,
         )[:3]
-        if guard.sensitive:
-            historical = [
-                item for item in historical
-                if same_stable_product(
-                    current_product_id=guard.product_id,
-                    candidate_product_id=item.get("product_id"),
-                    current_model_code=guard.model_code,
-                    candidate_model_code=None,
-                )
-            ]
         learning_references = [
             *context["similar_approved_answers"],
             *context["seller_style_examples"],
@@ -322,6 +321,7 @@ class LearningContextService:
                     "why_selected": item.get("why_selected"),
                     "attached_to_prompt": True,
                     "answer_supported": None,
+                    "compatibility": item.get("compatibility") or {},
                 }
                 for item in context["similar_approved_answers"]
             ],
@@ -335,6 +335,20 @@ class LearningContextService:
                     learning_quality_rejections.values()
                 ),
                 **learning_quality_rejections,
+                **{
+                    reason: sum(
+                        int((trace.get("rejection_counts") or {}).get(reason, 0))
+                        for trace in subquestion_traces
+                    )
+                    for reason in {
+                        key
+                        for trace in subquestion_traces
+                        for key in (trace.get("rejection_counts") or {})
+                        if key not in {
+                            "FILTERED_BY_VALIDITY", "REVOKED", "NEGATIVE_EXCLUDED"
+                        }
+                    }
+                },
             },
         }
         context["learning_retrieval"] = retrieval
@@ -350,6 +364,7 @@ class LearningContextService:
                 "relevance": item.get("relevance"),
                 "matched_subquestion": item.get("matched_subquestion"),
                 "eligibility": item.get("runtime_eligibility"),
+                "compatibility": item.get("compatibility") or {},
                 "attached_to_prompt": True,
                 "source": item.get("reference_strength")
                 or "HISTORICAL_VERIFIED_LEARNING",

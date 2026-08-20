@@ -6,8 +6,11 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from repositories.learning_repository import LearningRepository
+from services.learning_compatibility_service import (
+    LearningCompatibilityService,
+    extract_product_identity,
+)
 from services.learning_privacy_service import LearningPrivacyService
-from services.product_fact_guard import same_stable_product
 
 
 TOKEN = re.compile(r"[가-힣A-Za-z0-9]{2,}")
@@ -47,6 +50,7 @@ class SimilarAnswerService:
     def __init__(self, repository: LearningRepository) -> None:
         self.repository = repository
         self.privacy = LearningPrivacyService()
+        self.compatibility = LearningCompatibilityService()
 
     @staticmethod
     def _similarity(left: str, right: str) -> float:
@@ -106,6 +110,7 @@ class SimilarAnswerService:
         intent: str | None = None, product_name: str | None = None,
         model_code: str | None = None, inquiry_type: str | None = None,
         product_id: str | None = None,
+        option_name: str | None = None,
         product_fact_sensitive: bool = False,
         limit: int = 3, minimum_relevance: float = 0.24,
         candidate_pool: list[dict[str, Any]] | None = None,
@@ -122,32 +127,63 @@ class SimilarAnswerService:
             store_code=store_code
         )
         rejection_counts = {
-            "FILTERED_BY_PRODUCT": 0,
             "BELOW_SIMILARITY_THRESHOLD": 0,
             "CONTEXT_POLICY_REJECTED": 0,
         }
+        compatibility_diagnostics: list[dict[str, Any]] = []
         type_mismatch_count = 0
         query_concepts = self._semantic_concepts(query)
         required_context = query_concepts & CONTEXT_ANCHOR_CONCEPTS
+        current_product = extract_product_identity(
+            product_id=product_id,
+            product_name=product_name,
+            model_code=model_code,
+            option=option_name,
+        )
         for item in candidates:
             if inquiry_type and item.get("inquiry_type") != inquiry_type:
                 # Inquiry type is intentionally a relevance signal, not a hard
                 # equality filter. Taxonomies differ between old and new data.
                 type_mismatch_count += 1
-            if product_fact_sensitive:
-                metadata = item.get("metadata_json")
-                metadata = metadata if isinstance(metadata, dict) else {}
-                if not metadata.get("human_verified") or not same_stable_product(
-                    current_product_id=product_id,
-                    candidate_product_id=item.get("source_product_id"),
-                    current_model_code=model_code,
-                    candidate_model_code=item.get("model_code"),
-                ):
-                    # Detailed answer bodies from another/unknown product or
-                    # unverified examples are not safe facts. Global style
-                    # aggregation below remains available.
-                    rejection_counts["FILTERED_BY_PRODUCT"] += 1
-                    continue
+            metadata = item.get("metadata_json")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            human_verified = metadata.get("human_verified") is True
+            candidate_product = extract_product_identity(
+                product_id=item.get("source_product_id"),
+                product_name=(
+                    item.get("source_product_name") or item.get("product_name")
+                ),
+                model_code=item.get("model_code"),
+                option=item.get("source_option_name"),
+                metadata=metadata,
+            )
+            compatibility = self.compatibility.evaluate(
+                current_question=question,
+                current_product=current_product,
+                candidate_question=item.get("question_original_masked")
+                or item.get("question_normalized"),
+                candidate_answer=item.get("final_answer"),
+                candidate_product=candidate_product,
+                candidate_metadata=metadata,
+                authority="APPROVED" if human_verified else "AUTO",
+            )
+            diagnostic = {
+                "learning_id": int(item["id"]),
+                "lifecycle": "APPROVED" if human_verified else "AUTO",
+                "human_verified": human_verified,
+                **compatibility.to_dict(),
+            }
+            if not compatibility.eligible:
+                reason = str(compatibility.reject_reason or "COMPATIBILITY_REJECTED")
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                diagnostic.update({
+                    "eligible": False,
+                    "similarity": None,
+                    "reject_reason": reason,
+                })
+                if len(compatibility_diagnostics) < 40:
+                    compatibility_diagnostics.append(diagnostic)
+                continue
             candidate_concepts = self._semantic_concepts(
                 str(item["question_normalized"])
             )
@@ -159,12 +195,26 @@ class SimilarAnswerService:
             relevance += 0.08 if product_name and item.get("product_name") == product_name else 0
             relevance += 0.08 if model_code and item.get("model_code") == model_code else 0
             relevance += 0.04 if inquiry_type and item.get("inquiry_type") == inquiry_type else 0
+            relevance += compatibility.score_adjustment
             if relevance >= minimum_relevance:
                 safe = dict(item)
                 safe["relevance"] = round(relevance, 4)
+                safe["compatibility"] = compatibility.to_dict()
                 ranked.append((relevance, safe))
+                diagnostic.update({
+                    "eligible": True,
+                    "similarity": round(relevance, 4),
+                    "reject_reason": None,
+                })
             else:
                 rejection_counts["BELOW_SIMILARITY_THRESHOLD"] += 1
+                diagnostic.update({
+                    "eligible": False,
+                    "similarity": round(relevance, 4),
+                    "reject_reason": "BELOW_SIMILARITY_THRESHOLD",
+                })
+            if len(compatibility_diagnostics) < 40:
+                compatibility_diagnostics.append(diagnostic)
         ranked.sort(
             key=lambda pair: (
                 pair[0], self._source_priority(pair[1]),
@@ -193,6 +243,7 @@ class SimilarAnswerService:
                 "NEGATIVE_EXCLUDED": diagnostics["negative_excluded"],
                 **rejection_counts,
             },
+            "candidate_diagnostics": compatibility_diagnostics,
         }
         return selected
 
@@ -221,11 +272,17 @@ class SimilarAnswerService:
                     if (item.get("metadata_json") or {}).get("human_verified") is True
                     else "AUTO"
                 ),
+                "compatibility": item.get("compatibility") or {},
             }
             (seller if item["style_only"] else approved).append(payload)
         features = Counter()
         lengths = []
-        for item in self.repository.candidates(store_code=filters.get("store_code"), limit=100):
+        style_pool = filters.get("candidate_pool")
+        if not isinstance(style_pool, list):
+            style_pool = self.repository.candidates(
+                store_code=filters.get("store_code"), limit=100
+            )
+        for item in style_pool[:100]:
             if int(item["rating"]) < 4:
                 continue
             style = item.get("style_features_json") or {}

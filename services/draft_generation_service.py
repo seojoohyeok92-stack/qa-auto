@@ -129,6 +129,10 @@ class DraftGenerationService:
                     "matched_subquestion": matched,
                     "answer_supported": bool(item.get("answer_supported")),
                     "reason": str(item.get("reason") or "")[:300],
+                    "authority": "APPROVED",
+                    "compatibility": dict(
+                        selected.get("compatibility") or {}
+                    ),
                 })
         if not valid:
             answer = str(raw.get("answer") or "")
@@ -144,6 +148,10 @@ class DraftGenerationService:
                         ),
                         "answer_supported": True,
                         "reason": "ANSWER_TEXT_MATCHED_ATTACHED_HISTORICAL",
+                        "authority": "APPROVED",
+                        "compatibility": dict(
+                            selected.get("compatibility") or {}
+                        ),
                     })
         copied = dict(raw)
         copied["historical_usage"] = valid
@@ -184,8 +192,13 @@ class DraftGenerationService:
             if item.get("status") == "ANSWERABLE"
             and (item.get("learning_ids") or item.get("historical_case_ids"))
         ]
+        if not approved:
+            # Provider-reported IDs are never authoritative.  A Learning that
+            # was rejected before prompt attachment cannot be resurrected as
+            # "actually used" merely because a model emitted its ID.
+            raw = {**raw, "learning_usage": []}
         if (not approved and not historical) or not answerable:
-            return raw
+            return {**raw, "learning_usage": []}
 
         reported_usage = raw.get("learning_usage")
         valid_usage = []
@@ -213,6 +226,10 @@ class DraftGenerationService:
                             item.get("answer_supported")
                         ),
                         "reason": str(item.get("reason") or "")[:300],
+                        "authority": selected.get("authority"),
+                        "compatibility": dict(
+                            selected.get("compatibility") or {}
+                        ),
                     }
                 )
         answer = str(raw.get("answer") or "")
@@ -241,6 +258,10 @@ class DraftGenerationService:
                                 "matched_subquestion": question,
                                 "answer_supported": True,
                                 "reason": "ANSWER_TEXT_MATCHED_ATTACHED_LEARNING",
+                                "authority": selected.get("authority"),
+                                "compatibility": dict(
+                                    selected.get("compatibility") or {}
+                                ),
                             }
                         )
                         break
@@ -297,6 +318,10 @@ class DraftGenerationService:
                         "matched_subquestion": question,
                         "answer_supported": True,
                         "reason": "ACTIVE_POSITIVE_LEARNING_GROUNDED_RECOVERY",
+                        "authority": selected.get("authority"),
+                        "compatibility": dict(
+                            selected.get("compatibility") or {}
+                        ),
                     }
                 )
             elif selected_historical is not None:
@@ -308,6 +333,10 @@ class DraftGenerationService:
                         "matched_subquestion": question,
                         "answer_supported": True,
                         "reason": "SAFE_HISTORICAL_GROUNDED_RECOVERY",
+                        "authority": "APPROVED",
+                        "compatibility": dict(
+                            selected_historical.get("compatibility") or {}
+                        ),
                     }
                 )
 

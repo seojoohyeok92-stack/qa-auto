@@ -14,6 +14,7 @@ from answer.hybrid_models import (
 )
 from answer.inquiry_analysis import AnswerStrategy, InquiryAnalysis
 from answer.text_utils import PHONE_PATTERN
+from services.learning_compatibility_service import LearningCompatibilityService
 
 
 SECRET_PATTERN = re.compile(
@@ -543,12 +544,45 @@ class AnswerValidator:
             analysis=analysis,
             selected_facts=selected_facts,
         )
+        questions = tuple(
+            str(value).strip()
+            for value in intent.questions
+            if str(value).strip()
+        ) or (str(facts.inquiry.get("question") or ""),)
+        relevance = LearningCompatibilityService().answer_relevance(
+            questions=questions,
+            answer=draft.answer,
+        )
+        relevance_rule = ValidationRuleResult(
+            "ANSWER_TOPIC_RELEVANCE",
+            relevance.status,
+            relevance.reason,
+        )
+        coverage_rules: tuple[ValidationRuleResult, ...] = ()
+        if len(questions) > 1 and draft.subquestion_results:
+            answered = {
+                str(item.get("subquestion") or "").strip()
+                for item in draft.subquestion_results
+                if item.get("answered") is True
+            }
+            missing = [question for question in questions if question not in answered]
+            coverage_rules = (
+                ValidationRuleResult(
+                    "SUBQUESTION_EVIDENCE_COVERAGE",
+                    "REVIEW_REQUIRED" if missing else "PASS",
+                    (
+                        "COMPOUND_QUESTION_PARTIAL_COVERAGE"
+                        if missing else "ALL_SUBQUESTIONS_ANSWERED"
+                    ),
+                ),
+            )
+        validation_rules = (*phase9_rules, relevance_rule, *coverage_rules)
         errors.extend(
-            item.message for item in phase9_rules if item.status == "BLOCK"
+            item.message for item in validation_rules if item.status == "BLOCK"
         )
         warnings.extend(
             item.message
-            for item in phase9_rules
+            for item in validation_rules
             if item.status == "REVIEW_REQUIRED"
         )
         status = (
@@ -564,7 +598,7 @@ class AnswerValidator:
             warnings=tuple(dict.fromkeys(warnings)),
             checked_facts=tuple(dict.fromkeys(checked)),
             status=status,
-            rules=phase9_rules,
+            rules=validation_rules,
         )
 
     @staticmethod

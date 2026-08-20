@@ -116,6 +116,7 @@ def test_similar_search_limits_results_and_separates_factual_authority(tmp_path)
     context = SimilarAnswerService(LearningRepository(database)).context(
         "TV로 사용하려면 어떻게 하나요?", store_code="OJE_PLUS",
         inquiry_type="PRODUCT_INQUIRY", minimum_relevance=0.1,
+        product_name="삼성 스마트모니터 M7",
     )
     assert len(context["similar_approved_answers"]) <= 3
     assert context["similar_approved_answers"]
