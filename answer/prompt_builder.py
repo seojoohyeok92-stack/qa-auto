@@ -65,7 +65,9 @@ class PromptBuilder:
     PROHIBITIONS = (
         "Facts에 없는 배송일, 주문상태, 설치일, 상품정보, 정책, "
         "기사 방문시간, 반품 가능 여부를 추측하지 않는다. "
-        "전화번호, 주소, OTP, 인증정보, 토큰, Cookie, Session을 출력하지 않는다."
+        "전화번호, 주소, OTP, 인증정보, 토큰, Cookie, Session을 출력하지 않는다. "
+        "인사말(예: 안녕하세요)과 마무리 인사(예: 감사합니다)는 별도 Template이 "
+        "자동으로 추가하므로 답변 본문에 포함하지 않는다."
     )
     OUTPUT_CONTRACTS: dict[str, dict[str, Any]] = {
         "UNDERSTANDING": {
@@ -227,6 +229,7 @@ class PromptBuilder:
                 "concise": True,
                 "answer_only": True,
                 "avoid_repetition": True,
+                "no_greeting_or_closing": True,
             },
             "confirmed_facts": confirmed_facts,
             "learning_usage_policy": {

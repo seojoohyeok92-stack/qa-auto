@@ -13,12 +13,16 @@ DEFAULT_FALLBACK_NOTICE = FINAL_FALLBACK_NOTICE.replace("\n", " ")
 
 _LEADING_PRESENTATION = re.compile(
     r"\A\s*(?:"
-    r"[♣♧]*안녕하세요[♣♧]*"
-    r"|안녕하세요\s*[,!]?\s*고객님\s*[.!]?"
-    r"|안녕하세요\s+오제앤에스\s*(?:입니다)?\s*[.!]?"
-    r"|안녕하세요\s*[.,!]"
-    r"|오제\s*챗봇\s*\(?(?:Chat\s*Bot)?\)?(?:이|가)?\s*답변드립니다\s*[.!]?"
-    r")\s*(?:\n+|\Z)",
+    # A bare greeting is always redundant with the wrapper header, whether it
+    # is followed by a newline, the end of the string, or content on the same
+    # line (e.g. GPT writing "안녕하세요 상품명 기준..." with no punctuation
+    # or line break in between, which previously slipped past this filter and
+    # produced a duplicated greeting once the wrapper header was prepended).
+    r"[♣♧]*안녕하세요[♣♧]*\s*[,!]?\s*고객님\s*[.!]?\s*(?:\n+|\Z|(?=\S))"
+    r"|[♣♧]*안녕하세요[♣♧]*\s+오제앤에스\s*(?:입니다)?\s*[.!]?\s*(?:\n+|\Z|(?=\S))"
+    r"|[♣♧]*안녕하세요[♣♧]*\s*[.,!]?\s*(?:\n+|\Z|(?=\S))"
+    r"|오제\s*챗봇\s*\(?(?:Chat\s*Bot)?\)?(?:이|가)?\s*답변드립니다\s*[.!]?\s*(?:\n+|\Z)"
+    r")",
     re.IGNORECASE,
 )
 _TRAILING_PRESENTATION = re.compile(

@@ -253,25 +253,52 @@ def _review_required_safe_result(
     *,
     template_preferred: bool,
     failure_code: str,
+    questions: tuple[str, ...] = (),
 ) -> AnswerResult:
     """Return the last-resort, non-empty customer draft for GPT outages.
 
     A provider or validator failure is an expected operational state.  It must
     not leave an unanswered inquiry without a Program Answer; staff can replace
     this conservative draft later.
+
+    When the GPT UNDERSTANDING step already decomposed the inquiry before the
+    failure, ``questions`` carries what the customer actually asked.  Echoing
+    those back keeps this safety draft on-topic instead of a static
+    "사용 방법 또는 기능"/"주문 또는 상품" category label that may not match
+    the real question (e.g. a product-availability question mislabeled as a
+    usage/feature question).  With no decomposed questions available (a
+    failure before UNDERSTANDING even ran), the generic category fallback is
+    kept as the last resort.
     """
 
-    product_inquiry = str(request.inquiry_type).upper() == "PRODUCT_INQUIRY"
-    subject = (
-        "문의하신 상품의 사용 방법 또는 기능"
-        if product_inquiry
-        else "문의하신 주문 또는 상품 관련 내용"
+    cleaned_questions = tuple(
+        dict.fromkeys(
+            str(item).strip() for item in questions if str(item).strip()
+        )
     )
-    answer = format_final_answer(
-        f"""{subject}은 정확한 정보 확인이 필요한 문의입니다.
+    if cleaned_questions:
+        if len(cleaned_questions) == 1:
+            confirmation_body = f'문의주신 "{cleaned_questions[0]}"'
+        else:
+            bullet_list = "\n".join(f"- {item}" for item in cleaned_questions)
+            confirmation_body = f"문의주신 아래 내용은\n\n{bullet_list}"
+        answer = format_final_answer(
+            f"""{confirmation_body} 관련하여 정확한 정보 확인이 필요합니다.
 
 확인되지 않은 내용을 임의로 안내하지 않고 직원 검토가 필요한 상태로 처리하겠습니다."""
-    )
+        )
+    else:
+        product_inquiry = str(request.inquiry_type).upper() == "PRODUCT_INQUIRY"
+        subject = (
+            "문의하신 상품의 사용 방법 또는 기능"
+            if product_inquiry
+            else "문의하신 주문 또는 상품 관련 내용"
+        )
+        answer = format_final_answer(
+            f"""{subject}은 정확한 정보 확인이 필요한 문의입니다.
+
+확인되지 않은 내용을 임의로 안내하지 않고 직원 검토가 필요한 상태로 처리하겠습니다."""
+        )
     return AnswerResult(
         status=AnswerStatus.NEEDS_REVIEW,
         category="직원검토/안전초안",
@@ -2006,10 +2033,22 @@ class AnswerService:
                             # as it was instead of replacing it with a weaker
                             # safety response.
                             raise
+                        failed_intent = (
+                            hybrid_outcome.intent
+                            if "hybrid_outcome" in locals()
+                            and getattr(hybrid_outcome, "intent", None)
+                            is not None
+                            else None
+                        )
                         result = _review_required_safe_result(
                             request,
                             template_preferred=prefer_template,
                             failure_code=safe_error_code,
+                            questions=(
+                                tuple(failed_intent.questions)
+                                if failed_intent is not None
+                                else ()
+                            ),
                         )
                         validation = self.validator.validate_route(
                             result.answer,

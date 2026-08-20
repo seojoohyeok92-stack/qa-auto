@@ -60,6 +60,7 @@ class HybridAnswerService:
         self.self_review = SelfReviewService(self.provider)
         self.validator = validator or AnswerValidator()
         self.fact_selection = fact_selection or FactSelectionService()
+        self._learning_context_provider = learning_context_provider
 
     @staticmethod
     def _fallback(
@@ -296,11 +297,25 @@ class HybridAnswerService:
                     warnings=(),
                 )
             else:
+                try:
+                    learning_context = (
+                        self._learning_context_provider(facts, intent)
+                        if self._learning_context_provider is not None
+                        else {}
+                    )
+                except Exception:
+                    # Learning is an optional enrichment and can never block
+                    # GPT.  Computed once here (instead of inside
+                    # DraftGenerationService) so a bounded corrective
+                    # regeneration below can reuse it without a second
+                    # Learning/Historical DB lookup.
+                    learning_context = {}
                 draft = self.drafts.generate(
                     facts,
                     intent,
                     analysis=analysis,
                     selected_facts=selected_facts,
+                    learning_context=learning_context,
                 )
             events.append(
                 HybridEvent(
@@ -490,6 +505,84 @@ class HybridAnswerService:
                         },
                     )
                 )
+            can_regenerate = not (
+                analysis is not None
+                and analysis.answer_strategy
+                is AnswerStrategy.REQUEST_ORDER_ID
+            )
+            if not validation.passed and can_regenerate:
+                # Bounded, single corrective regeneration: a rejected draft is
+                # often a fixable blanket-uncertainty or speculation problem,
+                # not proof that no grounded answer exists.  Reuse the same
+                # pre-computed learning_context (no extra Learning/Historical
+                # query) and give the provider the concrete rejection reasons
+                # so it can answer the supported parts and only ask for
+                # confirmation on the parts that actually lack evidence.
+                # Exactly one retry: no loop, no extra DPS call, no repeated
+                # abuse of the provider.
+                events.append(
+                    HybridEvent(
+                        "GPT_CORRECTIVE_REGENERATION_STARTED",
+                        "검증 실패 답변에 대해 1회 보정 재생성을 시도합니다.",
+                        "WARNING",
+                        {"previous_errors": list(validation.errors)},
+                    )
+                )
+                retry_feedback = {
+                    "previous_attempt_rejected": True,
+                    "previous_validation_errors": list(validation.errors),
+                    "instruction": (
+                        "이전 답변은 검증에 실패했습니다. 근거가 있는 "
+                        "sub-question만 사실에 기반해 답하고, 근거가 없는 "
+                        "부분은 추측하지 말고 확인이 필요하다고 안내하세요. "
+                        "질문과 관련 없는 내용을 답변에 포함하지 마세요."
+                    ),
+                }
+                retry_draft = self.drafts.generate(
+                    facts,
+                    intent,
+                    analysis=analysis,
+                    selected_facts=selected_facts,
+                    learning_context=learning_context,
+                    retry_feedback=retry_feedback,
+                )
+                retry_review = self.self_review.review(
+                    facts,
+                    intent,
+                    retry_draft,
+                    analysis=analysis,
+                    selected_facts=selected_facts,
+                )
+                retry_validation = self.validator.validate(
+                    facts,
+                    intent,
+                    retry_draft,
+                    retry_review,
+                    analysis=analysis,
+                    selected_facts=selected_facts,
+                )
+                events.append(
+                    HybridEvent(
+                        "GPT_CORRECTIVE_REGENERATION_COMPLETED",
+                        (
+                            "보정 재생성 답변이 Validator를 통과했습니다."
+                            if retry_validation.passed
+                            else "보정 재생성 답변도 Validator를 통과하지 "
+                            "못했습니다."
+                        ),
+                        "INFO" if retry_validation.passed else "WARNING",
+                        {
+                            "passed": retry_validation.passed,
+                            "errors": list(retry_validation.errors),
+                        },
+                    )
+                )
+                if retry_validation.passed:
+                    draft, review, validation = (
+                        retry_draft,
+                        retry_review,
+                        retry_validation,
+                    )
             if not validation.passed:
                 events.append(
                     HybridEvent(

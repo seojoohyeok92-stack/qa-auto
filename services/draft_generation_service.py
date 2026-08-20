@@ -30,6 +30,8 @@ class DraftGenerationService:
         *,
         analysis: InquiryAnalysis | None = None,
         selected_facts: SelectedFacts | None = None,
+        learning_context: dict[str, Any] | None = None,
+        retry_feedback: dict[str, Any] | None = None,
     ) -> DraftResult:
         if selected_facts is None:
             context = {
@@ -61,15 +63,16 @@ class DraftGenerationService:
                 ),
                 "intent": intent.to_dict(),
             }
-        try:
-            learning_context = (
-                self.learning_context_provider(facts, intent)
-                if self.learning_context_provider is not None
-                else {}
-            )
-        except Exception:
-            # Learning is an optional enrichment and can never block GPT.
-            learning_context = {}
+        if learning_context is None:
+            try:
+                learning_context = (
+                    self.learning_context_provider(facts, intent)
+                    if self.learning_context_provider is not None
+                    else {}
+                )
+            except Exception:
+                # Learning is an optional enrichment and can never block GPT.
+                learning_context = {}
         prompt_input = {
             "intent": intent.to_dict(),
             "context_priority": [
@@ -79,6 +82,8 @@ class DraftGenerationService:
             ],
             **learning_context,
         }
+        if retry_feedback:
+            prompt_input["prior_attempt_feedback"] = retry_feedback
         context.update(learning_context)
         raw = self.provider.generate_json(
             task="DRAFT",
