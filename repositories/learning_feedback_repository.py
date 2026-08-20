@@ -5,7 +5,11 @@ from typing import Any
 from answer.learning_conflict import LearningConflictError
 from answer.answer_format import format_final_answer
 from repositories.database import Database
-from repositories.inquiry_repository import deserialize_json, serialize_json
+from repositories.inquiry_repository import (
+    InquiryRepository,
+    deserialize_json,
+    serialize_json,
+)
 from services.learning_privacy_service import LearningPrivacyService
 
 
@@ -62,10 +66,117 @@ class LearningFeedbackRepository:
             """,
             values,
         )
-        return connection.execute(
+        row = connection.execute(
             "SELECT * FROM learning_feedback WHERE source_key=?",
             (feedback["source_key"],),
         ).fetchone()
+        if (
+            row is not None
+            and bool(row["active"])
+            and str(row["learning_signal_type"] or "").upper()
+            in {"NEGATIVE", "EXCLUDED"}
+        ):
+            LearningFeedbackRepository._soft_revoke_matching_auto(
+                connection, row
+            )
+        return row
+
+    @staticmethod
+    def _soft_revoke_matching_auto(connection: Any, feedback: Any) -> None:
+        """Keep audit history while blocking the exact rejected AUTO answer."""
+
+        inquiry_id = feedback["inquiry_id"]
+        provenance = str(feedback["original_answer_source"] or "")
+        reference_id = feedback["original_answer_reference_id"]
+        masked_answer = str(feedback["original_answer_masked"] or "")
+        if inquiry_id is None or not provenance or not masked_answer:
+            return
+        sources = {
+            provenance,
+            *(
+                {"PROGRAM_GENERATED", "STAFF_EDITED"}
+                if provenance == "FINAL_ANSWER"
+                else set()
+            ),
+        }
+        candidates = connection.execute(
+            """
+            SELECT * FROM learning_examples
+            WHERE inquiry_id=? AND active=1
+              AND COALESCE(
+                  json_extract(metadata_json, '$.learning_signal_type'),
+                  'POSITIVE'
+              )='POSITIVE'
+              AND COALESCE(
+                  json_extract(metadata_json, '$.human_verified'), 0
+              )=0
+              AND approval_history_id IS NULL
+              AND upper(COALESCE(validator_result, '')) NOT IN (
+                  'HUMAN_VERIFIED_NAVER_POSTED',
+                  'HISTORICAL_ADMIN_APPROVED'
+              )
+              AND NOT (
+                  upper(COALESCE(json_extract(metadata_json,
+                      '$.source_origin'), ''))='HISTORICAL_PROMOTED'
+                  AND trim(COALESCE(json_extract(metadata_json,
+                      '$.promoted_by'), ''))<>''
+              )
+            """,
+            (int(inquiry_id),),
+        ).fetchall()
+        for candidate in candidates:
+            metadata = deserialize_json(candidate["metadata_json"])
+            candidate_provenance = str(
+                metadata.get("answer_provenance") or ""
+            )
+            if (
+                not candidate_provenance
+                and str(candidate["learning_source"] or "") == "SELLER_ANSWER"
+            ):
+                candidate_provenance = "NAVER_POSTED"
+            if candidate_provenance not in sources:
+                continue
+            candidate_reference = (
+                metadata.get("answer_reference_id")
+                or metadata.get("naver_posted_answer_id")
+                or candidate["answer_draft_id"]
+            )
+            if (
+                candidate_reference is not None
+                and reference_id is not None
+                and int(candidate_reference) != int(reference_id)
+            ):
+                continue
+            candidate_answer = LearningPrivacyService().mask(
+                format_final_answer(str(candidate["final_answer"] or ""))
+            )
+            if candidate_answer != masked_answer:
+                continue
+            connection.execute(
+                """
+                UPDATE learning_examples
+                SET active=0,
+                    metadata_json=json_set(
+                        COALESCE(metadata_json, '{}'),
+                        '$.learning_status', 'REVOKED',
+                        '$.effective_exclusion', ?,
+                        '$.excluded_by_feedback_id', ?,
+                        '$.excluded_answer_source', ?,
+                        '$.excluded_answer_reference_id', ?,
+                        '$.superseded', 1,
+                        '$.superseded_reason', 'NEGATIVE_FEEDBACK',
+                        '$.superseded_at',
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    ),
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id=? AND active=1
+                """,
+                (
+                    str(feedback["learning_signal_type"] or "NEGATIVE").upper(),
+                    int(feedback["id"]), provenance, reference_id,
+                    int(candidate["id"]),
+                ),
+            )
 
     def save_dashboard_evaluation_atomic(
         self,
@@ -429,7 +540,21 @@ class LearningFeedbackRepository:
                 """,
                 (max(1, min(int(limit), 2_000)),),
             ).fetchall()
-        return [self._row(row) for row in rows if row is not None]
+        results = [self._row(row) for row in rows if row is not None]
+        values = [row for row in results if row is not None]
+        states = InquiryRepository(self.database).learning_states([
+            int(row["inquiry_id"])
+            for row in values if row.get("inquiry_id") is not None
+        ])
+        for row in values:
+            state = states.get(int(row["inquiry_id"])) if row.get("inquiry_id") else None
+            row["effective_learning_status"] = (
+                (state or {}).get("learning_status") or "NONE"
+            )
+            row["effective_learning_tooltip"] = (
+                (state or {}).get("learning_tooltip") or "Learning 이력 없음"
+            )
+        return values
 
     def manager_summary(self) -> dict[str, int]:
         with self.database.connection() as connection:

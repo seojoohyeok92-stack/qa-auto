@@ -193,14 +193,20 @@ def test_posted_answer_staff_correction_has_precise_learning_provenance(
         "NAVER_POSTED"
     )
     positive = LearningRepository(database).candidates(store_code="STORE")
-    assert len(positive) == 2  # synchronized seller answer + staff correction
-    correction = next(
-        item
-        for item in positive
-        if item["metadata_json"].get("answer_provenance") == "STAFF_EDITED"
-    )
+    assert len(positive) == 1
+    correction = positive[0]
+    assert correction["metadata_json"].get("answer_provenance") == "STAFF_EDITED"
     assert correction["posted"] is False
     assert correction["metadata_json"]["customer_truth_remains_naver_posted"]
+    history = LearningRepository(database).manager_rows()
+    assert len(history) == 2
+    seller = next(
+        item
+        for item in history
+        if item["metadata_json"].get("answer_provenance") == "NAVER_POSTED"
+    )
+    assert seller["active"] is False
+    assert seller["metadata_json"]["effective_exclusion"] == "NEGATIVE"
 
 
 def test_unanswered_staff_edit_keeps_program_generated_provenance(tmp_path) -> None:

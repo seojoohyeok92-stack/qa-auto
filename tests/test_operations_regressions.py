@@ -181,12 +181,12 @@ def test_learning_lifecycle_and_dashboard_filter_are_batch_resolved(tmp_path: Pa
         assert rows[0]["id"] == ids[status]
 
 
-def test_lifecycle_can_show_approved_and_correction_without_old_state_spam() -> None:
+def test_lifecycle_shows_only_current_effective_state_without_history_spam() -> None:
     result = resolve_learning_lifecycle(
         {"has_approved": 1, "has_auto": 1, "has_excluded": 1, "has_corrected": 1}
     )
-    assert result["learning_statuses"] == ["APPROVED", "CORRECTED"]
-    assert result["learning_labels"] == ["승인", "교정"]
+    assert result["learning_statuses"] == ["EXCLUDED"]
+    assert result["learning_labels"] == ["제외"]
 
 
 def test_selected_prompt_learning_is_counted_only_after_actual_use(tmp_path: Path) -> None:

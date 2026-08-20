@@ -12,6 +12,23 @@ LEARNING_STATUS_LABELS = {
 }
 
 
+def is_explicitly_approved_learning(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return bool(
+        row.get("human_verified")
+        or bool(metadata.get("human_verified"))
+        or row.get("approval_history_id") is not None
+        or (
+            str(metadata.get("source_origin") or "").upper()
+            == "HISTORICAL_PROMOTED"
+            and str(metadata.get("promoted_by") or "").strip()
+        )
+        or str(row.get("validator_result") or "").upper()
+        in {"HUMAN_VERIFIED_NAVER_POSTED", "HISTORICAL_ADMIN_APPROVED"}
+    )
+
+
 def resolve_learning_lifecycle(flags: dict[str, Any]) -> dict[str, Any]:
     """Resolve the current inquiry lifecycle without promoting old signals."""
 
@@ -19,19 +36,21 @@ def resolve_learning_lifecycle(flags: dict[str, Any]) -> dict[str, Any]:
     automatic = bool(flags.get("has_auto"))
     excluded = bool(flags.get("has_excluded"))
     corrected = bool(flags.get("has_corrected"))
-    if approved:
-        primary = "APPROVED"
-    elif automatic:
-        primary = "AUTO"
+    supplied = str(flags.get("effective_status") or "").upper()
+    if supplied in LEARNING_STATUS_LABELS:
+        primary = supplied
     elif excluded:
         primary = "EXCLUDED"
     elif corrected:
         primary = "CORRECTED"
+    elif approved:
+        primary = "APPROVED"
+    elif automatic:
+        primary = "AUTO"
     else:
         primary = "NONE"
+    # The list badge represents current state, not the entire audit history.
     statuses = [primary]
-    if corrected and primary not in {"CORRECTED", "NONE"}:
-        statuses.append("CORRECTED")
     labels = [LEARNING_STATUS_LABELS[status] for status in statuses]
     provenance = [
         value

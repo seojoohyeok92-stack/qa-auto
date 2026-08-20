@@ -260,7 +260,7 @@ def test_operator_labels_cover_status_type_number_and_kst() -> None:
     assert _learning_status_label({"active": True}) == "미평가"
     assert _learning_status_label(
         {"signal_type": "POSITIVE", "active": False}
-    ) == "Positive 승인 취소"
+    ) == "Positive 자동 (비활성)"
     assert _learning_status_label(
         {"learning_signal_type": "NEGATIVE", "active": False}
     ) == "Negative 취소"

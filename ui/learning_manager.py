@@ -10,6 +10,7 @@ from repositories.database import Database
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
 from services.learning_validity_service import validity_summary
+from services.learning_lifecycle_service import is_explicitly_approved_learning
 
 
 INQUIRY_TYPE_LABELS = {
@@ -36,6 +37,7 @@ SIGNAL_FILTER_LABELS = {
 DEFAULT_COLUMNS = (
     "문의일시",
     "학습상태",
+    "원래상태",
     "네이버 문의번호",
     "문의유형",
     "유효성",
@@ -156,6 +158,21 @@ def _is_human_verified(row: dict[str, Any]) -> bool:
 
 
 def _learning_status_label(row: dict[str, Any]) -> str:
+    effective = str(row.get("effective_learning_status") or "").upper()
+    if effective == "EXCLUDED":
+        return "제외"
+    if effective == "CORRECTED":
+        return "교정"
+    if effective == "APPROVED":
+        return "Positive 승인"
+    if effective == "AUTO":
+        return "Positive 자동"
+    if effective == "NONE":
+        return "-"
+    return _history_status_label(row)
+
+
+def _history_status_label(row: dict[str, Any]) -> str:
     metadata = _metadata(row)
     signal = str(
         row.get("signal_type")
@@ -165,7 +182,8 @@ def _learning_status_label(row: dict[str, Any]) -> str:
     ).upper()
     active = bool(row.get("active"))
     if signal == "POSITIVE":
-        return "Positive 승인" if active else "Positive 승인 취소"
+        authority = "승인" if is_explicitly_approved_learning(row) else "자동"
+        return f"Positive {authority}" if active else f"Positive {authority} (비활성)"
     if signal == "NEGATIVE":
         return "Negative" if active else "Negative 취소"
     if signal == "EXCLUDED":
@@ -223,6 +241,7 @@ def _display_row(row: dict[str, Any]) -> dict[str, str]:
     return {
         "문의일시": format_datetime_minute_kst(_inquiry_datetime(row)),
         "학습상태": _learning_status_label(row),
+        "원래상태": _history_status_label(row),
         "네이버 문의번호": _external_inquiry_number(row),
         "문의유형": _inquiry_type_label(row),
         "유효성": validity_summary(row) if row.get("learning_source") else "-",
@@ -302,6 +321,7 @@ def _render_default_table(rows: list[dict[str, Any]]) -> None:
         column_config={
             "문의일시": st.column_config.TextColumn(width="small"),
             "학습상태": st.column_config.TextColumn(width="small"),
+            "원래상태": st.column_config.TextColumn(width="small"),
             "네이버 문의번호": st.column_config.TextColumn(width="medium"),
             "문의유형": st.column_config.TextColumn(width="small"),
             "유효성": st.column_config.TextColumn(width="small"),
@@ -607,7 +627,10 @@ def render_learning_manager(database: Database | None) -> None:
         validity_state=selected_validity_state,
     )
     st.subheader("Positive Learning")
-    st.caption("승인된 Positive와 soft revoke 이력을 실제 문의시각 최신순으로 표시합니다.")
+    st.caption(
+        "Positive 자동/승인 이력과 현재 effective lifecycle을 분리해 표시합니다. "
+        "soft revoke 이력은 삭제하지 않습니다."
+    )
     if not positive:
         st.info("조건에 맞는 Positive Learning이 없습니다.")
     else:

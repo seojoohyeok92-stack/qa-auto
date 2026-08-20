@@ -4,13 +4,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 from answer.learning_conflict import LearningConflictError
+from answer.answer_format import format_final_answer
 from repositories.database import Database
-from repositories.inquiry_repository import deserialize_json, serialize_json
+from repositories.inquiry_repository import (
+    InquiryRepository,
+    deserialize_json,
+    serialize_json,
+)
 from services.learning_validity_service import (
     is_learning_usable,
     normalize_validity_update,
     validity_status,
 )
+from services.learning_privacy_service import LearningPrivacyService
 
 
 class LearningRepository:
@@ -172,6 +178,67 @@ class LearningRepository:
                 example,
                 allow_human_authority_update=True,
             )
+            learning_id = int(row["id"])
+            # A later, distinct Human Verified answer may supersede an older
+            # inquiry-level Negative/Correction for lifecycle display.  The
+            # old feedback remains active for its exact answer identity, so
+            # that answer stays blocked from runtime retrieval.
+            feedback_rows = connection.execute(
+                """
+                SELECT id, original_answer_masked, metadata_json
+                FROM learning_feedback
+                WHERE inquiry_id=? AND active=1
+                  AND learning_signal_type IN (
+                      'NEGATIVE','EXCLUDED','INTENT_CORRECTION'
+                  )
+                """,
+                (inquiry_id,),
+            ).fetchall()
+            for feedback in feedback_rows:
+                if str(feedback["original_answer_masked"] or "") == masked_answer:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE learning_feedback
+                    SET metadata_json=json_set(
+                            COALESCE(metadata_json, '{}'),
+                            '$.lifecycle_superseded_by_learning_id', ?,
+                            '$.lifecycle_superseded_at',
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ),
+                        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id=?
+                    """,
+                    (learning_id, int(feedback["id"])),
+                )
+            revoked_rows = connection.execute(
+                """
+                SELECT id, final_answer FROM learning_examples
+                WHERE inquiry_id=? AND active=0
+                  AND COALESCE(
+                      json_extract(metadata_json, '$.verification_revoked'), 0
+                  )=1
+                  AND id<>?
+                """,
+                (inquiry_id, learning_id),
+            ).fetchall()
+            for revoked in revoked_rows:
+                if str(revoked["final_answer"] or "") == masked_answer:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE learning_examples
+                    SET metadata_json=json_set(
+                            COALESCE(metadata_json, '{}'),
+                            '$.lifecycle_superseded_by_learning_id', ?,
+                            '$.lifecycle_superseded_at',
+                                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ),
+                        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id=?
+                    """,
+                    (learning_id, int(revoked["id"])),
+                )
         result = self._row(row)
         assert result is not None
         return result
@@ -374,13 +441,76 @@ class LearningRepository:
                 (now, now, store_code, store_code, safe_limit),
             ).fetchall()
         # Keep the shared Python policy as a second guard if a legacy timestamp
-        # cannot be interpreted consistently by SQLite.
-        return [
+        # cannot be interpreted consistently by SQLite.  Active feedback is
+        # loaded once and matched to exact answer identity so legacy AUTO rows
+        # remain auditable but cannot enter runtime evidence.
+        items = [
             item
             for row in rows
             if (item := self._row(row)) is not None
             and is_learning_usable(item)
+        ]
+        inquiry_ids = sorted({
+            int(item["inquiry_id"])
+            for item in items if item.get("inquiry_id") is not None
+        })
+        feedback_by_inquiry: dict[int, list[dict[str, Any]]] = {}
+        if inquiry_ids:
+            placeholders = ",".join("?" for _ in inquiry_ids)
+            with self.database.connection() as connection:
+                feedback_rows = connection.execute(
+                    f"""
+                    SELECT * FROM learning_feedback
+                    WHERE inquiry_id IN ({placeholders}) AND active=1
+                      AND learning_signal_type IN ('NEGATIVE','EXCLUDED')
+                    """,
+                    inquiry_ids,
+                ).fetchall()
+            for raw in feedback_rows:
+                feedback = dict(raw)
+                feedback_by_inquiry.setdefault(
+                    int(feedback["inquiry_id"]), []
+                ).append(feedback)
+        return [
+            item for item in items
+            if not self._excluded_by_exact_feedback(
+                item,
+                feedback_by_inquiry.get(int(item.get("inquiry_id") or 0), []),
+            )
         ][:safe_limit]
+
+    @staticmethod
+    def _excluded_by_exact_feedback(
+        item: dict[str, Any], feedbacks: list[dict[str, Any]]
+    ) -> bool:
+        if not feedbacks:
+            return False
+        metadata = item.get("metadata_json")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        provenance = str(metadata.get("answer_provenance") or "")
+        if not provenance and str(item.get("learning_source") or "") == "SELLER_ANSWER":
+            provenance = "NAVER_POSTED"
+        reference = (
+            metadata.get("answer_reference_id")
+            or metadata.get("naver_posted_answer_id")
+            or item.get("answer_draft_id")
+        )
+        answer = LearningPrivacyService().mask(
+            format_final_answer(str(item.get("final_answer") or ""))
+        )
+        for feedback in feedbacks:
+            if str(feedback.get("original_answer_source") or "") != provenance:
+                continue
+            feedback_reference = feedback.get("original_answer_reference_id")
+            if (
+                reference is not None
+                and feedback_reference is not None
+                and int(reference) != int(feedback_reference)
+            ):
+                continue
+            if str(feedback.get("original_answer_masked") or "") == answer:
+                return True
+        return False
 
     def candidate_diagnostics(self, *, store_code: str | None) -> dict[str, int]:
         """Summarize why rows cannot enter the ACTIVE Positive candidate pool."""
@@ -393,6 +523,27 @@ class LearningRepository:
                 """,
                 (store_code, store_code),
             ).fetchall()
+            inquiry_ids = sorted({
+                int(row["inquiry_id"])
+                for row in rows if row["inquiry_id"] is not None
+            })
+            feedback_rows = []
+            if inquiry_ids:
+                placeholders = ",".join("?" for _ in inquiry_ids)
+                feedback_rows = connection.execute(
+                    f"""
+                    SELECT * FROM learning_feedback
+                    WHERE inquiry_id IN ({placeholders}) AND active=1
+                      AND learning_signal_type IN ('NEGATIVE','EXCLUDED')
+                    """,
+                    inquiry_ids,
+                ).fetchall()
+        feedback_by_inquiry: dict[int, list[dict[str, Any]]] = {}
+        for raw in feedback_rows:
+            feedback = dict(raw)
+            feedback_by_inquiry.setdefault(
+                int(feedback["inquiry_id"]), []
+            ).append(feedback)
         counts = {
             "repository_rows": len(rows),
             "active_candidates": 0,
@@ -420,6 +571,12 @@ class LearningRepository:
                 continue
             if not is_learning_usable(item):
                 counts["filtered_by_validity"] += 1
+                continue
+            if self._excluded_by_exact_feedback(
+                item,
+                feedback_by_inquiry.get(int(item.get("inquiry_id") or 0), []),
+            ):
+                counts["negative_excluded"] += 1
                 continue
             counts["active_candidates"] += 1
         return counts
@@ -664,6 +821,10 @@ class LearningRepository:
                 (max(1, min(int(limit), 2000)),),
             ).fetchall()
         results = [dict(row) for row in rows]
+        states = InquiryRepository(self.database).learning_states([
+            int(row["inquiry_id"])
+            for row in results if row.get("inquiry_id") is not None
+        ])
         for row in results:
             row["active"] = bool(row["active"])
             row["validity_active"] = bool(row["validity_active"])
@@ -676,6 +837,13 @@ class LearningRepository:
                 "learning_signal_type", "POSITIVE"
             )
             row["validity_status"] = validity_status(row)
+            state = states.get(int(row["inquiry_id"])) if row.get("inquiry_id") else None
+            row["effective_learning_status"] = (
+                (state or {}).get("learning_status") or "NONE"
+            )
+            row["effective_learning_tooltip"] = (
+                (state or {}).get("learning_tooltip") or "Learning 이력 없음"
+            )
         return results
 
     def deactivate_draft(self, draft_id: int) -> int:
