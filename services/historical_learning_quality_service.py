@@ -10,11 +10,15 @@ WORD = re.compile(r"[가-힣A-Za-z0-9]+")
 DATE_RANGE = re.compile(
     r"(?:\[?\s*\d{1,2}\s*[./-]\s*\d{1,2}\s*(?:[~～-]|부터)\s*"
     r"\d{1,2}\s*[./-]\s*\d{1,2}\s*\]?)|"
-    r"(?:20\d{2}\s*[년./-]\s*\d{1,2}(?:\s*[월./-]\s*\d{1,2})?)"
+    r"(?:20\d{2}\s*[년./-]\s*\d{1,2}(?:\s*[월./-]\s*\d{1,2})?)|"
+    r"(?:\d{1,2}\s*월\s*\d{1,2}\s*일(?:까지|부터)?)"
 )
 TEMPORARY = re.compile(
     r"하계\s*휴가|휴무|설\s*연휴|추석|명절|감사제|기간\s*한정|"
-    r"프로모션|이벤트|행사\s*기간|리뷰\s*이벤트|배송\s*지연\s*공지",
+    r"프로모션|이벤트|행사(?:\s*기간|\s*페이지)?|리뷰\s*이벤트|"
+    r"배송\s*지연\s*공지|온누리.{0,20}(?:혜택|환급)|한시적|"
+    r"브랜드\s*위크|쇼핑\s*라이브|라이브\s*전용\s*쿠폰|"
+    r"현재.{0,30}(?:판매|재고).{0,8}(?:중|가능)",
     re.IGNORECASE,
 )
 ORDER_SPECIFIC = re.compile(
@@ -23,12 +27,20 @@ ORDER_SPECIFIC = re.compile(
     r"누락(?:된|된 것으로|으로)|익일\s*(?:출고|발송)|"
     r"(?:오늘|내일|금일)\s*(?:출고|발송|도착)|송장\s*번호|"
     r"판매\s*번호|(?:해당|고객님|현재).{0,12}배송\s*기사.{0,16}(?:배정|연락|방문)|"
-    r"배송\s*기사.{0,8}(?:배정\s*완료|연락\s*완료)",
+    r"배송\s*기사.{0,8}(?:배정\s*완료|연락\s*완료)|"
+    r"주문(?:건)?.{0,24}(?:삭제|취소\s*완료|환불\s*완료|\d+대만\s*출고)|"
+    r"(?:송장|운송장|택배).{0,20}\d{3,4}[ -]\d{3,4}[ -]\d{3,4}",
     re.IGNORECASE,
 )
 AVOIDANCE = re.compile(
     r"확인(?:이|할 수)?\s*(?:어렵|불가)|담당자\s*확인|판매처에\s*문의|"
-    r"정확한\s*안내가\s*어렵|직원\s*검토",
+    r"정확한\s*안내가\s*어렵|직원\s*검토|확인.{0,6}어려|"
+    r"담당자.{0,8}검토|검토.{0,8}필요",
+    re.IGNORECASE,
+)
+LOW_INFORMATION = re.compile(
+    r"^(?:안녕하세요[,.!\s]*)?(?:고객님[,.!\s]*)?"
+    r"(?:네이버|오제앤에스|판매자)(?:입니다|입니다만)?[.!\s]*$",
     re.IGNORECASE,
 )
 
@@ -141,16 +153,24 @@ class HistoricalLearningQualityService:
         risk = str(policy_risk or "NONE").upper()
         unsupported_answer_concepts = a_core - q_core
         missing_question_concepts = q_core - a_core
+        cross_domain_mismatch = bool(
+            "RETURN" in q_all
+            and ({"PICKUP", "PACKAGING"} & q_all)
+            and "PRODUCT_FUNCTION" in a_all
+            and "PRODUCT_FUNCTION" not in q_all
+            and "PICKUP" not in a_all
+        )
         mismatch = bool(
             q_concepts
             and a_concepts
             and (
-                not shared
+                cross_domain_mismatch
+                or not shared
                 or (
                     unsupported_answer_concepts
                     and missing_question_concepts
                     and concept_coverage <= 0.50
-                    and lexical < 0.16
+                    and (lexical < 0.16 or len(q_core) >= 2)
                 )
                 or (
                     concept_coverage < 0.40
@@ -184,7 +204,7 @@ class HistoricalLearningQualityService:
         elif low_relevance:
             status = "LOW_RELEVANCE"
             reasons.append("INSUFFICIENT_QUESTION_ANSWER_ALIGNMENT")
-        elif len(answer) < 12 or AVOIDANCE.search(answer):
+        elif len(answer) < 12 or LOW_INFORMATION.fullmatch(answer) or AVOIDANCE.search(answer):
             status = "REVIEW_REQUIRED"
             reasons.append("LOW_INFORMATION_ANSWER")
         else:
