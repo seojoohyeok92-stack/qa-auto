@@ -379,7 +379,7 @@ def _render_pagination(current_page: int, total_pages: int) -> None:
         )
 
 
-INQUIRY_LIST_WIDTHS = [1.15, 0.78, 1.55, 2.3, 1.2, 0.82, 1.7]
+INQUIRY_LIST_WIDTHS = [1.08, 0.72, 1.42, 2.1, 1.12, 0.78, 0.72, 1.55]
 
 
 def _render_list_header(total_count: int) -> None:
@@ -391,7 +391,7 @@ def _render_list_header(total_count: int) -> None:
     headers = st.columns(INQUIRY_LIST_WIDTHS, gap="small")
     for column, label in zip(
         headers,
-        ("문의 ID", "문의유형", "상품 정보", "문의 내용 요약", "주문번호", "상태", "접수 시간"),
+        ("문의 ID", "문의유형", "상품 정보", "문의 내용 요약", "주문번호", "상태", "학습", "접수 시간"),
     ):
         column.markdown(
             f'<div class="official-table-head">{escape(label)}</div>',
@@ -429,6 +429,10 @@ def _render_list(items: list[WorkItem], total_count: int) -> WorkItem | None:
         order_id = truncate_single_line(item.get("order_id"), 18)
         inquiry_id = truncate_single_line(
             item.get("inquiry_id") or item.get("source_question_id"), 17
+        )
+        learning_labels = item.get("learning_labels") or ["-"]
+        learning_tooltip = str(
+            item.get("learning_tooltip") or "Learning 이력 없음"
         )
         row = st.container(
             key=(
@@ -470,6 +474,16 @@ def _render_list(items: list[WorkItem], total_count: int) -> WorkItem | None:
                 unsafe_allow_html=True,
             )
             columns[6].markdown(
+                '<div class="official-cell learning-badges" '
+                f'title="{escape(learning_tooltip)}">'
+                + "".join(
+                    f'<span class="official-learning-badge">{escape(label)}</span>'
+                    for label in learning_labels[:2]
+                )
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            columns[7].markdown(
                 f'<div class="official-cell received-time">{escape(time_text)}</div>',
                 unsafe_allow_html=True,
             )

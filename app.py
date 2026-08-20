@@ -146,6 +146,7 @@ def filter_work_items(
     start_date: date,
     end_date: date,
     route: str = "ALL",
+    learning_status: str = "ALL",
 ) -> list[WorkItem]:
     normalized_query = search_query.strip().lower()
     filtered: list[WorkItem] = []
@@ -163,6 +164,14 @@ def filter_work_items(
         if source != "ALL" and item.get("source") != source:
             continue
         if route != "ALL" and _work_item_route(item) != route:
+            continue
+        statuses = {
+            str(value).upper()
+            for value in item.get("learning_statuses") or [
+                item.get("learning_status") or "NONE"
+            ]
+        }
+        if learning_status != "ALL" and learning_status not in statuses:
             continue
         if not metadata_filter_matches(item.get("queue"), queues):
             continue
@@ -284,6 +293,12 @@ def _dashboard_work_items_from_rows(
                 "workflow_status": inquiry.get("workflow_status"),
                 "approval_status": inquiry.get("approval_status"),
                 "post_status": inquiry.get("post_status"),
+                "learning_status": inquiry.get("learning_status", "NONE"),
+                "learning_statuses": inquiry.get("learning_statuses", ["NONE"]),
+                "learning_labels": inquiry.get("learning_labels", ["-"]),
+                "learning_tooltip": inquiry.get(
+                    "learning_tooltip", "Learning 이력 없음"
+                ),
             }
         )
         result.append(item)
@@ -321,6 +336,31 @@ def _attach_dashboard_routes(
             str(item.get("inquiry_id") or ""),
         )
         item["selected_answer_route"] = routes.get(key, _work_item_route(item))
+    return items
+
+
+def _attach_dashboard_learning(
+    database: Database, items: list[WorkItem]
+) -> list[WorkItem]:
+    repository = InquiryRepository(database)
+    states = repository.learning_states()
+    empty = repository._empty_learning_state()
+    with database.connection() as connection:
+        identities = connection.execute(
+            "SELECT id, store_code, source_type, source_question_id FROM inquiries"
+        ).fetchall()
+    by_source = {
+        (str(row["store_code"]), str(row["source_type"]), str(row["source_question_id"])):
+        states.get(int(row["id"]), empty)
+        for row in identities
+    }
+    for item in items:
+        key = (
+            str(item.get("store_code") or ""),
+            str(item.get("source") or item.get("source_type") or ""),
+            str(item.get("inquiry_id") or item.get("source_question_id") or ""),
+        )
+        item.update(by_source.get(key, empty))
     return items
 
 
@@ -814,6 +854,9 @@ def render_dashboard_page(
         available_queues,
         available_priorities,
     )
+    learning_filter = str(filters.get("learning_status") or "ALL")
+    if database is not None:
+        work_items = _attach_dashboard_learning(database, work_items)
     # Streamlit can keep an already-imported ui.dashboard module alive while
     # reloading this file.  During that transition an older filter result has
     # no route key, so treat it as the unfiltered route until the next rerun.
@@ -830,6 +873,7 @@ def render_dashboard_page(
         start_date=start_date,
         end_date=end_date,
         route=route_filter,
+        learning_status=learning_filter,
     )
     kpi_counts = (
         InquiryRepository(database).dashboard_kpi_counts(
@@ -842,6 +886,7 @@ def render_dashboard_page(
             search_query=filters["search_query"],
             start_date=start_date.isoformat(),
             end_date=end_date.isoformat(),
+            learning_status=learning_filter,
         )
         if database is not None
         else {}
@@ -863,6 +908,7 @@ def render_dashboard_page(
             filters["delivery_only"],
             filters["search_query"],
             route_filter,
+            learning_filter,
             start_date,
             end_date,
             kpi_filter,
@@ -905,6 +951,7 @@ def render_dashboard_page(
             kpi_filter=kpi_filter,
             page=int(st.session_state.get("dashboard_page", 1)),
             page_size=int(filters["display_limit"]),
+            learning_status=learning_filter,
         )
         current_page = min(
             max(1, int(st.session_state.get("dashboard_page", 1))),

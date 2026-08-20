@@ -1800,6 +1800,35 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        25,
+        (
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN usage_status TEXT NOT NULL DEFAULT 'PENDING'
+                CHECK (usage_status IN (
+                    'PENDING','USED','NOT_USED','REJECTED_CONFLICT',
+                    'REJECTED_LOW_CONFIDENCE','BLOCKED_BY_CURRENT_FACT'
+                ))
+            """,
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN usage_reason TEXT
+            """,
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN matched_subquestion TEXT
+            """,
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN evaluated_at TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_answer_learning_provenance_usage
+            ON answer_learning_provenance(answer_draft_id, usage_status)
+            """,
+        ),
+    ),
 )
 
 

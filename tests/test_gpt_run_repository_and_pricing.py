@@ -58,7 +58,7 @@ def run_values(inquiry_id: int, correlation: str = "corr-1", **extra):
 
 
 def test_migration_v5_creates_run_table(database: Database) -> None:
-    assert database.migration_versions() == list(range(1, 25))
+    assert database.migration_versions() == list(range(1, 26))
     with database.connection() as connection:
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE name='gpt_provider_runs'"

@@ -31,6 +31,7 @@ class TabCandidate:
     tab_title: str
     score: int
     current_url: str = ""
+    discovery_mode: str = "FULL_DISCOVERY"
 
 
 @dataclass(slots=True)
@@ -364,6 +365,36 @@ class ChromeTabManager:
                 connection.hwnd,
             )
             return None
+        if connection.tab is not None:
+            try:
+                stored_title = self.element_name(connection.tab)
+                if (
+                    connection.tab.exists(timeout=0)
+                    and stored_title
+                    and stored_title.casefold() == connection.tab_title.casefold()
+                ):
+                    self.last_connection_failure_reason = ""
+                    self.logger.info(
+                        "connection validation result: valid=True "
+                        "reason=STORED_TAB_FAST_PATH hwnd=%s tab=%r",
+                        connection.hwnd,
+                        stored_title,
+                    )
+                    return TabCandidate(
+                        hwnd=connection.hwnd,
+                        window=window,
+                        window_title=self.window_title(window),
+                        tab=connection.tab,
+                        tab_title=stored_title,
+                        score=1000,
+                        current_url=connection.current_url,
+                        discovery_mode="CACHED_HANDLE_FAST_PATH",
+                    )
+            except Exception:
+                self.logger.info(
+                    "stored TabItem fast path stale; falling back to full tab scan",
+                    exc_info=True,
+                )
         tabs = self.tabs_in_window(window)
         if self.last_tab_scan_failed:
             self.last_connection_failure_reason = "UIA_READ_FAILED"
@@ -433,10 +464,9 @@ class ChromeTabManager:
     def select_candidate(self, candidate: TabCandidate, timeout: float = 5.0) -> tuple[bool, str]:
         before_title = self.selected_tab_title(candidate.window)
         self.logger.info(
-            "기존 DPS TabItem 선택 시작: hwnd=%s all_tabs=%s selected_item=%r "
+            "기존 DPS TabItem 선택 시작: hwnd=%s selected_item=%r "
             "item_control_type=%s before_active_title=%r",
             candidate.hwnd,
-            [self.element_name(tab) for tab in self.tabs_in_window(candidate.window)],
             self.element_name(candidate.tab),
             getattr(candidate.tab.element_info, "control_type", ""),
             before_title,

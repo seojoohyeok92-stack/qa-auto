@@ -205,8 +205,12 @@ class AnswerRepository:
             from repositories.learning_provenance_repository import (
                 LearningProvenanceRepository,
             )
-            LearningProvenanceRepository(self.database).attach_latest_context(
+            provenance = LearningProvenanceRepository(self.database)
+            provenance.attach_latest_context(
                 inquiry_id=int(inquiry_id), draft_id=draft_id
+            )
+            provenance.finalize_for_draft(
+                draft_id=draft_id, result_metadata=metadata
             )
         except Exception:
             # Observability is optional and must never block answer creation.

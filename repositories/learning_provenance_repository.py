@@ -68,6 +68,97 @@ class LearningProvenanceRepository:
             )
         return int(cursor.rowcount)
 
+    def finalize_for_draft(
+        self, *, draft_id: int, result_metadata: dict[str, Any]
+    ) -> int:
+        """Persist actual use separately from retrieval and prompt attachment."""
+
+        hybrid = result_metadata.get("hybrid")
+        hybrid = hybrid if isinstance(hybrid, dict) else {}
+        generated = hybrid.get("draft")
+        generated = generated if isinstance(generated, dict) else {}
+        validation = hybrid.get("validation")
+        validation = validation if isinstance(validation, dict) else {}
+        fallback_used = bool(hybrid.get("fallback_used"))
+        usage: dict[tuple[str, int], dict[str, Any]] = {}
+        for kind, field, identifier in (
+            ("LEARNING", "learning_usage", "learning_id"),
+            ("HISTORICAL", "historical_usage", "historical_case_id"),
+        ):
+            values = generated.get(field)
+            for item in (values if isinstance(values, list) else []):
+                if not isinstance(item, dict) or item.get(identifier) is None:
+                    continue
+                usage[(kind, int(item[identifier]))] = item
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, reference_kind, learning_example_id,
+                       historical_case_id
+                FROM answer_learning_provenance
+                WHERE answer_draft_id=? AND included_in_prompt=1
+                """,
+                (int(draft_id),),
+            ).fetchall()
+            for row in rows:
+                reference_id = int(
+                    row["learning_example_id"]
+                    if row["reference_kind"] == "LEARNING"
+                    else row["historical_case_id"]
+                )
+                item = usage.get((str(row["reference_kind"]), reference_id))
+                reason = str((item or {}).get("reason") or "")[:500]
+                if item is not None and item.get("answer_supported"):
+                    status = "USED"
+                elif "CURRENT" in reason.upper() or "DPS" in reason.upper():
+                    status = "BLOCKED_BY_CURRENT_FACT"
+                elif "CONFLICT" in reason.upper():
+                    status = "REJECTED_CONFLICT"
+                elif fallback_used or not bool(validation.get("passed", True)):
+                    status = "REJECTED_LOW_CONFIDENCE"
+                else:
+                    status = "NOT_USED"
+                connection.execute(
+                    """
+                    UPDATE answer_learning_provenance
+                    SET usage_status=?, usage_reason=?, matched_subquestion=?,
+                        evaluated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    WHERE id=?
+                    """,
+                    (
+                        status,
+                        reason or (
+                            "FINAL_FALLBACK_OR_VALIDATOR_REJECTION"
+                            if status == "REJECTED_LOW_CONFIDENCE"
+                            else "PROVIDER_DID_NOT_USE_REFERENCE"
+                        ),
+                        str((item or {}).get("matched_subquestion") or "")[:1000]
+                        or None,
+                        int(row["id"]),
+                    ),
+                )
+            used_learning_ids = [
+                int(row["learning_example_id"])
+                for row in rows
+                if row["reference_kind"] == "LEARNING"
+                and usage.get(("LEARNING", int(row["learning_example_id"])), {}).get(
+                    "answer_supported"
+                )
+            ]
+            if used_learning_ids:
+                placeholders = ",".join("?" for _ in used_learning_ids)
+                connection.execute(
+                    f"""
+                    UPDATE learning_examples
+                    SET usage_count=usage_count+1,
+                        last_used_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    WHERE id IN ({placeholders}) AND active=1
+                    """,
+                    used_learning_ids,
+                )
+        return len(rows)
+
     def for_draft(self, draft_id: int) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(

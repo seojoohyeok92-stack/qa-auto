@@ -11,6 +11,21 @@ DEFAULT_CLOSING = _INITIAL_WRAPPER.footer.rsplit("\n\n", 1)[-1]
 FINAL_FALLBACK_NOTICE = _INITIAL_WRAPPER.footer.rsplit("\n\n", 1)[0]
 DEFAULT_FALLBACK_NOTICE = FINAL_FALLBACK_NOTICE.replace("\n", " ")
 
+_LEADING_PRESENTATION = re.compile(
+    r"\A\s*(?:"
+    r"[♣♧]*안녕하세요[♣♧]*"
+    r"|안녕하세요\s*[,!]?\s*고객님\s*[.!]?"
+    r"|안녕하세요\s+오제앤에스\s*(?:입니다)?\s*[.!]?"
+    r"|안녕하세요\s*[.,!]"
+    r"|오제\s*챗봇\s*\(?(?:Chat\s*Bot)?\)?(?:이|가)?\s*답변드립니다\s*[.!]?"
+    r")\s*(?:\n+|\Z)",
+    re.IGNORECASE,
+)
+_TRAILING_PRESENTATION = re.compile(
+    r"(?:\n+|\A)\s*감사합니다\s*[.!]?\s*\Z",
+    re.IGNORECASE,
+)
+
 
 def format_auto_answer(
     body: str,
@@ -43,12 +58,18 @@ def extract_answer_body(answer: str) -> str:
             (wrapper.header, DEFAULT_PREFIX, *wrapper.legacy_headers)
         )
     )
-    matched_prefix = next(
-        (prefix for prefix in leading_wrappers if text.startswith(prefix)),
-        None,
-    )
-    if matched_prefix:
-        text = text[len(matched_prefix) :].strip()
+    while text:
+        matched_prefix = next(
+            (prefix for prefix in leading_wrappers if text.startswith(prefix)),
+            None,
+        )
+        if matched_prefix:
+            text = text[len(matched_prefix) :].strip()
+            continue
+        normalized = _LEADING_PRESENTATION.sub("", text, count=1).strip()
+        if normalized == text:
+            break
+        text = normalized
     suffixes = tuple(
         dict.fromkeys(
             (
@@ -78,6 +99,11 @@ def extract_answer_body(answer: str) -> str:
             if text.endswith(closing):
                 text = text[: -len(closing)].strip()
                 break
+    while text:
+        normalized = _TRAILING_PRESENTATION.sub("", text, count=1).strip()
+        if normalized == text:
+            break
+        text = normalized
     return text
 
 

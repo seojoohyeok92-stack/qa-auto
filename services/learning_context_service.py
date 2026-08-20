@@ -76,10 +76,7 @@ class LearningContextService:
             source = str(candidate.get("learning_source") or "").upper()
             source_origin = str(metadata.get("source_origin") or "").upper()
             explicitly_approved = bool(
-                (
-                    source in {"APPROVED_EDITED", "APPROVED_UNEDITED"}
-                    or metadata.get("human_verified") is True
-                )
+                metadata.get("human_verified") is True
                 and source_origin != "HISTORICAL_PROMOTED"
             )
             approval_overrides_soft_quality = bool(

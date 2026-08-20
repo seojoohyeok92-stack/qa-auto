@@ -178,6 +178,33 @@ class InquiryAnalysisService:
     @staticmethod
     def _intent(question: str) -> str | None:
         compact = re.sub(r"[\s\W_]+", "", question).lower()
+        # Existing-order delivery coordination is an evidence-retrieval intent,
+        # not an information-insufficient terminal state.  Keep method/policy
+        # questions out by requiring a contact/scheduling signal as well as a
+        # current-progress signal.
+        agent_coordination = "기사" in compact and any(
+            token in compact
+            for token in (
+                "연락", "통화", "약속", "방문일정", "방문시간",
+                "방문날짜", "날짜시간", "일정안", "일정이안",
+            )
+        )
+        current_progress = any(
+            token in compact
+            for token in (
+                "배송중", "배송상태", "진행중", "연락이없",
+                "연락없", "못정", "안잡", "기다려", "기다리",
+                "언제연락", "언제오",
+            )
+        )
+        if agent_coordination and current_progress and any(
+            token in compact for token in ("배송", "설치", "방문", "기사")
+        ):
+            return (
+                "INSTALLATION_DATE"
+                if "설치" in compact and "배송" not in compact
+                else "DELIVERY_STATUS"
+            )
         # Customer-facing schedule language is a deterministic business rule,
         # not a score.  Keep this block ahead of legacy keyword scoring and
         # provider inference so newly-synced inquiries cannot inherit a stale
@@ -261,6 +288,11 @@ class InquiryAnalysisService:
                 "설치해주나",
                 "방문설치",
             )
+        ) or (
+            "기사" in compact
+            and "설치" in compact
+            and any(token in compact for token in ("해주시", "해주나", "가능", "벽걸이"))
+            and not current_progress
         ):
             return "INSTALLATION_METHOD"
         notification = any(

@@ -181,10 +181,11 @@ def main() -> int:
                 rows = connection.execute(
                     """
                     SELECT id FROM inquiries
-                     WHERE title LIKE ? OR content LIKE ?
+                     WHERE title LIKE ? OR content LIKE ? OR order_id LIKE ?
+                        OR product_order_id LIKE ? OR raw_json LIKE ?
                      ORDER BY id DESC LIMIT 20
                     """,
-                    (f"%{term}%", f"%{term}%"),
+                    tuple(f"%{term}%" for _ in range(5)),
                 ).fetchall()
                 inquiry_ids.extend(int(row["id"]) for row in rows)
     if args.failed_missing_order:

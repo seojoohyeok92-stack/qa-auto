@@ -2658,7 +2658,11 @@ class DpsWindowsAgent:
                     resolved_request_id,
                     "DPS_TAB_FOUND",
                     candidate=candidate,
-                    matched_element="DPS Chrome tab",
+                    matched_element=(
+                        "DPS Chrome tab (cached handle fast path)"
+                        if candidate.discovery_mode == "CACHED_HANDLE_FAST_PATH"
+                        else "DPS Chrome tab (full discovery)"
+                    ),
                 )
                 LOGGER.info(
                     "조회 전 UI 정보: foreground_hwnd=%s window=%r selected_tab=%r",
@@ -2912,6 +2916,7 @@ class DpsWindowsAgent:
                         "connected_window_title": candidate.window_title,
                         "connected_tab_title": candidate.tab_title,
                         "window_mode": "Samsung DPS 탭 UI Automation",
+                        "tab_discovery_mode": candidate.discovery_mode,
                         "login_state": "LOGGED_IN",
                         "current_page": "PURCHASE_REQUEST_LIST",
                         "navigation": navigation,

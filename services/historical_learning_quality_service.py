@@ -140,11 +140,18 @@ class HistoricalLearningQualityService:
         order_specific = bool(ORDER_SPECIFIC.search(answer))
         risk = str(policy_risk or "NONE").upper()
         unsupported_answer_concepts = a_core - q_core
+        missing_question_concepts = q_core - a_core
         mismatch = bool(
             q_concepts
             and a_concepts
             and (
                 not shared
+                or (
+                    unsupported_answer_concepts
+                    and missing_question_concepts
+                    and concept_coverage <= 0.50
+                    and lexical < 0.16
+                )
                 or (
                     concept_coverage < 0.40
                     and unsupported_answer_concepts

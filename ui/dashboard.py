@@ -413,6 +413,7 @@ def render_filter_bar(
         "delivery": "dashboard_delivery_only",
         "limit": "dashboard_display_limit",
         "route": "dashboard_route",
+        "learning": "dashboard_learning_status",
     }
     if st.session_state.get(keys["limit"]) not in (None, 10, 15, 20, 30):
         st.session_state[keys["limit"]] = 15
@@ -460,7 +461,7 @@ def render_filter_bar(
         st.rerun()
 
     with st.expander("고급 필터", expanded=False):
-        source_col, queue_col, priority_col, option_col = st.columns(4, gap="medium")
+        source_col, queue_col, priority_col, learning_col, option_col = st.columns(5, gap="medium")
         with source_col:
             source_label = st.selectbox(
                 "문의 유형", ["전체 유형", *SOURCE_LABELS.values()], key=keys["source"]
@@ -476,6 +477,12 @@ def render_filter_bar(
                 "우선순위", available_priorities, default=available_priorities,
                 format_func=lambda code: "미분류" if code == UNCLASSIFIED_FILTER_VALUE else PRIORITY_LABELS.get(code, code),
                 key=keys["priorities"],
+            )
+        with learning_col:
+            learning_label = st.selectbox(
+                "Learning 상태",
+                ["전체", "승인", "자동", "제외", "교정", "없음"],
+                key=keys["learning"],
             )
         with option_col:
             delivery_only = st.checkbox(
@@ -517,6 +524,10 @@ def render_filter_bar(
         "delivery_only": delivery_only,
         "display_limit": display_limit,
         "route": selected_route,
+        "learning_status": {
+            "전체": "ALL", "승인": "APPROVED", "자동": "AUTO",
+            "제외": "EXCLUDED", "교정": "CORRECTED", "없음": "NONE",
+        }[learning_label],
     }
 
 

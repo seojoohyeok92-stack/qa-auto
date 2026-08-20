@@ -238,10 +238,14 @@ def render_answer_learning_provenance(
         for item in usage
         if isinstance(item, dict) and item.get("learning_id") is not None
     })
+    persisted_used = sum(
+        1 for row in rows if str(row.get("usage_status") or "") == "USED"
+    )
+    used_count = persisted_used or len(supported_ids) + len(supported_historical_ids)
     st.caption(
         (
             f"Learning 참고: 선택 {len(rows)}건 · 답변 근거 사용 "
-            f"{len(supported_ids) + len(supported_historical_ids)}건"
+            f"{used_count}건"
         )
         if rows
         else "Learning 참고: 없음"
@@ -257,10 +261,14 @@ def render_answer_learning_provenance(
                 if row["reference_kind"] == "HISTORICAL"
                 else int(row["learning_example_id"])
             )
-            used = (
-                reference_id in supported_historical_ids
-                if row["reference_kind"] == "HISTORICAL"
-                else reference_id in supported_ids
+            persisted_status = str(row.get("usage_status") or "PENDING")
+            used = persisted_status == "USED" or (
+                persisted_status == "PENDING"
+                and (
+                    reference_id in supported_historical_ids
+                    if row["reference_kind"] == "HISTORICAL"
+                    else reference_id in supported_ids
+                )
             )
             if row["reference_kind"] == "HISTORICAL":
                 label = f"Historical Case #{row['historical_case_id']}"
@@ -272,6 +280,14 @@ def render_answer_learning_provenance(
                     pass
                 source = metadata.get("source_origin") or row.get("learning_source") or row["source_label"]
                 label = f"{SOURCE_LABELS.get(str(source), str(source))} #{row['learning_example_id']}"
+            result_labels = {
+                "USED": "사용",
+                "NOT_USED": "미사용",
+                "REJECTED_CONFLICT": "현재 사실과 충돌",
+                "REJECTED_LOW_CONFIDENCE": "신뢰도 부족",
+                "BLOCKED_BY_CURRENT_FACT": "현재 주문정보 우선",
+                "PENDING": "기존 기록 미평가",
+            }
             display.append({
                 "참고 자료": label,
                 "유사도": round(float(row.get("relevance") or 0), 2),
@@ -281,11 +297,17 @@ def render_answer_learning_provenance(
                     else "미사용"
                 ),
                 "결과": (
-                    "사용"
-                    if used
-                    else "미사용 - " + usage_reasons.get(
-                        (str(row["reference_kind"]), reference_id),
-                        outcome or "Provider 미선택",
+                    result_labels.get(persisted_status, "미사용")
+                    + (
+                        ""
+                        if used
+                        else " - " + str(
+                            row.get("usage_reason")
+                            or usage_reasons.get(
+                                (str(row["reference_kind"]), reference_id),
+                                outcome or "Provider 미선택",
+                            )
+                        )
                     )
                 ),
             })

@@ -473,6 +473,7 @@ class InquiryRepository:
         start_date: str,
         end_date: str,
         kpi_filter: str | None,
+        learning_status: str = "ALL",
     ) -> tuple[str, list[Any]]:
         clauses = [
             "substr(registered_at, 1, 10) BETWEEN ? AND ?",
@@ -557,6 +558,70 @@ class InquiryRepository:
             clauses.append("approval_status = 'APPROVED'")
         elif kpi_filter == "ATTENTION":
             clauses.append("workflow_status IN ('NEEDS_ATTENTION','FAILED')")
+        normalized_learning = str(learning_status or "ALL").upper()
+        positive = """
+            EXISTS (SELECT 1 FROM learning_examples le
+                    WHERE le.inquiry_id=inquiries.id AND le.active=1
+                      AND le.validity_active=1
+                      AND COALESCE(json_extract(le.metadata_json,
+                          '$.learning_signal_type'), 'POSITIVE')='POSITIVE')
+        """
+        approved = """
+            EXISTS (SELECT 1 FROM learning_examples le
+                    WHERE le.inquiry_id=inquiries.id AND le.active=1
+                      AND le.validity_active=1
+                      AND COALESCE(json_extract(le.metadata_json,
+                          '$.learning_signal_type'), 'POSITIVE')='POSITIVE'
+                      AND (COALESCE(json_extract(le.metadata_json,
+                              '$.human_verified'), 0)=1
+                           OR le.approval_history_id IS NOT NULL
+                           OR (upper(COALESCE(json_extract(le.metadata_json,
+                                  '$.source_origin'), ''))='HISTORICAL_PROMOTED'
+                               AND trim(COALESCE(json_extract(le.metadata_json,
+                                  '$.promoted_by'), ''))<>'')))
+        """
+        automatic = """
+            EXISTS (SELECT 1 FROM learning_examples le
+                    WHERE le.inquiry_id=inquiries.id AND le.active=1
+                      AND le.validity_active=1
+                      AND COALESCE(json_extract(le.metadata_json,
+                          '$.learning_signal_type'), 'POSITIVE')='POSITIVE'
+                      AND COALESCE(json_extract(le.metadata_json,
+                          '$.human_verified'), 0)=0
+                      AND le.approval_history_id IS NULL
+                      AND NOT (upper(COALESCE(json_extract(le.metadata_json,
+                            '$.source_origin'), ''))='HISTORICAL_PROMOTED'
+                        AND trim(COALESCE(json_extract(le.metadata_json,
+                            '$.promoted_by'), ''))<>''))
+        """
+        excluded = """
+            (EXISTS (SELECT 1 FROM learning_feedback lf
+                     WHERE lf.inquiry_id=inquiries.id AND lf.active=1
+                       AND lf.learning_signal_type IN ('NEGATIVE','EXCLUDED'))
+             OR EXISTS (SELECT 1 FROM learning_examples le
+                        WHERE le.inquiry_id=inquiries.id AND le.active=0
+                          AND (COALESCE(json_extract(le.metadata_json,
+                              '$.verification_revoked'), 0)=1
+                               OR upper(COALESCE(json_extract(le.metadata_json,
+                              '$.learning_status'), ''))='REVOKED')))
+        """
+        corrected = """
+            EXISTS (SELECT 1 FROM learning_feedback lf
+                    WHERE lf.inquiry_id=inquiries.id AND lf.active=1
+                      AND lf.learning_signal_type='INTENT_CORRECTION')
+        """
+        if normalized_learning == "APPROVED":
+            clauses.append(approved)
+        elif normalized_learning == "AUTO":
+            clauses.extend((automatic, f"NOT ({approved})"))
+        elif normalized_learning == "EXCLUDED":
+            clauses.extend((excluded, f"NOT ({positive})"))
+        elif normalized_learning == "CORRECTED":
+            clauses.append(corrected)
+        elif normalized_learning == "NONE":
+            clauses.extend(
+                (f"NOT ({positive})", f"NOT ({excluded})", f"NOT ({corrected})")
+            )
         return " WHERE " + " AND ".join(clauses), parameters
 
     def dashboard_page(
@@ -574,6 +639,7 @@ class InquiryRepository:
         kpi_filter: str | None,
         page: int,
         page_size: int,
+        learning_status: str = "ALL",
     ) -> tuple[list[dict[str, Any]], int, int]:
         safe_size = page_size if page_size in {10, 15, 20, 30} else 15
         where, parameters = self._dashboard_where(
@@ -587,6 +653,7 @@ class InquiryRepository:
             start_date=start_date,
             end_date=end_date,
             kpi_filter=kpi_filter,
+            learning_status=learning_status,
         )
         with self.database.connection() as connection:
             total = int(
@@ -605,15 +672,15 @@ class InquiryRepository:
                 """,
                 [*parameters, safe_size, (safe_page - 1) * safe_size],
             ).fetchall()
-        return (
-            [
+        values = [
                 self._row_to_dict(row)
                 for row in rows
                 if row is not None
-            ],
-            total,
-            total_pages,
-        )
+            ]
+        states = self.learning_states([int(row["id"]) for row in values])
+        for row in values:
+            row.update(states.get(int(row["id"]), self._empty_learning_state()))
+        return values, total, total_pages
 
     def dashboard_kpi_counts(
         self,
@@ -627,6 +694,7 @@ class InquiryRepository:
         search_query: str,
         start_date: str,
         end_date: str,
+        learning_status: str = "ALL",
     ) -> dict[str, int]:
         result: dict[str, int] = {}
         with self.database.connection() as connection:
@@ -648,6 +716,7 @@ class InquiryRepository:
                     start_date=start_date,
                     end_date=end_date,
                     kpi_filter=code,
+                    learning_status=learning_status,
                 )
                 result[code] = int(
                     connection.execute(
@@ -656,6 +725,76 @@ class InquiryRepository:
                     ).fetchone()[0]
                 )
         return result
+
+    @staticmethod
+    def _empty_learning_state() -> dict[str, Any]:
+        from services.learning_lifecycle_service import resolve_learning_lifecycle
+
+        return resolve_learning_lifecycle({})
+
+    def learning_states(
+        self, inquiry_ids: list[int] | None = None
+    ) -> dict[int, dict[str, Any]]:
+        """Batch-resolve current Learning state; never query per inquiry."""
+
+        from services.learning_lifecycle_service import resolve_learning_lifecycle
+
+        clauses = ""
+        parameters: list[Any] = []
+        clean = sorted({int(value) for value in inquiry_ids or []})
+        if inquiry_ids is not None:
+            if not clean:
+                return {}
+            placeholders = ",".join("?" for _ in clean)
+            clauses = f"WHERE i.id IN ({placeholders})"
+            parameters.extend(clean)
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT i.id,
+                  MAX(CASE WHEN le.active=1 AND le.validity_active=1
+                    AND COALESCE(json_extract(le.metadata_json,
+                        '$.learning_signal_type'),'POSITIVE')='POSITIVE'
+                    AND (COALESCE(json_extract(le.metadata_json,
+                            '$.human_verified'),0)=1
+                      OR le.approval_history_id IS NOT NULL
+                      OR (upper(COALESCE(json_extract(le.metadata_json,
+                            '$.source_origin'),''))='HISTORICAL_PROMOTED'
+                        AND trim(COALESCE(json_extract(le.metadata_json,
+                            '$.promoted_by'),''))<>'')) THEN 1 ELSE 0 END) has_approved,
+                  MAX(CASE WHEN le.active=1 AND le.validity_active=1
+                    AND COALESCE(json_extract(le.metadata_json,
+                        '$.learning_signal_type'),'POSITIVE')='POSITIVE'
+                    AND COALESCE(json_extract(le.metadata_json,
+                        '$.human_verified'),0)=0
+                    AND le.approval_history_id IS NULL
+                    AND NOT (upper(COALESCE(json_extract(le.metadata_json,
+                          '$.source_origin'),''))='HISTORICAL_PROMOTED'
+                      AND trim(COALESCE(json_extract(le.metadata_json,
+                          '$.promoted_by'),''))<>'') THEN 1 ELSE 0 END) has_auto,
+                  MAX(CASE WHEN lf.active=1
+                    AND lf.learning_signal_type IN ('NEGATIVE','EXCLUDED')
+                    THEN 1 WHEN le.active=0 AND (
+                      COALESCE(json_extract(le.metadata_json,
+                        '$.verification_revoked'),0)=1
+                      OR upper(COALESCE(json_extract(le.metadata_json,
+                        '$.learning_status'),''))='REVOKED')
+                    THEN 1 ELSE 0 END) has_excluded,
+                  MAX(CASE WHEN lf.active=1
+                    AND lf.learning_signal_type='INTENT_CORRECTION'
+                    THEN 1 ELSE 0 END) has_corrected
+                FROM inquiries i
+                LEFT JOIN learning_examples le ON le.inquiry_id=i.id
+                LEFT JOIN learning_feedback lf ON lf.inquiry_id=i.id
+                {clauses}
+                GROUP BY i.id
+                """,
+                parameters,
+            ).fetchall()
+        return {
+            int(row["id"]): resolve_learning_lifecycle(dict(row))
+            for row in rows
+        }
 
     def latest_registered_at(
         self,

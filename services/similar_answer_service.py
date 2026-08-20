@@ -79,6 +79,8 @@ class SimilarAnswerService:
         source_origin = str(
             metadata.get("source_origin") if isinstance(metadata, dict) else ""
         ).upper()
+        if isinstance(metadata, dict) and metadata.get("human_verified") is True:
+            return 10
         if source_origin == "HISTORICAL_PROMOTED":
             return 1
         if source == "AUTO_POST_CORRECTED":
@@ -192,7 +194,6 @@ class SimilarAnswerService:
                 **rejection_counts,
             },
         }
-        self.repository.mark_used([int(item["id"]) for item in selected])
         return selected
 
     def context(self, question: str, **filters: Any) -> dict[str, Any]:
@@ -215,6 +216,11 @@ class SimilarAnswerService:
                     if isinstance(item.get("metadata_json"), dict) else None
                 ),
                 "source_product_id": item.get("source_product_id"),
+                "authority": (
+                    "APPROVED"
+                    if (item.get("metadata_json") or {}).get("human_verified") is True
+                    else "AUTO"
+                ),
             }
             (seller if item["style_only"] else approved).append(payload)
         features = Counter()

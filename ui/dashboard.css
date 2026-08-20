@@ -3341,3 +3341,59 @@ input,
   background: #111d29 !important;
   opacity: 0.72 !important;
 }
+
+/* Inquiry list owns one scroll region: rows only. Header/pagination stay fixed. */
+[class*="st-key-official_inquiry_list_panel"] {
+  overflow: hidden !important;
+}
+
+[class*="st-key-official_inquiry_list_panel"] > div:first-child {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+[class*="st-key-official_inquiry_list_header"],
+[class*="st-key-dashboard_pagination"] {
+  flex: 0 0 auto !important;
+}
+
+[class*="st-key-official_inquiry_rows_scroll"] {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain;
+}
+
+[class*="st-key-official_inquiry_rows_scroll"] > div:first-child {
+  overflow: visible !important;
+}
+
+.official-table-head {
+  background: #0b1723 !important;
+}
+
+.learning-badges {
+  display: flex !important;
+  align-items: center;
+  gap: 3px;
+  overflow: visible !important;
+}
+
+.official-learning-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  padding: 2px 5px;
+  border: 1px solid rgba(93, 174, 255, 0.36);
+  border-radius: 999px;
+  color: #dbeeff;
+  background: rgba(39, 104, 166, 0.2);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}

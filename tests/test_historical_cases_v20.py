@@ -242,7 +242,7 @@ def test_auto_reference_can_be_disabled_and_reenabled_without_learning_promotion
 
 def test_migration_20_integrity(tmp_path) -> None:
     database = _database(tmp_path)
-    assert max(database.migration_versions()) == 24
+    assert max(database.migration_versions()) == 25
     with database.connection() as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
