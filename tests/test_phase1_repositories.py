@@ -70,9 +70,9 @@ def test_database_schema_initialization(database: Database) -> None:
 
 def test_database_migration_is_not_applied_twice(tmp_path) -> None:
     database = Database(tmp_path / "migration.db")
-    assert database.initialize() == list(range(1, 26))
+    assert database.initialize() == list(range(1, 27))
     assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 26))
+    assert database.migration_versions() == list(range(1, 27))
 
 
 def test_same_inquiry_upsert_does_not_duplicate(

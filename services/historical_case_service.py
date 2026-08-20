@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
+from answer.evidence_support import apply_answer_support
 from config import NaverSyncSettings, StoreConfig, get_configured_stores, get_store_config
 from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
@@ -591,6 +592,11 @@ class HistoricalCaseService:
             # Preserve the legacy promotion score while all active Historical
             # employee answers participate as verified, opt-out Learning.
             relevance += 0.04 if item.get("promoted_learning_id") else 0
+            # Answer-Support Re-ranking: boost (never replace) by how much of
+            # the query's content this case's own seller_answer covers.
+            relevance, answer_support = apply_answer_support(
+                relevance, query, item.get("seller_answer")
+            )
             concept_compatible = bool(
                 not query_concepts
                 or not candidate_concepts
@@ -602,6 +608,7 @@ class HistoricalCaseService:
             if relevance >= minimum_relevance and concept_compatible:
                 value = dict(item)
                 value["relevance"] = round(relevance, 4)
+                value["answer_support"] = round(answer_support, 4)
                 value["runtime_eligibility"] = eligibility.to_dict()
                 value["compatibility"] = compatibility.to_dict()
                 value["reference_strength"] = "HISTORICAL_VERIFIED_LEARNING"

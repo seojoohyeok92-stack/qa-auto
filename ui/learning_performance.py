@@ -29,6 +29,11 @@ SOURCE_LABELS = {
     "AUTO_POST_REVIEWED_NO_CHANGE": "수정 없이 확인된 답변",
     "APPROVED_EDITED": "직원 수정",
 }
+SYSTEM_VERIFIED_LABELS = {
+    "CONFIRMED": "시스템 확인됨",
+    "UNCONFIRMED": "시스템 미확인",
+    "NOT_EVALUATED": "평가 전",
+}
 CORRECTION_LABELS = {
     "INQUIRY_CLASSIFICATION_CORRECTION": "문의 유형 교정",
     "REQUIRED_ACTION_CORRECTION": "필요한 조회/작업 교정",
@@ -291,10 +296,22 @@ def render_answer_learning_provenance(
             display.append({
                 "참고 자료": label,
                 "유사도": round(float(row.get("relevance") or 0), 2),
+                "Answer-Support": round(
+                    float(row.get("answer_support_score") or 0), 2
+                ),
                 "답변 근거 사용": (
                     "사용"
                     if used
                     else "미사용"
+                ),
+                "Provider 자기보고": (
+                    "사용 보고"
+                    if row.get("provider_claimed_usage")
+                    else "미보고"
+                ),
+                "System 검증": SYSTEM_VERIFIED_LABELS.get(
+                    str(row.get("system_verified_usage") or "NOT_EVALUATED"),
+                    "평가 전",
                 ),
                 "결과": (
                     result_labels.get(persisted_status, "미사용")

@@ -5,6 +5,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
+from answer.evidence_support import apply_answer_support
 from repositories.learning_repository import LearningRepository
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
@@ -196,9 +197,17 @@ class SimilarAnswerService:
             relevance += 0.08 if model_code and item.get("model_code") == model_code else 0
             relevance += 0.04 if inquiry_type and item.get("inquiry_type") == inquiry_type else 0
             relevance += compatibility.score_adjustment
+            # Answer-Support Re-ranking: a candidate's *question* similarity
+            # is a retrieval signal, not proof its *answer* supports this
+            # query.  Boost (never replace) the score by how much of the
+            # query's content the candidate's own answer actually covers.
+            relevance, answer_support = apply_answer_support(
+                relevance, query, item.get("final_answer")
+            )
             if relevance >= minimum_relevance:
                 safe = dict(item)
                 safe["relevance"] = round(relevance, 4)
+                safe["answer_support"] = round(answer_support, 4)
                 safe["compatibility"] = compatibility.to_dict()
                 ranked.append((relevance, safe))
                 diagnostic.update({
@@ -258,6 +267,7 @@ class SimilarAnswerService:
                 "answer": item["final_answer"],
                 "rating": item["rating"],
                 "relevance": item["relevance"],
+                "answer_support": item.get("answer_support", 0.0),
                 "source_origin": (
                     (item.get("metadata_json") or {}).get("source_origin")
                     if isinstance(item.get("metadata_json"), dict) else None

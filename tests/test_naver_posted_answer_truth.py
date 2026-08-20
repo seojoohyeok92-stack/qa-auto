@@ -88,7 +88,7 @@ def _sync(database: Database, payload: dict) -> None:
 
 def _database(tmp_path) -> Database:
     database = Database(tmp_path / "posted-truth.db")
-    assert database.initialize() == list(range(1, 26))
+    assert database.initialize() == list(range(1, 27))
     return database
 
 
@@ -388,7 +388,7 @@ def test_posted_staff_edit_is_not_shown_as_approved_before_explicit_approval(
 def test_posted_answer_migration_is_idempotent(tmp_path) -> None:
     database = _database(tmp_path)
     assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 26))
+    assert database.migration_versions() == list(range(1, 27))
 
 
 def test_human_verified_naver_learning_survives_sync_and_rebuild(tmp_path) -> None:

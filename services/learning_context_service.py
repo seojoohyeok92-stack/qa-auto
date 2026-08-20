@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from answer.evidence_support import coverage_label
 from answer.facts import AnswerFacts
 from answer.hybrid_models import IntentResult
 from repositories.database import Database
@@ -260,10 +261,12 @@ class LearningContextService:
                 status = "NEEDS_DPS"
                 evidence_ids: list[int] = []
                 source = "CURRENT_DPS_REQUIRED"
+                evidence_coverage = "DEFERRED_TO_CURRENT_FACT"
             elif confirmed_schedule and schedule_specific:
                 status = "ANSWERABLE"
                 evidence_ids = []
                 source = "CURRENT_DPS"
+                evidence_coverage = "SUPPORTED"
             elif approved_for_question:
                 status = "ANSWERABLE"
                 evidence_ids = [
@@ -271,6 +274,11 @@ class LearningContextService:
                     for item in approved_for_question
                 ]
                 source = "ACTIVE_POSITIVE_LEARNING"
+                evidence_coverage = coverage_label(max(
+                    (float(item.get("answer_support") or 0)
+                     for item in approved_for_question),
+                    default=0.0,
+                ))
             elif historical_for_question:
                 status = "ANSWERABLE"
                 evidence_ids = []
@@ -278,11 +286,17 @@ class LearningContextService:
                     int(item["id"]) for item in historical_for_question
                 ]
                 source = "SAFE_HISTORICAL_LEARNING"
+                evidence_coverage = coverage_label(max(
+                    (float(item.get("answer_support") or 0)
+                     for item in historical_for_question),
+                    default=0.0,
+                ))
             else:
                 status = "NO_RELIABLE_SOURCE"
                 evidence_ids = []
                 source = None
                 historical_ids = []
+                evidence_coverage = "UNSUPPORTED"
             evidence_map.append(
                 {
                     "subquestion": question,
@@ -291,6 +305,11 @@ class LearningContextService:
                     "learning_ids": evidence_ids,
                     "historical_case_ids": historical_ids,
                     "answer_required": status == "ANSWERABLE",
+                    # Question -> Evidence Coverage: retrieval finding a
+                    # candidate is not the same as that candidate's answer
+                    # actually supporting this sub-question (see
+                    # answer/evidence_support.py).
+                    "evidence_coverage": evidence_coverage,
                 }
             )
         context["subquestion_evidence"] = evidence_map
@@ -362,6 +381,7 @@ class LearningContextService:
                 "policy_risk": item.get("policy_risk"),
                 "usage_notice": item.get("usage_notice"),
                 "relevance": item.get("relevance"),
+                "answer_support": item.get("answer_support", 0.0),
                 "matched_subquestion": item.get("matched_subquestion"),
                 "eligibility": item.get("runtime_eligibility"),
                 "compatibility": item.get("compatibility") or {},

@@ -283,6 +283,7 @@ class HybridAnswerService:
                     },
                 )
             )
+            learning_context: dict[str, Any] = {}
             if (
                 analysis is not None
                 and analysis.answer_strategy
@@ -452,6 +453,7 @@ class HybridAnswerService:
                 review,
                 analysis=analysis,
                 selected_facts=selected_facts,
+                subquestion_evidence=learning_context.get("subquestion_evidence"),
             )
             events.append(
                 HybridEvent(
@@ -560,6 +562,7 @@ class HybridAnswerService:
                     retry_review,
                     analysis=analysis,
                     selected_facts=selected_facts,
+                    subquestion_evidence=learning_context.get("subquestion_evidence"),
                 )
                 events.append(
                     HybridEvent(

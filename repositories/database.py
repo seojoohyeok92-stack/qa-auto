@@ -1829,6 +1829,31 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        26,
+        (
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN answer_support_score REAL
+            """,
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN evidence_coverage TEXT
+            """,
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN provider_claimed_usage INTEGER NOT NULL DEFAULT 0
+                CHECK (provider_claimed_usage IN (0,1))
+            """,
+            """
+            ALTER TABLE answer_learning_provenance
+            ADD COLUMN system_verified_usage TEXT NOT NULL DEFAULT 'NOT_EVALUATED'
+                CHECK (system_verified_usage IN (
+                    'NOT_EVALUATED','CONFIRMED','UNCONFIRMED'
+                ))
+            """,
+        ),
+    ),
 )
 
 

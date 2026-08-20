@@ -14,7 +14,10 @@ from answer.hybrid_models import (
 )
 from answer.inquiry_analysis import AnswerStrategy, InquiryAnalysis
 from answer.text_utils import PHONE_PATTERN
-from services.learning_compatibility_service import LearningCompatibilityService
+from services.learning_compatibility_service import (
+    LearningCompatibilityService,
+    classify_topics,
+)
 
 
 SECRET_PATTERN = re.compile(
@@ -439,6 +442,7 @@ class AnswerValidator:
         *,
         analysis: InquiryAnalysis | None = None,
         selected_facts: SelectedFacts | None = None,
+        subquestion_evidence: list[dict] | None = None,
     ) -> ValidationResult:
         errors: list[str] = []
         warnings: list[str] = list(draft.warnings) + list(review.warnings)
@@ -576,7 +580,34 @@ class AnswerValidator:
                     ),
                 ),
             )
-        validation_rules = (*phase9_rules, relevance_rule, *coverage_rules)
+        alignment_rules: tuple[ValidationRuleResult, ...] = ()
+        if subquestion_evidence:
+            answer_topics = set(classify_topics(draft.answer))
+            leaked_subquestions = [
+                str(item.get("subquestion") or "")
+                for item in subquestion_evidence
+                if str(item.get("status") or "") == "NO_RELIABLE_SOURCE"
+                and str(item.get("evidence_coverage") or "") == "UNSUPPORTED"
+                and (
+                    set(classify_topics(item.get("subquestion")))
+                    & answer_topics
+                )
+            ]
+            alignment_rules = (
+                ValidationRuleResult(
+                    "QUESTION_ANSWER_ALIGNMENT",
+                    "REVIEW_REQUIRED" if leaked_subquestions else "PASS",
+                    (
+                        "근거 없는 하위 질문과 같은 주제의 내용을 답변에 "
+                        "포함했습니다: " + "; ".join(leaked_subquestions)
+                    )
+                    if leaked_subquestions
+                    else "근거 없는 하위 질문에는 인접 주제로 답하지 않았습니다.",
+                ),
+            )
+        validation_rules = (
+            *phase9_rules, relevance_rule, *coverage_rules, *alignment_rules,
+        )
         errors.extend(
             item.message for item in validation_rules if item.status == "BLOCK"
         )
