@@ -32,6 +32,11 @@ class AnswerResult:
     question_count: int = 0
     question_breakdown: str = ""
     provider: str = "rules"
+    # Which matcher produced this result. FIXED_* kinds are deterministic
+    # policy/catalog answers whose wording is meant to be exact; KEYWORD_*
+    # kinds only matched on substring keywords and must not decide the final
+    # customer answer on their own (see answer_service._template_may_answer).
+    match_kind: str = "UNKNOWN"
 
 
 class AnswerEngine:
@@ -241,6 +246,7 @@ class AnswerEngine:
                 "existing_template": (
                     "configuration.xlsx" in source_result.reason
                 ),
+                "template_match_kind": source_result.match_kind,
             },
         )
 
@@ -254,57 +260,97 @@ class AnswerEngine:
 
         blocked = self._hard_block(product, question)
         if blocked:
-            return self._finalize(product, question, blocked, allow_gpt=False)
+            return self._finalize(
+                product, question, blocked, allow_gpt=False,
+                match_kind="FIXED_POLICY_HARD_BLOCK",
+            )
 
         learned = self._learned_rule(product, question)
         if learned:
-            return self._finalize(product, question, learned)
+            # Operator-registered rulebook entry, matched by substring
+            # keywords only -- suggestive, not a guaranteed exact answer.
+            return self._finalize(
+                product, question, learned, match_kind="KEYWORD_LEARNED_RULE",
+            )
 
         store_pickup = self._store_pickup(product, question)
         if store_pickup:
-            return self._finalize(product, question, store_pickup)
+            return self._finalize(
+                product, question, store_pickup,
+                match_kind="FIXED_POLICY_STORE_PICKUP",
+            )
 
         review = self._review_event(product, question)
         if review:
-            return self._finalize(product, question, review)
+            return self._finalize(
+                product, question, review, match_kind="FIXED_EVENT_REVIEW",
+            )
 
         package_code = self._package_code_answer(product, question)
         if package_code:
-            return self._finalize(product, question, package_code)
+            return self._finalize(
+                product, question, package_code,
+                match_kind="FIXED_PACKAGE_CODE",
+            )
 
         onnuri = self._onnuri_or_festival(product, question)
         if onnuri:
-            return self._finalize(product, question, onnuri)
+            return self._finalize(
+                product, question, onnuri, match_kind="FIXED_EVENT_ONNURI",
+            )
 
         shipping = self._shipping(product, question)
         if shipping:
-            return self._finalize(product, question, shipping)
+            return self._finalize(
+                product, question, shipping, match_kind="FIXED_POLICY_SHIPPING",
+            )
 
         install_common = self._install_common_info(product, question)
         if install_common:
-            return self._finalize(product, question, install_common)
+            return self._finalize(
+                product, question, install_common,
+                match_kind="FIXED_POLICY_INSTALL",
+            )
 
         pickup = self._old_appliance_pickup(product, question)
         if pickup:
-            return self._finalize(product, question, pickup)
+            return self._finalize(
+                product, question, pickup, match_kind="FIXED_POLICY_PICKUP",
+            )
 
         stand = self._stand_or_battery(product, question)
         if stand:
-            return self._finalize(product, question, stand)
+            return self._finalize(
+                product, question, stand, match_kind="FIXED_PRODUCT_ACCESSORY",
+            )
 
         model = self._model_code(product, question)
         if model:
-            return self._finalize(product, question, model)
+            return self._finalize(
+                product, question, model, match_kind="PRODUCT_DB_MODEL_CODE",
+            )
 
         spec = self._model_spec_answer(product, question)
         if spec:
-            return self._finalize(product, question, spec)
+            return self._finalize(
+                product, question, spec, match_kind="PRODUCT_DB_MODEL_SPEC",
+            )
 
         simple = self._simple_product_usage(product, question, ctext, cq)
         if simple:
-            return self._finalize(product, question, simple)
+            # Generic "usage" catch-all; never a guaranteed answer to the
+            # customer's specific question.
+            return self._finalize(
+                product, question, simple,
+                match_kind="KEYWORD_SIMPLE_PRODUCT_USAGE",
+            )
 
-        return self._finalize(product, question, self.no_answer("기타/직원확인", "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다."))
+        return self._finalize(
+            product,
+            question,
+            self.no_answer("기타/직원확인", "현재 룰북과 설정만으로는 자동답변 확신이 낮습니다."),
+            match_kind="NO_MATCH",
+        )
 
     def yes(self, category: str, body: str, reason: str) -> AnswerResult:
         return AnswerResult("답변 가능", format_auto_answer(body), reason, category)
@@ -336,11 +382,19 @@ class AnswerEngine:
                 return self.yes(str(rule.get("카테고리") or "학습답변룰"), body, "configuration.xlsx 학습답변룰 시트에 채택된 답변입니다.")
         return None
 
-    def _finalize(self, product: str, question: str, result: AnswerResult, allow_gpt: bool = True) -> AnswerResult:
+    def _finalize(
+        self,
+        product: str,
+        question: str,
+        result: AnswerResult,
+        allow_gpt: bool = True,
+        match_kind: str = "UNKNOWN",
+    ) -> AnswerResult:
         count, breakdown = estimate_question_count(question)
         result.question_count = count
         result.question_breakdown = breakdown
         result.provider = "rules"
+        result.match_kind = match_kind
         return result
 
     def _hard_block(self, product: str, question: str) -> AnswerResult | None:

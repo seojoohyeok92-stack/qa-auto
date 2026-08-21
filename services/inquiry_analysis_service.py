@@ -130,7 +130,15 @@ SCHEDULE_CHANGE_WORDS = (
     "변경해 주세요",
     "변경해주세요",
 )
+# Expressions that require a person to look at the actual case before the
+# customer gets any reply. Matched as substrings against the whitespace
+# normalized question, so each entry is chosen to be unambiguous on its own:
+# bare "보상" is deliberately absent because "보상판매" (trade-in) is an
+# ordinary sales question, and no return/refund word is listed here because
+# asking how returns work is answerable from fixed policy -- only an
+# individual refund decision is escalated, which CANCEL_WORDS already covers.
 HIGH_RISK_WORDS = (
+    # Legal / injury exposure
     "피해보상",
     "법적",
     "소송",
@@ -138,6 +146,27 @@ HIGH_RISK_WORDS = (
     "화재",
     "감전",
     "부상",
+    # Physical damage: the real condition of the item has to be verified
+    # before promising anything, so it can never be answered automatically.
+    "깨져",
+    "깨진",
+    "깨졌",
+    "파손",
+    "찌그러",
+    "훼손",
+    "부서",
+    # Service complaints: staff have to handle dissatisfaction directly.
+    "불친절",
+    "불만",
+    "엉망",
+    "항의",
+    # Compensation / liability: the company's responsibility is never a
+    # decision an automatic answer may make.
+    "보상해",
+    "보상 해",
+    "배상",
+    "책임",
+    "과실",
 )
 PRE_PURCHASE_DELIVERY_WORDS = (
     "오늘주문하면",

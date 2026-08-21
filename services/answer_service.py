@@ -112,6 +112,47 @@ def _apply_existing_template_metadata(
     return result
 
 
+# Rule matchers whose wording is deterministic for the situation they match:
+# fixed company/legal policy text, event announcements, and structured product
+# catalog facts. Only these may become the customer-facing final answer without
+# the GPT composition step.
+#
+# Deliberately excluded: KEYWORD_LEARNED_RULE and
+# KEYWORD_SIMPLE_PRODUCT_USAGE. Both match on substring keywords only, so they
+# can fire on a question they do not actually answer -- e.g. "AS는 삼성서비스
+# 센터에서 하나요?" matching an "A/S 접수 전화번호" rule and replying with a
+# phone number instead of answering yes. Those results are still generated and
+# handed to the GPT step as reference context; they simply no longer decide the
+# final answer by themselves.
+EXACT_TEMPLATE_MATCH_KINDS = frozenset({
+    "FIXED_POLICY_HARD_BLOCK",
+    "FIXED_POLICY_STORE_PICKUP",
+    "FIXED_EVENT_REVIEW",
+    "FIXED_PACKAGE_CODE",
+    "FIXED_EVENT_ONNURI",
+    "FIXED_POLICY_SHIPPING",
+    "FIXED_POLICY_INSTALL",
+    "FIXED_POLICY_PICKUP",
+    "FIXED_PRODUCT_ACCESSORY",
+    "PRODUCT_DB_MODEL_CODE",
+    "PRODUCT_DB_MODEL_SPEC",
+})
+
+
+def _template_may_answer(metadata: dict[str, Any]) -> bool:
+    """True when a rule result is exact enough to be the final answer.
+
+    An unknown/absent match kind is treated as exact so that callers which
+    construct rule results outside AnswerEngine (tests, legacy fixtures,
+    injected providers) keep their existing behaviour.
+    """
+
+    kind = str(metadata.get("template_match_kind") or "").upper()
+    if not kind or kind == "UNKNOWN":
+        return True
+    return kind in EXACT_TEMPLATE_MATCH_KINDS
+
+
 def _template_unavailable_reason(
     result: AnswerResult,
     request: Any,
@@ -147,6 +188,8 @@ def _template_unavailable_reason(
         return "INQUIRY_TYPE_MISMATCH"
     if metadata.get("relevant") is False:
         return "IRRELEVANT"
+    if not _template_may_answer(metadata):
+        return "NOT_EXACT_MATCH"
     validation = validator.validate_template_text(result.answer)
     if not validation.passed:
         return "VALIDATION_FAILED"
