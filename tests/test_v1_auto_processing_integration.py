@@ -106,11 +106,6 @@ def inquiry() -> dict:
     ("route", "plan", "reason"),
     [
         (
-            "ORDER_ID_REQUEST",
-            {"requires_order_lookup": True, "order_id_status": "MISSING"},
-            "REQUIRED_ORDER_ID_MISSING_OR_INVALID",
-        ),
-        (
             "DPS_LOOKUP_FAILED",
             {
                 "requires_dps_lookup": True,
@@ -133,11 +128,6 @@ def inquiry() -> dict:
             {"needs_staff_review": True},
             "PROCESSING_PLAN_REQUIRES_REVIEW",
         ),
-        (
-            "SAFE_RULE",
-            {"analysis": {"confidence": 0.45}},
-            "INTENT_CONFIDENCE_LOW",
-        ),
     ],
 )
 def test_uncertain_conditions_are_review_required(
@@ -148,6 +138,59 @@ def test_uncertain_conditions_are_review_required(
     )
     assert result.decision == "REVIEW_REQUIRED"
     assert reason in result.reasons
+
+
+# The two cases below were previously part of the parametrize list above.
+# They are not safety requirements: neither condition puts a wrong fact in
+# front of a customer, and blocking them was the single largest source of
+# unnecessary REVIEW_REQUIRED holds. They are now pinned explicitly, in both
+# directions, so the relaxation stays deliberate and cannot silently widen.
+def test_order_id_request_reply_is_auto_postable_and_reason_is_kept() -> None:
+    """A reply that only asks for the order number asserts no order fact."""
+    route = "ORDER_ID_REQUEST"
+    result = AutoProcessingEligibilityService().evaluate(
+        inquiry=inquiry(),
+        draft=draft(
+            route=route,
+            plan={"requires_order_lookup": True, "order_id_status": "MISSING"},
+        ),
+        route=route,
+    )
+    assert result.decision == "SAFE"
+    # Still recorded, just not blocking.
+    assert "ORDER_ID_REQUESTED_FROM_CUSTOMER" in result.soft_reasons
+
+
+def test_low_confidence_alone_is_auto_postable_and_reason_is_kept() -> None:
+    """A pessimistic confidence score is not itself a factual risk."""
+    route = "SAFE_RULE"
+    result = AutoProcessingEligibilityService().evaluate(
+        inquiry=inquiry(),
+        draft=draft(route=route, plan={"analysis": {"confidence": 0.45}}),
+        route=route,
+    )
+    assert result.decision == "SAFE"
+    assert "INTENT_CONFIDENCE_LOW" in result.soft_reasons
+
+
+def test_low_confidence_does_not_rescue_a_real_unsafe_condition() -> None:
+    """The relaxation must not leak into a genuine DPS failure."""
+    route = "DPS_LOOKUP_FAILED"
+    result = AutoProcessingEligibilityService().evaluate(
+        inquiry=inquiry(),
+        draft=draft(
+            route=route,
+            plan={
+                "analysis": {"confidence": 0.45},
+                "requires_dps_lookup": True,
+                "dps_lookup_status": "FAILED",
+                "valid_dps_snapshot_available": False,
+            },
+        ),
+        route=route,
+    )
+    assert result.decision == "REVIEW_REQUIRED"
+    assert "DPS_RESULT_NOT_TRUSTED" in result.reasons
 
 
 def test_validator_failure_is_review_and_privacy_failure_is_blocked() -> None:

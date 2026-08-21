@@ -8,7 +8,6 @@ from services.auto_post_validation_service import AutoPostTechnicalValidator
 
 REVIEW_ROUTES = {
     "BLOCKED_REVIEW_REQUIRED",
-    "ORDER_ID_REQUEST",
     "ORDER_LOOKUP_FAILED",
     "DELIVERY_ORDER_NOT_FOUND",
     "DPS_LOOKUP_FAILED",
@@ -23,7 +22,28 @@ AUTO_POSTABLE_ROUTES = {
     "GPT_FALLBACK",
     "GPT_DIRECT",
     "DELIVERY_WITH_INSTALLATION_DATE",
+    # A generated "please send us your order number" reply asserts no order
+    # fact at all -- it is the safe response to a missing order id, so it is
+    # itself auto-postable. The unsafe case (claiming an order fact without a
+    # trusted lookup) is still blocked by the order/DPS reasons below.
+    "ORDER_ID_REQUEST",
 }
+
+# Conditions worth recording, but which do not on their own indicate that
+# answering the customer is unsafe. Operating philosophy: auto-post by
+# default, hard-block only on an actual risk of customer harm. Anything not
+# listed here keeps its blocking behaviour.
+SOFT_REASONS = frozenset({
+    # A provider's self-reported confidence score is not a safety finding.
+    # A real factual risk always surfaces as an evidence/validator/DPS reason.
+    "INTENT_CONFIDENCE_LOW",
+    "INTENT_CONFIDENCE_UNKNOWN",
+    "GPT_CONFIDENCE_LOW",
+    "GPT_CONFIDENCE_UNKNOWN",
+    # The safe "please send your order number" reply. Asserts no order fact;
+    # blocking it would leave the customer with no reply at all.
+    "ORDER_ID_REQUESTED_FROM_CUSTOMER",
+})
 
 
 @dataclass(frozen=True)
@@ -31,6 +51,9 @@ class AutoProcessingEligibility:
     decision: str
     stage: str
     reasons: tuple[str, ...]
+    # Recorded-but-not-blocking findings, preserved for logs/diagnostics so
+    # relaxing the gate never means losing the signal.
+    soft_reasons: tuple[str, ...] = ()
 
     @property
     def safe(self) -> bool:
@@ -47,6 +70,29 @@ class AutoProcessingEligibilityService:
     def _metadata(draft: dict[str, Any]) -> dict[str, Any]:
         value = draft.get("metadata_json")
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _evidence_fully_supported(hybrid: dict[str, Any]) -> bool:
+        """True only when every sub-question is answerable from strong evidence.
+
+        Mirrors the retrieval-side Evidence Support contract exactly: each
+        sub-question must be ANSWERABLE *and* carry SUPPORTED coverage. Any
+        CONFLICT, NEEDS_DPS, NO_RELIABLE_SOURCE, or merely partial coverage
+        makes this False, so this can never relax a real evidence gap -- it
+        only lets a confident-enough evidence base stand on its own when the
+        provider's self-reported confidence number is pessimistic.
+        """
+        evidence = hybrid.get("subquestion_evidence")
+        if not isinstance(evidence, list) or not evidence:
+            return False
+        for item in evidence:
+            if not isinstance(item, dict):
+                return False
+            if str(item.get("status") or "").upper() != "ANSWERABLE":
+                return False
+            if str(item.get("evidence_coverage") or "").upper() != "SUPPORTED":
+                return False
+        return True
 
     def evaluate(
         self,
@@ -120,11 +166,20 @@ class AutoProcessingEligibilityService:
         }:
             reasons.append("DRAFT_REVIEW_REQUIRED")
 
+        # An ORDER_ID_REQUEST answer exists precisely *because* the order id is
+        # missing, and it only asks the customer for that number -- it states
+        # no order fact. Blocking it would leave the customer with no reply at
+        # all. The reasons are still recorded (soft) for diagnostics.
+        order_request_route = normalized_route == "ORDER_ID_REQUEST"
         order_required = bool(plan.get("requires_order_lookup"))
         if order_required and str(plan.get("order_id_status") or "").upper() != "VALID":
-            reasons.append("REQUIRED_ORDER_ID_MISSING_OR_INVALID")
+            reasons.append(
+                "ORDER_ID_REQUESTED_FROM_CUSTOMER" if order_request_route
+                else "REQUIRED_ORDER_ID_MISSING_OR_INVALID"
+            )
         if order_required and str(plan.get("order_lookup_status") or "").upper() != "SUCCESS":
-            reasons.append("ORDER_LOOKUP_NOT_TRUSTED")
+            if not order_request_route:
+                reasons.append("ORDER_LOOKUP_NOT_TRUSTED")
 
         dps_required = bool(plan.get("requires_dps_lookup"))
         if dps_required and str(plan.get("dps_lookup_status") or "").upper() != "SUCCESS":
@@ -132,28 +187,41 @@ class AutoProcessingEligibilityService:
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):
             reasons.append("DPS_SNAPSHOT_NOT_VALIDATED")
 
+        hybrid_value = metadata.get("hybrid")
+        hybrid = hybrid_value if isinstance(hybrid_value, dict) else {}
+        # Evidence + Authority first: a pessimistic confidence number from the
+        # provider is not itself a safety finding. When retrieval proved every
+        # sub-question answerable from SUPPORTED evidence, and no other reason
+        # fired, the confidence score alone must not hold the answer back.
+        # An unparseable score is still treated as unknown risk.
+        evidence_supported = self._evidence_fully_supported(hybrid)
+
         confidence = analysis.get("confidence")
         if confidence is not None:
             try:
-                if float(confidence) < 0.8:
+                if float(confidence) < 0.8 and not evidence_supported:
                     reasons.append("INTENT_CONFIDENCE_LOW")
             except (TypeError, ValueError):
                 reasons.append("INTENT_CONFIDENCE_UNKNOWN")
 
-        hybrid_value = metadata.get("hybrid")
-        hybrid = hybrid_value if isinstance(hybrid_value, dict) else {}
         draft_value = hybrid.get("draft")
         gpt_draft = draft_value if isinstance(draft_value, dict) else {}
         gpt_confidence = gpt_draft.get("confidence")
         if gpt_confidence is not None:
             try:
-                if float(gpt_confidence) < 0.8:
+                if float(gpt_confidence) < 0.8 and not evidence_supported:
                     reasons.append("GPT_CONFIDENCE_LOW")
             except (TypeError, ValueError):
                 reasons.append("GPT_CONFIDENCE_UNKNOWN")
 
-        if reasons:
+        ordered = tuple(dict.fromkeys(reasons))
+        hard = tuple(item for item in ordered if item not in SOFT_REASONS)
+        soft = tuple(item for item in ordered if item in SOFT_REASONS)
+        if hard:
             return AutoProcessingEligibility(
-                "REVIEW_REQUIRED", "AUTO_POST_ELIGIBILITY", tuple(dict.fromkeys(reasons))
+                "REVIEW_REQUIRED", "AUTO_POST_ELIGIBILITY", hard,
+                soft_reasons=soft,
             )
-        return AutoProcessingEligibility("SAFE", "AUTO_POST_ELIGIBILITY", ())
+        return AutoProcessingEligibility(
+            "SAFE", "AUTO_POST_ELIGIBILITY", (), soft_reasons=soft,
+        )

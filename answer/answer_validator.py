@@ -445,7 +445,13 @@ class AnswerValidator:
         subquestion_evidence: list[dict] | None = None,
     ) -> ValidationResult:
         errors: list[str] = []
-        warnings: list[str] = list(draft.warnings) + list(review.warnings)
+        # Free-form notes emitted by the GPT draft/self-review steps. They are
+        # surfaced to staff, but a model's stylistic remark is not evidence of
+        # a factual risk, so it must not by itself force REVIEW_REQUIRED.
+        # Every genuine risk already has an explicit error or an evidence/rule
+        # derived review signal below.
+        advisory: list[str] = list(draft.warnings) + list(review.warnings)
+        review_signals: list[str] = []
         checked: list[str] = []
         if not draft.answer.strip():
             errors.append("GPT 답변이 비어 있습니다.")
@@ -541,7 +547,7 @@ class AnswerValidator:
         if review.has_speculation or not review.facts_consistent:
             errors.append("GPT 자체 검토에서 사실 불일치를 확인했습니다.")
         if not review.answered_all_questions and intent.questions:
-            warnings.append("복합 질문 일부의 답변 누락 가능성이 있습니다.")
+            review_signals.append("복합 질문 일부의 답변 누락 가능성이 있습니다.")
         phase9_rules = self._phase9_rules(
             facts,
             draft.answer,
@@ -629,7 +635,7 @@ class AnswerValidator:
         errors.extend(
             item.message for item in validation_rules if item.status == "BLOCK"
         )
-        warnings.extend(
+        review_signals.extend(
             item.message
             for item in validation_rules
             if item.status == "REVIEW_REQUIRED"
@@ -638,16 +644,18 @@ class AnswerValidator:
             "BLOCK"
             if errors
             else "REVIEW_REQUIRED"
-            if warnings
+            if review_signals
             else "PASS"
         )
         return ValidationResult(
             passed=status != "BLOCK",
             errors=tuple(dict.fromkeys(errors)),
-            warnings=tuple(dict.fromkeys(warnings)),
+            # Everything staff should see, advisory notes included.
+            warnings=tuple(dict.fromkeys([*advisory, *review_signals])),
             checked_facts=tuple(dict.fromkeys(checked)),
             status=status,
             rules=validation_rules,
+            review_signals=tuple(dict.fromkeys(review_signals)),
         )
 
     @staticmethod

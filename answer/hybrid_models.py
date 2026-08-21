@@ -90,10 +90,15 @@ class ValidationResult:
     checked_facts: tuple[str, ...] = ()
     status: str = ""
     rules: tuple[ValidationRuleResult, ...] = ()
+    # Evidence/rule-derived signals that genuinely require staff review.
+    # ``warnings`` also carries free-form advisory notes emitted by the GPT
+    # draft/self-review steps; those are shown to staff but must not by
+    # themselves force REVIEW_REQUIRED (see AnswerValidator.validate).
+    review_signals: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for key in ("errors", "warnings", "checked_facts"):
+        for key in ("errors", "warnings", "checked_facts", "review_signals"):
             result[key] = list(result[key])
         result["status"] = self.status or (
             "PASS" if self.passed else "BLOCK"

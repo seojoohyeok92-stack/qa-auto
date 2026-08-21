@@ -18,6 +18,8 @@ REVIEW_EVENT_CODES = (
     "AUTO_POST_BLOCKED_DPS_SESSION",
 )
 
+SOFT_WARNING_EVENT_CODE = "AUTO_PROCESSING_SOFT_WARNING"
+
 # Maps the machine-readable reason codes produced by
 # AutoProcessingEligibilityService / AutoPostPipelineService's DPS-session
 # guard to the operator-facing buckets requested for Dashboard diagnostics.
@@ -48,6 +50,13 @@ _REASON_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "GPT_CONFIDENCE_LOW", "GPT_CONFIDENCE_UNKNOWN",
     )),
     ("자동등록 불가 라우트", ("INTENT_NOT_AUTO_POSTABLE",)),
+    ("개인정보/보안 차단", ("PII_EXPOSURE", "SECRET_EXPOSURE")),
+    ("답변 무결성 오류", (
+        "FINAL_ANSWER_REQUIRED", "UNRESOLVED_PLACEHOLDER",
+    )),
+    ("이미 답변됨", ("ALREADY_ANSWERED_OR_POSTED",)),
+    ("등록 직전 preflight 실패", ("PREFLIGHT_FAILED",)),
+    ("주문번호 요청 답변(자동등록)", ("ORDER_ID_REQUESTED_FROM_CUSTOMER",)),
 )
 _REASON_TO_BUCKET = {
     code: bucket for bucket, codes in _REASON_BUCKETS for code in codes
@@ -55,12 +64,18 @@ _REASON_TO_BUCKET = {
 
 
 def _reason_bucket(reason_code: str) -> str:
+    """Map a raw reason code to an operator-facing bucket.
+
+    Unknown codes deliberately fall through to the raw code itself rather
+    than a generic "기타", so an operator never sees an unexplainable
+    bucket for a reason the system actually recorded.
+    """
     code = str(reason_code or "").upper()
     if code in _REASON_TO_BUCKET:
         return _REASON_TO_BUCKET[code]
     if code.startswith("ROUTE_"):
         return "자동등록 불가 라우트"
-    return "기타"
+    return code or "기타"
 
 
 def _parse_reasons(details_json: object) -> list[str]:
@@ -74,6 +89,9 @@ def _parse_reasons(details_json: object) -> list[str]:
     reasons = data.get("reasons") if isinstance(data, dict) else None
     if isinstance(reasons, list):
         return [str(item) for item in reasons]
+    soft = data.get("soft_reasons") if isinstance(data, dict) else None
+    if isinstance(soft, list):
+        return [str(item) for item in soft]
     safe_error_code = data.get("safe_error_code") if isinstance(data, dict) else None
     return [str(safe_error_code)] if safe_error_code else []
 
@@ -303,13 +321,20 @@ class DashboardOperationsService:
                        (SELECT a.details_json FROM activity_logs a
                          WHERE a.inquiry_id = e.inquiry_id
                            AND a.event_code IN ({codes})
-                         ORDER BY a.id DESC LIMIT 1) AS review_details_json
+                         ORDER BY a.id DESC LIMIT 1) AS review_details_json,
+                       (SELECT a.details_json FROM activity_logs a
+                         WHERE a.inquiry_id = e.inquiry_id
+                           AND a.event_code = ?
+                         ORDER BY a.id DESC LIMIT 1) AS soft_details_json
                 FROM auto_sync_events e
                 JOIN inquiries i ON i.id = e.inquiry_id
                 ORDER BY e.updated_at DESC, e.id DESC
                 LIMIT ?
                 """.format(codes=",".join("?" for _ in REVIEW_EVENT_CODES)),
-                (*REVIEW_EVENT_CODES, int(recent_limit)),
+                (
+                    *REVIEW_EVENT_CODES, SOFT_WARNING_EVENT_CODE,
+                    int(recent_limit),
+                ),
             ).fetchall()
 
         reason_counts: dict[str, int] = {}
@@ -321,10 +346,14 @@ class DashboardOperationsService:
         recent_events: list[dict[str, Any]] = []
         for row in recent_rows:
             reasons = _parse_reasons(row["review_details_json"])
+            soft_reasons = _parse_reasons(row["soft_details_json"])
             queue_status = str(row["queue_status"])
             post_status = str(row["last_post_status"] or "")
             if post_status == "POSTED":
-                result = "AUTO_POSTED"
+                result = (
+                    "SOFT_WARNING_AUTO_POSTED" if soft_reasons
+                    else "AUTO_POSTED"
+                )
                 auto_posted = True
             elif queue_status == "BLOCKED_AUTO_POST_OFF":
                 result = "BLOCKED_AUTO_POST_OFF"
@@ -336,8 +365,11 @@ class DashboardOperationsService:
                 result = queue_status
                 auto_posted = False
             elif queue_status == "COMPLETED":
-                result = "COMPLETED"
-                auto_posted = post_status == "POSTED"
+                # Queue COMPLETED means the auto-post run finished handling
+                # this event, which is NOT the same as having posted. Keep the
+                # two meanings distinct for the operator.
+                result = "COMPLETED_NO_POST"
+                auto_posted = False
             else:
                 result = queue_status
                 auto_posted = False
@@ -349,6 +381,15 @@ class DashboardOperationsService:
                 "result": result,
                 "auto_posted": auto_posted,
                 "reasons": [_reason_bucket(item) for item in reasons],
+                "soft_reasons": [
+                    _reason_bucket(item) for item in soft_reasons
+                ],
+                # Raw codes preserved so an operator can diagnose a reason the
+                # bucket map does not yet name.
+                "raw_reason_codes": list(reasons),
+                "last_error_code": row["last_error_code"],
+                "attempt_count": int(row["attempt_count"] or 0),
+                "retryable": queue_status == "RETRY_BY_SCHEDULER",
                 "updated_at": row["updated_at"],
             })
 
@@ -364,4 +405,73 @@ class DashboardOperationsService:
             "review_required_reasons": reason_counts,
             "dps_required_count": int(dps_required or 0),
             "recent_events": recent_events,
+            "failed_events": self._failed_event_diagnostics(),
+            # Operator-facing severity split: a HARD block genuinely withheld
+            # the answer; a SOFT warning was recorded but the answer still
+            # posted; FAILED is a real pipeline failure, never a policy hold.
+            "severity_counts": {
+                "hard_block": sum(
+                    1 for event in recent_events
+                    if event["result"] == "REVIEW_REQUIRED"
+                ),
+                "soft_warning_auto_posted": sum(
+                    1 for event in recent_events
+                    if event["result"] == "SOFT_WARNING_AUTO_POSTED"
+                ),
+                "failed": sum(
+                    1 for event in recent_events
+                    if event["result"] in {"FAILED", "RETRY_BY_SCHEDULER"}
+                ),
+            },
         }
+
+    def _failed_event_diagnostics(
+        self, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Sanitized failure detail for FAILED/RETRY queue events.
+
+        Only the already-sanitized ``error_type``/``error_code`` that the
+        pipeline recorded are surfaced -- never a stack trace, request body,
+        credential, or customer field.
+        """
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.inquiry_id, e.external_id, e.status, e.attempt_count,
+                       e.last_error_code, e.updated_at,
+                       (SELECT a.details_json FROM activity_logs a
+                         WHERE a.inquiry_id = e.inquiry_id
+                           AND a.event_code IN (
+                               'AUTO_ANSWER_FAILED', 'AUTO_SYNC_EVENT_FAILED'
+                           )
+                         ORDER BY a.id DESC LIMIT 1) AS failure_details_json
+                FROM auto_sync_events e
+                WHERE e.status IN ('FAILED', 'RETRY_BY_SCHEDULER')
+                ORDER BY e.updated_at DESC, e.id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+
+        failures: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                details = json.loads(str(row["failure_details_json"] or "{}"))
+            except (TypeError, ValueError):
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            failures.append({
+                "inquiry_id": int(row["inquiry_id"]),
+                "external_inquiry_id": row["external_id"],
+                "queue_status": str(row["status"]),
+                "stage": "AUTO_POST_PIPELINE",
+                "error_type": details.get("error_type"),
+                "error_code": (
+                    details.get("error_code") or row["last_error_code"]
+                ),
+                "attempt_count": int(row["attempt_count"] or 0),
+                "retryable": str(row["status"]) == "RETRY_BY_SCHEDULER",
+                "updated_at": row["updated_at"],
+            })
+        return failures

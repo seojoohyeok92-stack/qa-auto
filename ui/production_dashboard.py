@@ -281,6 +281,14 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
             ("DPS 확인 필요", diagnostics["dps_required_count"]),
         )):
             column.metric(label, value)
+        severity = diagnostics["severity_counts"]
+        severity_columns = st.columns(3, gap="small")
+        for column, (label, value) in zip(severity_columns, (
+            ("HARD BLOCK(검토 보류)", severity["hard_block"]),
+            ("SOFT 경고(자동등록됨)", severity["soft_warning_auto_posted"]),
+            ("FAILED(실제 실패)", severity["failed"]),
+        )):
+            column.metric(label, value)
         if diagnostics["review_required_reasons"]:
             st.caption(
                 "직원 검토 필요 사유별 집계: " + " · ".join(
@@ -300,6 +308,7 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
                         "결과": event["result"],
                         "자동등록": "Y" if event["auto_posted"] else "N",
                         "사유": ", ".join(event["reasons"]) or "-",
+                        "SOFT 경고": ", ".join(event["soft_reasons"]) or "-",
                         "최근 처리시간": format_datetime_kst(
                             event["updated_at"], empty="없음"
                         ),
@@ -308,6 +317,50 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
                 ],
                 width="stretch", hide_index=True,
             )
+
+        failed_events = diagnostics["failed_events"]
+        if failed_events:
+            st.caption(
+                "처리 실패 이벤트 (REVIEW_REQUIRED와 구분되는 실제 파이프라인 실패)"
+            )
+            st.dataframe(
+                [
+                    {
+                        "문의번호(네이버)": item["external_inquiry_id"],
+                        "Queue 상태": item["queue_status"],
+                        "단계": item["stage"],
+                        "오류 유형": item["error_type"] or "-",
+                        "오류 코드": item["error_code"] or "-",
+                        "시도 횟수": item["attempt_count"],
+                        "재시도 가능": "Y" if item["retryable"] else "N",
+                        "최근 처리시간": format_datetime_kst(
+                            item["updated_at"], empty="없음"
+                        ),
+                    }
+                    for item in failed_events
+                ],
+                width="stretch", hide_index=True,
+            )
+
+        # Raw reason codes are an administrator diagnostic, kept out of the
+        # normal operator view to avoid noise (section 15).
+        if st.session_state.get("production_admin_mode", False):
+            raw_rows = [
+                {
+                    "문의번호(네이버)": event["external_inquiry_id"],
+                    "내부 ID": event["inquiry_id"],
+                    "workflow_status": event["workflow_status"],
+                    "원본 reason code": ", ".join(
+                        event["raw_reason_codes"]
+                    ) or "-",
+                    "last_error_code": event["last_error_code"] or "-",
+                }
+                for event in recent_events
+                if event["raw_reason_codes"] or event["last_error_code"]
+            ]
+            if raw_rows:
+                with st.expander("관리자 상세 · 원본 reason code", expanded=False):
+                    st.dataframe(raw_rows, width="stretch", hide_index=True)
     return data
 
 def render_sync_status(data: dict[str, Any]) -> None:

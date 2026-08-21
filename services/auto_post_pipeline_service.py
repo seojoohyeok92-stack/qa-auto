@@ -289,6 +289,19 @@ class AutoPostPipelineService:
                         inquiry_id, eligibility, run_id=run_id
                     )
                     continue
+                if eligibility.soft_reasons:
+                    # Recorded, not blocking: the answer is safe to post but
+                    # staff should still be able to see what was noted.
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "AUTO_PROCESSING_SOFT_WARNING",
+                        "자동등록을 막지 않는 경고를 기록했습니다.",
+                        level="WARNING",
+                        details={
+                            "auto_post_run_id": run_id,
+                            "soft_reasons": list(eligibility.soft_reasons),
+                        },
+                    )
                 dps_block = self._dps_session_block_reason(draft)
                 if dps_block:
                     counters["skipped_count"] += 1

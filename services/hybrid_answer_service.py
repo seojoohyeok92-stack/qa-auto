@@ -637,6 +637,16 @@ class HybridAnswerService:
                 "self_review": review.to_dict(),
                 "validation": validation.to_dict(),
                 "phase9": metadata["phase9"],
+                # Persisted so the downstream auto-post eligibility gate can
+                # judge on Evidence/Authority instead of a bare confidence
+                # number.  Retrieval already computed this; nothing is
+                # recomputed and no extra provider call is made.
+                "subquestion_evidence": [
+                    dict(item)
+                    for item in (
+                        learning_context.get("subquestion_evidence") or []
+                    )
+                ],
                 "confirmed_facts": {
                     "installation_date": installation_date,
                     "required_delivery_date": facts.installation.get(
