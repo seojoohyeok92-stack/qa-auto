@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from repositories.auto_post_repository import AutoPostRepository
@@ -10,6 +11,71 @@ from repositories.naver_sync_repository import NaverSyncRepository
 
 
 TODAY_SQL = "date({column}, '+9 hours') = date('now', '+9 hours')"
+
+REVIEW_EVENT_CODES = (
+    "AUTO_PROCESSING_REVIEW_REQUIRED",
+    "AUTO_PROCESSING_BLOCKED",
+    "AUTO_POST_BLOCKED_DPS_SESSION",
+)
+
+# Maps the machine-readable reason codes produced by
+# AutoProcessingEligibilityService / AutoPostPipelineService's DPS-session
+# guard to the operator-facing buckets requested for Dashboard diagnostics.
+# Display-only: never used to change routing/eligibility decisions.
+_REASON_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("주문번호 필요/조회 실패", (
+        "REQUIRED_ORDER_ID_MISSING_OR_INVALID", "ORDER_LOOKUP_NOT_TRUSTED",
+        "ROUTE_ORDER_ID_REQUEST", "ROUTE_ORDER_LOOKUP_FAILED",
+        "ROUTE_DELIVERY_ORDER_NOT_FOUND",
+    )),
+    ("DPS 확인 필요", (
+        "DPS_RESULT_NOT_TRUSTED", "DPS_SNAPSHOT_NOT_VALIDATED",
+        "ROUTE_DPS_LOOKUP_FAILED", "ROUTE_DELIVERY_DATE_UNCONFIRMED",
+        "LOGIN_REQUIRED", "OTP_REQUIRED", "CHROME_NOT_FOUND",
+        "DPS_TAB_NOT_FOUND", "DPS_PAGE_NOT_FOUND", "CONNECTION_FAILED",
+        "AGENT_CONNECTION_FAILED", "AGENT_CONNECT_TIMEOUT",
+        "AGENT_REQUEST_FAILED", "AGENT_START_FAILED", "AGENT_START_TIMEOUT",
+    )),
+    ("Validator 경고", ("VALIDATOR_NOT_PASS", "ROUTE_REVIEW_REQUIRED_SAFE_DRAFT")),
+    ("정책/고위험 검토", (
+        "ANSWER_REQUIRES_MANUAL_REVIEW", "PROCESSING_PLAN_REQUIRES_REVIEW",
+        "POLICY_OR_HIGH_RISK_REVIEW", "DRAFT_REVIEW_REQUIRED",
+        "ROUTE_BLOCKED_REVIEW_REQUIRED",
+    )),
+    ("Evidence 부족(제품 사실 미검증)", ("PRODUCT_FACT_NOT_VERIFIED",)),
+    ("낮은 신뢰도", (
+        "INTENT_CONFIDENCE_LOW", "INTENT_CONFIDENCE_UNKNOWN",
+        "GPT_CONFIDENCE_LOW", "GPT_CONFIDENCE_UNKNOWN",
+    )),
+    ("자동등록 불가 라우트", ("INTENT_NOT_AUTO_POSTABLE",)),
+)
+_REASON_TO_BUCKET = {
+    code: bucket for bucket, codes in _REASON_BUCKETS for code in codes
+}
+
+
+def _reason_bucket(reason_code: str) -> str:
+    code = str(reason_code or "").upper()
+    if code in _REASON_TO_BUCKET:
+        return _REASON_TO_BUCKET[code]
+    if code.startswith("ROUTE_"):
+        return "자동등록 불가 라우트"
+    return "기타"
+
+
+def _parse_reasons(details_json: object) -> list[str]:
+    if isinstance(details_json, dict):
+        data = details_json
+    else:
+        try:
+            data = json.loads(str(details_json or "{}"))
+        except (TypeError, ValueError):
+            return []
+    reasons = data.get("reasons") if isinstance(data, dict) else None
+    if isinstance(reasons, list):
+        return [str(item) for item in reasons]
+    safe_error_code = data.get("safe_error_code") if isinstance(data, dict) else None
+    return [str(safe_error_code)] if safe_error_code else []
 
 
 class DashboardOperationsService:
@@ -183,4 +249,119 @@ class DashboardOperationsService:
             "auto_sync_state": sync.auto_state(),
             "auto_post_settings": post.settings(),
             "auto_post_state": post.state(),
+        }
+
+    def queue_diagnostics(self, *, recent_limit: int = 20) -> dict[str, Any]:
+        """Read-only breakdown of the auto-post queue for operator diagnosis.
+
+        Distinguishes claimable queue state (``auto_sync_events``) from the
+        ``inquiries``-table-derived Pending/Review-Required KPIs in
+        :meth:`snapshot`, and surfaces *why* each currently review-required
+        inquiry was held, without changing any routing/eligibility decision.
+        """
+
+        event_summary = AutoPostEventRepository(self.database).summary()
+        with self.database.connection() as connection:
+            review_rows = connection.execute(
+                """
+                SELECT a.details_json
+                FROM activity_logs a
+                JOIN inquiries i ON i.id = a.inquiry_id
+                WHERE a.event_code IN ({codes})
+                  AND a.id = (
+                      SELECT MAX(a2.id) FROM activity_logs a2
+                      WHERE a2.inquiry_id = a.inquiry_id
+                        AND a2.event_code IN ({codes})
+                  )
+                  AND i.workflow_status IN ('REVIEW_PENDING', 'NEEDS_ATTENTION')
+                  AND COALESCE(i.source_answered, 0) = 0
+                """.format(
+                    codes=",".join("?" for _ in REVIEW_EVENT_CODES)
+                ),
+                REVIEW_EVENT_CODES * 2,
+            ).fetchall()
+            dps_required = connection.execute(
+                """
+                SELECT COUNT(*) FROM inquiries
+                WHERE COALESCE(source_answered, 0) = 0
+                  AND post_status != 'POSTED'
+                  AND workflow_status IN ('REVIEW_PENDING', 'NEEDS_ATTENTION')
+                  AND id IN (
+                      SELECT inquiry_id FROM activity_logs
+                      WHERE event_code = 'AUTO_POST_BLOCKED_DPS_SESSION'
+                  )
+                """
+            ).fetchone()[0]
+            recent_rows = connection.execute(
+                """
+                SELECT e.id, e.inquiry_id, e.external_id, e.status AS queue_status,
+                       e.updated_at, e.attempt_count, e.last_error_code,
+                       i.workflow_status, i.post_status,
+                       (SELECT p.status FROM naver_post_attempts p
+                         WHERE p.inquiry_id = e.inquiry_id
+                         ORDER BY p.id DESC LIMIT 1) AS last_post_status,
+                       (SELECT a.details_json FROM activity_logs a
+                         WHERE a.inquiry_id = e.inquiry_id
+                           AND a.event_code IN ({codes})
+                         ORDER BY a.id DESC LIMIT 1) AS review_details_json
+                FROM auto_sync_events e
+                JOIN inquiries i ON i.id = e.inquiry_id
+                ORDER BY e.updated_at DESC, e.id DESC
+                LIMIT ?
+                """.format(codes=",".join("?" for _ in REVIEW_EVENT_CODES)),
+                (*REVIEW_EVENT_CODES, int(recent_limit)),
+            ).fetchall()
+
+        reason_counts: dict[str, int] = {}
+        for row in review_rows:
+            for reason in _parse_reasons(row["details_json"]):
+                bucket = _reason_bucket(reason)
+                reason_counts[bucket] = reason_counts.get(bucket, 0) + 1
+
+        recent_events: list[dict[str, Any]] = []
+        for row in recent_rows:
+            reasons = _parse_reasons(row["review_details_json"])
+            queue_status = str(row["queue_status"])
+            post_status = str(row["last_post_status"] or "")
+            if post_status == "POSTED":
+                result = "AUTO_POSTED"
+                auto_posted = True
+            elif queue_status == "BLOCKED_AUTO_POST_OFF":
+                result = "BLOCKED_AUTO_POST_OFF"
+                auto_posted = False
+            elif reasons:
+                result = "REVIEW_REQUIRED"
+                auto_posted = False
+            elif queue_status in {"FAILED", "RETRY_BY_SCHEDULER"}:
+                result = queue_status
+                auto_posted = False
+            elif queue_status == "COMPLETED":
+                result = "COMPLETED"
+                auto_posted = post_status == "POSTED"
+            else:
+                result = queue_status
+                auto_posted = False
+            recent_events.append({
+                "inquiry_id": int(row["inquiry_id"]),
+                "external_inquiry_id": row["external_id"],
+                "queue_status": queue_status,
+                "workflow_status": row["workflow_status"],
+                "result": result,
+                "auto_posted": auto_posted,
+                "reasons": [_reason_bucket(item) for item in reasons],
+                "updated_at": row["updated_at"],
+            })
+
+        return {
+            "queue": {
+                "claimable_pending": event_summary["PENDING"],
+                "processing": event_summary["PROCESSING"],
+                "retry_scheduled": event_summary["RETRY_BY_SCHEDULER"],
+                "blocked_auto_post_off": event_summary["BLOCKED_AUTO_POST_OFF"],
+                "failed": event_summary["FAILED"],
+                "completed": event_summary["COMPLETED"],
+            },
+            "review_required_reasons": reason_counts,
+            "dps_required_count": int(dps_required or 0),
+            "recent_events": recent_events,
         }

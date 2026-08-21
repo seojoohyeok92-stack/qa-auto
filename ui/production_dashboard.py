@@ -93,16 +93,34 @@ def _render_admin_mode(database: Database) -> None:
     if st.session_state.get(loaded_key) != username:
         st.session_state["production_admin_mode"] = repository.admin_mode(username)
         st.session_state[loaded_key] = username
-    enabled = st.toggle(
-        "관리자 모드",
-        key="production_admin_mode",
-        disabled=not can_admin,
-        help="관리자 상세와 내부 운영 도구를 표시합니다.",
+    admin_enabled = bool(st.session_state.get("production_admin_mode", False))
+    st.caption("관리자 모드: **ON**" if admin_enabled else "관리자 모드: **OFF**")
+    start_col, stop_col = st.columns(2, gap="small")
+    start_clicked = start_col.button(
+        "관리자 모드 시작",
+        width="stretch",
+        key="production_admin_mode_start",
+        disabled=not can_admin or admin_enabled,
+        help="관리자 상세와 내부 운영 도구를 표시합니다. Auto Sync/자동처리와 무관합니다.",
     )
-    if enabled != repository.admin_mode(username):
-        repository.save_admin_mode(username, enabled)
+    stop_clicked = stop_col.button(
+        "관리자 모드 종료",
+        width="stretch",
+        key="production_admin_mode_stop",
+        disabled=not can_admin or not admin_enabled,
+        help="관리자 상세와 내부 운영 도구를 숨깁니다. Auto Sync/자동처리와 무관합니다.",
+    )
+    if start_clicked:
+        st.session_state["production_admin_mode"] = True
+        repository.save_admin_mode(username, True)
+        st.rerun()
+    if stop_clicked:
+        st.session_state["production_admin_mode"] = False
+        repository.save_admin_mode(username, False)
+        st.rerun()
 
 
+@st.fragment(run_every="30s")
 def render_realtime_operations(database: Database) -> dict[str, Any]:
     data = DashboardOperationsService(database).snapshot()
     dps_session = _cached_dps_session_status()
@@ -249,6 +267,47 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
         )
         for column, (label, value) in zip(columns, details):
             column.metric(label, value)
+
+        diagnostics = DashboardOperationsService(database).queue_diagnostics()
+        queue = diagnostics["queue"]
+        st.markdown("**Queue 진단** (claim 가능 여부 기준, Pending/직원 검토 필요 KPI와는 다른 모집단)")
+        queue_columns = st.columns(6, gap="small")
+        for column, (label, value) in zip(queue_columns, (
+            ("Claim 가능 PENDING", queue["claimable_pending"]),
+            ("Processing", queue["processing"]),
+            ("Retry 대기", queue["retry_scheduled"]),
+            ("Blocked(OFF)", queue["blocked_auto_post_off"]),
+            ("Failed", queue["failed"]),
+            ("DPS 확인 필요", diagnostics["dps_required_count"]),
+        )):
+            column.metric(label, value)
+        if diagnostics["review_required_reasons"]:
+            st.caption(
+                "직원 검토 필요 사유별 집계: " + " · ".join(
+                    f"{reason} {count}건"
+                    for reason, count in diagnostics["review_required_reasons"].items()
+                )
+            )
+        recent_events = diagnostics["recent_events"]
+        if recent_events:
+            st.caption(f"최근 처리 이벤트 (최근 {len(recent_events)}건, 네이버 원본 문의번호 기준)")
+            st.dataframe(
+                [
+                    {
+                        "문의번호(네이버)": event["external_inquiry_id"],
+                        "내부 ID": event["inquiry_id"],
+                        "Queue 상태": event["queue_status"],
+                        "결과": event["result"],
+                        "자동등록": "Y" if event["auto_posted"] else "N",
+                        "사유": ", ".join(event["reasons"]) or "-",
+                        "최근 처리시간": format_datetime_kst(
+                            event["updated_at"], empty="없음"
+                        ),
+                    }
+                    for event in recent_events
+                ],
+                width="stretch", hide_index=True,
+            )
     return data
 
 def render_sync_status(data: dict[str, Any]) -> None:
