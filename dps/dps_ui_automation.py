@@ -3436,6 +3436,14 @@ class DpsUiAutomation:
                         "DPS 주문은 확인했지만 요구납기일 정보가 서로 달라 "
                         "확인이 필요합니다."
                     )
+                elif merged_data.get("delivery_date_status") == (
+                    "PARTIALLY_CONFIRMED"
+                ):
+                    final_status = "DETAIL_DATE_CONFLICT"
+                    final_message = (
+                        "DPS 주문은 확인했지만 일부 품목의 요구납기일을 "
+                        "확인하지 못해 대표 설치예정일을 확정할 수 없습니다."
+                    )
                 elif detail_lookup.get("closed"):
                     final_status = "RESULT_FOUND_WITH_DETAIL"
                     final_message = "DPS 판매 상세정보를 확인했습니다."

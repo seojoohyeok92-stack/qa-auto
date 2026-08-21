@@ -77,7 +77,12 @@ def test_same_dates_map_to_installation_date():
     assert result["date_parse_status"] == "PARSED"
 
 
-def test_different_dates_require_human_review_without_earliest_or_latest():
+def test_different_confirmed_dates_use_the_latest_max_date():
+    # Deliberate behavior change (2026-08-21 operational-safety update): when
+    # every target item's date IS confirmed and they simply differ, the
+    # representative date is the latest (MAX) one -- see
+    # test_some_item_dates_unresolved_never_guesses_a_date for the case that
+    # still refuses to guess (a target item's date is unknown).
     result = resolve_item_required_delivery_date(
         [
             {
@@ -92,9 +97,86 @@ def test_different_dates_require_human_review_without_earliest_or_latest():
             },
         ]
     )
+    assert result["installation_date"] == "2026-07-31"
+    assert result["date_parse_status"] == "PARSED"
+    assert result["requires_human_review"] is False
+
+
+def test_some_item_dates_unresolved_never_guesses_a_date():
+    result = resolve_item_required_delivery_date(
+        [
+            {
+                "required_delivery_date": "2026-08-25",
+                "raw_required_delivery_date": "2026-08-25",
+                "date_parse_status": "PARSED",
+            },
+            {
+                "required_delivery_date": None,
+                "raw_required_delivery_date": None,
+                "date_parse_status": "MISSING",
+            },
+            {
+                "required_delivery_date": "2026-08-27",
+                "raw_required_delivery_date": "2026-08-27",
+                "date_parse_status": "PARSED",
+            },
+        ]
+    )
     assert result["installation_date"] is None
-    assert result["date_parse_status"] == "CONFLICT"
+    assert result["required_delivery_date"] is None
+    assert result["date_parse_status"] == "PARTIAL"
     assert result["requires_human_review"] is True
+
+
+def test_all_item_dates_missing_stays_missing_not_partial():
+    result = resolve_item_required_delivery_date(
+        [
+            {"required_delivery_date": None, "date_parse_status": "MISSING"},
+            {"required_delivery_date": None, "date_parse_status": "MISSING"},
+        ]
+    )
+    assert result["installation_date"] is None
+    assert result["date_parse_status"] == "MISSING"
+    assert result["requires_human_review"] is False
+
+
+def test_unparseable_item_date_blocks_max_confirmation():
+    result = resolve_item_required_delivery_date(
+        [
+            {
+                "required_delivery_date": "2026-08-25",
+                "raw_required_delivery_date": "2026-08-25",
+                "date_parse_status": "PARSED",
+            },
+            {
+                "required_delivery_date": None,
+                "raw_required_delivery_date": "INVALID",
+                "date_parse_status": "PARSE_FAILED",
+            },
+        ]
+    )
+    assert result["installation_date"] is None
+    assert result["date_parse_status"] == "PARTIAL"
+    assert result["requires_human_review"] is True
+
+
+def test_three_way_max_date_ignores_row_order():
+    forward = resolve_item_required_delivery_date(
+        [
+            {"required_delivery_date": "2026-08-25", "date_parse_status": "PARSED"},
+            {"required_delivery_date": "2026-08-30", "date_parse_status": "PARSED"},
+            {"required_delivery_date": "2026-08-27", "date_parse_status": "PARSED"},
+        ]
+    )
+    reversed_order = resolve_item_required_delivery_date(
+        [
+            {"required_delivery_date": "2026-08-27", "date_parse_status": "PARSED"},
+            {"required_delivery_date": "2026-08-30", "date_parse_status": "PARSED"},
+            {"required_delivery_date": "2026-08-25", "date_parse_status": "PARSED"},
+        ]
+    )
+    assert forward["installation_date"] == "2026-08-30"
+    assert reversed_order["installation_date"] == "2026-08-30"
 
 
 def test_explicit_online_order_representative_item_has_priority():

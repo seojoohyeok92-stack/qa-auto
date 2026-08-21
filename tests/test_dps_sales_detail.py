@@ -174,12 +174,30 @@ def test_customer_summary_date_is_not_an_installation_date_source():
     assert result["item_requested_dates"] == ["2026-07-30"]
 
 
-def test_multiple_item_dates_are_not_guessed():
+def test_multiple_confirmed_item_dates_use_the_latest_max_date():
+    # Deliberate behavior change (2026-08-21 operational-safety update):
+    # when every in-scope item's date IS confirmed and they differ, the
+    # representative date is the latest (MAX) one, not a blanket refusal.
+    # See resolve_item_required_delivery_date for the "some item's date is
+    # unresolved" case, which still refuses to guess.
     result = resolve_delivery_date(
         item_requested_dates=["2026-07-30", "2026-07-31"]
     )
+    assert result["delivery_scheduled_date"] == "2026-07-31"
+    assert result["installation_date"] == "2026-07-31"
+    assert result["delivery_date_status"] == "CONFIRMED"
+    assert result["date_parse_status"] == "PARSED"
+    assert result["requires_human_review"] is False
+
+
+def test_items_with_an_unresolved_date_are_never_guessed():
+    result = resolve_delivery_date(
+        item_requested_dates=["2026-07-30"], has_unresolved_items=True,
+    )
     assert result["delivery_scheduled_date"] is None
-    assert result["delivery_date_status"] == "MULTIPLE_DATES"
+    assert result["installation_date"] is None
+    assert result["date_parse_status"] == "PARTIAL"
+    assert result["requires_human_review"] is True
 
 
 def test_missing_dates_remain_null():

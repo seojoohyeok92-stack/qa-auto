@@ -374,12 +374,19 @@ def resolve_delivery_date(
     customer_requested_date: Any = None,
     item_requested_dates: Sequence[Any] = (),
     list_requested_date: Any = None,
+    has_unresolved_items: bool = False,
 ) -> dict[str, Any]:
     """Resolve only item-detail required dates.
 
     Customer summary and purchase-list dates remain accepted in the signature
     for backwards API compatibility, but are intentionally not installation
     date fallbacks.
+
+    ``has_unresolved_items`` signals that at least one in-scope item's date
+    could not be confirmed (missing or unparseable) even though this call's
+    ``item_requested_dates`` only ever contains the ones that *did* parse.
+    When set, no date is ever asserted -- even the MAX of the dates we did
+    see -- because the unconfirmed item's real date could be later still.
     """
 
     del customer_requested_date, list_requested_date
@@ -404,12 +411,34 @@ def resolve_delivery_date(
         "customer_requested_date": None,
         "item_requested_dates": unique_items,
     }
-    if len(unique_items) > 1:
+    if has_unresolved_items:
         return {
             **base,
-            "date_parse_status": "CONFLICT",
+            "date_parse_status": "PARTIAL",
             "requires_human_review": True,
-            "delivery_date_status": "MULTIPLE_DATES",
+            "delivery_date_status": "PARTIALLY_CONFIRMED",
+        }
+    if len(unique_items) > 1:
+        # Multiple in-scope items each have a *confirmed* date but disagree.
+        # The customer-facing representative date is the latest one (MAX) --
+        # never a guessed earliest/first/last-row value.  Comparison always
+        # goes through the shared date parser, never string sorting.
+        item_date = max(unique_items, key=lambda value: parse_date_value(value))
+        return {
+            **base,
+            "required_delivery_date": item_date,
+            "installation_date": item_date,
+            "installation_date_source": (
+                "DPS_ITEM_DETAIL_REQUIRED_DELIVERY_DATE"
+            ),
+            "date_parse_status": "PARSED",
+            "requested_delivery_date": item_date,
+            "delivery_scheduled_date": item_date,
+            "delivery_date_source": (
+                "DPS_ITEM_DETAIL_REQUIRED_DELIVERY_DATE"
+            ),
+            "delivery_date_status": "CONFIRMED",
+            "required_delivery_date_selection": "MAX_OF_MULTIPLE_VALID_DATES",
         }
     item_date = unique_items[0] if unique_items else None
     if item_date:
@@ -434,7 +463,16 @@ def resolve_delivery_date(
 def resolve_item_required_delivery_date(
     items: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Apply the representative-item policy and retain conflict evidence."""
+    """Apply the representative-item policy, then the MAX-date rule.
+
+    "대상 품목"(target items) is decided exactly as before (explicit
+    online-order/representative flag, else all items, narrowed to a single
+    TV/installation item when one uniquely disagrees with accessories) --
+    this function only changes what happens *after* that scope is decided:
+    if every target item's date is confirmed and they differ, the latest
+    (MAX) date is used; if even one target item's date is unconfirmed, no
+    date is asserted at all (PARTIAL, human review required).
+    """
 
     values = [dict(item) for item in items]
     representative = [
@@ -469,8 +507,23 @@ def resolve_item_required_delivery_date(
         )
         if len(tv_unique) == 1:
             unique = tv_unique
+            # The target-item scope itself narrows to the TV/installation
+            # items once they alone determine the date, so missing-item
+            # detection below is scoped to the same narrowed set instead of
+            # unrelated accessories that were never installation-relevant.
+            candidates = tv_items
 
-    result = resolve_delivery_date(item_requested_dates=unique)
+    # Any in-scope candidate without its own confirmed date blocks an
+    # automatic representative date -- MAX is only safe when every target
+    # item's date is actually known (Acceptance Case DPS-E/F/G).
+    has_unresolved_items = bool(dated_candidates) and len(dated_candidates) < len(
+        candidates
+    )
+
+    result = resolve_delivery_date(
+        item_requested_dates=unique,
+        has_unresolved_items=has_unresolved_items,
+    )
     raw_values = [
         item.get("raw_required_delivery_date")
         for item in candidates
@@ -483,6 +536,7 @@ def resolve_item_required_delivery_date(
         item.get("date_parse_status") == "PARSE_FAILED" for item in candidates
     ):
         result["date_parse_status"] = "PARSE_FAILED"
+        result["requires_human_review"] = True
     result["required_delivery_date_row_count"] = len(values)
     return result
 

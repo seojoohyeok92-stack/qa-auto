@@ -192,7 +192,7 @@ def normalize_dps_result(
     )
     requires_human_review = bool(
         data.get("requires_human_review")
-        or date_parse_status == "CONFLICT"
+        or date_parse_status in {"CONFLICT", "PARTIAL"}
     )
     warnings: list[str] = []
     source_status = meaningful(raw.get("status"))
@@ -206,6 +206,8 @@ def normalize_dps_result(
         warnings.append("DPS_REQUIRED_DATE_PARSE_FAILED")
     elif date_parse_status == "CONFLICT":
         warnings.append("DPS_REQUIRED_DATE_CONFLICT")
+    elif date_parse_status == "PARTIAL":
+        warnings.append("DPS_REQUIRED_DATE_PARTIAL")
     elif date_parse_status == "MISSING":
         warnings.append("DPS_REQUIRED_DATE_MISSING")
     return {

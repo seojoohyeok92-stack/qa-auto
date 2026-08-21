@@ -21,7 +21,10 @@ from services.inquiry_sync_orchestrator import InquirySyncOrchestrator
 from services.naver_auto_sync_scheduler import (
     ensure_auto_sync_scheduler,
 )
-from services.naver_auto_post_scheduler import ensure_auto_post_scheduler
+from services.naver_auto_post_scheduler import (
+    ensure_auto_post_scheduler,
+    reset_auto_post_runtime_on_process_start,
+)
 from services.dps_agent_client import ensure_dps_session_monitor
 from services.work_queue_service import (
     WorkItem,
@@ -989,6 +992,11 @@ def main() -> None:
     database, db_status = _initialize_database()
     if database is not None:
         ensure_local_identity(database)
+        # Must run before ensure_auto_post_scheduler, and only ever resets
+        # anything on this process's very first pass (see docstring) -- a
+        # same-process Streamlit rerun or an operator's own enable() call
+        # afterward is never affected.
+        reset_auto_post_runtime_on_process_start(database)
         ensure_auto_sync_scheduler(database)
         ensure_auto_post_scheduler(database)
         ensure_dps_session_monitor()

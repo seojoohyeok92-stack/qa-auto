@@ -941,7 +941,7 @@ def _dps_summary_values(
     result: dict[str, Any],
 ) -> list[tuple[str, str]]:
     date_status = data.get("delivery_date_status")
-    if date_status in {"DATE_CONFLICT", "MULTIPLE_DATES"}:
+    if date_status in {"DATE_CONFLICT", "MULTIPLE_DATES", "PARTIALLY_CONFIRMED"}:
         date_value = "날짜 확인 필요"
     else:
         date_value = format_date_value(

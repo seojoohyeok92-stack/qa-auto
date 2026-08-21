@@ -158,6 +158,7 @@ class DpsEnrichmentService:
             "MISSING": "DPS_REQUIRED_DATE_MISSING",
             "PARSE_FAILED": "DPS_REQUIRED_DATE_PARSE_FAILED",
             "CONFLICT": "DPS_REQUIRED_DATE_CONFLICT",
+            "PARTIAL": "DPS_REQUIRED_DATE_PARTIAL",
         }.get(parse_status, "DPS_REQUIRED_DATE_MISSING")
         details = {
             "masked_order_id": self._masked_order_id(order_id),
@@ -175,7 +176,7 @@ class DpsEnrichmentService:
             event,
             level=(
                 "WARNING"
-                if parse_status in {"PARSE_FAILED", "CONFLICT"}
+                if parse_status in {"PARSE_FAILED", "CONFLICT", "PARTIAL"}
                 else "INFO"
             ),
             details=details,

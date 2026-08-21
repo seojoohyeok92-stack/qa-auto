@@ -459,6 +459,50 @@ class NaverAutoPostScheduler:
 
 _REGISTRY_LOCK = RLock()
 _SCHEDULERS: dict[str, NaverAutoPostScheduler] = {}
+_STARTUP_RUNTIME_RESET_DONE: set[str] = set()
+
+
+def reset_auto_post_runtime_on_process_start(database: Database) -> bool:
+    """Force the persisted operator switch OFF once per process, at startup.
+
+    ``naver_auto_post_settings.enabled`` is a DB-persisted switch, so it
+    otherwise survives a full Streamlit process restart -- a new process
+    would silently resume automatic customer-facing outbound processing
+    with zero operator interaction.  This must run exactly once per process
+    (per database path), *before* anything in this process has had a
+    chance to call :func:`ensure_auto_post_scheduler` or
+    ``AutoPostRuntimeService.enable()`` for a legitimate reason (a Streamlit
+    UI rerun within the same already-running process, or this same
+    process's own explicit ``enable()`` call, must never be reset).
+
+    Callers: only ``app.py``'s startup path (``main()``), executed before
+    ``ensure_auto_post_scheduler``.  Returns True only when a reset
+    actually happened (for logging/tests).
+    """
+
+    key = str(Path(database.path).resolve())
+    with _REGISTRY_LOCK:
+        if key in _STARTUP_RUNTIME_RESET_DONE:
+            return False
+        _STARTUP_RUNTIME_RESET_DONE.add(key)
+    repository = AutoPostRepository(database)
+    settings = repository.settings()
+    if not settings.get("enabled"):
+        return False
+    repository.save_settings(
+        enabled=False,
+        interval_minutes=int(settings.get("interval_minutes") or 10),
+        max_retries=int(settings.get("max_retries") or 1),
+    )
+    repository.set_state("STOPPED")
+    LogRepository(database).record_system(
+        "AUTO_POST_RUNTIME_FORCED_OFF_ON_STARTUP",
+        "새 프로세스 시작으로 자동등록 운영 상태(Dashboard operation)를 OFF로 "
+        "초기화했습니다. 자동등록을 재개하려면 운영자가 다시 ON을 눌러야 "
+        "합니다.",
+        level="WARNING",
+    )
+    return True
 
 
 def ensure_auto_post_scheduler(
