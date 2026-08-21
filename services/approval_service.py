@@ -154,6 +154,9 @@ class ApprovalService:
         correction_reason: str = "",
         correction_note: str = "",
         corrected_intent: str = "",
+        correction_signal_kind: str = "",
+        correction_signal_content: str = "",
+        correction_fact_scope: str | None = None,
         expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         draft, state = self._assert_editable(
@@ -181,6 +184,9 @@ class ApprovalService:
                     correction_note=correction_note,
                     corrected_intent=corrected_intent,
                     actor=actor,
+                    signal_kind=correction_signal_kind,
+                    signal_content=correction_signal_content,
+                    fact_scope=correction_fact_scope,
                 )
                 if internal_posted_correction:
                     LearningService(
@@ -244,6 +250,9 @@ class ApprovalService:
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
                 actor=actor,
+                signal_kind=correction_signal_kind,
+                signal_content=correction_signal_content,
+                fact_scope=correction_fact_scope,
             )
             if internal_posted_correction:
                 LearningService(
@@ -261,6 +270,9 @@ class ApprovalService:
         actor: str = "관리자",
         positive_reason: str = "",
         positive_note: str = "",
+        positive_signal_kind: str = "",
+        positive_signal_content: str = "",
+        positive_fact_scope: str | None = None,
     ) -> dict[str, Any]:
         """Human-verify the Naver answer for Learning without reposting it."""
 
@@ -276,6 +288,9 @@ class ApprovalService:
             actor=actor,
             positive_reason=positive_reason,
             positive_note=positive_note,
+            signal_kind=positive_signal_kind,
+            signal_content=positive_signal_content,
+            fact_scope=positive_fact_scope,
         )
         if saved is None:
             raise ApprovalError("검증할 네이버 실제 등록 답변이 없습니다.")
@@ -302,8 +317,14 @@ class ApprovalService:
         correction_reason: str = "",
         correction_note: str = "",
         corrected_intent: str = "",
+        correction_signal_kind: str = "",
+        correction_signal_content: str = "",
+        correction_fact_scope: str | None = None,
         positive_reason: str = "",
         positive_note: str = "",
+        positive_signal_kind: str = "",
+        positive_signal_content: str = "",
+        positive_fact_scope: str | None = None,
         expected_updated_at: str | None = None,
     ) -> dict[str, Any]:
         """Approve an internal correction without changing the Naver answer."""
@@ -323,6 +344,9 @@ class ApprovalService:
             correction_reason=correction_reason,
             correction_note=correction_note,
             corrected_intent=corrected_intent,
+            correction_signal_kind=correction_signal_kind,
+            correction_signal_content=correction_signal_content,
+            correction_fact_scope=correction_fact_scope,
             expected_updated_at=expected_updated_at,
         )
         saved = learning.capture_posted_staff_correction(
@@ -332,6 +356,9 @@ class ApprovalService:
             actor=actor,
             positive_reason=positive_reason,
             positive_note=positive_note,
+            signal_kind=positive_signal_kind,
+            signal_content=positive_signal_content,
+            fact_scope=positive_fact_scope,
         )
         if saved is None:
             raise ApprovalError("학습할 직원 수정 답변이 없습니다.")
@@ -404,8 +431,14 @@ class ApprovalService:
         correction_reason: str = "",
         correction_note: str = "",
         corrected_intent: str = "",
+        correction_signal_kind: str = "",
+        correction_signal_content: str = "",
+        correction_fact_scope: str | None = None,
         positive_reason: str = "",
         positive_note: str = "",
+        positive_signal_kind: str = "",
+        positive_signal_content: str = "",
+        positive_fact_scope: str | None = None,
         expected_updated_at: str | None = None,
     ) -> ApprovalOutcome:
         draft, _ = self._assert_editable(inquiry_id, draft_id)
@@ -477,6 +510,9 @@ class ApprovalService:
                 history_id=int(history["id"]),
                 positive_reason=positive_reason,
                 positive_note=positive_note,
+                signal_kind=positive_signal_kind,
+                signal_content=positive_signal_content,
+                fact_scope=positive_fact_scope,
             )
             if correction_reason:
                 LearningFeedbackService(
@@ -488,6 +524,9 @@ class ApprovalService:
                     correction_note=correction_note,
                     corrected_intent=corrected_intent,
                     actor=actor,
+                    signal_kind=correction_signal_kind,
+                    signal_content=correction_signal_content,
+                    fact_scope=correction_fact_scope,
                 )
         except Exception as error:
             # Learning is deliberately non-blocking: approval is already

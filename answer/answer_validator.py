@@ -605,8 +605,26 @@ class AnswerValidator:
                     else "근거 없는 하위 질문에는 인접 주제로 답하지 않았습니다.",
                 ),
             )
+        conflict_rules: tuple[ValidationRuleResult, ...] = ()
+        if subquestion_evidence:
+            conflicting_subquestions = [
+                str(item.get("subquestion") or "")
+                for item in subquestion_evidence
+                if str(item.get("status") or "") == "CONFLICT"
+            ]
+            if conflicting_subquestions:
+                conflict_rules = (
+                    ValidationRuleResult(
+                        "VERIFIED_FACT_CONFLICT",
+                        "REVIEW_REQUIRED",
+                        "동일 범위/주제에서 서로 충돌하는 Verified Fact/Correction이 "
+                        "있어 직원 확인이 필요합니다: "
+                        + "; ".join(conflicting_subquestions),
+                    ),
+                )
         validation_rules = (
             *phase9_rules, relevance_rule, *coverage_rules, *alignment_rules,
+            *conflict_rules,
         )
         errors.extend(
             item.message for item in validation_rules if item.status == "BLOCK"

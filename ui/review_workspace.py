@@ -14,6 +14,7 @@ import streamlit.components.v1 as components
 from answer.answer_format import format_final_answer
 from answer.answer_provenance import AnswerProvenance
 from answer.learning_conflict import LearningConflictError
+from answer.learning_signal import PRODUCT_SCOPES, SIGNAL_KIND_LABELS, SignalKind
 from answer.learning_feedback import (
     CORRECTION_REASON_BY_LABEL,
     CORRECTION_REASON_LABELS,
@@ -803,6 +804,43 @@ def approval_learning_trace(
     }
 
 
+def _structured_signal_input(
+    *, key_prefix: str, allowed_kinds: tuple[SignalKind, ...],
+) -> tuple[str, str, str | None]:
+    """Optional Structured Learning Signal input shared by evaluation forms.
+
+    Returns (signal_kind, content_text, fact_scope). An empty signal_kind
+    means "plain evaluation reason only" -- nothing new is persisted beyond
+    today's correction/positive note (Acceptance Case J).
+    """
+
+    kind_label = st.selectbox(
+        "학습 신호 유형 (선택)",
+        ["평가 이유만", *[SIGNAL_KIND_LABELS[kind] for kind in allowed_kinds]],
+        key=f"{key_prefix}_signal_kind",
+    )
+    kind_by_label = {SIGNAL_KIND_LABELS[kind]: kind for kind in allowed_kinds}
+    selected_kind = kind_by_label.get(kind_label)
+    if selected_kind is None:
+        return "", "", None
+    content = st.text_area(
+        "구조화된 내용",
+        key=f"{key_prefix}_signal_content",
+        placeholder=(
+            "운영자가 확인한 사실/정정 내용, 또는 향후 답변에서 따르거나 "
+            "피해야 할 패턴을 구체적으로 서술"
+        ),
+        height=80,
+    )
+    scope_label = st.selectbox(
+        "적용 범위 (선택, 비우면 자동 판단)",
+        ["자동 판단", *sorted(PRODUCT_SCOPES)],
+        key=f"{key_prefix}_signal_scope",
+    )
+    scope = scope_label if scope_label != "자동 판단" else None
+    return selected_kind.value, content, scope
+
+
 def _positive_reason_label(value: object) -> str:
     try:
         reason = PositiveReason(str(value))
@@ -1468,6 +1506,18 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     key=f"positive_note_{inquiry_id}",
                     placeholder="왜 좋은 답변인지, 유사 문의에서 참고할 내용을 기록",
                 )
+                (
+                    positive_signal_kind, positive_signal_content,
+                    positive_fact_scope,
+                ) = _structured_signal_input(
+                    key_prefix=f"positive_{inquiry_id}",
+                    allowed_kinds=(
+                        SignalKind.GOOD_PATTERN, SignalKind.VERIFIED_FACT,
+                    ),
+                )
+        else:
+            positive_signal_kind = positive_signal_content = ""
+            positive_fact_scope = None
 
         correction_reason = ""
         correction_note = ""
@@ -1537,6 +1587,18 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "상세 메모 (선택)",
                     key=f"staff_correction_note_{inquiry_id}_{draft['id']}",
                 )
+                (
+                    correction_signal_kind, correction_signal_content,
+                    correction_fact_scope,
+                ) = _structured_signal_input(
+                    key_prefix=f"correction_{inquiry_id}_{draft['id']}",
+                    allowed_kinds=(
+                        SignalKind.BAD_PATTERN, SignalKind.CORRECTION,
+                    ),
+                )
+        if not answer_was_corrected:
+            correction_signal_kind = correction_signal_content = ""
+            correction_fact_scope = None
 
         evaluation_source: str | None = None
         evaluation_reference_id: int | None = None
@@ -1702,6 +1764,13 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "Negative 상세 메모 (선택)",
                 key=f"negative_note_{inquiry_id}_{selected_view}",
             )
+            (
+                negative_signal_kind, negative_signal_content,
+                negative_fact_scope,
+            ) = _structured_signal_input(
+                key_prefix=f"negative_{inquiry_id}_{selected_view}",
+                allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
+            )
             negative_save = st.button(
                 "Negative Learning 저장",
                 disabled=(
@@ -1718,6 +1787,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         excluded_revoke = False
         excluded_reason = ""
         excluded_note = ""
+        excluded_signal_kind = ""
+        excluded_signal_content = ""
+        excluded_fact_scope: str | None = None
         excluded_revoke_reason = ""
         persisted_excluded = (
             feedback_repository.active_dashboard_feedback(
@@ -1803,6 +1875,13 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "학습 제외 상세 메모 (선택)",
                     key=f"excluded_note_{inquiry_id}_{selected_view}",
                     max_chars=1_000,
+                )
+                (
+                    excluded_signal_kind, excluded_signal_content,
+                    excluded_fact_scope,
+                ) = _structured_signal_input(
+                    key_prefix=f"excluded_{inquiry_id}_{selected_view}",
+                    allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
                 )
                 excluded_save = st.button(
                     "학습 제외 저장",
@@ -2111,6 +2190,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 exclusion_reason=excluded_reason,
                 exclusion_note=excluded_note,
                 actor=actor,
+                signal_kind=excluded_signal_kind,
+                signal_content=excluded_signal_content,
+                fact_scope=excluded_fact_scope,
             )
             st.rerun()
         if excluded_revoke and persisted_excluded:
@@ -2129,6 +2211,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_note=negative_note,
                 corrected_intent=negative_intent,
                 actor=actor,
+                signal_kind=negative_signal_kind,
+                signal_content=negative_signal_content,
+                fact_scope=negative_fact_scope,
             )
             st.rerun()
         if generate:
@@ -2276,6 +2361,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_reason=correction_reason,
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
+                correction_signal_kind=correction_signal_kind,
+                correction_signal_content=correction_signal_content,
+                correction_fact_scope=correction_fact_scope,
                 expected_updated_at=str(draft.get("updated_at") or ""),
             )
             st.session_state["approval_ui_notice"] = (
@@ -2292,8 +2380,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_reason=correction_reason,
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
+                correction_signal_kind=correction_signal_kind,
+                correction_signal_content=correction_signal_content,
+                correction_fact_scope=correction_fact_scope,
                 positive_reason=positive_reason,
                 positive_note=positive_note,
+                positive_signal_kind=positive_signal_kind,
+                positive_signal_content=positive_signal_content,
+                positive_fact_scope=positive_fact_scope,
                 expected_updated_at=str(draft.get("updated_at") or ""),
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
@@ -2309,6 +2403,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 actor=actor,
                 positive_reason=positive_reason,
                 positive_note=positive_note,
+                positive_signal_kind=positive_signal_kind,
+                positive_signal_content=positive_signal_content,
+                positive_fact_scope=positive_fact_scope,
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
@@ -2325,8 +2422,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 correction_reason=correction_reason,
                 correction_note=correction_note,
                 corrected_intent=corrected_intent,
+                correction_signal_kind=correction_signal_kind,
+                correction_signal_content=correction_signal_content,
+                correction_fact_scope=correction_fact_scope,
                 positive_reason=positive_reason,
                 positive_note=positive_note,
+                positive_signal_kind=positive_signal_kind,
+                positive_signal_content=positive_signal_content,
+                positive_fact_scope=positive_fact_scope,
                 expected_updated_at=str(draft.get("updated_at") or ""),
             )
             st.session_state[pending_answer_view_key] = "Final Answer"

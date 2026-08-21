@@ -111,6 +111,14 @@ class PromptBuilder:
                     "reason": "string",
                 }
             ],
+            "feedback_signal_usage": [
+                {
+                    "signal_id": "integer",
+                    "matched_subquestion": "string",
+                    "answer_supported": "boolean",
+                    "reason": "string",
+                }
+            ],
             "subquestion_results": [
                 {
                     "subquestion": "string",
@@ -249,6 +257,16 @@ class PromptBuilder:
                 "answerable_items_must_not_be_replaced_by_blanket_uncertainty": True,
                 "report_each_learning_id_actually_used": True,
                 "report_each_historical_case_id_actually_used": True,
+            },
+            "feedback_signal_policy": {
+                "verified_facts_and_corrections_are_factual_evidence": True,
+                "corrections_supersede_older_or_conflicting_learning_answers": True,
+                "good_patterns_and_bad_patterns_are_style_guidance_only": True,
+                "good_patterns_and_bad_patterns_are_never_factual_evidence": True,
+                "avoid_bad_pattern_content_and_structure": True,
+                "follow_good_pattern_style_where_relevant": True,
+                "never_choose_between_conflicting_verified_facts": True,
+                "report_each_feedback_signal_id_actually_used": True,
             },
             "installation_date_instructions": (
                 [

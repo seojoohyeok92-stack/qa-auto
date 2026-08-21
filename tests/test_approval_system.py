@@ -57,7 +57,7 @@ def draft(database: Database, inquiry_id: int) -> dict:
 
 
 def test_migration_v3_creates_approval_schema(database: Database) -> None:
-    assert database.migration_versions() == list(range(1, 27))
+    assert database.migration_versions() == list(range(1, 28))
     with database.connection() as connection:
         columns = {
             row["name"]

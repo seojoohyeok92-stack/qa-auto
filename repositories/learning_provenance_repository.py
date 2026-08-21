@@ -16,9 +16,10 @@ class LearningProvenanceRepository:
     def record_context(
         self, *, inquiry_id: int,
         learning: list[dict[str, Any]], historical: list[dict[str, Any]],
+        context_run_id: str | None = None,
     ) -> str | None:
         rows: list[tuple[Any, ...]] = []
-        run_id = str(uuid.uuid4())
+        run_id = context_run_id or str(uuid.uuid4())
         for item in learning:
             reference_id = item.get("learning_example_id")
             if reference_id is None:
@@ -197,15 +198,33 @@ class LearningProvenanceRepository:
         return len(rows)
 
     def for_draft(self, draft_id: int) -> list[dict[str, Any]]:
+        """Include each reference's original-platform inquiry number.
+
+        Internal PKs (``learning_example_id``/``historical_case_id``) are
+        preserved untouched for DB/debug traceability; these extra columns
+        only let the Dashboard *display* the original Naver inquiry number
+        instead, since operators track sources by that number, not by
+        internal row id (many Learning rows have no order number to show).
+        """
+
         with self.database.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT p.*,
                        le.learning_source, le.metadata_json AS learning_metadata,
-                       hc.question AS historical_question
+                       le.question_original_masked AS learning_question,
+                       le.product_name AS learning_product_name,
+                       li.external_inquiry_id AS learning_external_inquiry_id,
+                       li.source_question_id AS learning_source_question_id,
+                       hc.question AS historical_question,
+                       hc.product_name AS historical_product_name,
+                       hc.external_inquiry_id AS historical_external_inquiry_id,
+                       hi.source_question_id AS historical_source_question_id
                 FROM answer_learning_provenance p
                 LEFT JOIN learning_examples le ON le.id=p.learning_example_id
+                LEFT JOIN inquiries li ON li.id=le.inquiry_id
                 LEFT JOIN historical_cases hc ON hc.id=p.historical_case_id
+                LEFT JOIN inquiries hi ON hi.id=hc.inquiry_id
                 WHERE p.answer_draft_id=? AND p.included_in_prompt=1
                 ORDER BY p.relevance DESC, p.id
                 """,

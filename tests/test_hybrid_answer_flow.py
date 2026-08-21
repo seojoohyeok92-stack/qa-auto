@@ -312,7 +312,7 @@ def test_ui_diagnostics_handles_legacy_draft() -> None:
 def test_migration_v4_is_reentrant_and_preserves_metadata(
     database: Database,
 ) -> None:
-    assert database.migration_versions() == list(range(1, 27))
+    assert database.migration_versions() == list(range(1, 28))
     assert database.initialize() == []
     with database.connection() as connection:
         columns = {

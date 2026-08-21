@@ -14,8 +14,10 @@ from config import get_configured_stores
 from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
+from answer.learning_signal import SignalKind
 from services.historical_case_service import HistoricalCaseService
 from services.learning_feedback_service import LearningFeedbackService
+from ui.review_workspace import _structured_signal_input
 from ui.session_identity import current_identity
 
 
@@ -399,6 +401,13 @@ def render_historical_case_manager(database: Database) -> None:
             feedback_note = st.text_input(
                 "상세 메모 (선택)", key="historical_correction_note"
             )
+            (
+                historical_signal_kind, historical_signal_content,
+                historical_fact_scope,
+            ) = _structured_signal_input(
+                key_prefix=f"historical_{selected_id}",
+                allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
+            )
             if st.button(
                 "잘못된 사례로 학습",
                 key="historical_save_negative_learning",
@@ -414,6 +423,9 @@ def render_historical_case_manager(database: Database) -> None:
                         correction_note=feedback_note,
                         corrected_intent=corrected_intent,
                         actor=str(identity.get("username") or "관리자"),
+                        signal_kind=historical_signal_kind,
+                        signal_content=historical_signal_content,
+                        fact_scope=historical_fact_scope,
                     )
                     _action_notice(
                         status="success",

@@ -6,9 +6,14 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from answer.learning_signal import SIGNAL_KIND_LABELS
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
+from repositories.feedback_signal_provenance_repository import (
+    FeedbackSignalProvenanceRepository,
+)
 from repositories.learning_provenance_repository import LearningProvenanceRepository
+from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_performance_service import LearningPerformanceService
 
 
@@ -243,27 +248,46 @@ def render_answer_learning_provenance(
         for item in usage
         if isinstance(item, dict) and item.get("learning_id") is not None
     })
+    signal_rows = FeedbackSignalProvenanceRepository(database).for_draft(
+        int(draft_id)
+    )
     persisted_used = sum(
         1 for row in rows if str(row.get("usage_status") or "") == "USED"
     )
     used_count = persisted_used or len(supported_ids) + len(supported_historical_ids)
+    signal_note = (
+        f" · Feedback Signal {len(signal_rows)}건" if signal_rows else ""
+    )
     st.caption(
         (
             f"Learning 참고: 선택 {len(rows)}건 · 답변 근거 사용 "
-            f"{used_count}건"
+            f"{used_count}건{signal_note}"
         )
-        if rows
+        if rows or signal_rows
         else "Learning 참고: 없음"
     )
+    if not rows and not signal_rows:
+        return
+    signals_repo = LearningSignalRepository(database)
     with st.expander("이번 답변에 사용된 Learning", expanded=False):
-        if not rows:
+        if not rows and not signal_rows:
             st.info("이 답변에는 기록된 Learning/Historical Context가 없습니다.")
             return
+        result_labels = {
+            "USED": "사용",
+            "NOT_USED": "미사용",
+            "REJECTED_CONFLICT": "현재 사실과 충돌",
+            "REJECTED_LOW_CONFIDENCE": "신뢰도 부족",
+            "BLOCKED_BY_CURRENT_FACT": "현재 주문정보 우선",
+            "NOT_APPLICABLE": "사실 근거 아님(스타일 안내)",
+            "PENDING": "기존 기록 미평가",
+        }
         display = []
         for row in rows:
+            is_historical = row["reference_kind"] == "HISTORICAL"
             reference_id = (
                 int(row["historical_case_id"])
-                if row["reference_kind"] == "HISTORICAL"
+                if is_historical
                 else int(row["learning_example_id"])
             )
             persisted_status = str(row.get("usage_status") or "PENDING")
@@ -271,12 +295,23 @@ def render_answer_learning_provenance(
                 persisted_status == "PENDING"
                 and (
                     reference_id in supported_historical_ids
-                    if row["reference_kind"] == "HISTORICAL"
+                    if is_historical
                     else reference_id in supported_ids
                 )
             )
-            if row["reference_kind"] == "HISTORICAL":
-                label = f"Historical Case #{row['historical_case_id']}"
+            # Prefer the original-platform inquiry number (what an operator
+            # actually recognizes a source by) over the internal PK; many
+            # Learning rows have no order number to fall back to instead.
+            # The internal id is preserved in "내부 ID" for DB traceability.
+            if is_historical:
+                internal_label = f"Historical Case #{row['historical_case_id']}"
+                external_number = (
+                    row.get("historical_source_question_id")
+                    or row.get("historical_external_inquiry_id")
+                )
+                question_snippet = str(row.get("historical_question") or "")
+                product_name = row.get("historical_product_name") or "-"
+                attached_signals = signals_repo.for_historical_case(reference_id)
             else:
                 metadata = {}
                 try:
@@ -284,21 +319,40 @@ def render_answer_learning_provenance(
                 except (TypeError, json.JSONDecodeError):
                     pass
                 source = metadata.get("source_origin") or row.get("learning_source") or row["source_label"]
-                label = f"{SOURCE_LABELS.get(str(source), str(source))} #{row['learning_example_id']}"
-            result_labels = {
-                "USED": "사용",
-                "NOT_USED": "미사용",
-                "REJECTED_CONFLICT": "현재 사실과 충돌",
-                "REJECTED_LOW_CONFIDENCE": "신뢰도 부족",
-                "BLOCKED_BY_CURRENT_FACT": "현재 주문정보 우선",
-                "PENDING": "기존 기록 미평가",
-            }
+                internal_label = (
+                    f"{SOURCE_LABELS.get(str(source), str(source))} "
+                    f"#{row['learning_example_id']}"
+                )
+                external_number = (
+                    row.get("learning_source_question_id")
+                    or row.get("learning_external_inquiry_id")
+                )
+                question_snippet = str(row.get("learning_question") or "")
+                product_name = row.get("learning_product_name") or "-"
+                attached_signals = signals_repo.for_learning_example(reference_id)
+            reference_label = (
+                f"네이버 문의 #{external_number}" if external_number else internal_label
+            )
+            if question_snippet.strip():
+                snippet = question_snippet.strip().replace("\n", " ")[:40]
+                reference_label = f"{reference_label} · {snippet}"
+            feedback_signal_summary = (
+                "; ".join(
+                    f"{SIGNAL_KIND_LABELS.get(item['signal_kind'], item['signal_kind'])}"
+                    for item in attached_signals
+                )
+                or "-"
+            )
             display.append({
-                "참고 자료": label,
+                "유형": "Historical" if is_historical else "Learning",
+                "참고 자료": reference_label,
+                "상품명": product_name,
+                "내부 ID": internal_label,
                 "유사도": round(float(row.get("relevance") or 0), 2),
                 "Answer-Support": round(
                     float(row.get("answer_support_score") or 0), 2
                 ),
+                "Feedback Signal": feedback_signal_summary,
                 "답변 근거 사용": (
                     "사용"
                     if used
@@ -328,5 +382,70 @@ def render_answer_learning_provenance(
                     )
                 ),
             })
+        for row in signal_rows:
+            signal_id = int(row["learning_signal_id"])
+            internal_label = f"Feedback Signal #{signal_id}"
+            external_number = (
+                row.get("signal_source_question_id")
+                or row.get("signal_external_inquiry_id")
+                or row.get("historical_external_inquiry_id")
+            )
+            reference_label = (
+                f"네이버 문의 #{external_number}" if external_number else internal_label
+            )
+            question_snippet = str(
+                row.get("question_masked") or row.get("historical_question") or ""
+            ).strip()
+            if question_snippet:
+                reference_label = (
+                    f"{reference_label} · {question_snippet.replace(chr(10), ' ')[:40]}"
+                )
+            product_identity = {}
+            try:
+                product_identity = json.loads(
+                    row.get("product_identity_json") or "{}"
+                )
+            except (TypeError, json.JSONDecodeError):
+                pass
+            product_name = (
+                product_identity.get("product_name")
+                or row.get("historical_product_name")
+                or "-"
+            )
+            persisted_status = str(row.get("usage_status") or "PENDING")
+            display.append({
+                "유형": "Feedback Signal",
+                "참고 자료": reference_label,
+                "상품명": product_name,
+                "내부 ID": internal_label,
+                "유사도": round(float(row.get("relevance") or 0), 2)
+                if row.get("relevance") is not None else "-",
+                "Answer-Support": round(
+                    float(row.get("answer_support_score") or 0), 2
+                ) if row.get("answer_support_score") is not None else "-",
+                "Feedback Signal": SIGNAL_KIND_LABELS.get(
+                    str(row.get("signal_kind") or ""), str(row.get("signal_kind") or "-")
+                ) + (" (충돌)" if row.get("conflict_detected") else ""),
+                "답변 근거 사용": (
+                    "사용" if persisted_status == "USED" else "미사용"
+                ),
+                "Provider 자기보고": (
+                    "사용 보고" if row.get("provider_claimed_usage") else "미보고"
+                ),
+                "System 검증": SYSTEM_VERIFIED_LABELS.get(
+                    str(row.get("system_verified_usage") or "NOT_EVALUATED"),
+                    "평가 전",
+                ),
+                "결과": result_labels.get(persisted_status, "미사용")
+                + (
+                    ""
+                    if persisted_status == "USED"
+                    else " - " + str(row.get("usage_reason") or "Provider 미선택")
+                ),
+            })
         st.dataframe(display, hide_index=True, width="stretch")
-        st.caption("실제 답변 생성 Prompt Context에 포함된 자료만 표시합니다.")
+        st.caption(
+            "실제 답변 생성 Prompt Context에 포함된 자료만 표시합니다. "
+            "'참고 자료'는 원본 플랫폼 문의번호를 우선 표시하며, 내부 PK는 "
+            "'내부 ID' 열에 그대로 보존됩니다."
+        )

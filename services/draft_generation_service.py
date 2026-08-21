@@ -100,6 +100,7 @@ class DraftGenerationService:
             raw, learning_context
         )
         raw = self._validate_historical_usage(raw, learning_context)
+        raw = self._validate_feedback_signal_usage(raw, learning_context)
         return self.parse(raw)
 
     @staticmethod
@@ -160,6 +161,56 @@ class DraftGenerationService:
                     })
         copied = dict(raw)
         copied["historical_usage"] = valid
+        return copied
+
+    @staticmethod
+    def _validate_feedback_signal_usage(
+        raw: dict[str, Any], learning_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Keep only self-reported FACTUAL signal usage that was actually attached.
+
+        Mirrors ``_validate_historical_usage``: a signal that was rejected
+        before prompt attachment (conflicting, out of scope, below the
+        relevance threshold) cannot become "actually used" merely because
+        the provider echoed its id.
+        """
+
+        if not isinstance(raw, dict):
+            return raw
+        feedback_signals = learning_context.get("feedback_signals")
+        feedback_signals = feedback_signals if isinstance(feedback_signals, dict) else {}
+        attached = {
+            int(item["signal_id"]): item
+            for item in (
+                *feedback_signals.get("verified_facts", []),
+                *feedback_signals.get("corrections", []),
+            )
+            if item.get("signal_id") is not None
+        }
+        valid: list[dict[str, Any]] = []
+        reported = raw.get("feedback_signal_usage")
+        if isinstance(reported, list):
+            for item in reported:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    signal_id = int(item.get("signal_id"))
+                except (TypeError, ValueError):
+                    continue
+                selected = attached.get(signal_id)
+                if selected is None:
+                    continue
+                matched = str(item.get("matched_subquestion") or "")
+                if matched != str(selected.get("matched_subquestion") or ""):
+                    continue
+                valid.append({
+                    "signal_id": signal_id,
+                    "matched_subquestion": matched,
+                    "answer_supported": bool(item.get("answer_supported")),
+                    "reason": str(item.get("reason") or "")[:300],
+                })
+        copied = dict(raw)
+        copied["feedback_signal_usage"] = valid
         return copied
 
     @staticmethod
@@ -413,6 +464,11 @@ class DraftGenerationService:
             historical_usage=tuple(
                 dict(item)
                 for item in raw.get("historical_usage", [])
+                if isinstance(item, dict)
+            ),
+            feedback_signal_usage=tuple(
+                dict(item)
+                for item in raw.get("feedback_signal_usage", [])
                 if isinstance(item, dict)
             ),
             subquestion_results=tuple(

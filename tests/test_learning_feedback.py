@@ -19,7 +19,7 @@ from services.learning_feedback_service import LearningFeedbackService
 
 def make_context(tmp_path):
     database = Database(tmp_path / "feedback.db")
-    assert database.initialize() == list(range(1, 27))
+    assert database.initialize() == list(range(1, 28))
     inquiry_id = InquiryRepository(database).upsert_work_item(
         {
             "store_code": "OJE_PLUS",
@@ -432,5 +432,5 @@ def test_feedback_migration_is_idempotent_and_legacy_rows_remain_positive(
             """
         )
     assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 27))
+    assert database.migration_versions() == list(range(1, 28))
     assert len(LearningRepository(database).candidates(store_code="OJE_PLUS")) == 1

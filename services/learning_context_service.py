@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 from answer.evidence_support import coverage_label
@@ -13,6 +14,10 @@ from repositories.log_repository import LogRepository
 from services.similar_answer_service import SimilarAnswerService
 from services.historical_case_service import HistoricalCaseService
 from repositories.learning_provenance_repository import LearningProvenanceRepository
+from repositories.feedback_signal_provenance_repository import (
+    FeedbackSignalProvenanceRepository,
+)
+from services.learning_signal_service import LearningSignalService
 from services.product_fact_guard import classify_product_fact
 
 
@@ -25,6 +30,8 @@ class LearningContextService:
         self.logs = LogRepository(database)
         self.historical = HistoricalCaseService(database)
         self.provenance = LearningProvenanceRepository(database)
+        self.feedback_signals = LearningSignalService(database)
+        self.feedback_signal_provenance = FeedbackSignalProvenanceRepository(database)
 
     def build(self, facts: AnswerFacts, intent: IntentResult) -> dict[str, Any]:
         inquiry_id = facts.inquiry.get("inquiry_id")
@@ -108,6 +115,7 @@ class LearningContextService:
         candidate_pool = safe_candidate_pool
         contexts: list[dict[str, Any]] = []
         subquestion_traces: list[dict[str, Any]] = []
+        signal_contexts: list[dict[str, Any]] = []
         for question in questions:
             question_guard = classify_product_fact(
                 question,
@@ -145,6 +153,24 @@ class LearningContextService:
             trace["product_fact_sensitive"] = question_guard.sensitive
             subquestion_traces.append(trace)
             contexts.append(item_context)
+            signal_result = self.feedback_signals.retrieve(
+                question,
+                store_code=store_code,
+                product_name=product_name,
+                model_code=question_guard.model_code,
+                product_id=question_guard.product_id,
+                option_name=(
+                    inquiry.get("option_name") or facts.product.get("option_name")
+                ),
+                inquiry_type=inquiry_type,
+                limit=2 if len(questions) > 1 else 3,
+            )
+            for key in (
+                "verified_facts", "corrections", "good_patterns", "bad_patterns",
+            ):
+                for item in signal_result[key]:
+                    item["matched_subquestion"] = question
+            signal_contexts.append(signal_result)
 
         def merged(key: str, limit: int = 6) -> list[dict[str, Any]]:
             by_id: dict[int, dict[str, Any]] = {}
@@ -168,6 +194,71 @@ class LearningContextService:
             "similar_approved_answers": approved,
             "seller_style_examples": seller,
             "oje_style_rules": contexts[0]["oje_style_rules"] if contexts else {},
+        }
+
+        def merged_signals(key: str, limit: int = 3) -> list[dict[str, Any]]:
+            by_id: dict[int, dict[str, Any]] = {}
+            for signal_context in signal_contexts:
+                for item in signal_context[key]:
+                    signal_id = int(item["id"])
+                    if signal_id not in by_id or float(
+                        item.get("relevance") or 0
+                    ) > float(by_id[signal_id].get("relevance") or 0):
+                        by_id[signal_id] = item
+            return sorted(
+                by_id.values(), key=lambda item: float(item.get("relevance") or 0),
+                reverse=True,
+            )[:limit]
+
+        verified_facts = merged_signals("verified_facts")
+        corrections = merged_signals("corrections")
+        good_patterns = merged_signals("good_patterns")
+        bad_patterns = merged_signals("bad_patterns")
+        conflicting_signal_ids = {
+            int(item["id"])
+            for signal_context in signal_contexts
+            for item in signal_context["conflicting_signals"]
+        }
+        context["feedback_signals"] = {
+            "verified_facts": [
+                {
+                    "signal_id": int(item["id"]),
+                    "content": item.get("content_text"),
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": item.get("relevance"),
+                    "answer_support": item.get("answer_support"),
+                    "product_scope": item.get("product_scope"),
+                }
+                for item in verified_facts
+            ],
+            "corrections": [
+                {
+                    "signal_id": int(item["id"]),
+                    "content": item.get("content_text"),
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": item.get("relevance"),
+                    "answer_support": item.get("answer_support"),
+                    "product_scope": item.get("product_scope"),
+                }
+                for item in corrections
+            ],
+            "good_patterns": [
+                {
+                    "signal_id": int(item["id"]),
+                    "guidance": item.get("content_text"),
+                    "matched_subquestion": item.get("matched_subquestion"),
+                }
+                for item in good_patterns
+            ],
+            "bad_patterns": [
+                {
+                    "signal_id": int(item["id"]),
+                    "guidance": item.get("content_text"),
+                    "matched_subquestion": item.get("matched_subquestion"),
+                }
+                for item in bad_patterns
+            ],
+            "unresolved_conflicts": len(conflicting_signal_ids) > 0,
         }
         confirmed_schedule = bool(
             facts.installation.get("installation_date_confirmed")
@@ -224,9 +315,11 @@ class LearningContextService:
             if int(item["id"]) not in promoted_case_ids
         ][:3]
 
+        signals_by_question = dict(zip(questions, signal_contexts))
         evidence_map: list[dict[str, Any]] = []
         for question in questions:
             historical_ids: list[int] = []
+            feedback_signal_ids: list[int] = []
             approved_for_question = [
                 item for item in approved
                 if item.get("matched_subquestion") == question
@@ -235,6 +328,10 @@ class LearningContextService:
                 item for item in historical
                 if item.get("matched_subquestion") == question
             ]
+            question_signals = signals_by_question.get(question, {})
+            verified_for_question = question_signals.get("verified_facts", [])
+            corrections_for_question = question_signals.get("corrections", [])
+            conflicts_for_question = question_signals.get("conflicts", [])
             explicit_current_schedule = bool(
                 re.search(
                     r"(?:예정일|도착일|배송일|설치일|말일까지|기다리다|"
@@ -267,6 +364,37 @@ class LearningContextService:
                 evidence_ids = []
                 source = "CURRENT_DPS"
                 evidence_coverage = "SUPPORTED"
+            elif conflicts_for_question:
+                # Two ACTIVE VERIFIED_FACT/CORRECTION signals in the same
+                # product/topic scope flatly disagree.  Never let GPT pick a
+                # side -- surface this as a conflict requiring human review
+                # instead (Acceptance Case F).
+                status = "CONFLICT"
+                evidence_ids = []
+                source = "CONFLICTING_VERIFIED_FEEDBACK_SIGNALS"
+                evidence_coverage = "UNSUPPORTED"
+                feedback_signal_ids = sorted({
+                    *(int(item["left_signal_id"]) for item in conflicts_for_question),
+                    *(int(item["right_signal_id"]) for item in conflicts_for_question),
+                })
+            elif verified_for_question or corrections_for_question:
+                # A human-verified fact/correction outranks a plain Positive
+                # Learning example for the same sub-question (Acceptance
+                # Case B): checked before falling back to approved Learning.
+                status = "ANSWERABLE"
+                evidence_ids = []
+                source = "VERIFIED_FEEDBACK_SIGNAL"
+                feedback_signal_ids = [
+                    int(item["id"])
+                    for item in (*verified_for_question, *corrections_for_question)
+                ]
+                evidence_coverage = coverage_label(max(
+                    (
+                        float(item.get("answer_support") or 0)
+                        for item in (*verified_for_question, *corrections_for_question)
+                    ),
+                    default=0.0,
+                ))
             elif approved_for_question:
                 status = "ANSWERABLE"
                 evidence_ids = [
@@ -304,6 +432,7 @@ class LearningContextService:
                     "source": source,
                     "learning_ids": evidence_ids,
                     "historical_case_ids": historical_ids,
+                    "feedback_signal_ids": feedback_signal_ids,
                     "answer_required": status == "ANSWERABLE",
                     # Question -> Evidence Coverage: retrieval finding a
                     # candidate is not the same as that candidate's answer
@@ -397,7 +526,8 @@ class LearningContextService:
             "never_use_as_current_fact": True,
             "current_authority_order": [
                 "RULE_AND_SAFETY", "CURRENT_ORDER", "CURRENT_DPS",
-                "PRODUCT_DB", "VALIDATED_TEMPLATE", "APPROVED_LEARNING",
+                "PRODUCT_DB", "VALIDATED_TEMPLATE",
+                "VERIFIED_FEEDBACK_SIGNAL", "APPROVED_LEARNING",
                 "HISTORICAL_VERIFIED_LEARNING",
             ],
             "time_dependent_claims_require_current_facts": True,
@@ -446,10 +576,73 @@ class LearningContextService:
                     "candidate_count": retrieval.get("candidate_count", 0),
                 },
             )
+            generated_run_id = str(uuid.uuid4())
             context_run_id = self.provenance.record_context(
                 inquiry_id=int(inquiry_id),
                 learning=learning_references,
                 historical=context["historical_cases"],
+                context_run_id=generated_run_id,
+            ) or generated_run_id
+            attached_signals = [
+                {
+                    "signal_id": int(item["signal_id"]),
+                    "signal_kind": "VERIFIED_FACT",
+                    "source_label": "VERIFIED_FACT",
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": item.get("relevance"),
+                    "answer_support": item.get("answer_support"),
+                }
+                for item in context["feedback_signals"]["verified_facts"]
+            ] + [
+                {
+                    "signal_id": int(item["signal_id"]),
+                    "signal_kind": "CORRECTION",
+                    "source_label": "CORRECTION",
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": item.get("relevance"),
+                    "answer_support": item.get("answer_support"),
+                }
+                for item in context["feedback_signals"]["corrections"]
+            ] + [
+                {
+                    "signal_id": int(item["signal_id"]),
+                    "signal_kind": "GOOD_PATTERN",
+                    "source_label": "GOOD_PATTERN",
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": None,
+                    "answer_support": None,
+                }
+                for item in context["feedback_signals"]["good_patterns"]
+            ] + [
+                {
+                    "signal_id": int(item["signal_id"]),
+                    "signal_kind": "BAD_PATTERN",
+                    "source_label": "BAD_PATTERN",
+                    "matched_subquestion": item.get("matched_subquestion"),
+                    "relevance": None,
+                    "answer_support": None,
+                }
+                for item in context["feedback_signals"]["bad_patterns"]
+            ] + [
+                {
+                    "signal_id": int(signal_id),
+                    "signal_kind": "VERIFIED_FACT",
+                    "source_label": "CONFLICTING_VERIFIED_FEEDBACK_SIGNAL",
+                    "matched_subquestion": None,
+                    "relevance": None,
+                    "answer_support": None,
+                    "conflict": True,
+                }
+                for signal_id in sorted({
+                    int(item["id"])
+                    for signal_context in signal_contexts
+                    for item in signal_context["conflicting_signals"]
+                })
+            ]
+            self.feedback_signal_provenance.record_context(
+                inquiry_id=int(inquiry_id),
+                context_run_id=generated_run_id,
+                signals=attached_signals,
             )
             result_count = len(context["similar_approved_answers"]) + len(
                 context["seller_style_examples"]

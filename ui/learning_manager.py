@@ -6,9 +6,11 @@ from typing import Any
 import streamlit as st
 
 from core.time_utils import format_datetime_kst, format_datetime_minute_kst, to_kst
+from answer.learning_signal import SIGNAL_KIND_LABELS
 from repositories.database import Database
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
+from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_validity_service import validity_summary
 from services.learning_lifecycle_service import is_explicitly_approved_learning
 
@@ -455,6 +457,28 @@ def _render_details(
         st.write(_learning_answer(row) or "-")
         if repository is not None:
             _render_validity_editor(row, repository, key_prefix=key_prefix)
+        if repository is not None and row.get("inquiry_id") is not None:
+            signals = LearningSignalRepository(repository.database).for_inquiry(
+                int(row["inquiry_id"])
+            )
+            if signals:
+                st.markdown("**구조화된 Learning Signal**")
+                st.dataframe(
+                    [
+                        {
+                            "유형": SIGNAL_KIND_LABELS.get(
+                                item["signal_kind"], item["signal_kind"]
+                            ),
+                            "내용": item.get("content_text") or "-",
+                            "적용 범위": item.get("product_scope") or "-",
+                            "상태": "활성" if item.get("active") else "취소됨",
+                            "등록일": item.get("created_at"),
+                        }
+                        for item in signals
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
         st.markdown("**고급 정보**")
         st.json(
             {

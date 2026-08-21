@@ -25,6 +25,8 @@ from services.learning_compatibility_service import (
     extract_product_identity,
     profile_knowledge,
 )
+from services.learning_signal_service import LearningSignalService
+from answer.learning_signal import OriginKind
 
 
 STALE_POLICY = re.compile(r"(?:\d{1,3}(?:,\d{3})*\s*원|\d{4}[./-]\d{1,2}[./-]\d{1,2}|이벤트\s*(?:기간|마감))")
@@ -62,6 +64,7 @@ class LearningService:
         self.logs = LogRepository(database)
         self.privacy = LearningPrivacyService()
         self.quality = LearningQualityService()
+        self.signals = LearningSignalService(database)
 
     def assert_positive_allowed(
         self,
@@ -217,6 +220,40 @@ class LearningService:
             "active": True,
         }
 
+    def _capture_positive_signal(
+        self,
+        *,
+        inquiry: dict[str, Any],
+        learning_example_id: int | None,
+        signal_kind: str,
+        signal_content: str,
+        fact_scope: str | None,
+        actor: str,
+    ) -> None:
+        if not str(signal_kind or "").strip() or not str(signal_content or "").strip():
+            return
+        question = "\n".join(
+            value
+            for value in (
+                str(inquiry.get("title") or "").strip(),
+                str(inquiry.get("content") or "").strip(),
+            )
+            if value
+        )
+        self.signals.capture(
+            origin_kind=OriginKind.POSITIVE_REVIEW,
+            signal_kind=signal_kind,
+            content_text=signal_content,
+            inquiry=inquiry,
+            learning_example_id=learning_example_id,
+            question=question,
+            product_name=inquiry.get("product_name"),
+            option_name=inquiry.get("option_name"),
+            product_id=inquiry.get("product_id"),
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+
     def capture_approved(
         self,
         *,
@@ -225,6 +262,9 @@ class LearningService:
         history_id: int | None = None,
         positive_reason: str = "",
         positive_note: str = "",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> dict[str, Any] | None:
         inquiry, draft = self.inquiries.get(inquiry_id), self.answers.get(draft_id)
         if not inquiry or not draft or str(draft.get("review_status")).upper() != "APPROVED":
@@ -280,6 +320,14 @@ class LearningService:
                     "reason": "DUPLICATE_FINAL_ANSWER",
                 },
             )
+            self._capture_positive_signal(
+                inquiry=inquiry,
+                learning_example_id=existing.get("id"),
+                signal_kind=signal_kind,
+                signal_content=signal_content,
+                fact_scope=fact_scope,
+                actor=str(inquiry.get("approved_by") or "직원"),
+            )
             return existing
         saved = self.repository.upsert_human_verified_atomic(
             example,
@@ -296,6 +344,14 @@ class LearningService:
             },
         )
         self.logs.record_inquiry(inquiry_id, "LEARNING_EXAMPLE_SAVED", "승인된 최종 답변을 Learning Repository에 저장했습니다.", details={"learning_example_id": saved["id"], "learning_source": source, "rating": saved["rating"]})
+        self._capture_positive_signal(
+            inquiry=inquiry,
+            learning_example_id=saved.get("id"),
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=str(inquiry.get("approved_by") or "직원"),
+        )
         return saved
 
     def capture_posted_staff_correction(
@@ -307,6 +363,9 @@ class LearningService:
         positive_reason: str = "",
         positive_note: str = "",
         actor: str = "직원",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> dict[str, Any] | None:
         """Save an internal correction without claiming it was posted to Naver."""
 
@@ -358,14 +417,24 @@ class LearningService:
             "verified_at": utc_now() if human_verified else None,
         }
         if human_verified:
-            return self.repository.upsert_human_verified_atomic(
+            saved = self.repository.upsert_human_verified_atomic(
                 example,
                 feedback_answer_sources=(
                     AnswerProvenance.STAFF_EDITED.value,
                     AnswerProvenance.FINAL_ANSWER.value,
                 ),
             )
-        return self.repository.upsert(example)
+        else:
+            saved = self.repository.upsert(example)
+        self._capture_positive_signal(
+            inquiry=inquiry,
+            learning_example_id=saved.get("id"),
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+        return saved
 
     def capture_verified_posted_answer(
         self,
@@ -374,6 +443,9 @@ class LearningService:
         actor: str,
         positive_reason: str = "",
         positive_note: str = "",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> dict[str, Any] | None:
         """Promote only the customer-visible Naver answer after human review."""
 
@@ -427,10 +499,19 @@ class LearningService:
                 },
             }
         )
-        return self.repository.upsert_human_verified_atomic(
+        saved = self.repository.upsert_human_verified_atomic(
             example,
             feedback_answer_sources=(AnswerProvenance.NAVER_POSTED.value,),
         )
+        self._capture_positive_signal(
+            inquiry=inquiry,
+            learning_example_id=saved.get("id"),
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+        return saved
 
     def import_existing_seller_answers(self, *, limit: int | None = None) -> dict[str, int]:
         sql = "SELECT id FROM inquiries WHERE source_answered=1 ORDER BY id"

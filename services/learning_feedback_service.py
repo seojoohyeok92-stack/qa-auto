@@ -14,6 +14,7 @@ from answer.learning_feedback import (
 from answer.answer_provenance import AnswerProvenance
 from answer.answer_format import format_final_answer
 from answer.learning_conflict import LearningConflictError
+from answer.learning_signal import OriginKind
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
@@ -24,6 +25,7 @@ from repositories.naver_posted_answer_repository import (
     NaverPostedAnswerRepository,
 )
 from services.learning_privacy_service import LearningPrivacyService
+from services.learning_signal_service import LearningSignalService
 
 
 class LearningFeedbackService:
@@ -36,12 +38,43 @@ class LearningFeedbackService:
         self.historical = HistoricalCaseRepository(database)
         self.repository = LearningFeedbackRepository(database)
         self.privacy = LearningPrivacyService()
+        self.signals = LearningSignalService(database)
 
     @staticmethod
     def _source_key(*parts: object) -> str:
         return hashlib.sha256(
             "|".join(str(part or "") for part in parts).encode("utf-8")
         ).hexdigest()
+
+    def _capture_signal(
+        self,
+        *,
+        origin_kind: OriginKind,
+        feedback_id: int | None,
+        inquiry: dict[str, Any],
+        question: str,
+        signal_kind: str,
+        signal_content: str,
+        fact_scope: str | None,
+        actor: str,
+        historical_case_id: int | None = None,
+    ) -> None:
+        if not str(signal_kind or "").strip() or not str(signal_content or "").strip():
+            return
+        self.signals.capture(
+            origin_kind=origin_kind,
+            signal_kind=signal_kind,
+            content_text=signal_content,
+            inquiry=inquiry,
+            learning_feedback_id=feedback_id,
+            historical_case_id=historical_case_id,
+            question=question,
+            product_name=inquiry.get("product_name"),
+            option_name=inquiry.get("option_name"),
+            product_id=inquiry.get("product_id"),
+            fact_scope=fact_scope,
+            actor=actor,
+        )
 
     def _dashboard_answer(
         self,
@@ -101,6 +134,9 @@ class LearningFeedbackService:
         correction_note: str = "",
         corrected_intent: str = "",
         actor: str = "직원",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> list[dict[str, Any]]:
         inquiry = self.inquiries.get(int(inquiry_id))
         draft = self.answers.get(int(draft_id))
@@ -172,7 +208,7 @@ class LearningFeedbackService:
             "active": True,
         }
         self.repository.deactivate_for_draft(int(draft_id))
-        return [
+        saved = [
             self.repository.upsert(
                 {
                     **common,
@@ -187,6 +223,17 @@ class LearningFeedbackService:
             )
             for signal in self._signals(reason)
         ]
+        self._capture_signal(
+            origin_kind=OriginKind.NEGATIVE_REVIEW,
+            feedback_id=saved[0]["id"] if saved else None,
+            inquiry=inquiry,
+            question=question,
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+        return saved
 
     def capture_dashboard_negative(
         self,
@@ -198,6 +245,9 @@ class LearningFeedbackService:
         correction_note: str = "",
         corrected_intent: str = "",
         actor: str = "직원",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> list[dict[str, Any]]:
         """Capture a negative review without creating a positive example."""
 
@@ -328,11 +378,22 @@ class LearningFeedbackService:
                 }
             for signal in self._signals(reason)
         ]
-        return self.repository.save_dashboard_evaluation_atomic(
+        saved = self.repository.save_dashboard_evaluation_atomic(
             feedbacks,
             requested_signal="NEGATIVE",
             positive_answer_sources=tuple(positive_provenances),
         )
+        self._capture_signal(
+            origin_kind=OriginKind.NEGATIVE_REVIEW,
+            feedback_id=saved[0]["id"] if saved else None,
+            inquiry=inquiry,
+            question=question,
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+        return saved
 
     def capture_dashboard_excluded(
         self,
@@ -343,6 +404,9 @@ class LearningFeedbackService:
         exclusion_reason: str | ExclusionReason,
         exclusion_note: str = "",
         actor: str = "직원",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> dict[str, Any]:
         inquiry, provenance, reference_id, draft_id, original = self._dashboard_answer(
             inquiry_id=int(inquiry_id),
@@ -431,11 +495,22 @@ class LearningFeedbackService:
                 },
                 "active": True,
             }
-        return self.repository.save_dashboard_evaluation_atomic(
+        saved = self.repository.save_dashboard_evaluation_atomic(
             [feedback],
             requested_signal="EXCLUDED",
             positive_answer_sources=tuple(positive_provenances),
         )[0]
+        self._capture_signal(
+            origin_kind=OriginKind.EXCLUSION_REVIEW,
+            feedback_id=saved.get("id"),
+            inquiry=inquiry,
+            question=question,
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+        return saved
 
     def revoke_dashboard_excluded(
         self, *, feedback_id: int, reason: str, actor: str = "직원"
@@ -453,6 +528,9 @@ class LearningFeedbackService:
         corrected_intent: str = "",
         actor: str = "관리자",
         excluded: bool = False,
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
     ) -> list[dict[str, Any]]:
         case = self.historical.get(int(case_id))
         if case is None:
@@ -501,7 +579,7 @@ class LearningFeedbackService:
             "active": True,
         }
         self.repository.deactivate_for_historical_case(int(case_id))
-        return [
+        saved = [
             self.repository.upsert(
                 {
                     **common,
@@ -515,3 +593,23 @@ class LearningFeedbackService:
             )
             for signal in self._signals(reason, excluded=excluded)
         ]
+        if signal_kind and str(signal_content or "").strip():
+            self.signals.capture(
+                origin_kind=OriginKind.HISTORICAL_REVIEW,
+                signal_kind=signal_kind,
+                content_text=signal_content,
+                inquiry={
+                    "id": case.get("inquiry_id"),
+                    "store_code": case.get("store_code"),
+                    "product_name": case.get("product_name"),
+                    "product_id": case.get("product_id"),
+                },
+                learning_feedback_id=saved[0]["id"] if saved else None,
+                historical_case_id=int(case_id),
+                question=str(case.get("question") or ""),
+                product_name=case.get("product_name"),
+                product_id=case.get("product_id"),
+                fact_scope=fact_scope,
+                actor=actor,
+            )
+        return saved

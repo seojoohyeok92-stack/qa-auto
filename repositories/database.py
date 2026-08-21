@@ -1854,6 +1854,129 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        27,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS learning_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT NOT NULL UNIQUE,
+                signal_kind TEXT NOT NULL CHECK (signal_kind IN (
+                    'REASON','GOOD_PATTERN','BAD_PATTERN',
+                    'CORRECTION','VERIFIED_FACT'
+                )),
+                origin_kind TEXT NOT NULL CHECK (origin_kind IN (
+                    'POSITIVE_REVIEW','NEGATIVE_REVIEW',
+                    'EXCLUSION_REVIEW','HISTORICAL_REVIEW'
+                )),
+                learning_feedback_id INTEGER,
+                learning_example_id INTEGER,
+                historical_case_id INTEGER,
+                inquiry_id INTEGER,
+                store_code TEXT,
+                question_masked TEXT,
+                content_text TEXT NOT NULL,
+                product_scope TEXT CHECK (
+                    product_scope IS NULL OR product_scope IN (
+                        'MODEL','VARIANT','PRODUCT_FAMILY',
+                        'CATEGORY','POLICY','GLOBAL'
+                    )
+                ),
+                topics_json TEXT NOT NULL DEFAULT '[]',
+                product_identity_json TEXT NOT NULL DEFAULT '{}',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+                actor TEXT,
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (learning_feedback_id)
+                    REFERENCES learning_feedback(id) ON DELETE SET NULL,
+                FOREIGN KEY (learning_example_id)
+                    REFERENCES learning_examples(id) ON DELETE SET NULL,
+                FOREIGN KEY (historical_case_id)
+                    REFERENCES historical_cases(id) ON DELETE SET NULL,
+                FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                    ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_kind
+            ON learning_signals(signal_kind, active, product_scope)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_inquiry
+            ON learning_signals(inquiry_id, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_learning_example
+            ON learning_signals(learning_example_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_historical_case
+            ON learning_signals(historical_case_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_store
+            ON learning_signals(store_code, active, signal_kind)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS answer_feedback_signal_provenance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                context_run_id TEXT NOT NULL,
+                inquiry_id INTEGER NOT NULL,
+                answer_draft_id INTEGER,
+                learning_signal_id INTEGER NOT NULL,
+                signal_kind TEXT NOT NULL,
+                source_label TEXT NOT NULL,
+                matched_subquestion TEXT,
+                relevance REAL,
+                answer_support_score REAL,
+                evidence_coverage TEXT,
+                conflict_detected INTEGER NOT NULL DEFAULT 0
+                    CHECK (conflict_detected IN (0,1)),
+                included_in_prompt INTEGER NOT NULL DEFAULT 1
+                    CHECK (included_in_prompt IN (0,1)),
+                usage_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
+                    usage_status IN (
+                        'PENDING','USED','NOT_USED','REJECTED_CONFLICT',
+                        'REJECTED_LOW_CONFIDENCE','BLOCKED_BY_CURRENT_FACT',
+                        'NOT_APPLICABLE'
+                    )
+                ),
+                usage_reason TEXT,
+                provider_claimed_usage INTEGER NOT NULL DEFAULT 0
+                    CHECK (provider_claimed_usage IN (0,1)),
+                system_verified_usage TEXT NOT NULL DEFAULT 'NOT_EVALUATED'
+                    CHECK (system_verified_usage IN (
+                        'NOT_EVALUATED','CONFIRMED','UNCONFIRMED'
+                    )),
+                evaluated_at TEXT,
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (answer_draft_id) REFERENCES answer_drafts(id)
+                    ON DELETE SET NULL,
+                FOREIGN KEY (learning_signal_id) REFERENCES learning_signals(id)
+                    ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_feedback_signal_provenance_inquiry
+            ON answer_feedback_signal_provenance(inquiry_id, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_feedback_signal_provenance_draft
+            ON answer_feedback_signal_provenance(answer_draft_id, usage_status)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_feedback_signal_provenance_signal
+            ON answer_feedback_signal_provenance(learning_signal_id)
+            """,
+        ),
+    ),
 )
 
 
