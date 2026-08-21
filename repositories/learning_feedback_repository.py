@@ -575,6 +575,19 @@ class LearningFeedbackRepository:
         original_answer_reference_id: int,
     ) -> int:
         with self.database.transaction() as connection:
+            affected = connection.execute(
+                """
+                SELECT id FROM learning_feedback
+                WHERE inquiry_id=? AND source='DASHBOARD_NEGATIVE_REVIEW'
+                  AND original_answer_source=?
+                  AND original_answer_reference_id=? AND active=1
+                """,
+                (
+                    int(inquiry_id),
+                    str(original_answer_source),
+                    int(original_answer_reference_id),
+                ),
+            ).fetchall()
             cursor = connection.execute(
                 """
                 UPDATE learning_feedback
@@ -590,6 +603,19 @@ class LearningFeedbackRepository:
                     int(original_answer_reference_id),
                 ),
             )
+            # Mirror LearningRepository.revoke_human_verified: scope any
+            # Structured Signal confirmation revoke to exactly the feedback
+            # rows this undo affects (4th-phase requirement).
+            for row in affected:
+                connection.execute(
+                    """
+                    UPDATE learning_signal_confirmations
+                    SET active=0, revoked_reason='NEGATIVE_EVALUATION_UNDONE',
+                        revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE learning_feedback_id=? AND active=1
+                    """,
+                    (int(row["id"]),),
+                )
         return int(cursor.rowcount)
 
     def revoke_dashboard_exclusion(

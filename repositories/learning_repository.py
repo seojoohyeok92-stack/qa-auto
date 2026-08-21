@@ -309,6 +309,23 @@ class LearningRepository:
                     int(inquiry_id),
                 ),
             )
+            # Scoped revoke of any Structured Learning Signal confirmation
+            # this exact approval contributed (4th-phase requirement): only
+            # the confirmation row traced to this learning_example_id is
+            # deactivated.  Other inquiries' independent confirmations of
+            # the same normalized fact are untouched, and the parent
+            # learning_signals row itself is never mutated here -- its
+            # retrieval eligibility is recomputed live from the surviving
+            # confirmations (see LearningSignalRepository.candidates()).
+            connection.execute(
+                """
+                UPDATE learning_signal_confirmations
+                SET active=0, revoked_reason=?,
+                    revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE learning_example_id=? AND active=1
+                """,
+                (clean_reason[:1_000], int(learning_id)),
+            )
             updated = connection.execute(
                 "SELECT * FROM learning_examples WHERE id=?",
                 (int(learning_id),),

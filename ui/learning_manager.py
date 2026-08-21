@@ -13,6 +13,7 @@ from repositories.learning_repository import LearningRepository
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_validity_service import validity_summary
 from services.learning_lifecycle_service import is_explicitly_approved_learning
+from ui.session_identity import current_actor
 
 
 INQUIRY_TYPE_LABELS = {
@@ -531,6 +532,145 @@ def _render_section(
     _render_details(page_rows, key_prefix=key_prefix, repository=repository)
 
 
+def _structured_signal_external_number(row: dict[str, Any]) -> str:
+    return str(
+        row.get("source_question_id") or row.get("external_inquiry_id") or "-"
+    )
+
+
+def _render_structured_signal_manager(database: Database) -> None:
+    from config import StructuredSignalAutoLearningSettings
+
+    st.subheader("구조화 Learning Signal")
+    settings = StructuredSignalAutoLearningSettings.from_environment()
+    st.caption(
+        (
+            "자동 추출: "
+            + ("ON" if settings.enabled else "OFF")
+            + " · 자동 VERIFIED_FACT/CORRECTION 승격: "
+            + ("ON" if settings.auto_verified_promotion_enabled else "OFF (SHADOW)")
+            + f" · 승격 임계 확인횟수: {settings.min_confirmations_for_promotion}"
+        ),
+        help=(
+            "AUTO_STRUCTURED_LEARNING_ENABLED / "
+            "AUTO_VERIFIED_FACT_PROMOTION_ENABLED 환경변수로 제어됩니다."
+        ),
+    )
+    repository = LearningSignalRepository(database)
+    filter_columns = st.columns([1.2, 1.2, 1.3, 1.6], gap="small")
+    generation_label = filter_columns[0].selectbox(
+        "생성 방식", ["전체", "자동 생성", "수동 등록"],
+        key="signal_manager_generation",
+    )
+    generation_mode = {
+        "자동 생성": "AUTO_EXTRACTED", "수동 등록": "MANUAL",
+    }.get(generation_label)
+    kind_label = filter_columns[1].selectbox(
+        "Signal 유형",
+        ["전체", *[SIGNAL_KIND_LABELS[kind] for kind in SIGNAL_KIND_LABELS if kind.value != "REASON"]],
+        key="signal_manager_kind",
+    )
+    signal_kind = next(
+        (kind.value for kind, label in SIGNAL_KIND_LABELS.items() if label == kind_label),
+        None,
+    )
+    status_label = filter_columns[2].selectbox(
+        "상태", ["전체", "ACTIVE", "MANUALLY_PROMOTED", "REJECTED", "SUPERSEDED"],
+        key="signal_manager_status",
+    )
+    confirmation_status = None if status_label == "전체" else status_label
+    review_only = filter_columns[3].checkbox(
+        "검토 필요만 보기 (자동 추출 + 승격 임계 미달)",
+        key="signal_manager_review_only",
+    )
+
+    rows = repository.manager_rows(
+        limit=1_000,
+        generation_mode=generation_mode,
+        signal_kind=signal_kind,
+        confirmation_status=confirmation_status,
+    )
+    if review_only:
+        rows = [
+            row for row in rows
+            if row.get("generation_mode") == "AUTO_EXTRACTED"
+            and row.get("signal_kind") in {"CORRECTION", "VERIFIED_FACT"}
+            and row.get("confirmation_status") == "ACTIVE"
+            and int(row.get("live_confirmation_count") or 0)
+            < settings.min_confirmations_for_promotion
+        ]
+    if not rows:
+        st.info("조건에 맞는 Structured Learning Signal이 없습니다.")
+        return
+
+    display = []
+    for row in rows:
+        metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+        display.append({
+            "원본 문의": _structured_signal_external_number(row),
+            "유형": SIGNAL_KIND_LABELS.get(row.get("signal_kind"), row.get("signal_kind")),
+            "내용": str(row.get("content_text") or "")[:60],
+            "적용범위": row.get("product_scope") or "-",
+            "생성방식": "자동" if row.get("generation_mode") == "AUTO_EXTRACTED" else "수동",
+            "상태": row.get("confirmation_status") or "ACTIVE",
+            "확인횟수": (
+                f"{int(row.get('live_confirmation_count') or 0)}/"
+                f"{settings.min_confirmations_for_promotion}"
+                if row.get("generation_mode") == "AUTO_EXTRACTED" else "-"
+            ),
+            "추출근거": row.get("diff_category") or metadata.get("rationale") or "-",
+            "내부 Signal ID": row.get("id"),
+            "등록일": row.get("created_at"),
+        })
+    st.dataframe(display, hide_index=True, width="stretch")
+
+    with st.expander("Signal 확인/거부", expanded=False):
+        ids = [row["id"] for row in rows]
+        selected_id = st.selectbox(
+            "대상 Signal", ids,
+            format_func=lambda signal_id: next(
+                f"#{signal_id} · {row['content_text'][:40]}"
+                for row in rows if row["id"] == signal_id
+            ),
+            key="signal_manager_selected_id",
+        )
+        selected_row = next(row for row in rows if row["id"] == selected_id)
+        st.json({
+            "signal_kind": selected_row.get("signal_kind"),
+            "content_text": selected_row.get("content_text"),
+            "product_scope": selected_row.get("product_scope"),
+            "topics": selected_row.get("topics_json"),
+            "generation_mode": selected_row.get("generation_mode"),
+            "confirmation_status": selected_row.get("confirmation_status"),
+            "live_confirmation_count": selected_row.get("live_confirmation_count"),
+            "diff_category": selected_row.get("diff_category"),
+            "metadata": selected_row.get("metadata_json"),
+        })
+        action_columns = st.columns(2, gap="small")
+        if action_columns[0].button(
+            "수동 확인(승격)", key="signal_manager_promote",
+            disabled=selected_row.get("confirmation_status") in {"MANUALLY_PROMOTED", "REJECTED"},
+        ):
+            repository.promote(int(selected_id), actor=current_actor())
+            st.success("Signal을 확인 처리했습니다. 즉시 evidence로 사용 가능합니다.")
+            st.rerun()
+        reject_reason = action_columns[1].text_input(
+            "거부 사유", key="signal_manager_reject_reason",
+        )
+        if action_columns[1].button(
+            "거부", key="signal_manager_reject",
+            disabled=(
+                not reject_reason.strip()
+                or selected_row.get("confirmation_status") == "REJECTED"
+            ),
+        ):
+            repository.reject(
+                int(selected_id), actor=current_actor(), reason=reject_reason,
+            )
+            st.success("Signal을 거부했습니다.")
+            st.rerun()
+
+
 def render_learning_manager(database: Database | None) -> None:
     st.session_state["current_page"] = "learning"
     # The admin-mode toggle lives on Dashboard and Streamlit removes widget
@@ -690,3 +830,5 @@ def render_learning_manager(database: Database | None) -> None:
             page_size=int(page_size),
             key_prefix="learning_manager_feedback",
         )
+
+    _render_structured_signal_manager(database)

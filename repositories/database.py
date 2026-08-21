@@ -1977,6 +1977,77 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        28,
+        (
+            """
+            ALTER TABLE learning_signals
+            ADD COLUMN generation_mode TEXT NOT NULL DEFAULT 'MANUAL'
+                CHECK (generation_mode IN ('MANUAL','AUTO_EXTRACTED'))
+            """,
+            """
+            ALTER TABLE learning_signals
+            ADD COLUMN confirmation_status TEXT NOT NULL DEFAULT 'ACTIVE'
+                CHECK (confirmation_status IN (
+                    'ACTIVE','MANUALLY_PROMOTED','REJECTED','SUPERSEDED'
+                ))
+            """,
+            """
+            ALTER TABLE learning_signals ADD COLUMN normalized_identity_key TEXT
+            """,
+            """
+            ALTER TABLE learning_signals ADD COLUMN diff_category TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_normalized_identity
+            ON learning_signals(normalized_identity_key)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signals_generation_mode
+            ON learning_signals(
+                generation_mode, confirmation_status, signal_kind, active
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS learning_signal_confirmations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learning_signal_id INTEGER NOT NULL,
+                confirmation_key TEXT NOT NULL,
+                inquiry_id INTEGER,
+                learning_example_id INTEGER,
+                learning_feedback_id INTEGER,
+                approval_history_id INTEGER,
+                source_authority TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+                confirmed_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                revoked_at TEXT,
+                revoked_reason TEXT,
+                UNIQUE(learning_signal_id, confirmation_key),
+                FOREIGN KEY (learning_signal_id)
+                    REFERENCES learning_signals(id) ON DELETE CASCADE,
+                FOREIGN KEY (learning_example_id)
+                    REFERENCES learning_examples(id) ON DELETE SET NULL,
+                FOREIGN KEY (learning_feedback_id)
+                    REFERENCES learning_feedback(id) ON DELETE SET NULL,
+                FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                    ON DELETE SET NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signal_confirmations_signal
+            ON learning_signal_confirmations(learning_signal_id, active)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signal_confirmations_example
+            ON learning_signal_confirmations(learning_example_id, active)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_learning_signal_confirmations_feedback
+            ON learning_signal_confirmations(learning_feedback_id, active)
+            """,
+        ),
+    ),
 )
 
 

@@ -229,9 +229,11 @@ class LearningService:
         signal_content: str,
         fact_scope: str | None,
         actor: str,
+        program_answer: str = "",
+        final_answer: str = "",
+        source_authority: str = "STAFF_EDITED_HUMAN_VERIFIED",
+        approval_history_id: int | None = None,
     ) -> None:
-        if not str(signal_kind or "").strip() or not str(signal_content or "").strip():
-            return
         question = "\n".join(
             value
             for value in (
@@ -240,18 +242,37 @@ class LearningService:
             )
             if value
         )
-        self.signals.capture(
+        if str(signal_kind or "").strip() and str(signal_content or "").strip():
+            # An operator explicitly classified this note -- honor it as-is
+            # and skip auto-extraction so the same event never produces two
+            # competing signals.
+            self.signals.capture(
+                origin_kind=OriginKind.POSITIVE_REVIEW,
+                signal_kind=signal_kind,
+                content_text=signal_content,
+                inquiry=inquiry,
+                learning_example_id=learning_example_id,
+                question=question,
+                product_name=inquiry.get("product_name"),
+                option_name=inquiry.get("option_name"),
+                product_id=inquiry.get("product_id"),
+                fact_scope=fact_scope,
+                actor=actor,
+            )
+            return
+        self.signals.auto_extract_and_capture(
             origin_kind=OriginKind.POSITIVE_REVIEW,
-            signal_kind=signal_kind,
-            content_text=signal_content,
             inquiry=inquiry,
-            learning_example_id=learning_example_id,
             question=question,
+            source_authority=source_authority,
+            program_answer=program_answer,
+            final_answer=final_answer,
+            learning_example_id=learning_example_id,
+            approval_history_id=approval_history_id,
             product_name=inquiry.get("product_name"),
             option_name=inquiry.get("option_name"),
             product_id=inquiry.get("product_id"),
-            fact_scope=fact_scope,
-            actor=actor,
+            actor="SYSTEM_AUTO_EXTRACTION",
         )
 
     def capture_approved(
@@ -327,6 +348,9 @@ class LearningService:
                 signal_content=signal_content,
                 fact_scope=fact_scope,
                 actor=str(inquiry.get("approved_by") or "직원"),
+                program_answer=str(draft.get("original_answer") or ""),
+                final_answer=final,
+                approval_history_id=history_id,
             )
             return existing
         saved = self.repository.upsert_human_verified_atomic(
@@ -351,6 +375,9 @@ class LearningService:
             signal_content=signal_content,
             fact_scope=fact_scope,
             actor=str(inquiry.get("approved_by") or "직원"),
+            program_answer=str(draft.get("original_answer") or ""),
+            final_answer=final,
+            approval_history_id=history_id,
         )
         return saved
 
@@ -433,6 +460,12 @@ class LearningService:
             signal_content=signal_content,
             fact_scope=fact_scope,
             actor=actor,
+            program_answer=customer_truth,
+            final_answer=corrected,
+            source_authority=(
+                "STAFF_EDITED_HUMAN_VERIFIED" if human_verified
+                else "STAFF_EDITED_INTERNAL_CORRECTION"
+            ),
         )
         return saved
 
@@ -623,11 +656,26 @@ class LearningService:
             "edit_detected_at": value.get("modified_at"),
             "source_priority": normalized,
         }
+        program_text = str(
+            (previous or {}).get("answer_body") or (draft or {}).get("final_answer") or ""
+        )
+        final_text = str(value.get("answer_body") or "")
         existing = self.repository.get_by_source_key(example["source_key"])
         if existing is not None:
             if normalized == "AUTO_POST_CORRECTED":
                 self.repository.deactivate_automatic_positive(
                     int(inquiry_id), superseded_by_learning_id=int(existing["id"])
+                )
+                self._capture_positive_signal(
+                    inquiry=inquiry,
+                    learning_example_id=existing.get("id"),
+                    signal_kind="",
+                    signal_content="",
+                    fact_scope=None,
+                    actor="SYSTEM_AUTO_POST_REVIEW",
+                    program_answer=program_text,
+                    final_answer=final_text,
+                    source_authority="STAFF_EDITED_NAVER_CONFIRMED",
                 )
             return existing
         saved = self.repository.upsert(example)
@@ -644,6 +692,18 @@ class LearningService:
                 "answer_version_id": int(version_id),
             },
         )
+        if normalized == "AUTO_POST_CORRECTED":
+            self._capture_positive_signal(
+                inquiry=inquiry,
+                learning_example_id=saved.get("id"),
+                signal_kind="",
+                signal_content="",
+                fact_scope=None,
+                actor="SYSTEM_AUTO_POST_REVIEW",
+                program_answer=program_text,
+                final_answer=final_text,
+                source_authority="STAFF_EDITED_NAVER_CONFIRMED",
+            )
         return saved
 
     def capture_auto_unchanged_accepted(

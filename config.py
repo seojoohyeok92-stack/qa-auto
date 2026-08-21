@@ -127,6 +127,45 @@ class PositiveLearningSettings:
         )
 
 
+@dataclass(frozen=True)
+class StructuredSignalAutoLearningSettings:
+    """Auto-extraction of Structured Learning Signals from staff edits.
+
+    Two independent, both-off-by-default gates (same graduated-rollout
+    shape as NaverAutoPostSettings/GptProviderSettings elsewhere in this
+    project):
+
+    - ``enabled``: master switch for the whole extract/classify/persist
+      pipeline. Off means byte-for-byte unchanged behavior from before this
+      feature existed.
+    - ``auto_verified_promotion_enabled``: even when extraction is on, an
+      auto-extracted CORRECTION/VERIFIED_FACT never becomes usable evidence
+      on its own -- this is the separate switch that lets repeated,
+      independent, conflict-free confirmations promote one to eligible.
+      Off is a SHADOW mode: candidates are still extracted, classified, and
+      stored (visible on Dashboard, still require a human "confirm" to be
+      used), just never auto-promoted.
+    """
+
+    enabled: bool = False
+    auto_verified_promotion_enabled: bool = False
+    min_confirmations_for_promotion: int = 3
+
+    @classmethod
+    def from_environment(cls) -> "StructuredSignalAutoLearningSettings":
+        return cls(
+            enabled=get_env_bool(
+                "AUTO_STRUCTURED_LEARNING_ENABLED", default=False
+            ),
+            auto_verified_promotion_enabled=get_env_bool(
+                "AUTO_VERIFIED_FACT_PROMOTION_ENABLED", default=False
+            ),
+            min_confirmations_for_promotion=_env_int(
+                "AUTO_VERIFIED_FACT_MIN_CONFIRMATIONS", 3, minimum=2
+            ),
+        )
+
+
 NAVER_AUTO_SYNC_INTERVALS = (5, 10, 15, 30, 60)
 
 

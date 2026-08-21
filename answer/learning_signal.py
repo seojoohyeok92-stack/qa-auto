@@ -51,6 +51,40 @@ class OriginKind(str, Enum):
     HISTORICAL_REVIEW = "HISTORICAL_REVIEW"
 
 
+class GenerationMode(str, Enum):
+    """Was this signal typed by an operator, or extracted from a diff?"""
+
+    MANUAL = "MANUAL"
+    AUTO_EXTRACTED = "AUTO_EXTRACTED"
+
+
+class ConfirmationStatus(str, Enum):
+    """Lifecycle state layered on top of ``active`` for auto-extracted signals.
+
+    ``active`` still means "not revoked/deleted" (existing phase-3 meaning,
+    unchanged).  This is a second axis that exists only to gate whether an
+    AUTO_EXTRACTED factual signal (CORRECTION/VERIFIED_FACT) is *eligible as
+    evidence yet* -- manual signals ignore this entirely (always eligible
+    once active, exactly like before this feature existed).
+
+    ACTIVE: default. Eligibility for AUTO_EXTRACTED factual signals is
+        computed dynamically from live (non-revoked) confirmation count vs
+        threshold -- never stored, so it self-heals when an approval this
+        signal was confirmed by is later cancelled or re-approved.
+    MANUALLY_PROMOTED: an operator explicitly confirmed this candidate via
+        Dashboard -- eligible regardless of confirmation count.
+    REJECTED: an operator explicitly rejected this candidate -- never
+        eligible again, kept for audit.
+    SUPERSEDED: resolved by a clearly higher-authority newer signal -- never
+        eligible as evidence, kept for provenance/traceability.
+    """
+
+    ACTIVE = "ACTIVE"
+    MANUALLY_PROMOTED = "MANUALLY_PROMOTED"
+    REJECTED = "REJECTED"
+    SUPERSEDED = "SUPERSEDED"
+
+
 def normalize_signal_kind(value: str | SignalKind | None) -> SignalKind:
     if value is None or not str(value).strip():
         return SignalKind.REASON
@@ -79,13 +113,14 @@ def normalize_fact_scope(value: object) -> str | None:
 # same handful of markers applies to any verified fact or correction text,
 # regardless of what product or policy it describes.
 _NEGATION_MARKERS = re.compile(
-    r"(불가능|불가(?:$|[^능])|안\s?됩니다|안\s?되(?:며|고|어|는)?|못\s?하|"
+    r"(불가능|불가(?:$|[^능])|안\s?됩니다|안\s?됨|안\s?되(?:며|고|어|는)?|못\s?하|"
     r"어렵습니다|어려울|없습니다|아닙니다|않습니다|제한됩니다|"
     r"지원되지\s?않|해당되지\s?않|적용되지\s?않)"
 )
 _AFFIRMATION_MARKERS = re.compile(
     r"("
     r"(?<!불)가능합니다|(?<!불)가능해요|(?<!불)가능하며|(?<!불)가능합니다만|"
+    r"(?<!불)가능함|"
     r"(?<!안)(?<!안 )됩니다|지원합니다|제공됩니다|받으실\s?수\s?있|"
     r"(?<!불)이용\s?가능|적용됩니다|해당됩니다"
     r")"

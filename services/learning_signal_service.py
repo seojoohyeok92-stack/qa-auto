@@ -3,16 +3,23 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from answer.answer_diff_classifier import (
+    classify_answer_diff,
+    classify_operator_note,
+)
 from answer.evidence_support import apply_answer_support
 from answer.learning_signal import (
+    ConfirmationStatus,
     FACTUAL_SIGNAL_KINDS,
     GUIDANCE_SIGNAL_KINDS,
+    GenerationMode,
     OriginKind,
     SignalKind,
     facts_conflict,
     normalize_fact_scope,
     normalize_signal_kind,
 )
+from config import StructuredSignalAutoLearningSettings
 from repositories.database import Database
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_compatibility_service import (
@@ -49,6 +56,68 @@ class LearningSignalService:
     def _source_key(*parts: object) -> str:
         return hashlib.sha256(
             "|".join(str(part or "") for part in parts).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _is_eligible(
+        item: dict[str, Any], *, settings: StructuredSignalAutoLearningSettings,
+    ) -> bool:
+        """Whether a signal may be used as retrieval evidence/guidance right now.
+
+        Dynamic, not cached: recomputed from the item's *current* row plus
+        its live confirmation count every call, so a cancelled approval
+        (which lowers ``live_confirmation_count`` via the live JOIN in
+        ``LearningSignalRepository.candidates()``) is reflected immediately
+        without touching the signal row itself.
+        """
+
+        if item.get("confirmation_status") in {"REJECTED", "SUPERSEDED"}:
+            return False
+        if item.get("generation_mode") != GenerationMode.AUTO_EXTRACTED.value:
+            return True  # MANUAL: unchanged phase-3 behavior.
+        if item.get("confirmation_status") == ConfirmationStatus.MANUALLY_PROMOTED.value:
+            return True  # Human-in-the-loop override, section 13.
+        if item.get("signal_kind") in {
+            SignalKind.GOOD_PATTERN.value, SignalKind.BAD_PATTERN.value,
+        }:
+            return True  # Non-factual guidance: low risk, eligible once active.
+        return (
+            settings.auto_verified_promotion_enabled
+            and int(item.get("live_confirmation_count") or 0)
+            >= settings.min_confirmations_for_promotion
+        )
+
+    @staticmethod
+    def _normalized_identity_key(
+        *,
+        store_code: object,
+        signal_kind: SignalKind,
+        scope: str,
+        identity: Any,
+        topics: tuple[str, ...],
+        content_text: str,
+    ) -> str:
+        """Group confirmations of the same essential claim onto one signal.
+
+        Anchored on product identity (narrowest available field first) so a
+        MODEL-scoped claim about one product never merges with the same
+        text stated about a different product (section 8's scope safety
+        applies here too, not just at retrieval time).
+        """
+
+        anchor = (
+            identity.model_code or identity.product_id or identity.family
+            or identity.category or "GLOBAL"
+        )
+        normalized_content = normalize_learning_question(content_text)
+        return hashlib.sha256(
+            "|".join(
+                str(part or "")
+                for part in (
+                    store_code, signal_kind.value, scope, anchor,
+                    "+".join(sorted(topics)), normalized_content,
+                )
+            ).encode("utf-8")
         ).hexdigest()
 
     def capture(
@@ -148,12 +217,18 @@ class LearningSignalService:
             product_id=product_id, product_name=product_name,
             model_code=model_code, option=option_name,
         )
-        candidates = self.repository.candidates(
-            store_code=store_code,
-            signal_kinds=tuple(
-                kind.value for kind in (*FACTUAL_SIGNAL_KINDS, *GUIDANCE_SIGNAL_KINDS)
-            ),
-        )
+        settings = StructuredSignalAutoLearningSettings.from_environment()
+        candidates = [
+            item
+            for item in self.repository.candidates(
+                store_code=store_code,
+                signal_kinds=tuple(
+                    kind.value
+                    for kind in (*FACTUAL_SIGNAL_KINDS, *GUIDANCE_SIGNAL_KINDS)
+                ),
+            )
+            if self._is_eligible(item, settings=settings)
+        ]
         ranked: list[tuple[float, dict[str, Any]]] = []
         rejection_counts: dict[str, int] = {}
         for item in candidates:
@@ -264,3 +339,135 @@ class LearningSignalService:
                 "conflict_count": len(conflicts),
             },
         }
+
+    def auto_extract_and_capture(
+        self,
+        *,
+        origin_kind: OriginKind,
+        inquiry: dict[str, Any] | None,
+        question: str,
+        source_authority: str,
+        program_answer: str = "",
+        final_answer: str = "",
+        operator_note: str = "",
+        learning_example_id: int | None = None,
+        learning_feedback_id: int | None = None,
+        approval_history_id: int | None = None,
+        product_name: str | None = None,
+        model_code: str | None = None,
+        product_id: str | None = None,
+        option_name: str | None = None,
+        actor: str = "SYSTEM_AUTO_EXTRACTION",
+    ) -> list[dict[str, Any]]:
+        """Extract, classify, and safely persist signals from a staff edit.
+
+        Never called for AI-only content with no human/Naver-confirmed
+        provenance -- callers only reach this from capture paths that
+        already represent a genuine staff edit and/or confirmed Naver post
+        (see 4th-phase report, self-loop prevention).  A CORRECTION/
+        VERIFIED_FACT candidate is *never* immediately usable as evidence
+        from a single occurrence: it only becomes eligible once repeated,
+        independent, conflict-free confirmation crosses the configured
+        threshold with promotion enabled, or an operator manually confirms
+        it via Dashboard.  GOOD_PATTERN/BAD_PATTERN (non-factual guidance)
+        go live immediately since misclassifying a style pattern carries
+        far less risk than fabricating a fact.
+        """
+
+        settings = StructuredSignalAutoLearningSettings.from_environment()
+        if not settings.enabled:
+            return []
+        inquiry = inquiry or {}
+        has_order_id = bool(str(inquiry.get("order_id") or "").strip())
+        candidates = list(
+            classify_answer_diff(
+                question=question,
+                program_answer=program_answer,
+                final_answer=final_answer,
+                has_order_id=has_order_id,
+            )
+        )
+        note_candidate = classify_operator_note(
+            question=question, note_text=operator_note, has_order_id=has_order_id,
+        )
+        if note_candidate is not None:
+            candidates.append(note_candidate)
+        if not candidates:
+            return []
+
+        inquiry_id = inquiry.get("id") or inquiry.get("inquiry_id")
+        identity = extract_product_identity(
+            product_id=product_id or inquiry.get("product_id"),
+            product_name=product_name or inquiry.get("product_name"),
+            model_code=model_code,
+            option=option_name or inquiry.get("option_name"),
+        )
+        masked_question = self.privacy.mask(question) if question else None
+        saved: list[dict[str, Any]] = []
+        for candidate in candidates:
+            masked_text = self.privacy.mask(candidate.content_text)
+            if not masked_text:
+                continue
+            profile = profile_knowledge(
+                question=masked_question or "", answer=masked_text, identity=identity,
+            )
+            normalized_key = self._normalized_identity_key(
+                store_code=inquiry.get("store_code"),
+                signal_kind=candidate.signal_kind,
+                scope=profile.scope,
+                identity=identity,
+                topics=profile.topics,
+                content_text=masked_text,
+            )
+            existing = self.repository.find_by_normalized_identity(normalized_key)
+            target = existing[0] if existing else None
+            if target is not None and target.get("confirmation_status") == "REJECTED":
+                # An operator already rejected this exact claim -- repeated
+                # auto-extraction must never resurrect it.
+                continue
+            if target is None:
+                source_key = self._source_key(
+                    "AUTO_EXTRACTED", normalized_key,
+                    inquiry_id, learning_example_id, learning_feedback_id,
+                )
+                target = self.repository.upsert({
+                    "source_key": source_key,
+                    "signal_kind": candidate.signal_kind.value,
+                    "origin_kind": origin_kind.value,
+                    "learning_feedback_id": learning_feedback_id,
+                    "learning_example_id": learning_example_id,
+                    "historical_case_id": None,
+                    "inquiry_id": int(inquiry_id) if inquiry_id is not None else None,
+                    "store_code": inquiry.get("store_code"),
+                    "question_masked": masked_question,
+                    "content_text": masked_text,
+                    "product_scope": profile.scope,
+                    "topics_json": list(profile.topics),
+                    "product_identity_json": identity.to_dict(),
+                    "metadata_json": {
+                        "actor": str(actor or "SYSTEM_AUTO_EXTRACTION"),
+                        "diff_categories": [
+                            item.value for item in candidate.diff_categories
+                        ],
+                        "rationale": candidate.rationale,
+                    },
+                    "active": True,
+                    "actor": str(actor or "SYSTEM_AUTO_EXTRACTION"),
+                    "generation_mode": GenerationMode.AUTO_EXTRACTED.value,
+                    "confirmation_status": ConfirmationStatus.ACTIVE.value,
+                    "normalized_identity_key": normalized_key,
+                    "diff_category": (
+                        candidate.diff_categories[0].value
+                        if candidate.diff_categories else None
+                    ),
+                })
+            self.repository.record_confirmation(
+                learning_signal_id=int(target["id"]),
+                inquiry_id=int(inquiry_id) if inquiry_id is not None else None,
+                learning_example_id=learning_example_id,
+                learning_feedback_id=learning_feedback_id,
+                approval_history_id=approval_history_id,
+                source_authority=source_authority,
+            )
+            saved.append(target)
+        return saved

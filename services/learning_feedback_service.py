@@ -58,22 +58,43 @@ class LearningFeedbackService:
         fact_scope: str | None,
         actor: str,
         historical_case_id: int | None = None,
+        program_answer: str = "",
+        final_answer: str = "",
+        operator_note: str = "",
     ) -> None:
-        if not str(signal_kind or "").strip() or not str(signal_content or "").strip():
+        if str(signal_kind or "").strip() and str(signal_content or "").strip():
+            # Operator explicitly classified this note -- honor it and skip
+            # auto-extraction so this event never produces two signals.
+            self.signals.capture(
+                origin_kind=origin_kind,
+                signal_kind=signal_kind,
+                content_text=signal_content,
+                inquiry=inquiry,
+                learning_feedback_id=feedback_id,
+                historical_case_id=historical_case_id,
+                question=question,
+                product_name=inquiry.get("product_name"),
+                option_name=inquiry.get("option_name"),
+                product_id=inquiry.get("product_id"),
+                fact_scope=fact_scope,
+                actor=actor,
+            )
             return
-        self.signals.capture(
+        if not program_answer and not final_answer and not operator_note:
+            return
+        self.signals.auto_extract_and_capture(
             origin_kind=origin_kind,
-            signal_kind=signal_kind,
-            content_text=signal_content,
             inquiry=inquiry,
-            learning_feedback_id=feedback_id,
-            historical_case_id=historical_case_id,
             question=question,
+            source_authority="NEGATIVE_REVIEW_STAFF_CORRECTED",
+            program_answer=program_answer,
+            final_answer=final_answer,
+            operator_note=operator_note,
+            learning_feedback_id=feedback_id,
             product_name=inquiry.get("product_name"),
             option_name=inquiry.get("option_name"),
             product_id=inquiry.get("product_id"),
-            fact_scope=fact_scope,
-            actor=actor,
+            actor="SYSTEM_AUTO_EXTRACTION",
         )
 
     def _dashboard_answer(
@@ -232,6 +253,9 @@ class LearningFeedbackService:
             signal_content=signal_content,
             fact_scope=fact_scope,
             actor=actor,
+            program_answer=original,
+            final_answer=corrected,
+            operator_note=correction_note,
         )
         return saved
 
@@ -390,6 +414,7 @@ class LearningFeedbackService:
             question=question,
             signal_kind=signal_kind,
             signal_content=signal_content,
+            operator_note=correction_note,
             fact_scope=fact_scope,
             actor=actor,
         )
