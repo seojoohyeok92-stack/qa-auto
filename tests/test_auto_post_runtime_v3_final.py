@@ -277,3 +277,81 @@ def test_post_unknown_turns_runtime_off_and_is_never_retried(
         "runtime_auto_post_enabled"
     ] is False
     assert AutoPostEventRepository(database).get(event["id"])["status"] == "FAILED"
+
+
+def test_events_synced_while_off_are_reclaimed_on_enable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Inquiries synced during an OFF period must not be stranded forever.
+
+    ``create()`` stamps them BLOCKED_AUTO_POST_OFF; without an unblock step
+    on enable() they would never be selected by claim_next() again.
+    """
+    database = make_database(tmp_path)
+    enable_sync(database)
+    monkeypatch.setenv("NAVER_POST_ENABLED", "true")
+    monkeypatch.setenv("NAVER_AUTO_POST_ENABLED", "true")
+
+    inquiry_id = make_inquiry(database, external_id="OFF-PERIOD-Q")
+    event = AutoPostEventRepository(database).create(
+        inquiry_id=inquiry_id, store_code="STORE", external_id="OFF-PERIOD-Q",
+        source_sync_id="SYNC-OFF-1", runtime_enabled=False,
+    )
+    assert event["status"] == "BLOCKED_AUTO_POST_OFF"
+
+    result = AutoPostRuntimeService(
+        database, authentication_ready=lambda: True,
+    ).enable()
+    assert result["status"] in {"RUNNING", "STARTING", "WAITING_FOR_SYNC"}
+    assert AutoPostEventRepository(database).get(event["id"])["status"] == (
+        "PENDING"
+    )
+
+    # Prove the requeued event is now genuinely claimable by the same
+    # queue-only claim path the real scheduler uses (independent of
+    # whichever scheduler instance enable() itself started in-process).
+    claimed = AutoPostEventRepository(database).claim_next(
+        owner_id="VERIFY-CLAIM"
+    )
+    assert claimed is not None
+    assert claimed["id"] == event["id"]
+    assert claimed["status"] == "PROCESSING"
+
+    from services.naver_auto_post_scheduler import ensure_auto_post_scheduler
+
+    ensure_auto_post_scheduler(database).stop()
+
+
+def test_events_pending_at_disable_are_reclaimed_on_next_enable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A PENDING event blocked by disable()'s block_new_claims() must also
+    become claimable again on the next enable(), not just OFF-period syncs.
+    """
+    database = make_database(tmp_path)
+    enable_sync(database)
+    monkeypatch.setenv("NAVER_POST_ENABLED", "true")
+    monkeypatch.setenv("NAVER_AUTO_POST_ENABLED", "true")
+
+    runtime = AutoPostRuntimeService(database, authentication_ready=lambda: True)
+    runtime.enable()
+    inquiry_id = make_inquiry(database, external_id="STILL-PENDING-Q")
+    event = AutoPostEventRepository(database).create(
+        inquiry_id=inquiry_id, store_code="STORE", external_id="STILL-PENDING-Q",
+        source_sync_id="SYNC-STILL-PENDING", runtime_enabled=True,
+    )
+    assert event["status"] == "PENDING"
+
+    runtime.disable()
+    assert AutoPostEventRepository(database).get(event["id"])["status"] == (
+        "BLOCKED_AUTO_POST_OFF"
+    )
+
+    runtime.enable()
+    assert AutoPostEventRepository(database).get(event["id"])["status"] == (
+        "PENDING"
+    )
+
+    from services.naver_auto_post_scheduler import ensure_auto_post_scheduler
+
+    ensure_auto_post_scheduler(database).stop()

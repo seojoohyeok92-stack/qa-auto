@@ -154,17 +154,31 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
     control, admin, explanation = st.columns(
         [1.5, 1.4, 5.1], gap="medium", vertical_alignment="center"
     )
+    missing_env_flags = [
+        name
+        for name, ready in (
+            ("NAVER_POST_ENABLED", post_env.enabled),
+            ("NAVER_AUTO_POST_ENABLED", auto_env.enabled),
+        )
+        if not ready
+    ]
     with control:
         control.caption(
             "자동처리: **ON**" if persisted_runtime_enabled else "자동처리: **OFF**"
         )
         start_col, stop_col = st.columns(2, gap="small")
+        start_help = "DB에 저장되는 서버 공용 스위치를 ON으로 전환합니다."
+        if missing_env_flags:
+            start_help = (
+                "다음 환경변수가 true가 아니어서 시작할 수 없습니다: "
+                + ", ".join(missing_env_flags)
+            )
         start_clicked = start_col.button(
             "자동처리 시작",
             width="stretch",
             key="production_auto_processing_start",
             disabled=persisted_runtime_enabled or not environment_ready,
-            help="DB에 저장되는 서버 공용 스위치를 ON으로 전환합니다.",
+            help=start_help,
         )
         stop_clicked = stop_col.button(
             "자동처리 중지",
@@ -190,8 +204,9 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
     )
     if not environment_ready:
         explanation.warning(
-            "운영 환경 잠금 상태입니다. NAVER_POST_ENABLED와 "
-            "NAVER_AUTO_POST_ENABLED가 모두 true일 때만 ON이 유효합니다."
+            "운영 환경 잠금 상태로 자동처리를 시작할 수 없습니다. "
+            "다음 환경변수가 true로 설정되어 있지 않습니다: "
+            + ", ".join(missing_env_flags)
         )
 
     summary = (

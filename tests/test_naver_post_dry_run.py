@@ -8,7 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 from answer.models import AnswerResult, AnswerStatus
 from answer.answer_format import format_final_answer
-from config import StoreConfig
+from config import NaverPostSettings, StoreConfig
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
@@ -204,16 +204,16 @@ def test_sqlite_backup_api_preserves_source_and_rows(
 
 
 def test_streamlit_post_prepare_panel_keeps_actual_button_locked(
-    database: Database,
+    database: Database, monkeypatch,
 ) -> None:
     inquiry_id = _inquiry(database)
+    monkeypatch.setenv("NAVER_POST_ENABLED", "false")
+    monkeypatch.setattr(
+        NaverPostSettings,
+        "from_environment",
+        classmethod(lambda cls: cls(enabled=False)),
+    )
     code = f'''
-import os
-os.environ["NAVER_POST_ENABLED"]="false"
-from config import NaverPostSettings
-NaverPostSettings.from_environment=classmethod(
-    lambda cls: cls(enabled=False)
-)
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from ui.review_workspace import _render_naver_post_prepare

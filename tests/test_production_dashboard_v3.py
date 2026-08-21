@@ -4,8 +4,11 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
+from repositories.naver_sync_repository import NaverSyncRepository
+from services.auto_post_runtime_service import AutoPostRuntimeService
 from services.dashboard_operations_service import DashboardOperationsService
 
 
@@ -109,6 +112,68 @@ render_realtime_operations(db)
     assert buttons["자동처리 시작"].disabled
     assert buttons["자동처리 중지"].disabled
     assert app.warning
+    warning_text = " ".join(str(w.value) for w in app.warning)
+    assert "NAVER_POST_ENABLED" in warning_text
+    assert "NAVER_AUTO_POST_ENABLED" in warning_text
+
+
+def test_realtime_dashboard_ready_environment_allows_start_dialog_and_stop_flow(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    path = tmp_path / "ready.db"
+    database = Database(path)
+    database.initialize()
+    monkeypatch.setenv("NAVER_POST_ENABLED", "true")
+    monkeypatch.setenv("NAVER_AUTO_POST_ENABLED", "true")
+    monkeypatch.setattr(
+        "services.auto_post_runtime_service.get_configured_stores",
+        lambda: ["dummy"],
+    )
+    NaverSyncRepository(database).save_auto_settings(
+        enabled=True, interval_minutes=5,
+    )
+
+    script = f"""
+import os
+os.environ["NAVER_POST_ENABLED"] = "true"
+os.environ["NAVER_AUTO_POST_ENABLED"] = "true"
+from repositories.database import Database
+from ui.production_dashboard import render_realtime_operations
+db = Database(r"{path}")
+render_realtime_operations(db)
+"""
+    app = run(script)
+    assert not app.exception
+    buttons = {button.label: button for button in app.button}
+    assert not buttons["자동처리 시작"].disabled
+    assert buttons["자동처리 중지"].disabled
+    assert not app.warning
+
+    app.button(key="production_auto_processing_start").click().run(timeout=40)
+    assert not app.exception
+    dialog_buttons = {button.label: button for button in app.button}
+    assert "자동등록 시작" in dialog_buttons
+
+    AutoPostRuntimeService(
+        database, authentication_ready=lambda: True,
+    ).enable()
+    app.run(timeout=40)
+    assert not app.exception
+    buttons = {button.label: button for button in app.button}
+    assert buttons["자동처리 시작"].disabled
+    assert not buttons["자동처리 중지"].disabled
+
+    app.run(timeout=40)
+    buttons = {button.label: button for button in app.button}
+    assert buttons["자동처리 시작"].disabled
+    assert not buttons["자동처리 중지"].disabled
+
+    app.button(key="production_auto_processing_stop").click().run(timeout=40)
+    assert not app.exception
+    assert AutoPostRepository(database).settings()["enabled"] is False
+    buttons = {button.label: button for button in app.button}
+    assert not buttons["자동처리 시작"].disabled
+    assert buttons["자동처리 중지"].disabled
 
 
 def test_dashboard_bottom_sections_show_operations_and_learning(

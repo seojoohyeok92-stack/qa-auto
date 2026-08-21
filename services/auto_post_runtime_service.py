@@ -112,13 +112,24 @@ class AutoPostRuntimeService:
             interval_minutes=int(settings.get("interval_minutes") or 10),
             max_retries=int(settings.get("max_retries") or 1),
         )
+        unblocked = self.events.unblock_after_runtime_enable()
         sync_enabled = bool(preflight["auto_sync_enabled"])
         self.repository.set_state("STARTING" if sync_enabled else "WAITING_FOR_SYNC")
         self.logs.record_system(
             "AUTO_POST_RUNTIME_ENABLED",
             "자동등록 Runtime을 활성화했습니다.",
-            details={"actual_status": "STARTING" if sync_enabled else "WAITING_FOR_SYNC"},
+            details={
+                "actual_status": "STARTING" if sync_enabled else "WAITING_FOR_SYNC",
+                "unblocked_event_count": unblocked,
+            },
         )
+        if unblocked:
+            self.logs.record_system(
+                "AUTO_POST_EVENTS_UNBLOCKED_ON_ENABLE",
+                "자동처리 재개로 OFF 중 대기하던 기존 미처리 문의를 자동처리 "
+                "대상으로 복귀시켰습니다.",
+                details={"unblocked_event_count": unblocked},
+            )
         if not sync_enabled:
             return {"status": "WAITING_FOR_SYNC", "settings": settings, **preflight}
         from services.naver_auto_post_scheduler import ensure_auto_post_scheduler

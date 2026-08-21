@@ -229,6 +229,30 @@ class AutoPostEventRepository:
             )
         return int(cursor.rowcount)
 
+    def unblock_after_runtime_enable(self) -> int:
+        """Return OFF-period events to the claimable queue on re-enable.
+
+        ``create()`` stamps events synced while the operator switch was OFF
+        as ``BLOCKED_AUTO_POST_OFF``, and ``block_new_claims()`` does the
+        same to anything still ``PENDING`` at the moment of disable. Neither
+        path is ever reversed elsewhere, so without this, inquiries synced
+        or left pending during an OFF period would never be reconsidered
+        after the operator turns auto-processing back ON. Restoring them to
+        ``PENDING`` makes them claimable by the normal queue-only pipeline,
+        which still applies every existing safety/validation check.
+        """
+        now = _stamp()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE auto_sync_events
+                SET status='PENDING', updated_at=?
+                WHERE status='BLOCKED_AUTO_POST_OFF'
+                """,
+                (now,),
+            )
+        return int(cursor.rowcount)
+
     def summary(self) -> dict[str, int]:
         with self.database.connection() as connection:
             rows = connection.execute(
