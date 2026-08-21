@@ -12,7 +12,6 @@ from config import (
     NaverSyncSettings,
 )
 from core.time_utils import format_datetime_kst
-from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
 from repositories.dashboard_preferences_repository import (
     DashboardPreferencesRepository,
@@ -75,18 +74,12 @@ def _confirm_auto_post_start(database_path: str) -> None:
     st.write("새로운 미답변 문의에 생성된 답변이 네이버에 자동 등록됩니다.")
     cancel, start = st.columns(2)
     if cancel.button("취소", width="stretch", key="auto_post_start_cancel"):
-        st.session_state["production_auto_processing_widget"] = False
         st.rerun()
     if start.button(
         "자동등록 시작", type="primary", width="stretch",
         key="auto_post_start_confirm",
     ):
         result = AutoPostRuntimeService(Database(database_path)).enable()
-        st.session_state["production_auto_processing_widget"] = bool(
-            AutoPostRepository(Database(database_path)).settings().get(
-                "runtime_auto_post_enabled"
-            )
-        )
         st.session_state["auto_post_runtime_result"] = result["status"]
         st.rerun()
 
@@ -161,32 +154,33 @@ def render_realtime_operations(database: Database) -> dict[str, Any]:
     control, admin, explanation = st.columns(
         [1.5, 1.4, 5.1], gap="medium", vertical_alignment="center"
     )
-    widget_key = "production_auto_processing_widget"
-    observed_key = "production_auto_processing_observed_db_value"
-    previous_observed = st.session_state.get(
-        observed_key, persisted_runtime_enabled
-    )
-    if widget_key not in st.session_state or (
-        previous_observed != persisted_runtime_enabled
-        and st.session_state.get(widget_key) == previous_observed
-    ):
-        st.session_state[widget_key] = persisted_runtime_enabled
-    st.session_state[observed_key] = persisted_runtime_enabled
-    requested_runtime = control.toggle(
-        "자동처리 ON/OFF",
-        disabled=not environment_ready and not persisted_runtime_enabled,
-        key=widget_key,
-        help="DB에 저장되는 서버 공용 스위치입니다. OFF에서도 Auto Sync와 수동 기능은 유지됩니다.",
-    )
+    with control:
+        control.caption(
+            "자동처리: **ON**" if persisted_runtime_enabled else "자동처리: **OFF**"
+        )
+        start_col, stop_col = st.columns(2, gap="small")
+        start_clicked = start_col.button(
+            "자동처리 시작",
+            width="stretch",
+            key="production_auto_processing_start",
+            disabled=persisted_runtime_enabled or not environment_ready,
+            help="DB에 저장되는 서버 공용 스위치를 ON으로 전환합니다.",
+        )
+        stop_clicked = stop_col.button(
+            "자동처리 중지",
+            width="stretch",
+            key="production_auto_processing_stop",
+            disabled=not persisted_runtime_enabled,
+            help="DB에 저장되는 서버 공용 스위치를 OFF로 전환합니다. Auto Sync와 수동 기능은 유지됩니다.",
+        )
     with admin:
         _render_admin_mode(database)
-    if requested_runtime != persisted_runtime_enabled:
-        if requested_runtime:
-            _confirm_auto_post_start(str(database.path))
-        else:
-            result = AutoPostRuntimeService(database).disable()
-            st.session_state["auto_post_runtime_result"] = result["status"]
-            st.rerun()
+    if start_clicked:
+        _confirm_auto_post_start(str(database.path))
+    if stop_clicked:
+        result = AutoPostRuntimeService(database).disable()
+        st.session_state["auto_post_runtime_result"] = result["status"]
+        st.rerun()
     changed = st.session_state.pop("auto_post_runtime_result", None)
     if changed:
         st.toast(f"자동처리 Runtime 상태: {changed}")

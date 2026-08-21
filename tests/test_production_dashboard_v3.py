@@ -105,8 +105,9 @@ render_realtime_operations(db)
         "DPS Keepalive", "최근 Sync", "최근 Auto Process",
         "최근 Auto Post", "직원 검토 필요",
     } <= labels
-    assert app.toggle[0].label == "자동처리 ON/OFF"
-    assert app.toggle[0].disabled
+    buttons = {button.label: button for button in app.button}
+    assert buttons["자동처리 시작"].disabled
+    assert buttons["자동처리 중지"].disabled
     assert app.warning
 
 
