@@ -45,6 +45,7 @@ _REASON_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "ROUTE_BLOCKED_REVIEW_REQUIRED",
     )),
     ("Evidence 부족(제품 사실 미검증)", ("PRODUCT_FACT_NOT_VERIFIED",)),
+    ("제품 호환성 근거 부족", ("PRODUCT_COMPATIBILITY_NOT_VERIFIED",)),
     ("낮은 신뢰도", (
         "INTENT_CONFIDENCE_LOW", "INTENT_CONFIDENCE_UNKNOWN",
         "GPT_CONFIDENCE_LOW", "GPT_CONFIDENCE_UNKNOWN",

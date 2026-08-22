@@ -160,6 +160,16 @@ class AutoProcessingEligibilityService:
             reasons.append("PROCESSING_PLAN_REQUIRES_REVIEW")
         if bool(plan.get("is_high_risk")) or bool(analysis.get("manual_review_required")):
             reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
+        # Compatibility is a fact the customer buys on. An exact fixed
+        # template (the catalog's own verified accessory rules, or a Product
+        # DB fact) may answer it; anything composed by the model without such
+        # a source may be drafted for staff but not published.
+        if (
+            str(analysis.get("detected_intent") or "").upper()
+            == "PRODUCT_COMPATIBILITY"
+            and normalized_route not in {"TEMPLATE", "PRODUCT_DB"}
+        ):
+            reasons.append("PRODUCT_COMPATIBILITY_NOT_VERIFIED")
         if str(draft.get("review_status") or "").upper() in {
             "NEEDS_REVIEW",
             "IN_REVIEW",

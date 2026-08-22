@@ -82,6 +82,13 @@ ORDER_STATUS_WORDS = (
     "출고 상태",
 )
 INSTALLATION_GENERAL_WORDS = (
+    "설치는",
+    "설치 방법",
+    "설치방법",
+    "설치가 어떻게",
+    "어떻게 설치",
+    "설치해 주",
+    "설치해주",
     "벽걸이",
     "스탠드",
     "타공",
@@ -97,6 +104,22 @@ INSTALLATION_GENERAL_WORDS = (
     "방문 설치",
 )
 PRODUCT_GENERAL_WORDS = (
+    "서비스센터",
+    "서비스 센터",
+    "AS는",
+    "AS를",
+    "AS가",
+    "AS 는",
+    "수리",
+    "보증기간",
+    "보증 기간",
+    "무상수리",
+    "무상 수리",
+    "튼튼",
+    "내구",
+    "사용할 수",
+    "사용 가능",
+    "쓸 수",
     "사양",
     "기능",
     "구성품",
@@ -192,6 +215,49 @@ PAYMENT_BENEFIT_WORDS = (
     "포인트",
     "프로모션",
 )
+
+
+# Whether a specific accessory/bracket/model actually fits is a fact the
+# customer buys on, and this system only holds verified compatibility for the
+# catalog's own accessories (see AnswerEngine._stand_or_battery, backed by
+# stand_rules/battery_rules). A question about the customer's *own* hardware
+# has no such source, so the answer may be drafted but not published without
+# a person. Requires an object *and* a fit relation together, so that plain
+# feature questions ("인터넷 연결해서 쓸 수 있나요?", "HDMI 연결 가능한가요?")
+# are not swept in.
+COMPATIBILITY_OBJECT_WORDS = (
+    "브라켓",
+    "브래킷",
+    "거치대",
+    "스탠드",
+    "월마운트",
+    "벽걸이",
+    "배터리",
+    "액세서리",
+    "악세서리",
+    "받침대",
+)
+COMPATIBILITY_RELATION_WORDS = (
+    "호환",
+    "맞나요",
+    "맞을까",
+    "맞는지",
+    "장착",
+    "부착",
+    "달 수",
+    "달수",
+    "쓸 수",
+    "사용할 수",
+    "같이 사용",
+    "함께 사용",
+    "이용 가능",
+)
+
+
+def _is_compatibility_question(question: str) -> bool:
+    return any(
+        word in question for word in COMPATIBILITY_OBJECT_WORDS
+    ) and any(word in question for word in COMPATIBILITY_RELATION_WORDS)
 
 
 def _is_unverifiable_payment_benefit(question: str) -> bool:
@@ -686,6 +752,16 @@ class InquiryAnalysisService:
             manual = True
             detected_intent = detected_intent or "GENERAL"
             reasons.append("결정적인 문의 유형 규칙과 일치하지 않습니다.")
+
+        # Tag compatibility questions so the auto-post gate can require an
+        # authoritative fact. Only a tag: the type, strategy and draft route
+        # are untouched, and an exact accessory template can still answer.
+        if _is_compatibility_question(question):
+            detected_intent = "PRODUCT_COMPATIBILITY"
+            reasons.append(
+                "액세서리·설치 호환 여부는 확정 근거가 있어야 안내할 수 "
+                "있습니다."
+            )
 
         # Raise the review flag without changing the classified type or the
         # answer strategy, so the normal Learning/GPT draft is still produced
