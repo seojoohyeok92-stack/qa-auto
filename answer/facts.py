@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from answer.models import AnswerRequest, AnswerResult
+from dps.dates import STALE_DPS_SCHEDULE, is_schedule_stale
 
 
 @dataclass(frozen=True)
@@ -60,12 +61,25 @@ def build_answer_facts(
             ]
         )
     )
+    # A date that had already passed when the customer wrote in belongs to a
+    # previous delivery, not the one being asked about. The lookup stays
+    # SUCCESS, but the date is not exposed as a confirmed schedule, so it can
+    # never be handed to the model as "the current installation date" nor
+    # asserted to the customer.
+    schedule_stale = str(
+        dps.get("schedule_validity") or ""
+    ).upper() == STALE_DPS_SCHEDULE or is_schedule_stale(
+        dps.get("installation_date"),
+        registered_at=request.metadata.get("registered_at"),
+        created_at=request.metadata.get("created_at"),
+    )
     installation_confirmed = bool(
         dps.get("installation_date")
         and dps.get("installation_date_source")
         == "DPS_ITEM_DETAIL_REQUIRED_DELIVERY_DATE"
         and str(dps.get("date_parse_status") or "").upper() == "PARSED"
         and not dps.get("requires_human_review")
+        and not schedule_stale
     )
     return AnswerFacts(
         inquiry={
@@ -145,6 +159,11 @@ def build_answer_facts(
                 "dps_lookup_id",
                 "lookup_timestamp",
             )
+        }
+        | {
+            "schedule_validity": (
+                STALE_DPS_SCHEDULE if schedule_stale else None
+            )
         },
         rule={
             "status": rule_result.status.value,
@@ -167,6 +186,7 @@ def build_answer_facts(
                 rule_result.needs_review
                 or dps.get("change_request")
                 or dps.get("requires_human_review")
+                or schedule_stale
             ),
             "actual_posting_enabled": False,
             "installation_notification_policy": (

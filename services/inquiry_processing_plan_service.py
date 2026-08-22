@@ -6,6 +6,7 @@ from typing import Any
 
 from answer.inquiry_processing_plan import InquiryProcessingPlan
 from answer.source_adapter import answer_request_from_inquiry
+from dps.dates import STALE_DPS_SCHEDULE, is_schedule_stale
 from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.workflow_repository import WorkflowRepository
@@ -147,7 +148,27 @@ class InquiryProcessingPlanService:
             ).upper()
         request.metadata["dps"] = dict(latest_dps or {})
         context = build_delivery_answer_context(request, analysis)
-        valid_dps_snapshot = dps_status == "SUCCESS"
+        # A successful lookup can still return the schedule of an already
+        # completed delivery. The lookup result stays SUCCESS -- it really did
+        # succeed -- but a date that had already passed when the customer
+        # wrote in is not the schedule they are asking about, so the snapshot
+        # is not answer-authoritative and auto-post is withheld.
+        stale_dps_schedule = bool(
+            latest_dps
+            and dps_status == "SUCCESS"
+            and is_schedule_stale(
+                (latest_dps or {}).get("installation_date")
+                or (latest_dps or {}).get("required_delivery_date"),
+                registered_at=request.metadata.get("registered_at"),
+                created_at=request.metadata.get("created_at"),
+            )
+        )
+        if stale_dps_schedule:
+            request.metadata["dps"] = {
+                **request.metadata["dps"],
+                "schedule_validity": STALE_DPS_SCHEDULE,
+            }
+        valid_dps_snapshot = dps_status == "SUCCESS" and not stale_dps_schedule
         if (
             analysis.requires_order_lookup
             and order_id_status == "VALID"

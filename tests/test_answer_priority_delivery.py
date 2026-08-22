@@ -102,6 +102,7 @@ def inquiry(
     question: str = "배송 언제 오나요?",
     order_id: object = None,
     product_order_id: object = None,
+    registered_at: object = None,
 ) -> int:
     return InquiryRepository(database).upsert_work_item(
         {
@@ -112,6 +113,7 @@ def inquiry(
             "content": question,
             "order_id": order_id,
             "product_order_id": product_order_id,
+            "registered_at": registered_at,
             "raw_json": {},
         }
     ).inquiry_id
@@ -429,6 +431,10 @@ def test_streamlit_cached_dps_date_click_displays_delivery_template(
         database,
         "UI-DPS-DATE",
         order_id="2026073012345678",
+        # The cached DPS date below is 2026-08-05, so the inquiry has to have
+        # been raised on or before it -- otherwise the schedule is genuinely
+        # stale and this stops being a test of the delivery template.
+        registered_at="2026-08-04T09:00:00+09:00",
     )
     DpsRepository(database).create_lookup_result(
         inquiry_id=inquiry_id,

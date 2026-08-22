@@ -84,6 +84,9 @@ def answer_request_from_inquiry(row: dict[str, Any]) -> AnswerRequest:
             "inquiry_content": row.get("content"),
             "question_source_fields": ["title", "content"],
             "registered_at": row.get("registered_at"),
+            # Fallback reference for judging whether a DPS schedule had
+            # already passed when this inquiry arrived.
+            "created_at": row.get("created_at"),
             "order_date": _first(
                 row.get("order_date"),
                 raw.get("order_date"),
@@ -167,5 +170,6 @@ def answer_request_from_work_item(
             "inquiry_content": work_item.get("content"),
             "question_source_fields": ["title", "content"],
             "registered_at": work_item.get("registered_at"),
+            "created_at": work_item.get("created_at"),
         },
     )

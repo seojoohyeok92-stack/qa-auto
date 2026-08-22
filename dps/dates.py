@@ -193,3 +193,58 @@ def validate_dps_lookup_period(
     ):
         return False, "DATE_RANGE_INVALID", start, end
     return True, "DATE_RANGE_READY", start, end
+
+
+STALE_DPS_SCHEDULE = "STALE_DPS_SCHEDULE"
+
+
+def schedule_reference_date(
+    *,
+    registered_at: Any = None,
+    created_at: Any = None,
+    now: Any = None,
+) -> date | None:
+    """The date a DPS schedule should be judged 'still upcoming' against.
+
+    The platform's own registration timestamp comes first so that
+    reprocessing an old inquiry judges it as it stood when the customer
+    asked, rather than as of today, with the local row timestamp as the
+    fallback. Returns None when neither is known: staleness is only
+    meaningful relative to when the customer actually asked, and falling
+    back to the wall clock would make the same record read differently from
+    one day to the next and retroactively invalidate already handled
+    inquiries.
+    """
+
+    for candidate in (registered_at, created_at, now):
+        parsed = parse_date_value(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def is_schedule_stale(
+    schedule_value: Any,
+    *,
+    registered_at: Any = None,
+    created_at: Any = None,
+    now: Any = None,
+) -> bool:
+    """True when a DPS schedule date already passed before the inquiry.
+
+    A DPS row can legitimately still hold a date from a previous, already
+    completed delivery. Such a date is a real lookup result -- the lookup
+    itself stays SUCCESS -- but it is not the schedule the customer is
+    asking about, so it must never be presented as the current one.
+    Compared at day granularity: same-day is not stale.
+    """
+
+    scheduled = parse_date_value(schedule_value)
+    if scheduled is None:
+        return False
+    reference = schedule_reference_date(
+        registered_at=registered_at, created_at=created_at, now=now
+    )
+    if reference is None:
+        return False
+    return scheduled < reference

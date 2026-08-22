@@ -169,6 +169,35 @@ SCHEDULE_CHANGE_ACTION_WORDS = (
 )
 
 
+# Card/payment benefits change with each promotion period, and nothing in
+# this system holds a verified current answer for them: there is no card or
+# promotion catalog, and a past Learning answer only proves what was true
+# then. A draft is still generated so staff have something to work from, but
+# it must not be published without a person confirming today's terms.
+# Deliberately keyed on the *benefit*, not on "카드" -- "카드 결제 가능한가요?"
+# is an ordinary payment-method question and stays auto-answerable.
+PAYMENT_BENEFIT_WORDS = (
+    "카드혜택",
+    "카드 혜택",
+    "카드할인",
+    "카드 할인",
+    "청구할인",
+    "제휴할인",
+    "제휴 할인",
+    "할인혜택",
+    "할인 혜택",
+    "무이자",
+    "캐시백",
+    "적립",
+    "포인트",
+    "프로모션",
+)
+
+
+def _is_unverifiable_payment_benefit(question: str) -> bool:
+    return any(word in question for word in PAYMENT_BENEFIT_WORDS)
+
+
 def _is_schedule_change_request(question: str) -> bool:
     if any(word in question for word in SCHEDULE_CHANGE_WORDS):
         return True
@@ -657,6 +686,16 @@ class InquiryAnalysisService:
             manual = True
             detected_intent = detected_intent or "GENERAL"
             reasons.append("결정적인 문의 유형 규칙과 일치하지 않습니다.")
+
+        # Raise the review flag without changing the classified type or the
+        # answer strategy, so the normal Learning/GPT draft is still produced
+        # for staff to edit -- only publishing it automatically is withheld.
+        if not manual and _is_unverifiable_payment_benefit(question):
+            manual = True
+            reasons.append(
+                "카드·결제 혜택은 시점에 따라 달라져 현재 적용 여부를 "
+                "직원이 확인해야 합니다."
+            )
 
         requires_order_id = requires_order
         validated = has_order
