@@ -1131,7 +1131,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     generating_key = f"gpt_generation_running_{inquiry_id}"
     use_template_key = template_preference_key(inquiry)
     use_template = st.checkbox(
-        "기존 템플릿 우선 사용",
+        "확정 운영 템플릿 사용",
         value=True,
         key=use_template_key,
     )
@@ -1170,13 +1170,13 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         st.info("확인된 설치예정일을 사용해 배송 답변을 생성합니다.")
     if use_template:
         st.caption(
-            "일치하는 운영 템플릿이 있으면 우선 사용하고,\n"
-            "일치하는 템플릿이 없으면 GPT가 새로운 초안을 생성합니다."
+            "정확히 일치하는 고정 운영 정책이 있을 때만 템플릿을 사용합니다.\n"
+            "그 외 문의는 Learning 등의 근거를 참고하여 GPT가 답변을 생성합니다."
         )
     else:
         st.caption(
-            "기존 템플릿을 사용하지 않고\n"
-            "GPT가 새로운 답변 초안을 생성합니다."
+            "확정 운영 템플릿을 사용하지 않고\n"
+            "Learning 등의 근거를 참고하여 GPT가 답변 초안을 생성합니다."
         )
     if draft and not posted:
         st.warning(
@@ -1193,8 +1193,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         and latest_delivery_normalized.get("installation_date")
         else "배송 안전 답변 생성"
         if inquiry_analysis.delivery_question
-        else "템플릿 우선 답변 생성"
-        if use_template
+        # Template use is now the narrow exception, not the default, and
+        # whether an exact fixed policy matches is only known once the rule
+        # engine runs inside AnswerService. Rather than duplicating that
+        # judgement here (which could drift from the backend), the button
+        # names what it always does: generate an answer. The checkbox caption
+        # above explains when a fixed template takes over instead.
         else "GPT 새 답변 생성"
     )
     generate = top_actions[0].button(

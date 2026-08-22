@@ -767,7 +767,7 @@ def test_apptest_default_checked_then_override_creates_rendered_version(
     preference = next(
         item
         for item in app.checkbox
-        if item.label == "기존 템플릿 우선 사용"
+        if item.label == "확정 운영 템플릿 사용"
     )
     assert preference.value is True
     assert preference.key.endswith(f"_{inquiry_id}")
@@ -843,7 +843,7 @@ def test_apptest_empty_gpt_result_has_no_success_and_keeps_program_answer(
     next(
         button
         for button in app.button
-        if button.label == "템플릿 우선 답변 생성"
+        if button.label == "GPT 새 답변 생성"
     ).click()
     app = app.run(timeout=30)
 
@@ -873,13 +873,13 @@ def test_apptest_checked_general_inquiry_uses_template_and_survives_rerun(
     preference = next(
         item
         for item in app.checkbox
-        if item.label == "기존 템플릿 우선 사용"
+        if item.label == "확정 운영 템플릿 사용"
     )
     assert preference.value is True
     next(
         button
         for button in app.button
-        if button.label == "템플릿 우선 답변 생성"
+        if button.label == "GPT 새 답변 생성"
     ).click()
     app = app.run(timeout=30)
 
@@ -932,13 +932,13 @@ def test_apptest_684104045_checked_template_miss_renders_gpt_fallback(
     preference = next(
         item
         for item in app.checkbox
-        if item.label == "기존 템플릿 우선 사용"
+        if item.label == "확정 운영 템플릿 사용"
     )
     assert preference.value is True
     next(
         button
         for button in app.button
-        if button.label == "템플릿 우선 답변 생성"
+        if button.label == "GPT 새 답변 생성"
     ).click()
     app = app.run(timeout=30)
 
@@ -972,7 +972,7 @@ def test_apptest_unchecked_delivery_still_uses_safe_template(
     preference = next(
         item
         for item in app.checkbox
-        if item.label == "기존 템플릿 우선 사용"
+        if item.label == "확정 운영 템플릿 사용"
     )
     preference.uncheck()
     app = app.run(timeout=30)

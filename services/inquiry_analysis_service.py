@@ -130,6 +130,51 @@ SCHEDULE_CHANGE_WORDS = (
     "변경해 주세요",
     "변경해주세요",
 )
+# A schedule *change* is a request to perform work on the order, not a
+# question about it. Matched as target + action together so that asking
+# "설치 예정일이 언제인가요?" stays an ordinary schedule lookup, and an
+# unrelated "색상 변경" or "주소 변경" is not pulled in either.
+SCHEDULE_CHANGE_TARGET_WORDS = (
+    "설치일",
+    "설치 일정",
+    "설치일정",
+    "설치 날짜",
+    "설치날짜",
+    "배송일",
+    "배송 일정",
+    "배송일정",
+    "배송 날짜",
+    "배송날짜",
+    "방문일",
+    "방문 시간",
+    "방문시간",
+    "방문 일정",
+    "수령일",
+)
+SCHEDULE_CHANGE_ACTION_WORDS = (
+    "변경",
+    "바꾸",
+    "바꿔",
+    "당겨",
+    "당길",
+    "미루",
+    "미뤄",
+    "연기",
+    "앞당",
+    "늦춰",
+    "늦추",
+    "옮겨",
+    "옮기",
+    "조정",
+)
+
+
+def _is_schedule_change_request(question: str) -> bool:
+    if any(word in question for word in SCHEDULE_CHANGE_WORDS):
+        return True
+    return any(
+        word in question for word in SCHEDULE_CHANGE_TARGET_WORDS
+    ) and any(word in question for word in SCHEDULE_CHANGE_ACTION_WORDS)
 # Expressions that require a person to look at the actual case before the
 # customer gets any reply. Matched as substrings against the whitespace
 # normalized question, so each entry is chosen to be unambiguous on its own:
@@ -470,18 +515,18 @@ class InquiryAnalysisService:
             confidence = 0.97
             manual = has_order
             reasons.append("취소·반품·교환 문의로 분류했습니다.")
-        elif any(word in question for word in SCHEDULE_CHANGE_WORDS):
+        elif _is_schedule_change_request(question):
             kind = InquiryType.DELIVERY_INSTALLATION_STATUS
             subtype = "SCHEDULE_CHANGE_REQUEST"
             requires_order = True
             requires_dps = True
-            strategy = (
-                AnswerStrategy.MANUAL_REVIEW
-                if has_order
-                else AnswerStrategy.REQUEST_ORDER_ID
-            )
+            # Q&A Auto cannot reschedule an order, so it must never reply on
+            # its own -- not even to ask for the order number, and never with
+            # the *current* date, which would read as ignoring the request.
+            # Staff review is required whether or not an order id is present.
+            strategy = AnswerStrategy.MANUAL_REVIEW
             confidence = 0.99
-            manual = has_order
+            manual = True
             detected_intent = "SCHEDULE_CHANGE"
             reasons.append("일정 변경 요청은 직원 검토가 필요합니다.")
         elif detected_intent == "NOTIFICATION_POLICY":
@@ -618,8 +663,13 @@ class InquiryAnalysisService:
         effective_kind = kind
         if requires_order_id and not validated:
             effective_kind = InquiryType.ORDER_INFO_REQUIRED
-            strategy = AnswerStrategy.REQUEST_ORDER_ID
-            manual = False
+            # Asking the customer for their order number is a safe automatic
+            # reply only when the intent itself did not already require a
+            # person. A schedule change still needs staff even before the
+            # order number arrives, so the review requirement is preserved
+            # here instead of being cleared by the order-id shortcut.
+            if not manual:
+                strategy = AnswerStrategy.REQUEST_ORDER_ID
             if has_product_order:
                 reasons.append(
                     "상품주문번호만 있으며 DPS에 사용할 일반 주문번호가 없습니다."
