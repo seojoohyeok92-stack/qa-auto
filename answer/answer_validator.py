@@ -535,7 +535,15 @@ class AnswerValidator:
         if facts.policy.get("requires_review") and not (
             draft.requires_review or intent.requires_review
         ):
-            errors.append("Rule 정책의 직원 검토 요구를 해제했습니다.")
+            # A review signal, not a block. The review requirement is already
+            # enforced independently downstream by rule_result.needs_review,
+            # so blocking here changed nothing about whether staff see the
+            # inquiry -- it only threw the answer away. On a compound inquiry
+            # that was destructive: one risky sub-question set
+            # policy.requires_review, and a correct partial answer (which
+            # answered the safe questions and deferred the risky one) was
+            # discarded for the generic "everything needs checking" draft.
+            review_signals.append("Rule 정책의 직원 검토 요구를 해제했습니다.")
         if not facts.delivery.get("status") and not facts.installation.get(
             "status"
         ):

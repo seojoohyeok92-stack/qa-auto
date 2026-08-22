@@ -180,13 +180,24 @@ def test_validator_rejects_unknown_date() -> None:
 
 
 def test_validator_cannot_override_rule_review_policy() -> None:
+    """An answer may not release a review the Rule layer demanded.
+
+    Previously asserted by looking for a blocking error. The guarantee is
+    the same but is now carried as a review signal: blocking discarded the
+    whole answer, which on a compound inquiry threw away correct answers to
+    the safe sub-questions. What must hold is that the result never comes
+    back as a clean PASS, so the inquiry still reaches staff.
+    """
+
     result = AnswerValidator().validate(
         facts(policy={"requires_review": True}),
         intent(requires_review=False),
         draft("확인 답변", requires_review=False),
         review(),
     )
-    assert any("Rule 정책" in error for error in result.errors)
+    assert result.status == "REVIEW_REQUIRED"
+    assert any("Rule 정책" in signal for signal in result.review_signals)
+    assert any("Rule 정책" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize(
