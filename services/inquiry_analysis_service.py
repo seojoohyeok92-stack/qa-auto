@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import re
 
 from answer.inquiry_analysis import (
@@ -9,6 +10,7 @@ from answer.inquiry_analysis import (
     OrderIdStatus,
 )
 from answer.models import AnswerRequest
+from answer.text_utils import split_subquestions
 
 
 GENERAL_ORDER_ID_PATTERN = re.compile(r"(?<!\d)\d{16}(?!\d)")
@@ -556,6 +558,104 @@ class InquiryAnalysisService:
         )
 
     def analyze(self, request: AnswerRequest) -> InquiryAnalysis:
+        subquestions = split_subquestions(request.question)
+        if len(subquestions) > 1:
+            return self._analyze_compound(request, subquestions)
+        return self._analyze_single(request)
+
+    def _analyze_compound(
+        self, request: AnswerRequest, subquestions: tuple[str, ...]
+    ) -> InquiryAnalysis:
+        """Judge each sub-question on its own, then combine the verdicts.
+
+        A single representative intent cannot describe a compound inquiry: the
+        first matching branch used to win outright, so one high-risk phrase
+        both suppressed draft generation for the whole message and erased the
+        DPS requirement that another sub-question still needed. Requirements
+        and review flags are therefore OR-ed across sub-questions, while the
+        ability to answer survives if *any* part can be answered.
+        """
+
+        parts = [
+            self._analyze_single(
+                dataclasses.replace(request, question=subquestion)
+            )
+            for subquestion in subquestions
+        ]
+        # A fragment that classifies as nothing in particular, sitting beside
+        # real questions, is a greeting or a closing remark ("확인 부탁드립니다.")
+        # rather than an unanswerable question, and must not drag the whole
+        # inquiry into review. When *every* part is unclassified there is no
+        # compound to speak of, so the original single-question judgement of
+        # the full text stands.
+        classified = [
+            item for item in parts if item.inquiry_subtype != "UNCLASSIFIED"
+        ]
+        if not classified:
+            return self._analyze_single(request)
+        parts = classified
+        # Sub-questions that all mean the same thing are not a compound
+        # inquiry either; relabelling them would change nothing except to
+        # lose the specific intent the pipeline downstream relies on.
+        subtypes = {item.inquiry_subtype for item in parts}
+        if len(subtypes) == 1:
+            return self._analyze_single(request)
+
+        representative = next(
+            (item for item in parts if item.manual_review_required), parts[0]
+        )
+        answerable = [item for item in parts if item.can_generate_answer]
+        # Keep a subtype that permits drafting whenever some part is
+        # answerable; the review flag below is what withholds publishing.
+        subtype = (
+            "COMPOUND_MULTI_INTENT"
+            if answerable
+            else representative.inquiry_subtype
+        )
+        compatibility = any(
+            item.detected_intent == "PRODUCT_COMPATIBILITY" for item in parts
+        )
+        manual = any(item.manual_review_required for item in parts)
+        reasons: list[str] = [
+            f"복합문의로 {len(parts)}개 질문을 각각 판단했습니다."
+        ]
+        for item in parts:
+            reasons.extend(item.reasons)
+        return InquiryAnalysis(
+            inquiry_type=representative.inquiry_type,
+            inquiry_subtype=subtype,
+            # A sub-question that needs the order or DPS keeps that
+            # requirement alive for the whole inquiry.
+            requires_order_lookup=any(
+                item.requires_order_lookup for item in parts
+            ),
+            requires_dps_lookup=any(
+                item.requires_dps_lookup for item in parts
+            ),
+            requires_order_id=any(item.requires_order_id for item in parts),
+            order_id_present=representative.order_id_present,
+            order_id_validated=representative.order_id_validated,
+            order_id_status=representative.order_id_status,
+            answer_strategy=representative.answer_strategy,
+            selected_fact_keys=tuple(
+                dict.fromkeys(
+                    key for item in parts for key in item.selected_fact_keys
+                )
+            ),
+            confidence=min(item.confidence for item in parts),
+            reasons=tuple(dict.fromkeys(reasons)),
+            manual_review_required=manual,
+            auto_answerable=not manual,
+            # Preserved so the auto-post gate still raises
+            # PRODUCT_COMPATIBILITY_NOT_VERIFIED for the compound inquiry.
+            detected_intent=(
+                "PRODUCT_COMPATIBILITY"
+                if compatibility
+                else representative.detected_intent
+            ),
+        )
+
+    def _analyze_single(self, request: AnswerRequest) -> InquiryAnalysis:
         question = re.sub(r"\s+", " ", str(request.question or "")).strip()
         legacy_type = str(request.inquiry_type or "").strip()
         order_text = str(request.order_id or "").strip()

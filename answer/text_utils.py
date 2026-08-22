@@ -93,3 +93,55 @@ def mask_personal_information(text: object) -> str:
         value,
     )
     return value
+
+
+# Korean sentence-final question endings. A compound inquiry often arrives
+# without any '?' at all ("A/S 어디서 받아요 설치는 기사님이 해주시나요 ..."),
+# so splitting on punctuation alone would collapse it into one question.
+# Written as insert-then-split rather than a lookbehind, because the endings
+# differ in length and Python requires fixed-width lookbehind.
+_QUESTION_ENDING = re.compile(
+    r"(나요|까요|은가요|는가요|가요|아요|어요|해요|되요|돼요"
+    r"|습니까|입니까|나여|은지|는지|될지|할지"
+    r"|궁금해요|궁금합니다|알려주세요|여쭤봅니다)(?=\s)"
+)
+_SUBQUESTION_MARK = "␟"
+# A trailing "궁금해요" carries no question of its own; keeping it would
+# add a meaningless sub-question that then classifies as UNCLASSIFIED and
+# would hold an otherwise safe compound inquiry for review.
+_FILLER_ONLY = re.compile(r"(?:궁금해요|궁금합니다|알려주세요|여쭤봅니다|입니다)[.!]*")
+_LIST_SPLIT = re.compile(r"(?:\n+|[?？]|(?:^|\s)\d+[.)]\s*)")
+
+
+def split_subquestions(
+    question: object, *, minimum_length: int = 4
+) -> tuple[str, ...]:
+    """Break a compound inquiry into its meaningful sub-questions.
+
+    Splits first on the explicit separators an inquiry usually carries
+    (newlines, question marks, numbered lists), then on Korean interrogative
+    endings so a run-on question without punctuation is still seen as several
+    questions rather than one.
+    """
+
+    text = str(question or "").strip()
+    if not text:
+        return ()
+    parts: list[str] = []
+    for chunk in _LIST_SPLIT.split(text):
+        chunk = (chunk or "").strip()
+        if not chunk:
+            continue
+        marked = _QUESTION_ENDING.sub(
+            lambda match: match.group(1) + _SUBQUESTION_MARK, chunk
+        )
+        for piece in marked.split(_SUBQUESTION_MARK):
+            piece = piece.strip()
+            if piece:
+                parts.append(piece)
+    meaningful = [
+        part
+        for part in parts
+        if len(part) >= minimum_length and not _FILLER_ONLY.fullmatch(part)
+    ]
+    return tuple(meaningful) if meaningful else (text,)
