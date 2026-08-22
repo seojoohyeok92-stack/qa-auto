@@ -4,7 +4,7 @@ import re
 
 from dps.dates import parse_date_value
 from answer.facts import AnswerFacts
-from answer.fact_selection import SelectedFacts
+from answer.fact_selection import SelectedFacts, resolve_fact
 from answer.hybrid_models import (
     DraftResult,
     IntentResult,
@@ -456,7 +456,10 @@ class AnswerValidator:
         if not draft.answer.strip():
             errors.append("GPT 답변이 비어 있습니다.")
         for path in draft.used_facts:
-            value = facts.get_fact(path)
+            # Resolve through the shared resolver, not facts.get_fact, so the
+            # virtual analysis.* namespace the prompt advertises in
+            # allowed_fact_paths is recognised here as well.
+            value = resolve_fact(facts, path, analysis=analysis)
             if value in (None, "", [], {}, ()):
                 errors.append(f"존재하지 않는 Fact를 사용했습니다: {path}")
             else:
@@ -551,7 +554,29 @@ class AnswerValidator:
                 if claim in draft.answer:
                     errors.append(f"근거 없는 확정 문장입니다: {claim}")
         if not review.passed:
-            errors.append("GPT 자체 검토를 통과하지 못했습니다.")
+            # ``passed`` is a single opaque verdict from the model, so a
+            # self-review that failed purely because the draft did not answer
+            # every sub-question was indistinguishable from one that found
+            # unsafe content. On a compound inquiry that conflation was
+            # destructive: the pipeline tells the provider to answer only the
+            # grounded sub-questions and defer the rest, and then blocked the
+            # answer for reporting exactly that incomplete coverage. Coverage
+            # is already surfaced as a review signal below and enforced
+            # independently by requires_review, so blocking here only threw a
+            # correct partial answer away. Speculation and factual
+            # inconsistency stay hard errors, and an unexplained failure is
+            # still treated as a block.
+            coverage_only = (
+                not review.has_speculation
+                and review.facts_consistent
+                and not review.answered_all_questions
+            )
+            if coverage_only:
+                review_signals.append(
+                    "GPT 자체 검토가 하위 질문 미답변만을 이유로 실패했습니다."
+                )
+            else:
+                errors.append("GPT 자체 검토를 통과하지 못했습니다.")
         if review.has_speculation or not review.facts_consistent:
             errors.append("GPT 자체 검토에서 사실 불일치를 확인했습니다.")
         if not review.answered_all_questions and intent.questions:

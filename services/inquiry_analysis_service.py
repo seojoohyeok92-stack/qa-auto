@@ -593,7 +593,23 @@ class InquiryAnalysisService:
         ]
         if not classified:
             return self._analyze_single(request)
-        parts = classified
+        # An unclassified fragment that still asks for review or for the order
+        # is a real question the classifier could not label -- a payment
+        # benefit question, say -- not a greeting. Dropping it discarded its
+        # review requirement along with it, so a compound inquiry could lose
+        # the very flag that was meant to hold it back. Keep such a part in the
+        # aggregation (and in the sub-question count) while the representative
+        # intent below still comes from a classified part.
+        judged = [
+            item
+            for item in parts
+            if item.inquiry_subtype != "UNCLASSIFIED"
+            or item.manual_review_required
+            or item.requires_order_id
+            or item.requires_order_lookup
+            or item.requires_dps_lookup
+        ]
+        parts = judged
         # Sub-questions that all mean the same thing are not a compound
         # inquiry either; relabelling them would change nothing except to
         # lose the specific intent the pipeline downstream relies on.
@@ -601,8 +617,15 @@ class InquiryAnalysisService:
         if len(subtypes) == 1:
             return self._analyze_single(request)
 
+        # The representative carries the inquiry type, order status, strategy
+        # and intent, so it must be a part the classifier actually recognised.
         representative = next(
-            (item for item in parts if item.manual_review_required), parts[0]
+            (
+                item
+                for item in classified
+                if item.manual_review_required
+            ),
+            classified[0],
         )
         answerable = [item for item in parts if item.can_generate_answer]
         # Keep a subtype that permits drafting whenever some part is
