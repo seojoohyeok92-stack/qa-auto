@@ -714,3 +714,64 @@ def test_a_calendar_date_is_not_treated_as_an_ungrounded_duration() -> None:
     assert ungrounded_claims(
         "설치는 3일 후 진행됩니다.", "설치는 결제 후 3일 이내 진행"
     ) == []
+
+
+# ------------------------------------------------- generation timing
+
+def test_stage_timings_are_recorded_for_the_generation() -> None:
+    """The event log timestamps when a row was written, not when the work
+    happened: hybrid events are flushed together after generate() returns.
+    Stage durations are measured in place so the time can be attributed."""
+
+    _, _, telemetry = run(
+        request_for(SIX_PART), provider_for(SIX_PART_PARTIAL), rule()
+    )
+    stages = telemetry["stage_seconds"]
+
+    for name in ("facts_and_selection", "intent", "draft_provider_call",
+                 "validation"):
+        assert name in stages, name
+        assert isinstance(stages[name], float)
+        assert stages[name] >= 0.0
+    # The stages are bounded by the generation they belong to.
+    assert sum(stages.values()) <= telemetry["total_elapsed_seconds"] + 0.5
+
+
+def test_timing_telemetry_carries_no_content() -> None:
+    _, _, telemetry = run(
+        request_for(SIX_PART), provider_for(SIX_PART_PARTIAL), rule()
+    )
+    rendered = repr(telemetry["stage_seconds"])
+    for forbidden in ("A/S", "삼성", "서비스센터", "브라켓"):
+        assert forbidden not in rendered
+    assert all(
+        isinstance(value, (int, float))
+        for value in telemetry["stage_seconds"].values()
+    )
+
+
+def test_prompt_breakdown_cost_is_negligible_at_normal_size() -> None:
+    """The diagnostic breakdown runs on every provider call, so it must not
+    itself be the latency it was added to explain."""
+
+    import json as _json
+    import time as _time
+
+    from answer.providers.resilient_json_provider import (
+        _prompt_component_chars,
+    )
+
+    payload = {
+        "input": {
+            "similar_approved_answers": [{"a": "x" * 1_500} for _ in range(6)],
+            "historical_cases": [{"b": "y" * 900} for _ in range(3)],
+        },
+        "system_policy": {"a": 1},
+    }
+    prompt = _json.dumps(payload, ensure_ascii=False)
+    start = _time.perf_counter()
+    for _ in range(20):
+        _prompt_component_chars(prompt)
+    per_call = (_time.perf_counter() - start) / 20
+
+    assert per_call < 0.05, f"{per_call:.4f}s per call is not negligible"

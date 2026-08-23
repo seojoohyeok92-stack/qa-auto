@@ -64,6 +64,7 @@ class HybridAnswerService:
         self.validator = validator or AnswerValidator()
         self.fact_selection = fact_selection or FactSelectionService()
         self._learning_context_provider = learning_context_provider
+        self._stage_seconds: dict[str, float] = {}
 
     def _provider_telemetry(
         self, *, started: float | None = None
@@ -80,6 +81,7 @@ class HybridAnswerService:
         budget = getattr(self.drafts, "last_prompt_budget", None)
         telemetry: dict[str, Any] = {
             "prompt_budget": budget or {},
+            "stage_seconds": dict(self._stage_seconds),
             "provider_call_count": len(records),
             "tasks": [str(item.get("task") or "") for item in records],
             "calls": records,
@@ -279,6 +281,19 @@ class HybridAnswerService:
         rule_result: AnswerResult,
     ) -> HybridAnswerOutcome:
         generation_started = time.monotonic()
+        # Wall clock per stage. The event log records when a row was written,
+        # not when the work happened -- hybrid events are flushed together
+        # after generate() returns -- so the log alone cannot say where the
+        # time went. These are measured in place. Durations only.
+        stage_seconds: dict[str, float] = {}
+        self._stage_seconds = stage_seconds
+
+        def _stage(name: str, since: float) -> float:
+            now = time.monotonic()
+            stage_seconds[name] = round(now - since, 3)
+            return now
+
+        _mark = time.monotonic()
         facts = build_answer_facts(request, rule_result)
         analysis_value = request.metadata.get("phase9_analysis")
         analysis = (
@@ -297,6 +312,7 @@ class HybridAnswerService:
                 keys=tuple(_available_fact_paths(facts)),
             )
         )
+        _mark = _stage("facts_and_selection", _mark)
         phase9_metadata = (
             dict(rule_result.metadata.get("phase9"))
             if isinstance(rule_result.metadata.get("phase9"), dict)
@@ -386,6 +402,7 @@ class HybridAnswerService:
                 )
             )
             intent = self._deterministic_intent(facts, analysis, rule_result)
+            _mark = _stage("intent", _mark)
             events.append(
                 HybridEvent(
                     "GPT_ANALYSIS_COMPLETED",
@@ -556,6 +573,7 @@ class HybridAnswerService:
                     "GPT 답변 Validator 확인을 시작했습니다.",
                 )
             )
+            _mark = _stage("draft_provider_call", _mark)
             validation = self.validator.validate(
                 facts,
                 intent,
@@ -566,6 +584,7 @@ class HybridAnswerService:
                 subquestion_evidence=learning_context.get("subquestion_evidence"),
                 evidence_texts=self._evidence_texts(learning_context),
             )
+            _mark = _stage("validation", _mark)
             events.append(
                 HybridEvent(
                     "GPT_VALIDATOR_FINISHED",

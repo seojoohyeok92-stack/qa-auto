@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from typing import Any
+import time
 import uuid
 
 import streamlit as st
@@ -1970,6 +1971,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                         inquiry_id, draft["id"]
                     ),
                 }
+                rerun_started = st.session_state.pop(
+                    "gpt_rerun_started_at", None
+                )
+                if rerun_started is not None:
+                    render_details = {
+                        **render_details,
+                        "rerun_elapsed_seconds": round(
+                            time.perf_counter() - rerun_started, 3
+                        ),
+                    }
                 _record_ui_event(
                     database,
                     inquiry_id,
@@ -2343,6 +2354,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "새 답변 초안을 이력으로 저장했습니다. 승인 완료된 "
                     "Final Answer와 활성 Draft는 변경하지 않았습니다.",
                 )
+            # The backend is done here; everything after this is Streamlit
+            # re-executing the page. Stamping the handover lets the render
+            # below report that span instead of leaving it as an unexplained
+            # gap between two log rows.
+            st.session_state["gpt_rerun_started_at"] = time.perf_counter()
             st.rerun()
         if reset and draft:
             ApprovalService(database).reset_edited_answer(
