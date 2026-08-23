@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -11,6 +13,87 @@ from answer.provider_errors import (
     GptProviderTimeoutError,
 )
 from answer.providers.interfaces import JsonGptProvider
+
+
+# Open a branch further only when it is large enough to be the explanation.
+_EXPLAIN_COMPONENT_CHARS = 20_000
+_MAX_COMPONENT_DEPTH = 3
+# Real prompt keys are code-defined identifiers such as "system_policy"
+# or "learning_retrieval". Only that shape is recorded.
+_SAFE_COMPONENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _prompt_component_chars(prompt: object) -> dict[str, int]:
+    """Size each part of the prompt, so an oversized one can be explained.
+
+    A production DRAFT prompt measured 655,129 characters where the same
+    inquiry measured about 15,000 on a database with no learning records, and
+    nothing in the record said which part carried the difference. The prompt
+    is a JSON document, so its own structure gives the breakdown.
+
+    Sizes only -- keys and character counts. No prompt text, no learning
+    bodies, no customer data. Returns {} for a prompt that is not JSON.
+    """
+
+    try:
+        payload = json.loads(str(prompt or ""))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    def measure(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+
+    sizes: dict[str, int] = {}
+
+    def name(key: object, index: int) -> str:
+        # A component name is only ever a code-defined identifier. Anything
+        # else -- which would mean a data-derived key -- is recorded by
+        # position instead, so a size record can never carry customer text.
+        text = str(key)
+        return text if _SAFE_COMPONENT_NAME.match(text) else f"key_{index}"
+
+    def walk(prefix: str, value: Any, depth: int) -> None:
+        chars = measure(value)
+        sizes[prefix] = chars
+        if isinstance(value, list):
+            sizes[f"{prefix}.count"] = len(value)
+        # Descend while a branch is still worth explaining. `input` carries
+        # the retrieved evidence and is always broken out; anything else is
+        # only opened when it is large enough to be the answer to "what made
+        # this prompt 655,129 characters", so an ordinary record stays small.
+        if depth >= _MAX_COMPONENT_DEPTH:
+            return
+        explain = prefix == "input" or chars >= _EXPLAIN_COMPONENT_CHARS
+        if not explain:
+            return
+        if isinstance(value, dict):
+            for index, (key, item) in enumerate(value.items()):
+                walk(f"{prefix}.{name(key, index)}", item, depth + 1)
+        elif isinstance(value, list) and value:
+            # For a list, the largest single record locates the weight
+            # without naming every element.
+            biggest = max(value, key=measure)
+            sizes[f"{prefix}.max_record"] = measure(biggest)
+
+    for index, (key, value) in enumerate(payload.items()):
+        walk(name(key, index), value, 0)
+    return dict(sorted(sizes.items(), key=lambda item: -item[1]))
+
+
+def _accounted_chars(components: dict[str, int]) -> int:
+    """How much of the prompt the top-level components explain.
+
+    The remainder is JSON key names and punctuation. Reporting it keeps an
+    unexplained gap from being mistaken for a missing component.
+    """
+
+    return sum(
+        chars
+        for name, chars in components.items()
+        if "." not in name and not name.endswith(".count")
+    )
 
 
 class ResilientJsonProvider:
@@ -91,6 +174,10 @@ class ResilientJsonProvider:
         context: dict[str, Any],
     ) -> dict[str, Any]:
         started = self.clock()
+        # Parsed once: on an oversized prompt this is the expensive part.
+        _components = _prompt_component_chars(prompt)
+        _accounted = _accounted_chars(_components)
+        _total = len(str(prompt or ""))
         if self._deadline is None:
             # Reuses the clock read above so recording adds no extra reads.
             self._deadline = started + self.settings.total_timeout_seconds
@@ -108,6 +195,9 @@ class ResilientJsonProvider:
             "max_retries": self.settings.max_retries,
             # Sizes only. The prompt itself is never recorded.
             "prompt_chars": len(str(prompt or "")),
+            "prompt_component_chars": _components,
+            "prompt_accounted_chars": _accounted,
+            "prompt_unaccounted_chars": _total - _accounted,
             "context_keys": sorted(str(key) for key in (context or {})),
             "attempts": 0,
             "outcome": "STARTED",

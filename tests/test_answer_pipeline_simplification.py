@@ -471,3 +471,85 @@ def test_telemetry_carries_no_prompt_text() -> None:
 )
 def test_echoed_question_keeps_its_question_mark(text: str, expected: str) -> None:
     assert restore_question_mark(text) == expected
+
+
+# ------------------------------------------------- prompt size provenance
+
+def test_prompt_size_breakdown_is_recorded_per_component() -> None:
+    """A 655,129-char production prompt could not be explained because the
+    record held one total. Each part is now sized on its own."""
+
+    _, _, telemetry = run(
+        request_for(SIX_PART), provider_for(SIX_PART_PARTIAL), rule()
+    )
+    call = telemetry["calls"][0]
+    components = call["prompt_component_chars"]
+
+    assert components, "no breakdown recorded"
+    assert all(isinstance(value, int) for value in components.values())
+    # The evidence-carrying section is broken out one level further, because
+    # that is where growth appears.
+    assert any(name.startswith("input.") for name in components)
+    # Sorted largest first, so the dominant component is the first line.
+    sizes = [value for name, value in components.items()
+             if not name.endswith(".count")]
+    assert sizes == sorted(sizes, reverse=True)
+    # The parts account for the whole, give or take JSON punctuation, and the
+    # remainder is reported rather than left as an unexplained gap.
+    total = call["prompt_chars"]
+    accounted = call["prompt_accounted_chars"]
+    unaccounted = call["prompt_unaccounted_chars"]
+    assert accounted + unaccounted == total
+    assert 0 <= unaccounted < total * 0.2, (accounted, unaccounted, total)
+
+
+def test_an_oversized_component_is_broken_down_further() -> None:
+    """A single huge branch must name its own largest part, so one server
+    run is enough to identify the culprit."""
+
+    from answer.providers.resilient_json_provider import (
+        _prompt_component_chars,
+    )
+    import json as _json
+
+    huge = {"input": {"historical_cases": [
+        {"answer_reference": "x" * 30_000, "id": index} for index in range(3)
+    ]}}
+    sizes = _prompt_component_chars(_json.dumps(huge))
+    assert sizes["input.historical_cases"] > 90_000
+    assert sizes["input.historical_cases.count"] == 3
+    # The largest single record is named, without quoting any of it.
+    assert sizes["input.historical_cases.max_record"] > 30_000
+    assert "x" * 100 not in repr(sizes)
+
+
+def test_prompt_breakdown_carries_no_content() -> None:
+    _, _, telemetry = run(
+        request_for(SIX_PART), provider_for(SIX_PART_PARTIAL), rule()
+    )
+    rendered = repr(telemetry["calls"][0]["prompt_component_chars"])
+    for forbidden in ("A/S는 삼성서비스센터", "서비스센터를 통해", "삼성 50인치"):
+        assert forbidden not in rendered
+
+
+def test_component_names_cannot_carry_customer_text() -> None:
+    """Values are integers by construction, and names are restricted to the
+    ASCII identifier shape real prompt keys use, so neither can carry text."""
+
+    import json as _json
+
+    from answer.providers.resilient_json_provider import (
+        _prompt_component_chars,
+    )
+
+    leaky_key = "고객 010-1234-5678 님이 남긴 질문"
+    sizes = _prompt_component_chars(
+        _json.dumps({"input": {leaky_key: "x" * 30_000}})
+    )
+    rendered = repr(sizes)
+    assert all(isinstance(value, int) for value in sizes.values())
+    assert "010-1234-5678" not in rendered
+    assert "고객" not in rendered
+    assert "x" * 100 not in rendered
+    # The oversized value is still located, by size.
+    assert max(sizes.values()) >= 30_000

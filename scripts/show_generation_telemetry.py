@@ -120,6 +120,26 @@ def main() -> int:
                 f" last_attempt={call.get('last_attempt_seconds')}"
                 f" outcome={call.get('outcome')}"
             )
+            total = call.get("prompt_chars")
+            accounted = call.get("prompt_accounted_chars")
+            unaccounted = call.get("prompt_unaccounted_chars")
+            if accounted is not None:
+                print(f"        total_prompt_chars      {total:>12,}")
+                print(f"        accounted_component_chars {accounted:>10,}")
+                print(f"        unaccounted_chars       {unaccounted:>12,}")
+            components = call.get("prompt_component_chars") or {}
+            if components:
+                print("        TOP PROMPT COMPONENTS")
+                shown = [
+                    (name, chars)
+                    for name, chars in components.items()
+                    if not name.endswith(".count")
+                ][:15]
+                for name, chars in shown:
+                    share = f"{chars / total:>6.1%}" if total else "     -"
+                    count = components.get(f"{name}.count")
+                    suffix = f"  records={count}" if count is not None else ""
+                    print(f"          {name:<42}{chars:>12,}{share}{suffix}")
 
     print("\n=== event timeline ===")
     for item in events:

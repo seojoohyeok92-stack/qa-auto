@@ -266,5 +266,6 @@ def test_provenance_never_carries_prompt_text_or_secrets() -> None:
         "task", "model", "connect_timeout_seconds", "read_timeout_seconds",
         "total_timeout_seconds", "max_retries", "prompt_chars",
         "context_keys", "attempts", "outcome", "deadline_budget_seconds",
-        "elapsed_seconds", "last_attempt_seconds",
+        "elapsed_seconds", "last_attempt_seconds", "prompt_component_chars",
+        "prompt_accounted_chars", "prompt_unaccounted_chars",
     }
