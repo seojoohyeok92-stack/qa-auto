@@ -599,6 +599,13 @@ class GovernedHybridAnswerService:
             return outcome
         except Exception as error:
             timeout = isinstance(error, (GptProviderTimeoutError, TimeoutError))
+            # Provenance for the failed call. Without this a timeout recorded
+            # only the exception class, so the next investigation could not
+            # tell which generation stage stalled, how many HTTP attempts the
+            # wall clock actually covered, or whether the prompt had grown.
+            # Metadata only -- no prompt text, no context values, no key.
+            provider_call = dict(getattr(provider, "last_call", {}) or {})
+            provider_call["retry_count"] = getattr(provider, "retry_count", 0)
             events.extend(
                 [
                     HybridEvent(
@@ -609,7 +616,10 @@ class GovernedHybridAnswerService:
                         if timeout
                         else "GPT Provider 처리에 실패했습니다.",
                         "WARNING",
-                        {"error_type": error.__class__.__name__},
+                        {
+                            "error_type": error.__class__.__name__,
+                            "provider_call": provider_call,
+                        },
                     ),
                     HybridEvent(
                         "GPT_RULE_FALLBACK",
