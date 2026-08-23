@@ -9,6 +9,7 @@ from answer.hybrid_models import DraftResult, IntentResult
 from answer.inquiry_analysis import InquiryAnalysis
 from answer.prompt_builder import PromptBuilder
 from answer.providers.interfaces import JsonGptProvider
+from services.learning_context_service import apply_prompt_budget, prompt_context
 
 
 class DraftGenerationService:
@@ -73,6 +74,14 @@ class DraftGenerationService:
             except Exception:
                 # Learning is an optional enrichment and can never block GPT.
                 learning_context = {}
+        evidence, budget_report = apply_prompt_budget(
+            prompt_context(learning_context)
+        )
+        self.last_prompt_budget = budget_report
+        # Only the evidence reaches the model. The retrieval traces stay in
+        # `context` below for provenance: they describe how candidates were
+        # found, not what the answer may assert, and they scale with the size
+        # of the learning database rather than with the inquiry.
         prompt_input = {
             "intent": intent.to_dict(),
             "context_priority": [
@@ -80,7 +89,7 @@ class DraftGenerationService:
                 "SIMILAR_APPROVED_ANSWERS", "SELLER_STYLE_EXAMPLES",
                 "HISTORICAL_CASES_REFERENCE_ONLY", "OJE_STYLE_RULES",
             ],
-            **learning_context,
+            **evidence,
         }
         if retry_feedback:
             prompt_input["prior_attempt_feedback"] = retry_feedback

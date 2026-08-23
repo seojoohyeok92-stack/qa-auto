@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 from dps.dates import parse_date_value
@@ -60,6 +61,74 @@ FORBIDDEN_CLAIMS = (
     "반품 가능합니다",
     "기사님이 방문합니다",
 )
+
+
+# A factual claim the customer could act on has to come from somewhere. The
+# validator used to check only the fact paths the model volunteered in
+# used_facts, so a draft that cited nothing was never grounded at all, and
+# FACT_GROUNDING reported a count rather than deciding anything. A confident,
+# unhedged sentence such as "구매 후 1개월이 지난 경우 삼성서비스센터에서
+# 진행됩니다" therefore reached customers with no support behind it.
+#
+# These detect the classes that are both high risk and deterministically
+# checkable. Prose that asserts nothing verifiable is deliberately left alone.
+_QUANTITY_CLAIM = re.compile(
+    r"(?<![\d.])(\d[\d,]*)\s*(개월|년|일|주|주일|회|퍼센트|%|원|만원|천원|인치|kg|리터)"
+)
+# Wording that defers rather than asserts. A deferred sentence promises
+# nothing, so it needs no evidence.
+_HEDGED = re.compile(
+    r"(확인\s*후|확인이\s*필요|확인해\s*드리|안내드리겠|어렵습니다|알려주시면"
+    r"|필요합니다|검토가\s*필요|다를\s*수\s*있)"
+)
+_COMPATIBILITY_CLAIM = re.compile(r"(호환|장착|부착)\w*\s*(됩니다|가능합니다|합니다)")
+_BENEFIT_CLAIM = re.compile(
+    r"(할인|혜택|무이자|캐시백|적립|사은품)\w*\s*(됩니다|가능합니다|적용됩니다|드립니다)"
+)
+
+
+def _sentences(answer: str) -> list[str]:
+    return [
+        part.strip()
+        for part in re.split(r"[.!?\n]+", str(answer or ""))
+        if part.strip()
+    ]
+
+
+def ungrounded_claims(answer: str, evidence: str) -> list[str]:
+    """Assertions in the answer that the supplied evidence does not support.
+
+    Evidence is every text the pipeline actually gave the model: the selected
+    facts, the retrieved learning and historical answers, the verified
+    feedback signals and the rule answer. A claim counts as grounded when the
+    thing it asserts -- the quantity, the compatibility, the benefit -- can be
+    found there.
+    """
+
+    haystack = re.sub(r"\s+", "", str(evidence or ""))
+    findings: list[str] = []
+    for sentence in _sentences(answer):
+        if _HEDGED.search(sentence):
+            continue
+        # A calendar date is not a duration. Dates carry their own authority
+        # check against the confirmed DPS schedule, so remove them before
+        # looking for quantities -- otherwise "2026년 8월 3일" reads as the
+        # two ungrounded periods "2026년" and "3일".
+        measurable = CUSTOMER_DATE_PATTERN.sub(" ", sentence)
+        measurable = ISO_DATE_PATTERN.sub(" ", measurable)
+        for match in _QUANTITY_CLAIM.finditer(measurable):
+            quantity = f"{match.group(1)}{match.group(2)}"
+            if re.sub(r"\s+", "", quantity) not in haystack:
+                findings.append(
+                    f"근거 없는 수치·기간을 확정했습니다: {quantity}"
+                )
+        if _COMPATIBILITY_CLAIM.search(sentence) and "호환" not in haystack:
+            findings.append("근거 없는 호환 여부를 확정했습니다.")
+        if _BENEFIT_CLAIM.search(sentence) and not re.search(
+            r"할인|혜택|무이자|캐시백|적립", haystack
+        ):
+            findings.append("근거 없는 혜택·할인을 확정했습니다.")
+    return list(dict.fromkeys(findings))
 
 
 class AnswerValidator:
@@ -443,6 +512,7 @@ class AnswerValidator:
         analysis: InquiryAnalysis | None = None,
         selected_facts: SelectedFacts | None = None,
         subquestion_evidence: list[dict] | None = None,
+        evidence_texts: str | None = None,
     ) -> ValidationResult:
         errors: list[str] = []
         # Free-form notes emitted by the GPT draft/self-review steps. They are
@@ -579,6 +649,33 @@ class AnswerValidator:
                 errors.append("GPT 자체 검토를 통과하지 못했습니다.")
         if review.has_speculation or not review.facts_consistent:
             errors.append("GPT 자체 검토에서 사실 불일치를 확인했습니다.")
+        # Grounding does not depend on the model volunteering used_facts: the
+        # answer is checked against everything the pipeline actually supplied.
+        corpus = " ".join(
+            part
+            for part in (
+                # The customer's own question is not evidence. Including it
+                # would let "브라켓과 호환되나요?" ground an answer that
+                # asserts "호환됩니다".
+                json.dumps(
+                    {
+                        section: values
+                        for section, values in facts.to_dict().items()
+                        if section != "inquiry"
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                json.dumps(
+                    dict(selected_facts.values) if selected_facts else {},
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                str(evidence_texts or ""),
+            )
+            if part
+        )
+        errors.extend(ungrounded_claims(draft.answer, corpus))
         if not review.answered_all_questions and intent.questions:
             review_signals.append("복합 질문 일부의 답변 누락 가능성이 있습니다.")
         phase9_rules = self._phase9_rules(

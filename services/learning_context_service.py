@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import re
 import uuid
 from typing import Any
@@ -19,6 +21,110 @@ from repositories.feedback_signal_provenance_repository import (
 )
 from services.learning_signal_service import LearningSignalService
 from services.product_fact_guard import classify_product_fact
+
+
+# Retrieval traces: which candidates were considered, which were filtered and
+# why, per sub-question. They are operational provenance, not something the
+# model answers from -- and they grow with the size of the learning database,
+# not with the inquiry. On the server they reached 620,203 of a 655,129
+# character DRAFT prompt (94.7%) while the actual evidence was 15,045.
+# They stay in the context for telemetry; they are kept out of the prompt.
+PROMPT_EXCLUDED_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {"learning_retrieval", "historical_retrieval"}
+)
+
+# The seller answer is carried twice per historical case, as
+# answer_style_reference and answer_reference. One copy is enough for the
+# model; the other stays in the context for the provenance that reads it.
+_HISTORICAL_CASE_PROMPT_DROP: frozenset[str] = frozenset(
+    {"answer_style_reference"}
+)
+
+
+def prompt_context(context: dict[str, Any]) -> dict[str, Any]:
+    """The part of the learning context the model actually answers from.
+
+    Evidence in, retrieval diagnostics out. Nothing is deleted -- the caller
+    keeps the full context for logging and telemetry; this is only what gets
+    serialised into the prompt.
+    """
+
+    projected: dict[str, Any] = {}
+    for key, value in context.items():
+        if key in PROMPT_EXCLUDED_CONTEXT_KEYS:
+            continue
+        if key == "historical_cases" and isinstance(value, list):
+            projected[key] = [
+                {
+                    field: item[field]
+                    for field in item
+                    if field not in _HISTORICAL_CASE_PROMPT_DROP
+                }
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+            continue
+        projected[key] = value
+    return projected
+
+
+# Evidence the model may lose last if the prompt still has to shrink, most
+# expendable first. Facts, DPS, the customer's own question and the analysis
+# are never in this list: they are the answer's authority and are never
+# dropped. Verified feedback signals and the per-sub-question evidence map
+# outrank retrieved examples, which outrank style references.
+_PROMPT_TRIM_ORDER: tuple[str, ...] = (
+    "seller_style_examples",
+    "historical_cases",
+    "similar_approved_answers",
+)
+# A full-evidence prompt for the six-question production inquiry measures
+# about 12,000 characters once the retrieval traces are out, and about 15,000
+# with no learning data at all. 60,000 leaves roughly four times that headroom
+# -- generous for a genuinely rich inquiry, and far below anything that could
+# repeat the 655,129 character prompt.
+DRAFT_PROMPT_BUDGET_CHARS = 60_000
+
+
+def apply_prompt_budget(
+    context: dict[str, Any],
+    *,
+    budget: int = DRAFT_PROMPT_BUDGET_CHARS,
+    measure: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Keep the prompt within budget without silently losing authority.
+
+    Drops whole evidence groups in a fixed order, least authoritative first,
+    and reports every drop. Facts, DPS, the analysis and the customer's own
+    question are not candidates -- if the prompt is still too large after the
+    optional evidence is gone, it is left too large rather than quietly cut,
+    because truncating those would change what the answer is allowed to say.
+    """
+
+    size = measure or (
+        lambda value: len(json.dumps(value, ensure_ascii=False, default=str))
+    )
+    trimmed = dict(context)
+    report: dict[str, Any] = {
+        "budget_chars": budget,
+        "original_chars": size(trimmed),
+        "dropped": [],
+    }
+    for key in _PROMPT_TRIM_ORDER:
+        if size(trimmed) <= budget:
+            break
+        value = trimmed.get(key)
+        if not value:
+            continue
+        report["dropped"].append(
+            {"component": key, "chars": size(value),
+             "records": len(value) if isinstance(value, list) else None}
+        )
+        trimmed[key] = [] if isinstance(value, list) else {}
+    report["final_chars"] = size(trimmed)
+    report["within_budget"] = report["final_chars"] <= budget
+    return trimmed, report
 
 
 class LearningContextService:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from answer.models import AnswerRequest
@@ -28,6 +29,14 @@ def _first(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), "")
 
 
+# Letters and digits only: punctuation differences between an inquiry title
+# and the body line it was taken from must not make them look different.
+_COMPARABLE = re.compile(r"[^0-9A-Za-z가-힣]+")
+# How much of a truncated title must match the body's opening to count as the
+# same question. Long enough that a genuinely different title never matches.
+_TITLE_PREFIX_MATCH = 12
+
+
 def _combined_inquiry_text(title: Any, content: Any) -> str:
     """Join the inquiry title and body without repeating the question.
 
@@ -46,10 +55,19 @@ def _combined_inquiry_text(title: Any, content: Any) -> str:
         return normalized_content
     if not normalized_content:
         return normalized_title
-    content_lines = {
-        line.strip() for line in normalized_content.splitlines() if line.strip()
-    }
-    if normalized_content == normalized_title or normalized_title in content_lines:
+    # Compare on letters and digits alone, and treat a title that only
+    # *begins* the body line as the same question. The channel may punctuate
+    # or truncate the title differently from the line it was taken from -- a
+    # dropped "?", an appended ellipsis -- and any of those made the title
+    # look like a new question. That is why six questions were still being
+    # retrieved as seven after exact-line matching was added.
+    title_key = _COMPARABLE.sub("", normalized_title)
+    content_key = _COMPARABLE.sub("", normalized_content)
+    if not title_key or title_key in content_key:
+        return normalized_content
+    if len(title_key) >= _TITLE_PREFIX_MATCH and content_key.startswith(
+        title_key[:_TITLE_PREFIX_MATCH]
+    ):
         return normalized_content
     return f"{normalized_title}\n{normalized_content}"
 

@@ -77,7 +77,9 @@ class HybridAnswerService:
         """
 
         records = list(getattr(self.provider, "call_records", []) or [])
+        budget = getattr(self.drafts, "last_prompt_budget", None)
         telemetry: dict[str, Any] = {
+            "prompt_budget": budget or {},
             "provider_call_count": len(records),
             "tasks": [str(item.get("task") or "") for item in records],
             "calls": records,
@@ -87,6 +89,33 @@ class HybridAnswerService:
                 time.monotonic() - started, 3
             )
         return telemetry
+
+    @staticmethod
+    def _evidence_texts(learning_context: dict[str, Any]) -> str:
+        """Every text the model was actually given, for grounding checks.
+
+        The validator can see the facts but not the retrieved answers, so
+        without this a claim taken straight from an approved learning example
+        would look unsupported.
+        """
+
+        parts: list[str] = []
+        for key in ("similar_approved_answers", "seller_style_examples",
+                    "historical_cases"):
+            for item in learning_context.get(key) or []:
+                if isinstance(item, dict):
+                    parts.extend(
+                        str(value) for value in item.values()
+                        if isinstance(value, str)
+                    )
+        signals = learning_context.get("feedback_signals")
+        if isinstance(signals, dict):
+            for group in signals.values():
+                for item in group or []:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("content") or ""))
+        return " ".join(part for part in parts if part)
+
 
     @staticmethod
     def _deterministic_intent(
@@ -535,6 +564,7 @@ class HybridAnswerService:
                 analysis=analysis,
                 selected_facts=selected_facts,
                 subquestion_evidence=learning_context.get("subquestion_evidence"),
+                evidence_texts=self._evidence_texts(learning_context),
             )
             events.append(
                 HybridEvent(
@@ -638,6 +668,7 @@ class HybridAnswerService:
                     analysis=analysis,
                     selected_facts=selected_facts,
                     subquestion_evidence=learning_context.get("subquestion_evidence"),
+                    evidence_texts=self._evidence_texts(learning_context),
                 )
                 events.append(
                     HybridEvent(

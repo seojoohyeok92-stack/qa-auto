@@ -207,7 +207,11 @@ def test_normal_generation_makes_no_understanding_or_self_review_call() -> None:
 def test_case_a_single_general_product_inquiry_is_answered() -> None:
     request = request_for("이 제품 무게가 얼마나 되나요?")
     outcome, hybrid, telemetry = run(
-        request, provider_for("약 15kg입니다."), rule(needs_review=False)
+        request,
+        provider_for("약 15kg입니다."),
+        # The weight is a verifiable claim, so it needs a source. The rule
+        # answer is the evidence the validator reads.
+        rule(needs_review=False, answer="이 제품의 무게는 약 15kg입니다."),
     )
     assert hybrid["fallback_used"] is False
     assert "15kg" in outcome.result.answer
@@ -272,7 +276,9 @@ def test_case_d_compound_all_answerable_is_answered_in_one_call() -> None:
     )
     request = request_for(content)
     outcome, hybrid, telemetry = run(
-        request, provider_for(answer), rule(needs_review=False)
+        request,
+        provider_for(answer),
+        rule(needs_review=False, answer="보증기간은 구입일로부터 2년입니다."),
     )
     assert hybrid["fallback_used"] is False
     assert len(split_subquestions(request.question)) == 3
@@ -404,7 +410,8 @@ def test_case_k_transient_errors_keep_their_retry_policy() -> None:
         inner, GptProviderSettings(), sleeper=lambda _: None
     )
     outcome = HybridAnswerService(wrapped).generate(
-        request_for("이 제품 무게가 얼마나 되나요?"), rule(needs_review=False)
+        request_for("이 제품 무게가 얼마나 되나요?"),
+        rule(needs_review=False, answer="이 제품의 무게는 약 15kg입니다."),
     )
     assert inner.attempts == 2
     assert "15kg" in outcome.result.answer
@@ -553,3 +560,157 @@ def test_component_names_cannot_carry_customer_text() -> None:
     assert "x" * 100 not in rendered
     # The oversized value is still located, by size.
     assert max(sizes.values()) >= 30_000
+
+
+# ------------------------------------------- PHASE A: prompt composition
+
+def test_retrieval_traces_never_reach_the_draft_prompt() -> None:
+    """The server's 655,129-char prompt was 94.7% retrieval diagnostics."""
+
+    from services.learning_context_service import (
+        PROMPT_EXCLUDED_CONTEXT_KEYS,
+        prompt_context,
+    )
+
+    context = {
+        "similar_approved_answers": [{"learning_example_id": 1, "answer": "근거"}],
+        "historical_cases": [
+            {
+                "historical_case_id": 7,
+                "question": "질문",
+                "answer_style_reference": "동일한 답변",
+                "answer_reference": "동일한 답변",
+            }
+        ],
+        "feedback_signals": {"verified_facts": [{"signal_id": 3}]},
+        "subquestion_evidence": [{"subquestion": "q", "status": "ANSWERABLE"}],
+        "learning_retrieval": {"subquestions": ["x" * 40_000]},
+        "historical_retrieval": {"subquestions": ["y" * 40_000]},
+    }
+    projected = prompt_context(context)
+
+    # Diagnostics are gone...
+    for key in PROMPT_EXCLUDED_CONTEXT_KEYS:
+        assert key not in projected, key
+    # ...and every evidence component is untouched.
+    for key in ("similar_approved_answers", "feedback_signals",
+                "subquestion_evidence"):
+        assert projected[key] == context[key]
+    # The seller answer is carried once, not twice.
+    case = projected["historical_cases"][0]
+    assert "answer_reference" in case
+    assert "answer_style_reference" not in case
+    assert case["historical_case_id"] == 7
+    # The original context keeps everything, for provenance.
+    assert "learning_retrieval" in context
+
+
+def test_prompt_budget_drops_least_authoritative_evidence_first() -> None:
+    from services.learning_context_service import apply_prompt_budget
+
+    context = {
+        "facts": {"authority": "keep"},
+        "similar_approved_answers": [{"a": "x" * 8_000}],
+        "historical_cases": [{"b": "y" * 8_000}],
+        "seller_style_examples": [{"c": "z" * 8_000}],
+    }
+    trimmed, report = apply_prompt_budget(context, budget=12_000)
+
+    assert [item["component"] for item in report["dropped"]] == [
+        "seller_style_examples",
+        "historical_cases",
+    ]
+    assert report["within_budget"] is True
+    assert report["final_chars"] < report["original_chars"]
+    # Authority is never a trim candidate.
+    assert trimmed["facts"] == {"authority": "keep"}
+    assert trimmed["similar_approved_answers"]
+
+
+def test_prompt_budget_is_reported_in_telemetry() -> None:
+    _, _, telemetry = run(
+        request_for(SIX_PART), provider_for(SIX_PART_PARTIAL), rule()
+    )
+    budget = telemetry["prompt_budget"]
+    assert budget["budget_chars"] > 0
+    assert budget["within_budget"] is True
+    assert budget["dropped"] == []
+
+
+# ------------------------------------------------- PHASE B: grounding
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        # The production sentence: a period nobody supplied.
+        ("구매 후 1개월이 지난 경우 삼성서비스센터에서 진행됩니다.", "수치·기간"),
+        ("보증기간은 2년입니다.", "수치·기간"),
+        ("기존 브라켓과 호환됩니다.", "호환"),
+        ("카드 할인 적용됩니다.", "혜택·할인"),
+    ],
+)
+def test_ungrounded_claims_are_blocked(answer: str, expected: str) -> None:
+    outcome, hybrid, _ = run(request_for(SIX_PART), provider_for(answer), rule())
+    errors = (hybrid.get("validation") or {}).get("errors") or []
+    assert any(expected in error for error in errors), errors
+    assert hybrid["fallback_used"] is True
+    assert answer not in outcome.result.answer
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # Deferrals promise nothing, so they need no evidence.
+        "브라켓 호환 여부는 확인 후 안내드리겠습니다.",
+        "카드 혜택은 확인 후 안내드리겠습니다.",
+        "설치예정일은 주문번호를 알려주시면 확인해 드리겠습니다.",
+        # Neither does ordinary prose.
+        "설치는 전문 기사가 방문하여 진행합니다.",
+        "A/S는 삼성전자 서비스센터를 통해 받으실 수 있습니다.",
+    ],
+)
+def test_unverifiable_or_deferred_prose_is_not_blocked(answer: str) -> None:
+    _, hybrid, _ = run(request_for(SIX_PART), provider_for(answer), rule())
+    errors = (hybrid.get("validation") or {}).get("errors") or []
+    assert not any("근거 없는" in error for error in errors), errors
+
+
+def test_a_supported_claim_passes() -> None:
+    """The same sentence is fine once the evidence is there."""
+
+    from answer.answer_validator import ungrounded_claims
+
+    claim = "구매 후 1개월이 지난 경우 삼성서비스센터에서 진행됩니다."
+    assert ungrounded_claims(claim, "") != []
+    assert ungrounded_claims(claim, "구매 후 1개월 이내는 판매자가 처리합니다.") == []
+
+
+def test_grounding_does_not_depend_on_the_model_declaring_used_facts() -> None:
+    """used_facts was the only trigger before, so citing nothing skipped it."""
+
+    outcome, hybrid, _ = run(
+        request_for(SIX_PART),
+        provider_for("보증기간은 5년입니다.", used_facts=[]),
+        rule(),
+    )
+    errors = (hybrid.get("validation") or {}).get("errors") or []
+    assert any("근거 없는" in error for error in errors), errors
+    assert "5년" not in outcome.result.answer
+
+
+def test_a_calendar_date_is_not_treated_as_an_ungrounded_duration() -> None:
+    """Dates answer to DATE_GROUNDING against the confirmed DPS schedule.
+
+    Reading "2026년 8월 3일" as the periods "2026년" and "3일" would have
+    blocked every correctly grounded installation date.
+    """
+
+    from answer.answer_validator import ungrounded_claims
+
+    assert ungrounded_claims("설치예정일은 2026년 8월 3일입니다.", "") == []
+    assert ungrounded_claims("배송은 2026-09-01에 완료됩니다.", "") == []
+    # A real duration is still checked.
+    assert ungrounded_claims("설치는 3일 후 진행됩니다.", "") != []
+    assert ungrounded_claims(
+        "설치는 3일 후 진행됩니다.", "설치는 결제 후 3일 이내 진행"
+    ) == []
