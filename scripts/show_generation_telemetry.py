@@ -47,6 +47,56 @@ def _json(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def render_components(
+    components: dict[str, int], total: int | None, *, top: int | None = None
+) -> list[str]:
+    """Render the whole prompt breakdown as a size-ordered tree.
+
+    Every component is shown, nested under its parent and sorted largest
+    first, so the dominant branch is the first line and its internals sit
+    directly beneath it. `.count` and `.max_record` describe the component
+    they belong to and are attached to its row rather than listed separately.
+    The previous rendering stopped after fifteen rows, which hid the inside
+    of the one branch that mattered.
+    """
+
+    if not components:
+        return []
+    values = {
+        name: chars
+        for name, chars in components.items()
+        if not name.endswith((".count", ".max_record"))
+    }
+    children: dict[str, list[str]] = {}
+    for name in values:
+        parent = name.rsplit(".", 1)[0] if "." in name else ""
+        children.setdefault(parent, []).append(name)
+
+    lines = ["TOP PROMPT COMPONENTS"]
+
+    def emit(parent: str, depth: int) -> None:
+        ordered = sorted(children.get(parent, []), key=lambda item: -values[item])
+        if top is not None and depth == 0:
+            ordered = ordered[:top]
+        for name in ordered:
+            chars = values[name]
+            share = f"{chars / total:>7.1%}" if total else "       -"
+            extras = []
+            count = components.get(f"{name}.count")
+            if count is not None:
+                extras.append(f"records={count}")
+            biggest = components.get(f"{name}.max_record")
+            if biggest is not None:
+                extras.append(f"max_record={biggest:,}")
+            suffix = ("  " + "  ".join(extras)) if extras else ""
+            label = "  " * depth + name.rsplit(".", 1)[-1]
+            lines.append(f"  {label:<46}{chars:>12,}{share}{suffix}")
+            emit(name, depth + 1)
+
+    emit("", 0)
+    return lines
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", required=True)
@@ -128,18 +178,9 @@ def main() -> int:
                 print(f"        accounted_component_chars {accounted:>10,}")
                 print(f"        unaccounted_chars       {unaccounted:>12,}")
             components = call.get("prompt_component_chars") or {}
-            if components:
-                print("        TOP PROMPT COMPONENTS")
-                shown = [
-                    (name, chars)
-                    for name, chars in components.items()
-                    if not name.endswith(".count")
-                ][:15]
-                for name, chars in shown:
-                    share = f"{chars / total:>6.1%}" if total else "     -"
-                    count = components.get(f"{name}.count")
-                    suffix = f"  records={count}" if count is not None else ""
-                    print(f"          {name:<42}{chars:>12,}{share}{suffix}")
+            for line in render_components(components, total):
+                print(f"        {line}")
+
 
     print("\n=== event timeline ===")
     for item in events:
