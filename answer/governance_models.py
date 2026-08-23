@@ -41,8 +41,14 @@ class GptProviderSettings:
     mode: GptMode = GptMode.FAKE
     model: str = "fake-json-v1"
     connect_timeout_seconds: float = 5.0
-    read_timeout_seconds: float = 30.0
-    total_timeout_seconds: float = 40.0
+    # Requests are not streamed, so nothing arrives until generation is
+    # finished: this is effectively "how long one model call may take".
+    # 30s was below what the configured reasoning model needs even for the
+    # small UNDERSTANDING prompt, which is what timed out in production.
+    read_timeout_seconds: float = 45.0
+    # The budget for one whole "GPT 새 답변 생성", across every provider call
+    # it makes -- not per call. This is the operator's real wait.
+    total_timeout_seconds: float = 120.0
     max_retries: int = 2
     retry_backoff_seconds: float = 0.5
     requests_per_minute: int = 30
@@ -99,10 +105,10 @@ class GptProviderSettings:
                 "QNA_GPT_CONNECT_TIMEOUT_SECONDS", 5.0
             ),
             read_timeout_seconds=_float_env(
-                "QNA_GPT_READ_TIMEOUT_SECONDS", 30.0
+                "QNA_GPT_READ_TIMEOUT_SECONDS", 45.0
             ),
             total_timeout_seconds=_float_env(
-                "QNA_GPT_TOTAL_TIMEOUT_SECONDS", 40.0
+                "QNA_GPT_TOTAL_TIMEOUT_SECONDS", 120.0
             ),
             max_retries=_int_env("QNA_GPT_MAX_RETRIES", 2),
             retry_backoff_seconds=_float_env(

@@ -100,7 +100,17 @@ class OpenAIResponsesTransport:
                 json=body,
                 timeout=(connect_timeout, read_timeout),
             )
+        except requests.ConnectTimeout as error:
+            # Never reaching the server is a transient fault: the same request
+            # is worth sending again. Distinguished from a read timeout so the
+            # retry policy can treat the two differently.
+            raise GptProviderRetryableError(
+                "OpenAI Provider 연결 시간이 초과되었습니다."
+            ) from error
         except requests.Timeout as error:
+            # A read timeout means the request was accepted and generation
+            # simply took longer than the budget. Repeating an identical
+            # request rarely makes the model faster, so this is not retried.
             raise GptProviderTimeoutError(
                 "OpenAI Provider 응답 시간이 초과되었습니다."
             ) from error
@@ -157,6 +167,27 @@ class OpenAIJsonProvider(GptProvider):
             )
         self.settings = settings
         self._transport = transport or OpenAIResponsesTransport(settings)
+        self._attempt_budget: float | None = None
+
+    def set_attempt_budget(self, seconds: float | None) -> None:
+        """Cap the next request by the time left in the generation budget.
+
+        Without this the configured total timeout could not restrain an
+        in-flight request: it was only ever compared *after* a read timeout
+        had already elapsed. The retry wrapper calls this before each attempt
+        so the socket read itself is bounded by the remaining budget.
+        """
+
+        self._attempt_budget = None if seconds is None else max(0.0, seconds)
+
+    def _read_timeout(self) -> float:
+        configured = self.settings.read_timeout_seconds
+        if self._attempt_budget is None:
+            return configured
+        # Leave room for connecting, and never fall to zero -- a request with
+        # no read budget at all would fail before it could be sent.
+        usable = self._attempt_budget - self.settings.connect_timeout_seconds
+        return max(1.0, min(configured, usable))
 
     def generate_json(
         self,
@@ -175,6 +206,6 @@ class OpenAIJsonProvider(GptProvider):
             context=context,
             model=self.settings.model,
             connect_timeout=self.settings.connect_timeout_seconds,
-            read_timeout=self.settings.read_timeout_seconds,
+            read_timeout=self._read_timeout(),
             total_timeout=self.settings.total_timeout_seconds,
         )

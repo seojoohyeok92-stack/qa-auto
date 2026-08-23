@@ -32,6 +32,14 @@ class ResilientJsonProvider:
         self.output_tokens = 0
         self.total_tokens = 0
         self.usage_available = False
+        # One deadline for the whole generation, not per call. A single
+        # "GPT 새 답변 생성" runs UNDERSTANDING, DRAFT and SELF_REVIEW, plus a
+        # corrective DRAFT/SELF_REVIEW pair when validation fails -- up to
+        # five provider calls. With a per-call budget the operator's worst
+        # case was that budget multiplied by five, so the configured total
+        # never described what anyone actually waited. This provider is built
+        # once per generation, so the instance lifetime is the generation.
+        self._deadline: float | None = None
         # Safe diagnostics for the most recent provider call. A timeout
         # previously recorded only the exception class, which left no way to
         # tell a slow single request from prompt growth or from retries
@@ -43,16 +51,33 @@ class ResilientJsonProvider:
     def _retryable(error: Exception) -> bool:
         if isinstance(error, GptProviderAuthenticationError):
             return False
-        if isinstance(
-            error,
-            (GptProviderTimeoutError, TimeoutError, ConnectionError),
-        ):
+        # A response timeout is not a transient fault. The request reached the
+        # provider and generation ran past the budget; sending the identical
+        # request again almost always runs past it again, and the only certain
+        # effect is doubling the customer's wait. Connect failures, 429s and
+        # 5xx are genuinely transient and stay retryable -- a connect timeout
+        # arrives as GptProviderRetryableError from the transport.
+        if isinstance(error, (GptProviderTimeoutError, TimeoutError)):
+            return False
+        if isinstance(error, ConnectionError):
             return True
         if isinstance(error, GptProviderRetryableError):
             return error.status_code is None or error.status_code == 429 or (
                 500 <= error.status_code <= 599
             )
         return False
+
+    def _apply_attempt_budget(self, attempt_started: float) -> None:
+        """Tell the inner provider how long this attempt may take.
+
+        Providers that cannot bound themselves (the fakes, and any transport
+        without the hook) simply do not implement it.
+        """
+
+        setter = getattr(self.provider, "set_attempt_budget", None)
+        if not callable(setter) or self._deadline is None:
+            return
+        setter(max(0.0, self._deadline - attempt_started))
 
     def generate_json(
         self,
@@ -62,6 +87,9 @@ class ResilientJsonProvider:
         context: dict[str, Any],
     ) -> dict[str, Any]:
         started = self.clock()
+        if self._deadline is None:
+            # Reuses the clock read above so recording adds no extra reads.
+            self._deadline = started + self.settings.total_timeout_seconds
         attempt = 0
         record: dict[str, Any] = {
             # Which generation stage this was: UNDERSTANDING, DRAFT,
@@ -86,8 +114,13 @@ class ResilientJsonProvider:
         # must not add clock reads -- the retry budget arithmetic is what the
         # clock is for.
         attempt_started = started
+        record["deadline_budget_seconds"] = round(self._deadline - started, 3)
         while True:
             record["attempts"] = attempt + 1
+            # Bound the request itself by what is left of the generation
+            # budget, so the deadline restrains an in-flight call instead of
+            # only being noticed once it has already overrun.
+            self._apply_attempt_budget(attempt_started)
             try:
                 result = self.provider.generate_json(
                     task=task, prompt=prompt, context=context
@@ -116,7 +149,7 @@ class ResilientJsonProvider:
                 now = self.clock()
                 record["last_attempt_seconds"] = round(now - attempt_started, 3)
                 record["elapsed_seconds"] = round(now - started, 3)
-                if now - started > self.settings.total_timeout_seconds:
+                if now > self._deadline:
                     record["outcome"] = "TOTAL_TIMEOUT_AFTER_RESPONSE"
                     raise GptProviderTimeoutError(
                         "GPT provider total timeout exceeded."
@@ -124,6 +157,13 @@ class ResilientJsonProvider:
                 record["outcome"] = "OK"
                 return result
             except Exception as error:
+                # Read the clock once and use it for both the terminal and the
+                # retry path. How long the attempt actually took is the whole
+                # point of the record, so it must survive a terminal failure --
+                # that is the number the server needs after a timeout.
+                now = self.clock()
+                record["last_attempt_seconds"] = round(now - attempt_started, 3)
+                record["elapsed_seconds"] = round(now - started, 3)
                 record["outcome"] = error.__class__.__name__
                 if not self._retryable(error) or attempt >= self.settings.max_retries:
                     if isinstance(error, (TimeoutError,)):
@@ -134,10 +174,7 @@ class ResilientJsonProvider:
                 attempt += 1
                 self.retry_count += 1
                 delay = self.settings.retry_backoff_seconds * (2 ** (attempt - 1))
-                now = self.clock()
-                record["last_attempt_seconds"] = round(now - attempt_started, 3)
-                record["elapsed_seconds"] = round(now - started, 3)
-                if now - started + delay > self.settings.total_timeout_seconds:
+                if now + delay > self._deadline:
                     record["outcome"] = "RETRY_WOULD_EXCEED_TOTAL_TIMEOUT"
                     raise GptProviderTimeoutError(
                         "GPT provider retry would exceed total timeout."

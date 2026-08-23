@@ -49,9 +49,7 @@ def test_success_does_not_retry() -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        TimeoutError("timeout"),
         ConnectionError("network"),
-        GptProviderTimeoutError("read timeout"),
         GptProviderRetryableError("429", status_code=429),
         GptProviderRetryableError("500", status_code=500),
         GptProviderRetryableError("503", status_code=503),
@@ -64,6 +62,27 @@ def test_retryable_errors_retry_and_succeed(error: Exception) -> None:
         task="DRAFT", prompt="{}", context={}
     )["answer"] == "ok"
     assert wrapped.retry_count == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("timeout"), GptProviderTimeoutError("read timeout")],
+)
+def test_response_timeouts_are_not_retried(error: Exception) -> None:
+    """A response timeout is not a transient fault.
+
+    The request reached the provider and generation ran past the budget, so
+    an identical retry almost always runs past it again and only doubles the
+    customer's wait. Connect failures, 429s and 5xx stay retryable and are
+    covered above.
+    """
+
+    provider = ScriptedProvider([error, {"answer": "ok"}])
+    wrapped = ResilientJsonProvider(provider, settings(), sleeper=lambda _: None)
+    with pytest.raises(GptProviderTimeoutError):
+        wrapped.generate_json(task="DRAFT", prompt="{}", context={})
+    assert wrapped.retry_count == 0
+    assert provider.calls == 1
 
 
 @pytest.mark.parametrize(
