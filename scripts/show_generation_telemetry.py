@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,21 @@ def _json(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _elapsed_between(earlier: str, later: str) -> float | None:
+    """Seconds between two activity-log timestamps, or None if unparsable."""
+
+    def parse(value: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    start, end = parse(earlier), parse(later)
+    if start is None or end is None:
+        return None
+    return (end - start).total_seconds()
 
 
 def render_components(
@@ -126,11 +142,25 @@ def main() -> int:
         events = [
             dict(row)
             for row in connection.execute(
-                "SELECT event_code, created_at FROM activity_logs"
+                "SELECT event_code, created_at, details_json FROM activity_logs"
                 " WHERE inquiry_id=? ORDER BY id",
                 (inquiry_id,),
             ).fetchall()
         ]
+        try:
+            runs = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT id, model, started_at, completed_at, duration_ms,"
+                    " success, error_type, input_tokens, output_tokens,"
+                    " total_tokens, input_size, output_size"
+                    " FROM gpt_provider_runs WHERE inquiry_id=?"
+                    " ORDER BY id DESC LIMIT 5",
+                    (inquiry_id,),
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            runs = []
     finally:
         connection.close()
 
@@ -161,6 +191,20 @@ def main() -> int:
         print(f"  provider_call_count   : {telemetry.get('provider_call_count')}")
         print(f"  tasks                 : {telemetry.get('tasks')}")
         print(f"  total_elapsed_seconds : {telemetry.get('total_elapsed_seconds')}")
+        stages = telemetry.get("stage_seconds") or {}
+        if stages:
+            print("  stage_seconds         :")
+            for name, seconds in stages.items():
+                print(f"      {name:<28}{seconds:>10}s")
+        else:
+            print("  stage_seconds         : NOT_STORED"
+                  " (draft predates the timing change)")
+        budget = telemetry.get("prompt_budget") or {}
+        if budget:
+            print(f"  prompt_budget         : {budget.get('final_chars')} /"
+                  f" {budget.get('budget_chars')}"
+                  f"  within={budget.get('within_budget')}"
+                  f"  dropped={budget.get('dropped')}")
         for call in telemetry.get("calls") or []:
             print(
                 f"    - task={call.get('task')}"
@@ -182,9 +226,45 @@ def main() -> int:
                 print(f"        {line}")
 
 
+    print("\n=== provider runs (gpt_provider_runs) ===")
+    if not runs:
+        print("  (none)")
+    for run in runs:
+        print(
+            f"  run {run['id']}  model={run['model']}"
+            f"  duration_ms={run['duration_ms']}"
+            f"  success={run['success']}  error={run['error_type']}"
+        )
+        print(
+            f"      started={run['started_at']}"
+            f"  completed={run['completed_at']}"
+        )
+        print(
+            f"      tokens in/out/total="
+            f"{run['input_tokens']}/{run['output_tokens']}/{run['total_tokens']}"
+            f"   input_size={run['input_size']}"
+            f"  output_size={run['output_size']}"
+        )
+
     print("\n=== event timeline ===")
+    interesting = (
+        "rerun_elapsed_seconds", "draft_id", "stage", "status",
+        "error_type", "reason", "safe_error_code",
+    )
+    previous = None
     for item in events:
-        print(f"  {item['created_at']}  {item['event_code']}")
+        stamp = str(item["created_at"])
+        gap = ""
+        if previous is not None:
+            delta = _elapsed_between(previous, stamp)
+            if delta is not None:
+                gap = f"  (+{delta:.3f}s)"
+        previous = stamp
+        print(f"  {stamp}  {item['event_code']}{gap}")
+        detail = _json(item.get("details_json"))
+        shown = {key: detail[key] for key in interesting if key in detail}
+        if shown:
+            print(f"        {shown}")
     return 0
 
 
