@@ -67,6 +67,16 @@ DELIVERY_SCHEDULE_WORDS = (
     "오늘 오",
     "내일 오",
     "일정 확인",
+    # Complaints about the schedule slipping. The customer is asking what the
+    # schedule now is, not asking us to change it -- so this is a lookup and
+    # must keep its order/DPS requirement. An explicit request ("미뤄주세요")
+    # is matched earlier by _is_schedule_change_request and still wins.
+    "미뤄지는데",
+    "미뤄졌는데",
+    "지연되는데",
+    "지연됐는데",
+    "늦어지는데",
+    "늦어졌는데",
 )
 NOTIFICATION_POLICY_WORDS = (
     "알림톡",
@@ -557,11 +567,100 @@ class InquiryAnalysisService:
             word in compact for word in PRE_PURCHASE_DELIVERY_WORDS
         )
 
+    # A connector joins two clauses, but it does not on its own mean there
+    # are two questions: "50인치, 60인치 중 어떤 게 좋나요" is one comparison.
+    # These only propose candidate boundaries; _connector_segments decides
+    # whether a boundary actually separates two intents.
+    LIST_CONNECTOR = re.compile(r"\s*,\s*|\s*그리고\s*")
+    CLAUSE_CONNECTOR = re.compile(r"(?<=[가-힣])고(?=\s)")
+    # Shorter than this is an enumerated noun ("스탠드", "배송"), not a
+    # question of its own.
+    MIN_SEGMENT_LENGTH = 4
+
     def analyze(self, request: AnswerRequest) -> InquiryAnalysis:
         subquestions = split_subquestions(request.question)
+        if len(subquestions) == 1:
+            # The deterministic splitter keys on sentence enders and list
+            # punctuation, so a connector-joined compound arrives as one
+            # question. Left that way, a single HARD word ("파손") classifies
+            # the whole text HIGH_RISK and suppresses drafting, losing the
+            # answerable part with it. Refine only this case, so the existing
+            # decomposition path is untouched.
+            refined = self._connector_segments(request, subquestions[0])
+            if refined:
+                subquestions = refined
         if len(subquestions) > 1:
             return self._analyze_compound(request, subquestions)
         return self._analyze_single(request)
+
+    def _subtype_of(
+        self, request: AnswerRequest, text: str
+    ) -> tuple[str, str]:
+        """Classify one candidate segment as (subtype, detected_intent)."""
+
+        judged = self._analyze_single(
+            dataclasses.replace(request, question=text)
+        )
+        return judged.inquiry_subtype, judged.detected_intent
+
+    def _connector_segments(
+        self, request: AnswerRequest, text: str
+    ) -> tuple[str, ...]:
+        """Split a connector-joined question only when the sides differ.
+
+        The connector is never the evidence. Each candidate segment is run
+        through the same single-question classifier, and the split is kept
+        only when the segments genuinely carry different intents. That is
+        what separates "설치방법, 파손 보상 알려주세요" (installation guidance
+        plus a dispute) from "50인치, 60인치 중 어떤 게 좋나요" (one comparison,
+        both sides PRODUCT_SPEC_OR_FEATURE) without listing either sentence.
+        """
+
+        for segments in self._candidate_segmentations(text):
+            if len(segments) < 2:
+                continue
+            if any(
+                len(segment) < self.MIN_SEGMENT_LENGTH for segment in segments
+            ):
+                continue
+            judged = [self._subtype_of(request, segment) for segment in segments]
+            # An UNCLASSIFIED segment is far more often a fragment left by
+            # cutting mid-clause ("AS도 되고") than a question of its own, and
+            # an unclassified part drags the whole inquiry into review. Only
+            # split where every side stands on its own as a recognised
+            # question.
+            if any(subtype == "UNCLASSIFIED" for subtype, _ in judged):
+                continue
+            # Compare subtype *and* intent: "설치방법" and "기존 브라켓과
+            # 호환되나요" share the installation subtype but differ in intent,
+            # while the two halves of "50인치, 60인치 중 어떤 게 좋나요" match on
+            # both and stay one question.
+            if len(set(judged)) < 2:
+                continue
+            return segments
+        return ()
+
+    def _candidate_segmentations(self, text: str) -> list[tuple[str, ...]]:
+        """Candidate splits, most explicit connector first."""
+
+        candidates: list[tuple[str, ...]] = []
+        listed = tuple(
+            part.strip()
+            for part in self.LIST_CONNECTOR.split(text)
+            if part and part.strip()
+        )
+        if len(listed) > 1:
+            candidates.append(listed)
+        # A verbal "-고" chains clauses and can repeat inside one clause
+        # ("알고 싶고"); the final one is the real clause boundary, so only
+        # that split is offered.
+        boundaries = list(self.CLAUSE_CONNECTOR.finditer(text))
+        if boundaries:
+            end = boundaries[-1].end()
+            left, right = text[:end].strip(), text[end:].strip()
+            if left and right:
+                candidates.append((left, right))
+        return candidates
 
     def _analyze_compound(
         self, request: AnswerRequest, subquestions: tuple[str, ...]

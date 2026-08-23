@@ -135,8 +135,15 @@ class AutoProcessingEligibilityService:
         validation_status = str(draft.get("validation_status") or "").upper()
         validator_value = draft.get("validator_result_json")
         validator = validator_value if isinstance(validator_value, dict) else {}
-        if validation_status.startswith("FAIL") or "REVIEW" in validation_status:
+        # "the validator rejected this" and "the validator passed but asked
+        # for a person to look" are different findings. Reporting both as
+        # VALIDATOR_NOT_PASS told staff the validator had failed on answers it
+        # had actually passed. Both still block; only the stated reason
+        # differs.
+        if validation_status.startswith("FAIL"):
             reasons.append("VALIDATOR_NOT_PASS")
+        elif "REVIEW" in validation_status:
+            reasons.append("VALIDATOR_REVIEW_REQUIRED")
         if validator and validator.get("passed") is False:
             reasons.append("VALIDATOR_NOT_PASS")
         if normalized_route not in AUTO_POSTABLE_ROUTES:

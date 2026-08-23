@@ -53,9 +53,18 @@ TOPIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # The trailing boundary is a negative lookahead rather than \W,
+        # because Korean agglutinates a particle straight onto the term:
+        # "A/S는", "A/S가", "A/S도". A particle is a word character, so the
+        # old (?:\W|$) boundary never matched the question form while the
+        # answer still matched via "서비스센터". A question then looked like
+        # it had no A/S topic and answering it registered as an unrequested
+        # topic, holding otherwise safe compound answers for review.
+        # The lookahead still rejects Latin continuations such as ASUS.
         "AS_SUPPORT",
         re.compile(
-            r"(?:^|\W)A\s*/?\s*S(?:\W|$)|애프터\s*서비스|서비스\s*센터|무상\s*수리|보증\s*기간|수리\s*접수",
+            r"(?:^|\W)A\s*/?\s*S(?![A-Za-z0-9])|애프터\s*서비스|서비스\s*센터"
+            r"|무상\s*수리|보증\s*기간|수리\s*접수",
             re.IGNORECASE,
         ),
     ),
