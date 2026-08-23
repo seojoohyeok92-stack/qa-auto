@@ -1978,9 +1978,15 @@ class AnswerService:
                                 hybrid_metadata.get("fallback_reason")
                                 or "GPT_VALIDATION_FAILED"
                             )
+                            # Keep the reason machine-readable as well as in
+                            # the message: a provider limit is a "retry
+                            # shortly" for the operator, a validation failure
+                            # is not, and the UI can only say so if the cause
+                            # survives the raise.
                             raise AnswerGenerationError(
                                 "GPT 답변이 안전 검증을 통과하지 못했습니다: "
-                                + fallback_reason
+                                + fallback_reason,
+                                reason_code=fallback_reason,
                             )
                         if not is_valid_draft(result.answer):
                             raise AnswerGenerationError(

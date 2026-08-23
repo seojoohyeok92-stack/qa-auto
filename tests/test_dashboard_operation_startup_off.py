@@ -13,7 +13,7 @@ from services.naver_auto_post_scheduler import (
 
 def make_database(tmp_path: Path, name: str = "dashboard-off.db") -> Database:
     database = Database(tmp_path / name)
-    assert database.initialize()[-1] == 28
+    assert database.initialize()[-1] == 29
     return database
 
 

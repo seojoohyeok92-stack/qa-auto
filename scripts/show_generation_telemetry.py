@@ -9,6 +9,11 @@ took and how large its prompt was.
 
 It opens the database through a SQLite read-only URI, issues SELECT only, and
 prints sizes and timings -- never prompt text, context values or the API key.
+
+The event timeline prints the gap between consecutive rows, the recorded
+``rerun_elapsed_seconds`` for the Streamlit re-execution that followed the
+generation, and -- when the dashboard ran with ``OJE_RERUN_PROFILE=1`` -- the
+per-stage split of that rerun.
 """
 from __future__ import annotations
 
@@ -249,7 +254,8 @@ def main() -> int:
     print("\n=== event timeline ===")
     interesting = (
         "rerun_elapsed_seconds", "draft_id", "stage", "status",
-        "error_type", "reason", "safe_error_code",
+        "error_type", "reason", "reason_code", "safe_error_code",
+        "existing_draft_preserved",
     )
     previous = None
     for item in events:
@@ -265,6 +271,14 @@ def main() -> int:
         shown = {key: detail[key] for key in interesting if key in detail}
         if shown:
             print(f"        {shown}")
+        profile = detail.get("rerun_profile")
+        if isinstance(profile, dict):
+            print(f"        rerun profile: total"
+                  f" {profile.get('total_seconds')}s")
+            for row in profile.get("stages") or []:
+                print(f"          {str(row.get('stage')):<26}"
+                      f"{row.get('elapsed_seconds'):>9}s"
+                      f"  cumulative {row.get('cumulative_seconds')}s")
     return 0
 
 

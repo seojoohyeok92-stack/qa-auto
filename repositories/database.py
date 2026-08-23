@@ -2048,6 +2048,24 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        29,
+        (
+            # The dashboard reads activity_logs by event_code and by level on
+            # every rerun. Only created_at was indexed, so each of those reads
+            # scanned the whole log -- a table that grows without bound and by
+            # far the largest in a production database. Indexing the columns
+            # actually filtered on turns those scans into seeks.
+            """
+            CREATE INDEX IF NOT EXISTS idx_activity_logs_event_created
+            ON activity_logs(event_code, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_activity_logs_level_created
+            ON activity_logs(level, created_at DESC)
+            """,
+        ),
+    ),
 )
 
 

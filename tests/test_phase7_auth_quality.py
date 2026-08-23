@@ -54,7 +54,7 @@ def seed_draft(database: Database, *, posted: bool = False) -> tuple[int, int]:
 
 
 def test_migration_v6_creates_operational_tables(database: Database) -> None:
-    assert database.migration_versions() == list(range(1, 29))
+    assert database.migration_versions() == list(range(1, 30))
     with database.connection() as connection:
         names = {
             row[0]

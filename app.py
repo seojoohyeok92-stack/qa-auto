@@ -55,6 +55,11 @@ from ui.learning_manager import render_learning_manager
 from ui.gpt_copilot import render_gpt_copilot
 from ui.historical_case_manager import render_historical_case_manager
 from ui.learning_performance import render_learning_performance
+from ui.rerun_profile import (
+    begin as begin_rerun_profile,
+    publish as publish_rerun_profile,
+    stage as profile_stage,
+)
 from ui.production_dashboard import (
     render_learning_status,
     render_operations_statistics,
@@ -345,13 +350,44 @@ def _attach_dashboard_routes(
 def _attach_dashboard_learning(
     database: Database, items: list[WorkItem]
 ) -> list[WorkItem]:
+    """Attach Learning badges to exactly the rows handed in.
+
+    Resolving one inquiry's Learning state runs a dozen correlated subqueries
+    over the Learning tables, so doing it for the whole table cost far more
+    than the twenty rows a page shows. Both queries are now scoped to the
+    inquiries actually being decorated; the mapping and the fallback for a row
+    with no Learning history are unchanged.
+    """
+
+    if not items:
+        return items
     repository = InquiryRepository(database)
-    states = repository.learning_states()
     empty = repository._empty_learning_state()
+    question_ids = sorted(
+        {
+            str(
+                item.get("inquiry_id")
+                or item.get("source_question_id")
+                or ""
+            )
+            for item in items
+        }
+        - {""}
+    )
+    if not question_ids:
+        for item in items:
+            item.update(empty)
+        return items
+    placeholders = ",".join("?" for _ in question_ids)
     with database.connection() as connection:
         identities = connection.execute(
-            "SELECT id, store_code, source_type, source_question_id FROM inquiries"
+            "SELECT id, store_code, source_type, source_question_id"
+            f" FROM inquiries WHERE source_question_id IN ({placeholders})",
+            question_ids,
         ).fetchall()
+    states = repository.learning_states(
+        [int(row["id"]) for row in identities]
+    )
     by_source = {
         (str(row["store_code"]), str(row["source_type"]), str(row["source_question_id"])):
         states.get(int(row["id"]), empty)
@@ -801,23 +837,27 @@ def render_dashboard_page(
     load_errors: list[WorkQueueError],
     database: Database | None,
 ) -> None:
-    dashboard_states = (
-        ApprovalRepository(database).dashboard_states()
-        if database is not None
-        else []
-    )
-    start_date, end_date = render_header(
-        work_items, database, dashboard_states
-    )
-    operations = render_dashboard_actions(
-        database, configured_stores, work_items
-    )
-    if operations is not None:
-        render_operations_statistics(operations)
-        render_learning_status(operations)
-        _render_admin_details(database, operations)
-    if database is not None:
-        render_learning_performance(database)
+    with profile_stage("dashboard_states"):
+        dashboard_states = (
+            ApprovalRepository(database).dashboard_states()
+            if database is not None
+            else []
+        )
+    with profile_stage("header"):
+        start_date, end_date = render_header(
+            work_items, database, dashboard_states
+        )
+    with profile_stage("dashboard_actions"):
+        operations = render_dashboard_actions(
+            database, configured_stores, work_items
+        )
+        if operations is not None:
+            render_operations_statistics(operations)
+            render_learning_status(operations)
+            _render_admin_details(database, operations)
+    with profile_stage("learning_performance"):
+        if database is not None:
+            render_learning_performance(database)
 
     if load_errors:
         _show_load_errors(load_errors)
@@ -852,34 +892,26 @@ def render_dashboard_page(
 
     available_routes = sorted({_work_item_route(item) for item in work_items})
     st.session_state["dashboard_available_routes"] = available_routes
-    filters = render_filter_bar(
-        available_stores,
-        available_queues,
-        available_priorities,
-    )
+    with profile_stage("filter_bar"):
+        filters = render_filter_bar(
+            available_stores,
+            available_queues,
+            available_priorities,
+        )
     learning_filter = str(filters.get("learning_status") or "ALL")
-    if database is not None:
-        work_items = _attach_dashboard_learning(database, work_items)
+    with profile_stage("attach_learning"):
+        # Only the Learning filter needs every candidate row's state; when it
+        # is off, the badges are read solely by the rows that get rendered, so
+        # they are decorated further down once the page is known.
+        if database is not None and learning_filter != "ALL":
+            work_items = _attach_dashboard_learning(database, work_items)
     # Streamlit can keep an already-imported ui.dashboard module alive while
     # reloading this file.  During that transition an older filter result has
     # no route key, so treat it as the unfiltered route until the next rerun.
     route_filter = str(filters.get("route") or "ALL")
-    scoped_items = filter_work_items(
-        work_items,
-        store_codes=filters["stores"],
-        source=filters["source"],
-        queues=filters["queues"],
-        priorities=filters["priorities"],
-        answer_status=filters["answer_status"],
-        delivery_only=filters["delivery_only"],
-        search_query=filters["search_query"],
-        start_date=start_date,
-        end_date=end_date,
-        route=route_filter,
-        learning_status=learning_filter,
-    )
-    kpi_counts = (
-        InquiryRepository(database).dashboard_kpi_counts(
+    with profile_stage("filter_work_items"):
+        scoped_items = filter_work_items(
+            work_items,
             store_codes=filters["stores"],
             source=filters["source"],
             queues=filters["queues"],
@@ -887,14 +919,29 @@ def render_dashboard_page(
             answer_status=filters["answer_status"],
             delivery_only=filters["delivery_only"],
             search_query=filters["search_query"],
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat(),
+            start_date=start_date,
+            end_date=end_date,
+            route=route_filter,
             learning_status=learning_filter,
         )
-        if database is not None
-        else {}
-    )
-    with kpi_slot:
+    with profile_stage("dashboard_kpi_counts"):
+        kpi_counts = (
+            InquiryRepository(database).dashboard_kpi_counts(
+                store_codes=filters["stores"],
+                source=filters["source"],
+                queues=filters["queues"],
+                priorities=filters["priorities"],
+                answer_status=filters["answer_status"],
+                delivery_only=filters["delivery_only"],
+                search_query=filters["search_query"],
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                learning_status=learning_filter,
+            )
+            if database is not None
+            else {}
+        )
+    with profile_stage("kpi_cards"), kpi_slot:
         kpi_filter = render_kpi_cards(
             scoped_items,
             database,
@@ -939,30 +986,32 @@ def render_dashboard_page(
         )
         total_count = len(route_items)
     else:
-        page_rows, total_count, total_pages = InquiryRepository(
-            database
-        ).dashboard_page(
-            store_codes=filters["stores"],
-            source=filters["source"],
-            queues=filters["queues"],
-            priorities=filters["priorities"],
-            answer_status=filters["answer_status"],
-            delivery_only=filters["delivery_only"],
-            search_query=filters["search_query"],
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat(),
-            kpi_filter=kpi_filter,
-            page=int(st.session_state.get("dashboard_page", 1)),
-            page_size=int(filters["display_limit"]),
-            learning_status=learning_filter,
-        )
+        with profile_stage("dashboard_page_query"):
+            page_rows, total_count, total_pages = InquiryRepository(
+                database
+            ).dashboard_page(
+                store_codes=filters["stores"],
+                source=filters["source"],
+                queues=filters["queues"],
+                priorities=filters["priorities"],
+                answer_status=filters["answer_status"],
+                delivery_only=filters["delivery_only"],
+                search_query=filters["search_query"],
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                kpi_filter=kpi_filter,
+                page=int(st.session_state.get("dashboard_page", 1)),
+                page_size=int(filters["display_limit"]),
+                learning_status=learning_filter,
+            )
         current_page = min(
             max(1, int(st.session_state.get("dashboard_page", 1))),
             total_pages,
         )
-        page_items = _attach_dashboard_routes(
-            database, _dashboard_work_items_from_rows(page_rows)
-        )
+        with profile_stage("page_items_build"):
+            page_items = _attach_dashboard_routes(
+                database, _dashboard_work_items_from_rows(page_rows)
+            )
     st.session_state["dashboard_page"] = current_page
 
     if not page_items:
@@ -970,16 +1019,21 @@ def render_dashboard_page(
         render_gpt_copilot(database)
         return
 
-    render_review_workspace(
-        page_items,
-        total_count,
-        database,
-        page_size=int(filters["display_limit"]),
-        current_page=current_page,
-        total_pages=total_pages,
-    )
+    with profile_stage("attach_learning_page"):
+        page_items = _attach_dashboard_learning(database, page_items)
 
-    render_gpt_copilot(database)
+    with profile_stage("review_workspace_render"):
+        render_review_workspace(
+            page_items,
+            total_count,
+            database,
+            page_size=int(filters["display_limit"]),
+            current_page=current_page,
+            total_pages=total_pages,
+        )
+
+    with profile_stage("gpt_copilot"):
+        render_gpt_copilot(database)
 
     if not st.session_state.get("selected_inquiry_key"):
         st.caption(
@@ -989,7 +1043,9 @@ def render_dashboard_page(
 
 
 def main() -> None:
-    database, db_status = _initialize_database()
+    begin_rerun_profile()
+    with profile_stage("app_start"):
+        database, db_status = _initialize_database()
     if database is not None:
         ensure_local_identity(database)
         # Must run before ensure_auto_post_scheduler, and only ever resets
@@ -1000,7 +1056,8 @@ def main() -> None:
         ensure_auto_sync_scheduler(database)
         ensure_auto_post_scheduler(database)
         ensure_dps_session_monitor()
-    configured_stores = get_configured_stores()
+    with profile_stage("repository_init"):
+        configured_stores = get_configured_stores()
     current_page = str(st.session_state.get("current_page") or "dashboard")
     persisted_admin_mode = _restore_persisted_admin_mode(database)
     refresh_requested = False
@@ -1021,7 +1078,8 @@ def main() -> None:
 
     if current_page in {"dashboard", "inquiries"}:
         if database is not None:
-            work_items = dashboard_work_items_from_database(database)
+            with profile_stage("work_queue_load"):
+                work_items = dashboard_work_items_from_database(database)
             load_errors, load_succeeded = [], True
         else:
             work_items, load_errors, load_succeeded = [], [], False
@@ -1046,6 +1104,7 @@ def main() -> None:
             configured_stores, work_items, load_errors, database
         )
         render_build_footer()
+        publish_rerun_profile()
         return
     if current_page == "inquiries":
         if load_errors:

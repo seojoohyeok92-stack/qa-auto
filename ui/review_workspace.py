@@ -77,6 +77,7 @@ from ui.dps_presenter import (
     installation_date_display,
     installation_date_value,
 )
+from ui.rerun_profile import snapshot as rerun_profile_snapshot
 from ui.session_identity import can, current_actor
 from ui.uat_presenters import answer_source_label
 
@@ -194,6 +195,51 @@ def load_program_answer_view(
         ),
         "mismatch": mismatch,
     }
+
+
+# Provider limits the operator can simply wait out, mapped to what the
+# dashboard should say about each. Anything not listed here keeps the generic
+# failure message, so a new cause is never silently described as a rate limit.
+_RETRYABLE_LIMIT_MESSAGES: dict[str, tuple[str, str]] = {
+    "RATE_LIMITED": (
+        "OpenAI 요청 제한으로 생성하지 못했습니다",
+        "OpenAI 요청 제한으로 답변을 생성하지 못했습니다. "
+        "잠시 후 다시 시도해주세요. 기존 Program Answer는 그대로 유지됩니다.",
+    ),
+    "COST_LIMITED": (
+        "OpenAI 사용 한도로 생성하지 못했습니다",
+        "OpenAI 사용 한도에 도달해 답변을 생성하지 못했습니다. "
+        "한도를 확인한 뒤 다시 시도해주세요. "
+        "기존 Program Answer는 그대로 유지됩니다.",
+    ),
+}
+
+
+def limit_notice(error: BaseException) -> str | None:
+    """The operator-facing explanation for a provider limit, if that is why.
+
+    Returns ``None`` for every other cause so the caller falls back to its
+    existing message rather than reporting an unrelated failure as a limit.
+    """
+
+    found = _limit_labels(error)
+    return None if found is None else found[1]
+
+
+def _limit_labels(error: BaseException) -> tuple[str, str] | None:
+    code = str(getattr(error, "reason_code", "") or "").strip().upper()
+    return _RETRYABLE_LIMIT_MESSAGES.get(code)
+
+
+def _close_generation_status(box: Any, label: str) -> None:
+    """Move an open progress container into its finished error state."""
+
+    if box is None:
+        return
+    try:
+        box.update(label=label, state="error", expanded=False)
+    except Exception:  # pragma: no cover - container already torn down
+        LOGGER.debug("생성 진행 표시를 종료하지 못했습니다.", exc_info=True)
 
 
 def _record_ui_event(
@@ -1981,6 +2027,15 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                             time.perf_counter() - rerun_started, 3
                         ),
                     }
+                    # When stage timing is switched on, attach the split so
+                    # the recorded span can be read as a breakdown rather
+                    # than a single unexplained number.
+                    profile = rerun_profile_snapshot()
+                    if profile:
+                        render_details = {
+                            **render_details,
+                            "rerun_profile": profile,
+                        }
                 _record_ui_event(
                     database,
                     inquiry_id,
@@ -2196,6 +2251,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     generation_stage = "button"
     generation_correlation_id: str | None = None
     generated_draft_id: int | None = None
+    # Kept outside the try so a failure can close the progress container the
+    # generation opened; otherwise it stays on screen reading "Facts 준비 중"
+    # forever, which made a half-second rate-limit refusal look like a run
+    # still in progress.
+    generation_status_box: Any = None
     try:
         if excluded_save:
             LearningFeedbackService(database).capture_dashboard_excluded(
@@ -2255,6 +2315,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "Facts 준비 중",
                     expanded=True,
                 ) as generation_status:
+                    generation_status_box = generation_status
                     generation_stage = "facts"
                     generation_status.write("문의 정보 준비 중")
                     generation_status.write("주문 및 설치정보 확인 중")
@@ -2556,6 +2617,30 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     ) as error:
         st.error(str(error))
     except Exception as error:
+        limit_labels = _limit_labels(error)
+        if limit_labels is not None:
+            status_label, notice = limit_labels
+            # A provider limit refuses in well under a second and never
+            # touches the stored answer, so the operator is told to retry
+            # rather than sent to the activity log, and the existing Program
+            # Answer stands.
+            _close_generation_status(generation_status_box, status_label)
+            _record_ui_event(
+                database,
+                inquiry_id,
+                "GPT_PROVIDER_LIMIT_NOTICE",
+                "Provider 한도로 새 답변 생성을 중단하고 기존 답변을 유지했습니다.",
+                level="WARNING",
+                details={
+                    "correlation_id": generation_correlation_id,
+                    "stage": generation_stage,
+                    "reason_code": getattr(error, "reason_code", None),
+                    "error_type": error.__class__.__name__,
+                    "existing_draft_preserved": True,
+                },
+            )
+            st.warning(notice)
+            return
         record_runtime_exception(
             "STREAMLIT_RUNTIME_EXCEPTION",
             error,
@@ -2580,6 +2665,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "error_category": error.__class__.__name__,
             },
         )
+        _close_generation_status(generation_status_box, "답변 생성 실패")
         if generated_draft_id:
             st.error(
                 "초안은 저장됐지만 화면 갱신에 실패했습니다. "

@@ -11,7 +11,18 @@ class UnsupportedInquiryError(AnswerEngineError):
 
 
 class AnswerGenerationError(AnswerEngineError):
-    """A provider failed to produce a valid answer result."""
+    """A provider failed to produce a valid answer result.
+
+    ``reason_code`` carries the machine-readable cause -- ``RATE_LIMITED``,
+    ``COST_LIMITED``, ``PRIVACY_BLOCKED`` and so on. Without it every cause
+    reached the dashboard as the same opaque sentence, so an operator could
+    not tell "wait and retry" apart from "this answer needs review".
+    """
+
+    def __init__(self, *args: object, reason_code: str | None = None) -> None:
+        super().__init__(*args)
+        normalized = str(reason_code or "").strip().upper()
+        self.reason_code: str | None = normalized or None
 
 
 class AnswerProviderUnavailableError(AnswerGenerationError):
