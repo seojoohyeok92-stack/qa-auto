@@ -224,9 +224,12 @@ def test_corrective_regeneration_recovers_after_one_rejected_attempt() -> None:
     hybrid = HybridAnswerService(provider, learning_context_provider=lambda *_: {})
     outcome = hybrid.generate(_request(" ".join(questions)), _rule_result())
 
-    assert provider.calls.count("UNDERSTANDING") == 1
+    # The pipeline no longer spends a call on UNDERSTANDING or SELF_REVIEW:
+    # the intent is derived deterministically and the validator does the
+    # grading. Only the draft and its one corrective retry reach the provider.
+    assert provider.calls.count("UNDERSTANDING") == 0
     assert provider.calls.count("DRAFT") == 2
-    assert provider.calls.count("SELF_REVIEW") == 2
+    assert provider.calls.count("SELF_REVIEW") == 0
     assert outcome.fallback_used is False
     assert outcome.validation is not None and outcome.validation.passed is True
     assert "취급하지 않는 것 같습니다" not in outcome.result.answer
@@ -253,10 +256,16 @@ def test_corrective_regeneration_is_bounded_to_a_single_retry() -> None:
     # Both attempts fail: exactly one retry happened (two DRAFT calls total),
     # never an unbounded loop, and the caller correctly falls back.
     assert provider.calls.count("DRAFT") == 2
-    assert provider.calls.count("SELF_REVIEW") == 2
+    # SELF_REVIEW is no longer a provider round trip; the validator
+    # grades the draft deterministically.
+    assert provider.calls.count("SELF_REVIEW") == 0
     assert outcome.fallback_used is True
     assert outcome.intent is not None
-    assert list(outcome.intent.questions) == list(questions)
+    # The sub-questions now come from the deterministic splitter, which
+    # carries the question without its trailing mark.
+    assert list(outcome.intent.questions) == [
+        question.rstrip("?") for question in questions
+    ]
 
 
 def test_request_order_id_strategy_never_triggers_regeneration() -> None:

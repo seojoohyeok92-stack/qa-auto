@@ -46,6 +46,10 @@ class ResilientJsonProvider:
         # burning the wall clock. Metadata only: never the prompt text, the
         # context values, the API key or anything a customer wrote.
         self.last_call: dict[str, Any] = {}
+        # Every call this generation made, in order. One instance is built per
+        # generation, so this is the per-generation provider ledger: how many
+        # round trips a "GPT 새 답변 생성" actually cost and where the time went.
+        self.call_records: list[dict[str, Any]] = []
 
     @staticmethod
     def _retryable(error: Exception) -> bool:
@@ -109,6 +113,7 @@ class ResilientJsonProvider:
             "outcome": "STARTED",
         }
         self.last_call = record
+        self.call_records.append(record)
         # Tracked without reading the clock: the first attempt starts with the
         # call, and each later one starts when the backoff finishes. Recording
         # must not add clock reads -- the retry budget arithmetic is what the

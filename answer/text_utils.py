@@ -113,6 +113,33 @@ _FILLER_ONLY = re.compile(r"(?:궁금해요|궁금합니다|알려주세요|여�
 _LIST_SPLIT = re.compile(r"(?:\n+|[?？]|(?:^|\s)\d+[.)]\s*)")
 
 
+# Korean polite interrogative tails, and the imperative tails that look like
+# them but are requests. Used only to punctuate a question echoed back to the
+# customer -- never for classification.
+_INTERROGATIVE_TAIL = re.compile(r"(?:요|까|죠|쥬|나|니)$")
+_REQUEST_ENDING = re.compile(r"(?:주세요|주십시오|바랍니다|부탁드립니다|하세요)$")
+
+
+def restore_question_mark(text: object) -> str:
+    """Put back the question mark that splitting removed.
+
+    split_subquestions cuts on "?" and on interrogative endings, so a
+    sub-question comes back without its punctuation. That is right for
+    classification and wrong for anything shown to the customer: echoing
+    문의주신 "...하나요" back reads like a transcription error.
+    """
+
+    value = str(text or "").strip()
+    if not value or value[-1] in "?？!！.。":
+        return value
+    if _REQUEST_ENDING.search(value):
+        # "설치방법 알려주세요" is a request, not a question.
+        return value
+    if _INTERROGATIVE_TAIL.search(value):
+        return f"{value}?"
+    return value
+
+
 def split_subquestions(
     question: object, *, minimum_length: int = 4
 ) -> tuple[str, ...]:
@@ -144,4 +171,10 @@ def split_subquestions(
         for part in parts
         if len(part) >= minimum_length and not _FILLER_ONLY.fullmatch(part)
     ]
-    return tuple(meaningful) if meaningful else (text,)
+    # The same question asked twice is still one question. A customer
+    # repeating themselves, or a channel that echoes the first line as the
+    # inquiry title, must not inflate the sub-question count: the extra copy
+    # would be classified, prompted and coverage-checked as if the customer
+    # wanted two separate answers.
+    deduplicated = list(dict.fromkeys(meaningful))
+    return tuple(deduplicated) if deduplicated else (text,)

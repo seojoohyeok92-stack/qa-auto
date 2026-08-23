@@ -29,12 +29,28 @@ def _first(*values: Any) -> Any:
 
 
 def _combined_inquiry_text(title: Any, content: Any) -> str:
+    """Join the inquiry title and body without repeating the question.
+
+    Naver titles a product inquiry with the first line of its body, so
+    prepending the title unconditionally added a duplicate of the customer's
+    first question. Equality alone did not catch it -- the title matches only
+    the first *line* of a multi-question body -- so a six-question inquiry was
+    analysed as seven, with the extra one counted, prompted and coverage
+    checked twice. The title is only prepended when it says something the body
+    does not already contain.
+    """
+
     normalized_title = normalize_question_text(title)
     normalized_content = normalize_question_text(content)
     if not normalized_title:
         return normalized_content
-    if not normalized_content or normalized_content == normalized_title:
+    if not normalized_content:
         return normalized_title
+    content_lines = {
+        line.strip() for line in normalized_content.splitlines() if line.strip()
+    }
+    if normalized_content == normalized_title or normalized_title in content_lines:
+        return normalized_content
     return f"{normalized_title}\n{normalized_content}"
 
 

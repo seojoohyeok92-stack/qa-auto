@@ -263,7 +263,7 @@ def test_rule_forced_review_is_excluded_from_canary(
 def test_timeout_fixture_falls_back_and_records_timeout(
     database: Database,
 ) -> None:
-    provider = FakeGptProvider(fail_tasks={"UNDERSTANDING"})
+    provider = FakeGptProvider(fail_tasks={"DRAFT"})
     # Hybrid normalizes the injected failure as provider failure.
     outcome = GovernedHybridAnswerService(
         database,

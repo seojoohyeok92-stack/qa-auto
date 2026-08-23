@@ -18,6 +18,7 @@ from answer.inquiry_processing_plan import InquiryProcessingPlan
 from answer.answer_format import format_final_answer
 from answer.answer_validator import AnswerValidator
 from answer.source_adapter import answer_request_from_inquiry
+from answer.text_utils import restore_question_mark
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.dps_repository import DpsRepository
@@ -316,7 +317,9 @@ def _review_required_safe_result(
 
     cleaned_questions = tuple(
         dict.fromkeys(
-            str(item).strip() for item in questions if str(item).strip()
+            restore_question_mark(item)
+            for item in questions
+            if str(item).strip()
         )
     )
     if cleaned_questions:

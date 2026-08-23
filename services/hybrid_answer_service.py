@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -8,6 +9,7 @@ from answer.fact_selection import FactSelectionService, SelectedFacts
 from answer.facts import AnswerFacts, build_answer_facts
 from answer.hybrid_models import (
     DraftResult,
+    Emotion,
     IntentResult,
     SelfReviewResult,
     ValidationResult,
@@ -16,6 +18,7 @@ from answer.models import AnswerRequest, AnswerResult, AnswerStatus
 from answer.inquiry_analysis import InquiryAnalysis
 from answer.inquiry_analysis import AnswerStrategy
 from answer.providers.interfaces import JsonGptProvider
+from answer.text_utils import split_subquestions
 from answer.providers.provider_factory import create_gpt_provider
 from services.draft_generation_service import DraftGenerationService
 from services.gpt_understanding_service import GptUnderstandingService
@@ -62,6 +65,90 @@ class HybridAnswerService:
         self.fact_selection = fact_selection or FactSelectionService()
         self._learning_context_provider = learning_context_provider
 
+    def _provider_telemetry(
+        self, *, started: float | None = None
+    ) -> dict[str, Any]:
+        """How many provider round trips this generation cost, and where.
+
+        When a generation failed the safe draft replaced the GPT draft and the
+        evidence went with it, so nobody could tell afterwards whether the
+        pipeline had made one call or five. Sizes and timings only -- the
+        records carry no prompt text, context values or customer data.
+        """
+
+        records = list(getattr(self.provider, "call_records", []) or [])
+        telemetry: dict[str, Any] = {
+            "provider_call_count": len(records),
+            "tasks": [str(item.get("task") or "") for item in records],
+            "calls": records,
+        }
+        if started is not None:
+            telemetry["total_elapsed_seconds"] = round(
+                time.monotonic() - started, 3
+            )
+        return telemetry
+
+    @staticmethod
+    def _deterministic_intent(
+        facts: AnswerFacts,
+        analysis: InquiryAnalysis | None,
+        rule_result: AnswerResult,
+    ) -> IntentResult:
+        """Derive the intent without spending a provider call on it.
+
+        The UNDERSTANDING round trip re-derived what the Python analysis had
+        already decided, and the only field anything downstream depends on is
+        `questions` -- used for coverage, topic relevance and per-sub-question
+        evidence. split_subquestions produces that deterministically, so the
+        call bought a second opinion on a decision that was already made while
+        adding a network round trip to every generation. Emotion, urgency and
+        confidence were only ever written to a diagnostic event.
+        """
+
+        questions = split_subquestions(facts.inquiry.get("question"))
+        return IntentResult(
+            category=(
+                (analysis.inquiry_subtype if analysis else "")
+                or rule_result.category
+                or "기타/직원확인"
+            ),
+            questions=questions,
+            emotion=Emotion.NORMAL,
+            urgency="NORMAL",
+            confidence=float(analysis.confidence) if analysis else 1.0,
+            requires_review=bool(
+                analysis.manual_review_required
+                if analysis is not None
+                else rule_result.needs_review
+            ),
+            reason="결정적 분석으로 문의를 분해했습니다.",
+        )
+
+    @staticmethod
+    def _neutral_self_review(questions: tuple[str, ...]) -> SelfReviewResult:
+        """Stand in for the provider's self review.
+
+        Every field the self review reported is checked deterministically by
+        AnswerValidator -- speculation by pattern, fact existence against the
+        resolved facts, coverage against the sub-questions, dates against DPS.
+        Asking the model to grade its own answer added a third provider call
+        whose opinion could veto a draft the validator would have passed, and
+        on inquiry 686097134 that is exactly what happened: the model reported
+        a fact inconsistency it could not point at, and a correct partial
+        answer was replaced by the generic safe draft. Grading now belongs to
+        the validator alone; this neutral result keeps its signature intact.
+        """
+
+        return SelfReviewResult(
+            passed=True,
+            answered_all_questions=True,
+            has_speculation=False,
+            facts_consistent=True,
+            requires_review=False,
+            reason="Validator가 결정적으로 검증합니다.",
+            warnings=(),
+        )
+
     @staticmethod
     def _fallback(
         rule_result: AnswerResult,
@@ -74,6 +161,7 @@ class HybridAnswerService:
         draft: DraftResult | None = None,
         review: SelfReviewResult | None = None,
         validation: ValidationResult | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> HybridAnswerOutcome:
         metadata = dict(rule_result.metadata)
         metadata["hybrid"] = {
@@ -89,6 +177,7 @@ class HybridAnswerService:
             "draft": draft.to_dict() if draft else None,
             "self_review": review.to_dict() if review else None,
             "validation": validation.to_dict() if validation else None,
+            "provider_telemetry": telemetry or {},
             "confirmed_facts": {
                 "installation_date": facts.installation.get("date"),
                 "required_delivery_date": facts.installation.get(
@@ -160,6 +249,7 @@ class HybridAnswerService:
         request: AnswerRequest,
         rule_result: AnswerResult,
     ) -> HybridAnswerOutcome:
+        generation_started = time.monotonic()
         facts = build_answer_facts(request, rule_result)
         analysis_value = request.metadata.get("phase9_analysis")
         analysis = (
@@ -266,20 +356,17 @@ class HybridAnswerService:
                     details={"provider": self.provider.name},
                 )
             )
-            intent = self.understanding.analyze(
-                facts,
-                analysis=analysis,
-                selected_facts=selected_facts,
-            )
+            intent = self._deterministic_intent(facts, analysis, rule_result)
             events.append(
                 HybridEvent(
                     "GPT_ANALYSIS_COMPLETED",
-                    "GPT 문의 분석을 완료했습니다.",
+                    "문의 분석을 완료했습니다.",
                     details={
                         "category": intent.category,
                         "emotion": intent.emotion.value,
                         "question_count": len(intent.questions),
                         "confidence": intent.confidence,
+                        "source": "DETERMINISTIC",
                     },
                 )
             )
@@ -412,13 +499,7 @@ class HybridAnswerService:
                     warnings=(),
                 )
             else:
-                review = self.self_review.review(
-                    facts,
-                    intent,
-                    draft,
-                    analysis=analysis,
-                    selected_facts=selected_facts,
-                )
+                review = self._neutral_self_review(intent.questions)
             events.append(
                 HybridEvent(
                     "GPT_PROVIDER_FINISHED",
@@ -548,13 +629,7 @@ class HybridAnswerService:
                     learning_context=learning_context,
                     retry_feedback=retry_feedback,
                 )
-                retry_review = self.self_review.review(
-                    facts,
-                    intent,
-                    retry_draft,
-                    analysis=analysis,
-                    selected_facts=selected_facts,
-                )
+                retry_review = self._neutral_self_review(intent.questions)
                 retry_validation = self.validator.validate(
                     facts,
                     intent,
@@ -605,6 +680,9 @@ class HybridAnswerService:
                     draft=draft,
                     review=review,
                     validation=validation,
+                    telemetry=self._provider_telemetry(
+                        started=generation_started
+                    ),
                 )
             requires_review = bool(
                 rule_result.needs_review
@@ -628,6 +706,9 @@ class HybridAnswerService:
                 "enabled": True,
                 "provider": self.provider.name,
                 "fallback_used": False,
+                "provider_telemetry": self._provider_telemetry(
+                    started=generation_started
+                ),
                 "facts": {
                     "warnings": list(facts.warnings),
                     "available": _available_fact_paths(facts),
@@ -721,6 +802,9 @@ class HybridAnswerService:
                 draft=draft,
                 review=review,
                 validation=validation,
+                telemetry=self._provider_telemetry(
+                    started=generation_started
+                ),
             )
 
 
