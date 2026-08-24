@@ -107,9 +107,9 @@ def main() -> int:
             "error_code",
         ):
             print(f"  {key:<19}: {state.get(key)}")
-        print(f"  last_started_at    : {_kst(state.get("last_started_at"))} KST")
-        print(f"  last_completed_at  : {_kst(state.get("last_completed_at"))} KST")
-        print(f"  next_run_at        : {_kst(state.get("next_run_at"))} KST")
+        print(f"  last_started_at    : {_kst(state.get('last_started_at'))} KST")
+        print(f"  last_completed_at  : {_kst(state.get('last_completed_at'))} KST")
+        print(f"  next_run_at        : {_kst(state.get('next_run_at'))} KST")
 
     now = datetime.now().astimezone()
     print(f"\n  server clock now   : {now.strftime('%Y-%m-%d %H:%M:%S')} "
