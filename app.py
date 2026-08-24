@@ -61,6 +61,7 @@ from ui.rerun_profile import (
     stage as profile_stage,
 )
 from ui.production_dashboard import (
+    dashboard_database_revision,
     render_learning_status,
     render_operations_statistics,
     render_realtime_operations,
@@ -661,7 +662,14 @@ def render_dashboard_actions(
     """외부 동기화와 로컬 화면 갱신을 명확히 분리합니다."""
 
     sync_settings = NaverSyncSettings.from_environment()
-    operations = render_realtime_operations(database) if database is not None else None
+    operations = (
+        render_realtime_operations(
+            database,
+            dashboard_database_revision(database),
+        )
+        if database is not None
+        else None
+    )
     persisted_running = bool(
         database is not None
         and (

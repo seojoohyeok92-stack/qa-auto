@@ -16,6 +16,7 @@ from repositories.database import Database
 from repositories.dashboard_preferences_repository import (
     DashboardPreferencesRepository,
 )
+from repositories.naver_sync_repository import NaverSyncRepository
 from services.dashboard_operations_service import DashboardOperationsService
 from services.auto_post_runtime_service import AutoPostRuntimeService
 from services.dps_agent_client import get_dps_session_status
@@ -120,8 +121,48 @@ def _render_admin_mode(database: Database) -> None:
         st.rerun()
 
 
+def dashboard_database_revision(database: Database) -> tuple[int, str, str, str]:
+    """Return the local-DB fields that make an open Dashboard stale."""
+
+    with database.connection() as connection:
+        inquiry_state = connection.execute(
+            """
+            SELECT COUNT(*) AS inquiry_count,
+                   COALESCE(MAX(updated_at), '') AS latest_updated_at
+            FROM inquiries
+            """
+        ).fetchone()
+    sync_state = NaverSyncRepository(database).auto_state()
+    return (
+        int(inquiry_state["inquiry_count"] or 0),
+        str(inquiry_state["latest_updated_at"] or ""),
+        str(sync_state.get("last_completed_at") or ""),
+        str(sync_state.get("status") or ""),
+    )
+
+
+def dashboard_database_changed(
+    database: Database,
+    baseline: tuple[int, str, str, str],
+) -> bool:
+    """Check only local SQLite state; this function never starts sync work."""
+
+    return dashboard_database_revision(database) != baseline
+
+
 @st.fragment(run_every="30s")
-def render_realtime_operations(database: Database) -> dict[str, Any]:
+def render_realtime_operations(
+    database: Database,
+    dashboard_revision: tuple[int, str, str, str] | None = None,
+) -> dict[str, Any]:
+    if (
+        dashboard_revision is not None
+        and dashboard_database_changed(database, dashboard_revision)
+    ):
+        # A fragment rerun normally leaves the inquiry list outside this
+        # function untouched. Request one full rerun only after local DB state
+        # changes so main() rereads the list without polling Naver.
+        st.rerun()
     data = DashboardOperationsService(database).snapshot()
     dps_session = _cached_dps_session_status()
     data["dps_session"] = dps_session
