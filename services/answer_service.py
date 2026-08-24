@@ -25,6 +25,7 @@ from repositories.dps_repository import DpsRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.workflow_repository import WorkflowRepository
+from kakao_notify import notify_qna_safely
 from services.dps_enrichment_service import (
     DpsEnrichmentOutcome,
     DpsEnrichmentService,
@@ -425,6 +426,80 @@ class AnswerService:
         if self._hybrid_service is None:
             self._hybrid_service = GovernedHybridAnswerService(self.database)
         return self._hybrid_service
+
+    def _notify_active_draft_safely(
+        self,
+        *,
+        inquiry_id: int,
+        inquiry: dict[str, Any],
+        draft: dict[str, Any],
+        result: AnswerResult,
+        plan: InquiryProcessingPlan,
+    ) -> None:
+        if not draft.get("is_active"):
+            return
+        needs_review = (
+            plan.needs_staff_review
+            or result.status is not AnswerStatus.GENERATED
+        )
+        try:
+            notification_enqueued = notify_qna_safely(
+                title=(
+                    "[네이버 Q&A 자동답변 보류]"
+                    if needs_review
+                    else "[네이버 Q&A 답변 생성 완료]"
+                ),
+                product=str(inquiry.get("product_name") or ""),
+                option_name=str(inquiry.get("option_name") or ""),
+                question=str(
+                    inquiry.get("content")
+                    or inquiry.get("title")
+                    or ""
+                ),
+                answer=str(draft.get("original_answer") or result.answer),
+                reason=str(result.reason or ""),
+                action="needs_review" if needs_review else "generated",
+                inquiry_id=str(
+                    inquiry.get("external_inquiry_id")
+                    or inquiry.get("source_question_id")
+                    or inquiry_id
+                ),
+                notify_key=(
+                    f"answer_draft_created:{inquiry_id}:{draft['id']}"
+                ),
+            )
+            if notification_enqueued:
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "KAKAO_NOTIFICATION_ENQUEUED",
+                    "답변 초안을 카카오 공통 전송 대기열에 등록했습니다.",
+                    details={
+                        "draft_id": draft["id"],
+                        "recipient": "staff_qna_room",
+                    },
+                )
+        except Exception as error:
+            LOGGER.exception(
+                "카카오 알림 대기열 등록 실패: inquiry_id=%s draft_id=%s",
+                inquiry_id,
+                draft.get("id"),
+            )
+            try:
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "KAKAO_NOTIFICATION_ENQUEUE_FAILED",
+                    "답변은 정상 저장했지만 카카오 알림 등록에 실패했습니다.",
+                    level="WARNING",
+                    details={
+                        "draft_id": draft.get("id"),
+                        "error_type": error.__class__.__name__,
+                    },
+                )
+            except Exception:
+                LOGGER.exception(
+                    "카카오 알림 실패 로그 기록 오류: inquiry_id=%s",
+                    inquiry_id,
+                )
 
     def enrich_dps_for_inquiry(
         self,
@@ -2757,6 +2832,13 @@ class AnswerService:
                         "analysis",
                     }
                 },
+            )
+            self._notify_active_draft_safely(
+                inquiry_id=inquiry_id,
+                inquiry=inquiry,
+                draft=draft,
+                result=result,
+                plan=plan,
             )
             return AnswerGenerationOutcome(result=result, draft=draft)
         except Exception as error:

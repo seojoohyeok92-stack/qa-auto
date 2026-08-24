@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCR_DIR = PROJECT_ROOT.parent
+PROJECT_ROOT = Path(__file__).resolve().parent
+SCRIPTS_DIR = PROJECT_ROOT.parent
 
-KAKAO_SERVICE_DIR = SCR_DIR / "common_service" / "kakao"
+KAKAO_SERVICE_DIR = SCRIPTS_DIR / "common_service" / "kakao"
 OUTBOX = KAKAO_SERVICE_DIR / "outbox_events.jsonl"
 
 # 같은 문의의 카카오 알림 전송 여부를 기록하는 DB
@@ -22,8 +22,20 @@ NOTIFY_DB = PROJECT_ROOT / "data" / "kakao_notify_history.sqlite3"
 # pending 상태에서 이 시간 이상 멈춘 경우 다시 시도
 PENDING_TIMEOUT_MINUTES = 10
 
-# 카카오톡 채팅방 이름
+# 카카오톡 채팅방 기본 이름 #"테스트" #"오제 네이버 자동답변 확인방"
 KAKAO_QNA_RECIPIENT = "오제 네이버 자동답변 확인방"
+
+
+def is_kakao_notify_enabled() -> bool:
+    return os.getenv(
+        "KAKAO_NOTIFY_ENABLED",
+        "1",
+    ).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _validate_kakao_service() -> None:
@@ -311,7 +323,8 @@ def enqueue_kakao_message(
     _validate_kakao_service()
 
     target_recipient = (
-        recipient
+        str(recipient or "").strip()
+        or os.getenv("KAKAO_QNA_RECIPIENT", "").strip()
         or KAKAO_QNA_RECIPIENT
     )
 
@@ -319,7 +332,7 @@ def enqueue_kakao_message(
         "title": title,
         "message": message,
         "recipient": target_recipient,
-        "source": "naver_qna",
+        "source": "qa_auto",
         "created_at": datetime.now().strftime(
             "%Y-%m-%d %H:%M:%S"
         ),
@@ -396,6 +409,9 @@ def notify_qna_safely(
         호출부에서 이미 만든 고유 알림 키가 있다면 전달.
         notify_key가 없으면 inquiry_id 또는 질문 내용으로 생성.
     """
+    if not is_kakao_notify_enabled():
+        return False
+
     resolved_notify_key = (
         str(notify_key or "").strip()
         or build_notify_key(

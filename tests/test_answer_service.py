@@ -124,6 +124,62 @@ def test_service_generates_from_inquiry_and_saves_draft(
     assert engine.requests[0].product_order_id == "PRODUCT-ORDER-ID"
 
 
+def test_saved_active_draft_is_enqueued_for_kakao(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inquiry_id = create_inquiry(database, "SERVICE-KAKAO-1")
+    calls: list[dict[str, object]] = []
+
+    def record_notification(**kwargs: object) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "services.answer_service.notify_qna_safely",
+        record_notification,
+    )
+    outcome = AnswerService(
+        database,
+        engine=StaticEngine(generated_result("카카오 공유 답변")),
+    ).generate_for_inquiry(inquiry_id)
+
+    assert len(calls) == 1
+    assert calls[0]["title"] == "[네이버 Q&A 답변 생성 완료]"
+    assert calls[0]["product"] == "삼성 스마트모니터 M5"
+    assert calls[0]["question"] == "이 제품의 사용 방법이 궁금합니다."
+    assert "카카오 공유 답변" in str(calls[0]["answer"])
+    assert calls[0]["notify_key"] == (
+        f"answer_draft_created:{inquiry_id}:{outcome.draft['id']}"
+    )
+
+
+def test_kakao_failure_does_not_fail_saved_answer(
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inquiry_id = create_inquiry(database, "SERVICE-KAKAO-2")
+
+    def fail_notification(**_: object) -> bool:
+        raise OSError("outbox unavailable")
+
+    monkeypatch.setattr(
+        "services.answer_service.notify_qna_safely",
+        fail_notification,
+    )
+    outcome = AnswerService(
+        database,
+        engine=StaticEngine(generated_result()),
+    ).generate_for_inquiry(inquiry_id)
+
+    assert outcome.draft["is_active"] == 1
+    events = {
+        row["event_code"]
+        for row in LogRepository(database).recent_for_inquiry(inquiry_id)
+    }
+    assert "KAKAO_NOTIFICATION_ENQUEUE_FAILED" in events
+
+
 def test_success_completes_step_and_sets_review_pending(
     database: Database,
 ) -> None:
