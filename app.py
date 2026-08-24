@@ -440,13 +440,20 @@ def _selected_database_inquiry(
 
 
 def _render_sync_result(database: Database | None = None) -> None:
-    result = st.session_state.get("dashboard_sync_result")
+    # The panel must describe the sync that actually ran most recently, which
+    # is usually an automatic one. Reading the session copy first pinned it to
+    # whichever manual sync this browser session had run: every automatic sync
+    # afterwards stayed invisible, so a query window from hours earlier looked
+    # like the live one and an inquiry that simply had not been collected yet
+    # looked like it had been skipped. The stored run covers manual and
+    # automatic syncs alike, so it is read first and the session copy is only
+    # a fallback for a run that never reached the repository.
+    result = None
     last_success = None
     if database is not None:
         last_success = NaverSyncRepository(database).latest(
             successful_only=True
         )
-    if not isinstance(result, dict) and database is not None:
         persisted = NaverSyncRepository(database).latest()
         if isinstance(persisted, dict):
             result = {
@@ -467,6 +474,8 @@ def _render_sync_result(database: Database | None = None) -> None:
                     )
                 ),
             }
+    if not isinstance(result, dict):
+        result = st.session_state.get("dashboard_sync_result")
     if not isinstance(result, dict):
         st.caption(
             "마지막 동기화: 아직 실행되지 않음 · 기본 조회 기간 최근 7일"
@@ -520,11 +529,28 @@ def _render_sync_result(database: Database | None = None) -> None:
     requested_from = result.get("requested_from")
     requested_to = result.get("requested_to")
     if requested_from or requested_to:
-        st.caption(
-            "조회 기간: "
+        # Stamp the window with the run it belongs to and with the next
+        # scheduled run. Without those, a window that ends minutes ago is
+        # indistinguishable from a scheduler that has stopped.
+        ran_at = format_datetime_kst(
+            result.get("completed_at") or result.get("started_at"),
+            empty="시각 미상",
+        )
+        line = (
+            f"최근 실행 {ran_at} · 조회 기간: "
             f"{format_datetime_kst(requested_from)} ~ "
             f"{format_datetime_kst(requested_to)}"
         )
+        if database is not None:
+            state = NaverSyncRepository(database).auto_state()
+            if str(state.get("status") or "").upper() != "STOPPED":
+                line += (
+                    " · 다음 자동 동기화 "
+                    + format_datetime_kst(
+                        state.get("next_run_at"), empty="예정 없음"
+                    )
+                )
+        st.caption(line)
     errors = result.get("errors")
     if isinstance(errors, list) and errors:
         with st.expander("동기화 오류 단계 확인", expanded=True):
