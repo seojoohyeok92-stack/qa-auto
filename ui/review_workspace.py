@@ -77,6 +77,13 @@ from ui.dps_presenter import (
     installation_date_display,
     installation_date_value,
 )
+from ui.answer_status_presenter import (
+    ALREADY_ANSWERED,
+    ELIGIBLE,
+    AnswerStatusView,
+    build_answer_status,
+    pipeline_route,
+)
 from ui.rerun_profile import snapshot as rerun_profile_snapshot
 from ui.session_identity import can, current_actor
 from ui.uat_presenters import answer_source_label
@@ -314,6 +321,35 @@ def _database_inquiry(
 def _masked_customer(value: Any) -> str:
     text = display_value(value)
     return text if text == "-" or len(text) <= 1 else f"{text[0]}*{text[-1]}"
+
+
+def _warning_summary(status: AnswerStatusView) -> str:
+    """Say how many notes there are *and* whether any of them holds the answer.
+
+    "경고 2건" alone read as "something is wrong", which is how two advisory
+    notes on a PASS answer came to look like the reason it was not published.
+    """
+
+    total = status.warning_count
+    if not total:
+        return "없음"
+    if status.review_signals:
+        return f"{total}건 (직원 확인 {len(status.review_signals)}건)"
+    return f"{total}건 (참고)"
+
+
+def _render_registration_reasons(status: AnswerStatusView) -> None:
+    """Explain the auto-registration outcome in the operator's words."""
+
+    if status.registration == ELIGIBLE:
+        st.caption("자동등록 가능 · 차단 사유 없음")
+        return
+    if status.registration == ALREADY_ANSWERED:
+        st.caption("이미 답변이 등록되어 있어 중복 등록하지 않습니다.")
+        return
+    reasons = [text for _, text in status.blocking_reasons]
+    if reasons:
+        st.caption("자동등록 보류 사유 · " + " · ".join(reasons))
 
 
 def _field(label: str, value: Any) -> str:
@@ -1302,30 +1338,33 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         if draft
         else {}
     )
-    warnings = []
-    if diagnostics:
-        warnings = list(
-            dict.fromkeys(
-                [
-                    *(diagnostics["draft"].get("warnings") or []),
-                    *(diagnostics["facts"].get("warnings") or []),
-                    *(diagnostics["validation"].get("warnings") or []),
-                ]
-            )
-        )
+    # What the gate would decide right now, computed from the stored state
+    # with the same call the Auto Post pipeline makes. Reading it here is what
+    # keeps the screen and the pipeline from disagreeing; it writes nothing,
+    # posts nothing and never calls the provider.
+    answer_status = build_answer_status(
+        inquiry=inquiry,
+        draft=draft,
+        route=pipeline_route(draft),
+    )
     with analysis_column:
         st.markdown(
             '<div class="compact-analysis-card"><h4>분석 결과</h4>'
             f'{_field("문의 유형", intent.get("category") or inquiry.get("inquiry_type"))}'
             f'{_field("답변 출처", source)}'
-            f'{_field("자동 답변", "가능" if validator_passed else "검토 필요")}'
-            f'{_field("직원 검토", "필요" if not approved else "완료")}'
+            f'{_field("답변 검증", answer_status.validation_label)}'
+            f'{_field("직원 검토", answer_status.staff_review_label)}'
+            f'{_field("자동등록", answer_status.registration_label)}'
+            f'{_field("승인 상태", answer_status.approval_label)}'
+            f'{_field("네이버 답변", answer_status.naver_answer_label)}'
+            f'{_field("프로그램 등록", answer_status.program_post_label)}'
             f'{_field("Provider", governance.get("provider") or (provider_run or {}).get("provider"))}'
             f'{_field("사용 Rule", (diagnostics or {}).get("hybrid", {}).get("rule_id"))}'
-            f'{_field("경고", f"{len(warnings)}건" if warnings else "없음")}'
+            f'{_field("경고", _warning_summary(answer_status))}'
             "</div>",
             unsafe_allow_html=True,
         )
+        _render_registration_reasons(answer_status)
         if phase9_analysis:
             displayed_order_id = str(inquiry.get("order_id") or "").strip()
             st.caption(
@@ -2166,14 +2205,26 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "못해 성공 처리하지 않았습니다."
                 )
 
+    # ``passed`` is True for REVIEW_REQUIRED as well as PASS, so reporting it
+    # as "Validator 통과" told staff an answer had cleared review when the
+    # validator had actually asked for them. The bar follows the status.
+    validator_status = answer_status.validation_status
+    validator_clear = validator_status == "PASS"
     validator_message = (
         "사실 일치 · PII 없음 · 금지 표현 없음"
-        if validator_passed
+        if validator_clear
         else "검증 결과를 확인하고 직원 검토를 진행하세요."
     )
+    validator_headline = (
+        "✓ Validator 통과"
+        if validator_clear
+        else "✕ Validator 차단"
+        if validator_status == "BLOCK"
+        else "! Validator 확인 필요"
+    )
     st.markdown(
-        f'<div class="validator-status-bar {"passed" if validator_passed else "warning"}">'
-        f'<strong>{"✓ Validator 통과" if validator_passed else "! Validator 확인 필요"}</strong>'
+        f'<div class="validator-status-bar {"passed" if validator_clear else "warning"}">'
+        f"<strong>{escape(validator_headline)}</strong>"
         f"<span>{escape(validator_message)}</span></div>",
         unsafe_allow_html=True,
     )
