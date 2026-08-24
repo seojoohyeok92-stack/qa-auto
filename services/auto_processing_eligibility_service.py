@@ -185,6 +185,7 @@ class AutoProcessingEligibilityService:
         hybrid: dict[str, Any],
         validation_status: str,
         validator: dict[str, Any],
+        route: str = "",
     ) -> bool:
         """Whether post-generation evidence resolved a classifier-only hold.
 
@@ -199,9 +200,16 @@ class AutoProcessingEligibilityService:
         if (
             not cls._current_analysis_clears_review(inquiry)
             or not cls._validator_cleared(validation_status, validator)
-            or not cls._evidence_fully_supported(hybrid)
             or bool(plan.get("is_high_risk"))
         ):
+            return False
+        # Rendered templates are validated by the route-specific template
+        # validator and never have GPT-only draft/self-review/evidence blocks.
+        # Independent product/order/DPS/privacy and route reasons are still
+        # evaluated below and remain hard blockers.
+        if str(route or "").upper() == "TEMPLATE":
+            return True
+        if not cls._evidence_fully_supported(hybrid):
             return False
         generated_value = hybrid.get("draft")
         generated = (
@@ -211,9 +219,19 @@ class AutoProcessingEligibilityService:
         self_review = review_value if isinstance(review_value, dict) else None
         if generated is None or self_review is None:
             return False
+        missing = generated.get("missing_information")
+        required_missing = generated.get("required_missing_information")
+        classified_missing = isinstance(
+            generated.get("missing_information_details"), list
+        )
+        unresolved_missing = (
+            bool(required_missing)
+            if classified_missing
+            else bool(missing)
+        )
         return not (
             bool(generated.get("requires_review"))
-            or bool(generated.get("missing_information"))
+            or unresolved_missing
             or bool(self_review.get("requires_review"))
         )
 
@@ -276,6 +294,7 @@ class AutoProcessingEligibilityService:
                 hybrid=hybrid,
                 validation_status=validation_status,
                 validator=validator,
+                route=normalized_route,
             )
         )
         # "the validator rejected this" and "the validator passed but asked

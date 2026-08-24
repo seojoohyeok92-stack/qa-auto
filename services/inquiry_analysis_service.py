@@ -462,6 +462,8 @@ class InquiryAnalysisService:
             token in compact
             for token in (
                 "자가설치",
+                "혼자설치",
+                "직접설치",
                 "기사님이설치",
                 "기사님설치",
                 "기사설치",

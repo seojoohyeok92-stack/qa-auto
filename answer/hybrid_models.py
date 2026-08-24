@@ -37,6 +37,10 @@ class DraftResult:
     confidence: float
     used_facts: tuple[str, ...] = ()
     missing_information: tuple[str, ...] = ()
+    required_missing_information: tuple[str, ...] = ()
+    optional_missing_information: tuple[str, ...] = ()
+    missing_information_details: tuple[dict[str, Any], ...] = ()
+    provider_requires_review: bool = False
     requires_review: bool = False
     warnings: tuple[str, ...] = ()
     learning_usage: tuple[dict[str, Any], ...] = ()
@@ -48,12 +52,24 @@ class DraftResult:
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         for key in (
-            "used_facts", "missing_information", "warnings",
+            "used_facts", "missing_information",
+            "required_missing_information", "optional_missing_information",
+            "missing_information_details", "warnings",
             "learning_usage", "historical_usage", "feedback_signal_usage",
             "subquestion_results",
         ):
             result[key] = list(result[key])
         return result
+
+    @property
+    def has_required_missing_information(self) -> bool:
+        """Fail closed for legacy drafts without the new severity metadata."""
+
+        if self.required_missing_information:
+            return True
+        if self.missing_information and not self.missing_information_details:
+            return True
+        return False
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,23 @@ from answer.providers.interfaces import JsonGptProvider
 from services.learning_context_service import apply_prompt_budget, prompt_context
 
 
+_SUMMARY_REQUEST = re.compile(r"간단|간략|요약|대략|기본(?:적인|으로)?")
+_OPTIONAL_DETAIL_QUALIFIER = re.compile(
+    r"세부|상세|구체|단계별|부품별|나사별|체결별"
+)
+_OPTIONAL_MANUAL_DETAIL = re.compile(
+    r"조립|설치|체결|순서|절차|방법|매뉴얼|설명서"
+)
+_SAFE_DETAIL_DEFERRAL = re.compile(
+    r"설명서|매뉴얼|제품 안내|제조사 안내|설치 기사|전문 기사|기사 안내|"
+    r"확인해\s*(?:주세요|주시기|보시기)|참고해\s*(?:주세요|주시기|보시기)"
+)
+_REQUIRED_FACT_DETAIL = re.compile(
+    r"호환|브라켓|모델|옵션|배송|도착|설치일|예정일|날짜|기간|A/S|AS|"
+    r"할인|혜택|주문|환불|반품|취소|파손|분쟁|책임|개인정보"
+)
+
+
 class DraftGenerationService:
     def __init__(
         self,
@@ -110,7 +127,70 @@ class DraftGenerationService:
         )
         raw = self._validate_historical_usage(raw, learning_context)
         raw = self._validate_feedback_signal_usage(raw, learning_context)
+        raw = self._classify_missing_information(raw, intent)
         return self.parse(raw)
+
+    @staticmethod
+    def _classify_missing_information(
+        raw: dict[str, Any], intent: IntentResult
+    ) -> dict[str, Any]:
+        """Classify a narrowly-defined manual detail as optional.
+
+        Everything is required by default.  Optional detail needs all three
+        independent signals: the customer explicitly requested a summary, the
+        missing item is a finer-grained manual/assembly detail rather than a
+        customer-impacting fact, and the generated answer safely defers that
+        detail to an authoritative manual or installer.  Validator authority
+        remains downstream; a rejected answer is never made safe here.
+        """
+
+        if not isinstance(raw, dict):
+            return raw
+        values = raw.get("missing_information")
+        if not isinstance(values, list):
+            return raw
+        missing = [str(item).strip() for item in values if str(item).strip()]
+        questions = " ".join(str(item) for item in intent.questions)
+        answer_context = " ".join(
+            [
+                str(raw.get("answer") or ""),
+                *(str(item) for item in (raw.get("warnings") or [])),
+            ]
+        )
+        summary_requested = bool(_SUMMARY_REQUEST.search(questions))
+        safe_deferral = bool(_SAFE_DETAIL_DEFERRAL.search(answer_context))
+        required: list[str] = []
+        optional: list[str] = []
+        details: list[dict[str, str]] = []
+        for item in missing:
+            optional_detail = bool(
+                summary_requested
+                and safe_deferral
+                and _OPTIONAL_DETAIL_QUALIFIER.search(item)
+                and _OPTIONAL_MANUAL_DETAIL.search(item)
+                and not _REQUIRED_FACT_DETAIL.search(item)
+            )
+            severity = (
+                "OPTIONAL_DETAIL"
+                if optional_detail
+                else "REQUIRED_FOR_SAFE_ANSWER"
+            )
+            (optional if optional_detail else required).append(item)
+            details.append({"text": item, "severity": severity})
+
+        copied = dict(raw)
+        copied["provider_requires_review"] = bool(raw.get("requires_review"))
+        copied["missing_information_details"] = details
+        copied["required_missing_information"] = required
+        copied["optional_missing_information"] = optional
+        if missing and optional and not required:
+            copied["requires_review"] = False
+            copied["warnings"] = list(raw.get("warnings") or []) + [
+                "OPTIONAL_DETAIL_DEFERRED_TO_MANUAL_OR_INSTALLER"
+            ]
+        elif required:
+            copied["requires_review"] = True
+        return copied
 
     @staticmethod
     def _validate_historical_usage(
@@ -458,11 +538,41 @@ class DraftGenerationService:
             if not isinstance(value, list):
                 raise ValueError(f"GPT draft {field} must be a list.")
             list_fields[field] = tuple(str(item) for item in value)
+        detail_values = raw.get("missing_information_details")
+        details = tuple(
+            dict(item)
+            for item in (
+                detail_values if isinstance(detail_values, list) else []
+            )
+            if isinstance(item, dict)
+        )
+        required_value = raw.get("required_missing_information")
+        optional_value = raw.get("optional_missing_information")
+        required = tuple(
+            str(item)
+            for item in (
+                required_value
+                if isinstance(required_value, list)
+                else list_fields["missing_information"]
+            )
+        )
+        optional = tuple(
+            str(item)
+            for item in (
+                optional_value if isinstance(optional_value, list) else []
+            )
+        )
         return DraftResult(
             answer=str(raw.get("answer") or ""),
             confidence=confidence,
             used_facts=list_fields["used_facts"],
             missing_information=list_fields["missing_information"],
+            required_missing_information=required,
+            optional_missing_information=optional,
+            missing_information_details=details,
+            provider_requires_review=bool(
+                raw.get("provider_requires_review", raw.get("requires_review"))
+            ),
             requires_review=bool(raw.get("requires_review")),
             warnings=list_fields["warnings"],
             learning_usage=tuple(

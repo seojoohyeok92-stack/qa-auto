@@ -35,6 +35,27 @@ _COMPARABLE = re.compile(r"[^0-9A-Za-z가-힣]+")
 # How much of a truncated title must match the body's opening to count as the
 # same question. Long enough that a genuinely different title never matches.
 _TITLE_PREFIX_MATCH = 12
+_GENERIC_TITLE = re.compile(
+    r"^(?:일반)?(?:상품|제품|설치|배송)(?:관련)?(?:문의|질문)$"
+)
+
+
+def _is_generic_inquiry_title(value: Any) -> bool:
+    """True only for a channel/category label with no customer-specific fact.
+
+    Naver sometimes supplies a short category header as the inquiry title.
+    The rule is intentionally structural and closed: after punctuation and
+    whitespace are removed, the whole title must consist only of an optional
+    generic modifier, one supported category noun, and a question-label
+    suffix.  Titles carrying a condition, material, model, place, capability,
+    or any other extra word therefore remain part of the inquiry.
+    """
+
+    normalized = normalize_question_text(value)
+    if not normalized:
+        return False
+    compact = re.sub(r"[\s\W_]+", "", normalized)
+    return bool(compact and _GENERIC_TITLE.fullmatch(compact))
 
 
 def _combined_inquiry_text(title: Any, content: Any) -> str:
@@ -55,6 +76,8 @@ def _combined_inquiry_text(title: Any, content: Any) -> str:
         return normalized_content
     if not normalized_content:
         return normalized_title
+    if _is_generic_inquiry_title(normalized_title):
+        return normalized_content
     # Compare on letters and digits alone, and treat a title that only
     # *begins* the body line as the same question. The channel may punctuate
     # or truncate the title differently from the line it was taken from -- a

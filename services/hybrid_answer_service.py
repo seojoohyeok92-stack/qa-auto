@@ -739,7 +739,7 @@ class HybridAnswerService:
                 or intent.requires_review
                 or draft.requires_review
                 or review.requires_review
-                or draft.missing_information
+                or draft.has_required_missing_information
                 or validation.status == "REVIEW_REQUIRED"
             )
             status = (
