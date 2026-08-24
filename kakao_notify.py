@@ -22,7 +22,7 @@ NOTIFY_DB = PROJECT_ROOT / "data" / "kakao_notify_history.sqlite3"
 # pending 상태에서 이 시간 이상 멈춘 경우 다시 시도
 PENDING_TIMEOUT_MINUTES = 10
 
-# 카카오톡 채팅방 기본 이름
+# 카카오톡 채팅방 기본 이름 #"테스트" #"오제 네이버 자동답변 확인방"
 KAKAO_QNA_RECIPIENT = "오제 네이버 자동답변 확인방"
 
 
