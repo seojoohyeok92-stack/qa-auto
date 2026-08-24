@@ -72,6 +72,9 @@ REASON_LABELS: dict[str, str] = {
     "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": (
         "문의 유형을 분류하지 못했지만 Validator는 통과했습니다."
     ),
+    "PRELIMINARY_REVIEW_RESOLVED": (
+        "사전 검토 신호가 현재 분석·근거·Validator 확인으로 해소되었습니다."
+    ),
 }
 
 # The gate builds this one dynamically from the route, so it cannot be a fixed

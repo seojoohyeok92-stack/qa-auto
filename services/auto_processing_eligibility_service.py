@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from answer.source_adapter import answer_request_from_inquiry
 from services.auto_post_validation_service import AutoPostTechnicalValidator
+from services.inquiry_analysis_service import InquiryAnalysisService
 
 
 REVIEW_ROUTES = {
@@ -47,6 +49,12 @@ SOFT_REASONS = frozenset({
     # deterministic validator passed the answer outright. See
     # ``_validator_cleared`` -- a routing gap, not a safety finding.
     "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR",
+    # A pre-generation classifier gap can set three derivative review flags
+    # (answer metadata, processing plan, and draft status).  When generation
+    # later has complete evidence and the deterministic validator clears the
+    # actual answer, keep the original signal for audit without counting the
+    # same preliminary decision three times as customer-facing risk.
+    "PRELIMINARY_REVIEW_RESOLVED",
 })
 
 
@@ -110,11 +118,12 @@ class AutoProcessingEligibilityService:
         actively cleared from one it never got to check.
         """
 
-        if validation_status != "PASS":
+        pass_statuses = {"PASS", "PASS_WITH_WARNING"}
+        if validation_status not in pass_statuses:
             return False
         if not validator or validator.get("passed") is not True:
             return False
-        if str(validator.get("status") or "PASS").upper() != "PASS":
+        if str(validator.get("status") or "PASS").upper() not in pass_statuses:
             return False
         return not validator.get("errors") and not validator.get(
             "review_signals"
@@ -138,6 +147,74 @@ class AutoProcessingEligibilityService:
             == "INFORMATION_INSUFFICIENT"
             and str(analysis.get("inquiry_subtype") or "").upper()
             == "UNCLASSIFIED"
+        )
+
+    @classmethod
+    def _current_analysis_clears_review(
+        cls, inquiry: dict[str, Any]
+    ) -> bool:
+        """True when a current deterministic analysis supersedes a stale hold.
+
+        Persisted drafts can outlive classifier improvements.  Re-analysis is
+        local and deterministic (no provider call), and is used only to prove
+        that the old manual-review signal no longer exists.  A current manual
+        review result, an unreadable legacy inquiry, or any failure stays
+        conservative.
+        """
+
+        if not str(inquiry.get("content") or inquiry.get("question") or "").strip():
+            return False
+        try:
+            current = InquiryAnalysisService().analyze(
+                answer_request_from_inquiry(inquiry)
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        current_analysis = current.to_dict()
+        return not current.manual_review_required or cls._intent_unclassified(
+            current_analysis
+        )
+
+    @classmethod
+    def _preliminary_review_resolved(
+        cls,
+        *,
+        inquiry: dict[str, Any],
+        analysis: dict[str, Any],
+        plan: dict[str, Any],
+        hybrid: dict[str, Any],
+        validation_status: str,
+        validator: dict[str, Any],
+    ) -> bool:
+        """Whether post-generation evidence resolved a classifier-only hold.
+
+        This is deliberately narrower than "validator PASS".  Every
+        sub-question must be supported, the generated draft and deterministic
+        self-review must expose no unresolved review signal or missing
+        information, and the processing plan must not identify real risk.
+        Advisory warnings are intentionally not consulted here; they are not
+        unsafe claims and remain visible in the persisted validator metadata.
+        """
+
+        if (
+            not cls._current_analysis_clears_review(inquiry)
+            or not cls._validator_cleared(validation_status, validator)
+            or not cls._evidence_fully_supported(hybrid)
+            or bool(plan.get("is_high_risk"))
+        ):
+            return False
+        generated_value = hybrid.get("draft")
+        generated = (
+            generated_value if isinstance(generated_value, dict) else None
+        )
+        review_value = hybrid.get("self_review")
+        self_review = review_value if isinstance(review_value, dict) else None
+        if generated is None or self_review is None:
+            return False
+        return not (
+            bool(generated.get("requires_review"))
+            or bool(generated.get("missing_information"))
+            or bool(self_review.get("requires_review"))
         )
 
     def evaluate(
@@ -181,6 +258,26 @@ class AutoProcessingEligibilityService:
         validation_status = str(draft.get("validation_status") or "").upper()
         validator_value = draft.get("validator_result_json")
         validator = validator_value if isinstance(validator_value, dict) else {}
+        hybrid_value = metadata.get("hybrid")
+        hybrid = hybrid_value if isinstance(hybrid_value, dict) else {}
+        review_status = str(draft.get("review_status") or "").upper()
+        has_preliminary_review = bool(
+            metadata.get("requires_manual_review")
+            or plan.get("needs_staff_review")
+            or review_status == "NEEDS_REVIEW"
+            or analysis.get("manual_review_required")
+        )
+        preliminary_review_resolved = (
+            has_preliminary_review
+            and self._preliminary_review_resolved(
+                inquiry=inquiry,
+                analysis=analysis,
+                plan=plan,
+                hybrid=hybrid,
+                validation_status=validation_status,
+                validator=validator,
+            )
+        )
         # "the validator rejected this" and "the validator passed but asked
         # for a person to look" are different findings. Reporting both as
         # VALIDATOR_NOT_PASS told staff the validator had failed on answers it
@@ -200,7 +297,11 @@ class AutoProcessingEligibilityService:
         ):
             reasons.append(f"ROUTE_{normalized_route or 'UNKNOWN'}")
         if bool(metadata.get("requires_manual_review")):
-            reasons.append("ANSWER_REQUIRES_MANUAL_REVIEW")
+            reasons.append(
+                "PRELIMINARY_REVIEW_RESOLVED"
+                if preliminary_review_resolved
+                else "ANSWER_REQUIRES_MANUAL_REVIEW"
+            )
         product_guard_value = metadata.get("product_fact_guard")
         product_guard = (
             product_guard_value if isinstance(product_guard_value, dict) else {}
@@ -210,7 +311,11 @@ class AutoProcessingEligibilityService:
         ):
             reasons.append("PRODUCT_FACT_NOT_VERIFIED")
         if bool(plan.get("needs_staff_review")):
-            reasons.append("PROCESSING_PLAN_REQUIRES_REVIEW")
+            reasons.append(
+                "PRELIMINARY_REVIEW_RESOLVED"
+                if preliminary_review_resolved
+                else "PROCESSING_PLAN_REQUIRES_REVIEW"
+            )
         # "this inquiry is high risk" and "the keyword classifier had no rule
         # for this wording" arrived in the same flag, and both hard-blocked.
         # Only the first is a safety finding. Inquiry 686125753 asked
@@ -225,14 +330,15 @@ class AutoProcessingEligibilityService:
         if bool(plan.get("is_high_risk")):
             reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
         elif bool(analysis.get("manual_review_required")):
-            reasons.append(
-                "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR"
-                if (
-                    self._intent_unclassified(analysis)
-                    and self._validator_cleared(validation_status, validator)
-                )
-                else "POLICY_OR_HIGH_RISK_REVIEW"
-            )
+            if (
+                self._intent_unclassified(analysis)
+                and self._validator_cleared(validation_status, validator)
+            ):
+                reasons.append("INTENT_UNCLASSIFIED_VALIDATOR_CLEAR")
+            elif preliminary_review_resolved:
+                reasons.append("PRELIMINARY_REVIEW_RESOLVED")
+            else:
+                reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
         # Compatibility is a fact the customer buys on. An exact fixed
         # template (the catalog's own verified accessory rules, or a Product
         # DB fact) may answer it; anything composed by the model without such
@@ -243,11 +349,14 @@ class AutoProcessingEligibilityService:
             and normalized_route not in {"TEMPLATE", "PRODUCT_DB"}
         ):
             reasons.append("PRODUCT_COMPATIBILITY_NOT_VERIFIED")
-        if str(draft.get("review_status") or "").upper() in {
-            "NEEDS_REVIEW",
-            "IN_REVIEW",
-        }:
+        if review_status == "IN_REVIEW":
             reasons.append("DRAFT_REVIEW_REQUIRED")
+        elif review_status == "NEEDS_REVIEW":
+            reasons.append(
+                "PRELIMINARY_REVIEW_RESOLVED"
+                if preliminary_review_resolved
+                else "DRAFT_REVIEW_REQUIRED"
+            )
 
         # An ORDER_ID_REQUEST answer exists precisely *because* the order id is
         # missing, and it only asks the customer for that number -- it states
@@ -270,8 +379,6 @@ class AutoProcessingEligibilityService:
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):
             reasons.append("DPS_SNAPSHOT_NOT_VALIDATED")
 
-        hybrid_value = metadata.get("hybrid")
-        hybrid = hybrid_value if isinstance(hybrid_value, dict) else {}
         # Evidence + Authority first: a pessimistic confidence number from the
         # provider is not itself a safety finding. When retrieval proved every
         # sub-question answerable from SUPPORTED evidence, and no other reason
