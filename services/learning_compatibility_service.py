@@ -53,18 +53,20 @@ TOPIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        # The trailing boundary is a negative lookahead rather than \W,
-        # because Korean agglutinates a particle straight onto the term:
-        # "A/S는", "A/S가", "A/S도". A particle is a word character, so the
-        # old (?:\W|$) boundary never matched the question form while the
-        # answer still matched via "서비스센터". A question then looked like
-        # it had no A/S topic and answering it registered as an unrequested
-        # topic, holding otherwise safe compound answers for review.
-        # The lookahead still rejects Latin continuations such as ASUS.
+        # Both boundaries are Latin-only lookarounds rather than \W, because
+        # Korean agglutinates straight onto the term with no space on either
+        # side: "삼성센터AS무상기간", "A/S는", "A/S가". Hangul is a word
+        # character, so a \W boundary never matched those forms while the
+        # answer still matched via "서비스센터" -- the question then looked
+        # like it had no A/S topic, and answering it registered as an
+        # unrequested topic, holding otherwise safe compound answers for
+        # review. That is exactly what happened to inquiry 686125753, whose
+        # unspaced "삼성센터AS무상기간알려주세요" classified as OTHER.
+        # The lookarounds still reject Latin neighbours such as ASUS and GAS.
         "AS_SUPPORT",
         re.compile(
-            r"(?:^|\W)A\s*/?\s*S(?![A-Za-z0-9])|애프터\s*서비스|서비스\s*센터"
-            r"|무상\s*수리|보증\s*기간|수리\s*접수",
+            r"(?<![A-Za-z0-9])A\s*/?\s*S(?![A-Za-z0-9])|애프터\s*서비스"
+            r"|서비스\s*센터|무상\s*수리|보증\s*기간|수리\s*접수",
             re.IGNORECASE,
         ),
     ),
@@ -552,7 +554,17 @@ class LearningCompatibilityService:
             status = "REVIEW_REQUIRED"
             reason = "ANSWER_TOPIC_NOT_DEMONSTRATED"
         elif required and unrelated:
-            status = "REVIEW_REQUIRED"
+            # Reached only once every topic the customer asked about is
+            # covered -- the earlier branches take the mismatch, the partial
+            # compound and the nothing-supplied cases. What is left is an
+            # answer that answered everything and also mentioned adjacent
+            # context: "패널은 2년" alongside the A/S warranty, "설치예정일"
+            # alongside the delivery question. That is ordinary helpful
+            # answering, not a safety finding, and any real risk inside the
+            # extra content is still caught by fact grounding, date
+            # grounding, privacy and prohibited-content rules. Recorded for
+            # staff, but it no longer holds the answer back on its own.
+            status = "WARN"
             reason = "ANSWER_CONTAINS_UNREQUESTED_TOPIC"
         else:
             status = "PASS"

@@ -718,7 +718,19 @@ class AnswerValidator:
             )
         alignment_rules: tuple[ValidationRuleResult, ...] = ()
         if subquestion_evidence:
-            answer_topics = set(classify_topics(draft.answer))
+            # Only what the answer *asserts* counts as leaking into an
+            # unsupported sub-question. Matching the whole answer's topics
+            # could not tell "배송은 보통 2주 걸립니다" -- an invented fact --
+            # from "확인된 배송기한 정보가 없어 안내가 어렵습니다", which is
+            # the deferral the pipeline asks for; both mention delivery, so a
+            # correct safe hold was held for review exactly like a fabricated
+            # claim. Hedged sentences state nothing, so they are skipped, and
+            # an assertion about the topic still trips the rule.
+            asserted_topics: set[str] = set()
+            for sentence in _sentences(draft.answer):
+                if _HEDGED.search(sentence):
+                    continue
+                asserted_topics.update(classify_topics(sentence))
             leaked_subquestions = [
                 str(item.get("subquestion") or "")
                 for item in subquestion_evidence
@@ -726,7 +738,7 @@ class AnswerValidator:
                 and str(item.get("evidence_coverage") or "") == "UNSUPPORTED"
                 and (
                     set(classify_topics(item.get("subquestion")))
-                    & answer_topics
+                    & asserted_topics
                 )
             ]
             alignment_rules = (
@@ -738,7 +750,7 @@ class AnswerValidator:
                         "포함했습니다: " + "; ".join(leaked_subquestions)
                     )
                     if leaked_subquestions
-                    else "근거 없는 하위 질문에는 인접 주제로 답하지 않았습니다.",
+                    else "근거 없는 하위 질문을 단정하지 않았습니다.",
                 ),
             )
         conflict_rules: tuple[ValidationRuleResult, ...] = ()
@@ -769,6 +781,13 @@ class AnswerValidator:
             item.message
             for item in validation_rules
             if item.status == "REVIEW_REQUIRED"
+        )
+        # A rule may report something worth showing staff without claiming the
+        # answer is unsafe to send. WARN keeps the finding in ``warnings`` --
+        # it is never dropped -- while leaving the verdict at PASS, so a
+        # recorded observation does not by itself hold back a safe answer.
+        advisory.extend(
+            item.message for item in validation_rules if item.status == "WARN"
         )
         status = (
             "BLOCK"

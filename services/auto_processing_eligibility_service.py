@@ -43,6 +43,10 @@ SOFT_REASONS = frozenset({
     # The safe "please send your order number" reply. Asserts no order fact;
     # blocking it would leave the customer with no reply at all.
     "ORDER_ID_REQUESTED_FROM_CUSTOMER",
+    # The keyword classifier had no rule for this wording, and the
+    # deterministic validator passed the answer outright. See
+    # ``_validator_cleared`` -- a routing gap, not a safety finding.
+    "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR",
 })
 
 
@@ -93,6 +97,48 @@ class AutoProcessingEligibilityService:
             if str(item.get("evidence_coverage") or "").upper() != "SUPPORTED":
                 return False
         return True
+
+    @staticmethod
+    def _validator_cleared(
+        validation_status: str, validator: dict[str, Any]
+    ) -> bool:
+        """True only when the validator passed with nothing at all to report.
+
+        Anything short of that -- a failure, a review signal, a recorded error,
+        or a missing verdict -- leaves the answer blocked, so this can never
+        relax a real finding. It only distinguishes an answer the validator
+        actively cleared from one it never got to check.
+        """
+
+        if validation_status != "PASS":
+            return False
+        if not validator or validator.get("passed") is not True:
+            return False
+        if str(validator.get("status") or "PASS").upper() != "PASS":
+            return False
+        return not validator.get("errors") and not validator.get(
+            "review_signals"
+        )
+
+    @staticmethod
+    def _intent_unclassified(analysis: dict[str, Any]) -> bool:
+        """True when the classifier found no rule, not when it found risk.
+
+        ``manual_review_required`` is raised by two very different findings.
+        "위험·분쟁 관련 표현이 있어 직원 판단이 필요합니다" is a positive risk
+        classification and must always hold the answer; falling off the end of
+        the keyword tables is not. Only the second is recognised here, and it
+        is recognised positively -- both the category and the subtype have to
+        say "no rule matched" -- so a new review category can never be mistaken
+        for a classifier gap.
+        """
+
+        return (
+            str(analysis.get("question_category") or "").upper()
+            == "INFORMATION_INSUFFICIENT"
+            and str(analysis.get("inquiry_subtype") or "").upper()
+            == "UNCLASSIFIED"
+        )
 
     def evaluate(
         self,
@@ -165,8 +211,28 @@ class AutoProcessingEligibilityService:
             reasons.append("PRODUCT_FACT_NOT_VERIFIED")
         if bool(plan.get("needs_staff_review")):
             reasons.append("PROCESSING_PLAN_REQUIRES_REVIEW")
-        if bool(plan.get("is_high_risk")) or bool(analysis.get("manual_review_required")):
+        # "this inquiry is high risk" and "the keyword classifier had no rule
+        # for this wording" arrived in the same flag, and both hard-blocked.
+        # Only the first is a safety finding. Inquiry 686125753 asked
+        # "삼성센터AS무상기간알려주세요 / 배송기한얼마나생각하면될까요?" -- both
+        # phrasings miss the keyword tables, so the inquiry was UNCLASSIFIED
+        # and manual_review_required, and a grounded answer the validator
+        # passed outright could still never be published. The classifier is a
+        # routing aid; what makes an answer safe to send is the deterministic
+        # validator, so an unclassified intent is recorded but stops blocking
+        # once that validator has passed with nothing to report. Genuine high
+        # risk, and any validator finding at all, still block.
+        if bool(plan.get("is_high_risk")):
             reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
+        elif bool(analysis.get("manual_review_required")):
+            reasons.append(
+                "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR"
+                if (
+                    self._intent_unclassified(analysis)
+                    and self._validator_cleared(validation_status, validator)
+                )
+                else "POLICY_OR_HIGH_RISK_REVIEW"
+            )
         # Compatibility is a fact the customer buys on. An exact fixed
         # template (the catalog's own verified accessory rules, or a Product
         # DB fact) may answer it; anything composed by the model without such
