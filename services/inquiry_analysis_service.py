@@ -357,11 +357,15 @@ def _is_unverifiable_payment_benefit(question: str) -> bool:
     return any(word in question for word in PAYMENT_BENEFIT_WORDS)
 
 
-def _is_schedule_change_request(question: str) -> bool:
-    # "It was postponed; when is it now?" reports a changed state and asks
-    # for the current schedule.  It is a lookup, not a request that Q&A Auto
-    # perform another change.  Passive/result wording plus an explicit lookup
-    # marker is required so "please postpone it" still takes the staff path.
+def _is_schedule_status_lookup(question: str) -> bool:
+    """"It was postponed; when is it now?" -- a report plus a lookup.
+
+    This reports a change that already happened and asks what the schedule is
+    now.  It is a lookup, not a request that Q&A Auto perform another change.
+    Passive/result wording *and* an explicit lookup marker are both required,
+    so "please postpone it" still takes the staff path.
+    """
+
     passive_delay = any(
         word in question
         for word in (
@@ -373,7 +377,11 @@ def _is_schedule_change_request(question: str) -> bool:
         word in question
         for word in ("언제", "지금", "현재", "되나요", "오나요", "오시나요")
     )
-    if passive_delay and lookup_request:
+    return passive_delay and lookup_request
+
+
+def _is_schedule_change_request(question: str) -> bool:
+    if _is_schedule_status_lookup(question):
         return False
     if any(word in question for word in SCHEDULE_CHANGE_WORDS):
         return True
@@ -805,6 +813,18 @@ class InquiryAnalysisService:
             )
             for subquestion in subquestions
         ]
+        # The whole-message rescue below has a mirror image. Splitting can also
+        # separate the *report* of a change from the question about it:
+        # "설치가 미뤄졌다고 들었는데 / 언제 오나요?" leaves one fragment holding
+        # "미뤄" with no lookup marker, which reads as "please postpone it", and
+        # the other holding "언제" with nothing to postpone. Read apart, a
+        # customer asking what their new date is became a rescheduling request
+        # and was sent to staff -- the same evidence, split, reversing the
+        # verdict. The undivided message is the one that says what was meant.
+        if _is_schedule_status_lookup(request.question) and any(
+            item.inquiry_subtype == "SCHEDULE_CHANGE_REQUEST" for item in parts
+        ):
+            return self._analyze_single(request)
         # Sentence splitting can separate the schedule target ("installation
         # date") from the requested action ("move it earlier").  Each fragment
         # is harmless alone, but the full customer request requires an actual

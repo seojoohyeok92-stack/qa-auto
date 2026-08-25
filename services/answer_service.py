@@ -324,6 +324,15 @@ class AnswerService:
         self.database = database
         self._engine = engine
         self._dps_enrichment = dps_enrichment
+        # Whether a *caller* supplied these, recorded before anything can
+        # lazily fill the attributes in. The synthetic order snapshot below
+        # keys off "a test injected a DPS double and no order service", and
+        # the lazily-created production instances are indistinguishable from
+        # injected ones once ``_dps_enrichment``/``_order_lookup_service``
+        # have been populated -- which is how a test-only shortcut became
+        # reachable in production. See ``_use_synthetic_order_snapshot``.
+        self._dps_enrichment_injected = dps_enrichment is not None
+        self._order_lookup_injected = order_lookup_service is not None
         self._hybrid_service = hybrid_service
         self._eligibility: AutoProcessingEligibilityService | None = None
         # Separate knowledge source, read-only, in its own database. Injected
@@ -340,6 +349,28 @@ class AnswerService:
         self.answers = AnswerRepository(database)
         self.dps = DpsRepository(database)
         self.validator = AnswerValidator()
+
+    def _use_synthetic_order_snapshot(self) -> bool:
+        """Whether this instance is a legacy unit test with a DPS double.
+
+        Read only from what the constructor was handed, never from the
+        attributes: ``dps_enrichment`` and ``order_lookup_service`` are lazy
+        properties that assign to ``_dps_enrichment`` and
+        ``_order_lookup_service`` on first use, so the original test asking
+        "was a double injected?" silently became "has anything touched DPS
+        yet, and is this the first order lookup?" -- which a production run
+        satisfies on its first delivery inquiry after start-up.
+
+        The consequence was not a cosmetic one. The synthetic snapshot claims
+        ``success`` for whatever number the customer typed, without calling
+        Naver at all, so an order that does not exist was recorded as looked
+        up and handed to DPS. Real inquiry 686427466 shows it: a number Naver
+        answers with 100003 (주문을 찾을 수 없음) produced
+        ``ORDER_LOOKUP_SUCCEEDED result_count=1`` 43ms after the lookup
+        started, with no Naver request in the log at all.
+        """
+
+        return self._dps_enrichment_injected and not self._order_lookup_injected
 
     @property
     def order_lookup_service(self) -> UatOrderService:
@@ -1219,10 +1250,7 @@ class AnswerService:
                     # Injected DPS doubles represent pre-arranged delivery
                     # facts in legacy unit tests. Production and new matrix
                     # tests always use the real/injected order service first.
-                    if (
-                        self._order_lookup_service is None
-                        and self._dps_enrichment is not None
-                    ):
+                    if self._use_synthetic_order_snapshot():
                         order_lookup_result = {
                             "success": True,
                             "orders": [{"order_id": request.order_id}],

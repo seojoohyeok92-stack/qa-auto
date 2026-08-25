@@ -377,6 +377,70 @@ def required_fact_groups(question: object) -> tuple[frozenset[str], ...]:
         for word in ("탈부착", "탈착", "분리", "떼었다", "떼고", "다시 장착")
     ):
         groups.append(frozenset({"stand_detachable"}))
+    # Weight is the clearest case of one topic holding several facts that are
+    # not interchangeable: the panel alone, the panel on its stand, and the
+    # stand's own shipping carton are three different numbers. Naming the
+    # scope in the question picks exactly one of them, so a body-weight
+    # question can never be satisfied by the accessory's package weight.
+    if any(word in text for word in ("무게", "중량", "kg", "몇키로", "몇 키로")):
+        excludes_stand = any(
+            word in text
+            for word in (
+                "스탠드 제외", "스탠드제외", "스탠드 빼고", "스탠드빼고",
+                "스탠드 없이", "스탠드없이", "본체만", "패널만", "tv만",
+            )
+        )
+        includes_stand = any(
+            word in text
+            for word in (
+                "스탠드 포함", "스탠드포함", "스탠드까지",
+                "스탠드 합쳐", "스탠드 달고", "스탠드 장착",
+            )
+        )
+        if excludes_stand:
+            groups.append(frozenset({"weight_without_stand_kg"}))
+        elif includes_stand:
+            groups.append(frozenset({"weight_with_stand_kg"}))
+        else:
+            # Unqualified "무게": either set weight answers it, but the
+            # accessory carton still does not.
+            groups.append(
+                frozenset({"weight_with_stand_kg", "weight_without_stand_kg"})
+            )
+    if any(word in text for word in ("해상도", "resolution", "fhd", "qhd", "uhd", "4k")):
+        groups.append(frozenset({"resolution", "resolution_class"}))
+    if any(
+        word in text
+        for word in ("화면 크기", "화면크기", "화면 사이즈", "인치", "몇인치", "몇 인치")
+    ):
+        groups.append(frozenset({"screen_size", "display_size_cm"}))
+    if "usb" in text or "유에스비" in text:
+        # Port count is catalogued; charging power is not. Naming only the
+        # claim that has a field keeps "USB 몇 개인가요?" answerable while
+        # "USB-C로 65W 충전이 되나요?" stays a question for a person, instead
+        # of being answered by an unrelated port count.
+        if any(
+            word in text
+            for word in ("몇 개", "몇개", "개수", "갯수", "포트 수", "단자 수")
+        ):
+            groups.append(frozenset({"usb_port_count"}))
+        elif any(
+            word in text
+            for word in ("버전", "규격", "3.0", "2.0", "타입")
+        ):
+            groups.append(frozenset({"usb_version"}))
+    if "블루투스" in text or "bluetooth" in text:
+        groups.append(frozenset({"bluetooth_present", "bluetooth_version"}))
+    if any(
+        word in text
+        for word in ("와이파이", "wifi", "wi-fi", "무선인터넷", "무선 인터넷")
+    ) and not any(word in text for word in ("미러링", "screen mirroring")):
+        # "와이파이 없이도 미러링 되나요?" is a question about mirroring, not
+        # about the Wi-Fi radio; the mirroring branch above already names the
+        # field that answers it.
+        groups.append(frozenset({"wifi_present", "wifi_standard"}))
+    if any(word in text for word in ("주사율", "refresh")):
+        groups.append(frozenset({"refresh_rate"}))
     return tuple(dict.fromkeys(groups))
 
 

@@ -25,6 +25,7 @@ from answer.exceptions import GenerationSkippedError
 from services import learning_evidence_policy
 from services.gpt_understanding_service import GptUnderstandingService
 from services.pre_generation_gate import PreGenerationGate
+from services.product_knowledge_service import required_fact_groups
 from services.self_review_service import SelfReviewService
 
 
@@ -126,6 +127,119 @@ class HybridAnswerService:
                 "product_id": knowledge.product_id,
             }
         }
+
+    @staticmethod
+    def _product_fact_support(
+        knowledge: Any, subquestion: object
+    ) -> tuple[str, ...]:
+        """The verified fields that answer ``subquestion``, or ().
+
+        Three things must all hold, and each rules out a different way a
+        product fact could be the wrong evidence:
+
+        1. the sub-question makes a claim the fact model *names* -- otherwise
+           a delivery or refund question, or a spec nobody has modelled, would
+           be "supported" by whatever happens to be catalogued;
+        2. every named claim has a safe (VERIFIED, this product, ACTIVE
+           provenance) field -- a catalogued screen size may not vouch for a
+           question about weight, and one answered claim in a two-claim
+           question is not an answer;
+        3. nothing in the catalogue contradicts it, which is
+           ``supports_question``'s own test.
+
+        Requirement 1 is why ``required_fact_groups`` is consulted directly
+        instead of ``supports_question``: that method answers "is anything
+        contradicting this?" and falls back to ``has_safe_facts`` for a
+        question it has no model for, which is the right default when the
+        question is merely being *shown* facts. Promoting evidence is a
+        stronger claim, and under that fallback a topic match was enough --
+        "USB-C로 65W 충전이 가능한가요?" matched the USB topic and would have
+        been answered by ``usb_port_count``, which says nothing about
+        charging. An unmodelled claim now stays unsupported and goes to staff.
+
+        Retrieval breadth is deliberately not enough on its own: only the
+        intersection of "relevant to this sub-question" and "verified for this
+        exact product" counts.
+        """
+
+        required = required_fact_groups(subquestion)
+        if not required:
+            return ()
+        safe_keys = getattr(knowledge, "safe_field_keys", None)
+        if not callable(safe_keys):
+            return ()
+        safe = safe_keys()
+        if not all(safe.intersection(group) for group in required):
+            return ()
+        if not knowledge.supports_question(subquestion):
+            return ()
+        # Report the fields that actually settled the question, not every
+        # field its topic could have touched: the trace is what a person
+        # reads to decide whether the auto-post was justified, and listing
+        # the stand's carton weight beside a body-weight answer would make a
+        # correct decision look like the wrong one.
+        return tuple(
+            field
+            for group in required
+            for field in sorted(safe.intersection(group))
+        )
+
+    @classmethod
+    def _apply_product_fact_evidence(
+        cls, request: AnswerRequest, learning_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Let a VERIFIED product fact answer a sub-question it covers.
+
+        The evidence ladder in ``learning_context_service`` knew about DPS,
+        verified feedback signals, approved Learning and historical cases, but
+        not about ``product_facts.db`` -- so a specification question the
+        Product DB answers exactly still came out ``NO_RELIABLE_SOURCE``.
+
+        That single gap broke two things at once, which is why fixing only the
+        publishing gate never worked. ``subquestion_evidence_is_binding`` is
+        in the prompt contract, so the model was told not to answer a
+        sub-question whose verified fact was sitting in the very same prompt
+        and replied "추가 확인이 필요합니다"; and the validator's
+        QUESTION_ANSWER_ALIGNMENT rule then flagged any answer that *did*
+        state the fact as an unsupported claim.
+
+        Only ``NO_RELIABLE_SOURCE`` items are promoted. NEEDS_DPS keeps
+        deferring to the current order, CONFLICT keeps requiring a person, and
+        an item already ANSWERABLE keeps the source it had -- so this can add
+        evidence but never remove or overrule any.
+        """
+
+        knowledge = request.metadata.get("product_knowledge")
+        if not getattr(knowledge, "matched", False):
+            return learning_context
+        if not getattr(knowledge, "has_safe_facts", False):
+            return learning_context
+        evidence = learning_context.get("subquestion_evidence")
+        if not isinstance(evidence, list):
+            return learning_context
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "")
+            if status not in {"NO_RELIABLE_SOURCE", "ANSWERABLE"}:
+                continue
+            covering = cls._product_fact_support(
+                knowledge, item.get("subquestion")
+            )
+            if not covering:
+                continue
+            item["product_fact_fields"] = list(covering)
+            # An item retrieval already answered keeps the source it earned;
+            # the verified fact is recorded beside it and settles coverage.
+            # Learning that merely paraphrases the question scores partial
+            # answer-support, and that partial score was enough to hold an
+            # answer the Product DB can prove outright.
+            item["evidence_coverage"] = "SUPPORTED"
+            if status == "NO_RELIABLE_SOURCE":
+                item["status"] = "ANSWERABLE"
+                item["source"] = "VERIFIED_PRODUCT_FACT"
+                item["answer_required"] = True
+        return learning_context
 
     @staticmethod
     def _apply_evidence_conflicts(
@@ -549,6 +663,13 @@ class HybridAnswerService:
                 # facts carry this product's verified specification. Both
                 # reach the prompt; neither overwrites the other.
                 learning_context.update(self._product_facts_context(request))
+                # ...and they are evidence, not just prompt text. Applied
+                # before the conflict pass below so a product fact that
+                # contradicts an approved Learning answer is still resolved
+                # as a CONFLICT rather than silently winning.
+                learning_context = self._apply_product_fact_evidence(
+                    request, learning_context
+                )
                 # PRE-GENERATION GATE (2/2) -- the retrieved evidence.
                 # Retrieval and the product-fact lookup are local reads, so
                 # both sides of a contradiction are known while the provider

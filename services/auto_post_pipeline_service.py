@@ -114,6 +114,84 @@ class AutoPostPipelineService:
             details=details,
         )
 
+    def _record_decision(
+        self,
+        inquiry_id: int,
+        *,
+        draft: dict[str, Any],
+        route: str,
+        eligibility: AutoProcessingEligibility,
+        run_id: str,
+    ) -> None:
+        """One record saying what was decided and everything it rested on.
+
+        The inputs were already logged, but by a dozen separate events across
+        classification, lookup, generation and validation, so reconstructing
+        why one inquiry went to staff meant reading the whole trail and
+        joining it by hand. Diagnosing the 2026-08-25 holds took exactly that,
+        and what it turned up -- an evidence map that disagreed with the
+        product-fact metadata beside it -- is only visible when the two are
+        read together.
+
+        Values only: no answer text, no customer text, no order number.
+        """
+
+        metadata = draft.get("metadata_json")
+        data = metadata if isinstance(metadata, dict) else {}
+        plan = data.get("processing_plan")
+        plan = plan if isinstance(plan, dict) else {}
+        analysis = plan.get("analysis")
+        analysis = analysis if isinstance(analysis, dict) else {}
+        hybrid = data.get("hybrid")
+        hybrid = hybrid if isinstance(hybrid, dict) else {}
+        guard = data.get("product_fact_guard")
+        guard = guard if isinstance(guard, dict) else {}
+        evidence = hybrid.get("subquestion_evidence")
+        evidence = evidence if isinstance(evidence, list) else []
+        validator = draft.get("validator_result_json")
+        validator = validator if isinstance(validator, dict) else {}
+        self.logs.record_inquiry(
+            inquiry_id,
+            "AUTO_POST_DECISION",
+            "자동등록 판정과 그 근거를 한 건으로 기록했습니다.",
+            level="INFO" if eligibility.safe else "WARNING",
+            details={
+                "auto_post_run_id": run_id,
+                "classification": analysis.get("question_category"),
+                "detected_intent": analysis.get("detected_intent"),
+                "strategy": analysis.get("answer_strategy"),
+                "route": route,
+                "answer_source": data.get("generation_mode")
+                or draft.get("provider"),
+                "evidence_sources": sorted(
+                    {
+                        str(item.get("source") or "NONE")
+                        for item in evidence
+                        if isinstance(item, dict)
+                    }
+                ),
+                "product_fact_source": guard.get("current_fact_source"),
+                "product_fact_verified": guard.get("current_fact_verified"),
+                "learning_verified": bool(
+                    (guard.get("approved_learning_evidence") or {}).get("usable")
+                ),
+                "order_number_state": plan.get("order_id_status"),
+                "order_lookup_state": plan.get("order_lookup_status"),
+                "dps_state": plan.get("dps_lookup_status"),
+                "validator_state": draft.get("validation_status"),
+                "validator_passed": validator.get("passed"),
+                "review_required": str(
+                    draft.get("review_status") or ""
+                ).upper() in {"NEEDS_REVIEW", "IN_REVIEW"},
+                "eligibility": eligibility.decision,
+                "blocking_reason_codes": list(eligibility.reasons),
+                "soft_reason_codes": list(eligibility.soft_reasons),
+                "final_decision": (
+                    "AUTO_POST_ALLOWED" if eligibility.safe else "MANUAL_REVIEW"
+                ),
+            },
+        )
+
     @staticmethod
     def _route(draft: dict[str, Any]) -> str:
         metadata = draft.get("metadata_json")
@@ -297,6 +375,13 @@ class AutoPostPipelineService:
                     inquiry=fresh,
                     draft=draft,
                     route=route,
+                )
+                self._record_decision(
+                    inquiry_id,
+                    draft=draft,
+                    route=route,
+                    eligibility=eligibility,
+                    run_id=run_id,
                 )
                 if not eligibility.safe:
                     counters["skipped_count"] += 1

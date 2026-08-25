@@ -31,6 +31,36 @@ def create_headers(access_token: str) -> dict[str, str]:
     }
 
 
+class OrderNotFoundError(RuntimeError):
+    """네이버가 "그런 주문은 없다"고 확정 응답한 경우.
+
+    호출 실패(인증 만료·네트워크·5xx)와 반드시 구분해야 합니다. 전자는
+    고객이 주문번호를 잘못 적었다는 뜻이라 곧바로 "주문번호를 다시 확인해
+    주세요"라고 안내할 수 있지만, 후자는 우리 쪽 장애이므로 같은 안내를
+    하면 고객에게 사실과 다른 말을 하게 됩니다.
+    """
+
+
+# 네이버 커머스 API가 "주문을 찾을 수 없음"에 사용하는 코드입니다.
+ORDER_NOT_FOUND_CODES = frozenset({"100003"})
+
+
+def _is_order_not_found(response: requests.Response) -> bool:
+    if response.status_code == 404:
+        return True
+    if response.status_code != 400:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("code") or "") in ORDER_NOT_FOUND_CODES:
+        return True
+    return "주문을 찾을 수 없" in str(payload.get("message") or "")
+
+
 def raise_order_api_error(
     response: requests.Response,
     action: str,
@@ -38,6 +68,12 @@ def raise_order_api_error(
     """
     주문 API 오류를 읽기 쉬운 형태로 변환합니다.
     """
+
+    if _is_order_not_found(response):
+        raise OrderNotFoundError(
+            f"{action}: 해당 주문번호로 주문을 찾을 수 없습니다.\n"
+            f"상태 코드: {response.status_code}"
+        )
 
     raise RuntimeError(
         f"{action}에 실패했습니다.\n"

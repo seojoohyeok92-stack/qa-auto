@@ -33,6 +33,7 @@ settle, and picking one would publish a coin flip.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable, Mapping
 
@@ -53,6 +54,22 @@ EXACT_PRODUCT_MATCHES = frozenset({
 HEDGE_MARKERS = (
     "것 같", "것같", "듯 합니다", "듯합니다", "아마", "추정", "예상됩니다",
     "확인이 필요", "확인 후", "확인해 보", "알아보",
+)
+
+# A stated quantity in a declarative sentence: "HDMI 단자는 3개입니다",
+# "본체 무게는 6.5kg입니다", "해상도는 3840x2160입니다".
+#
+# ``detect_polarity`` exists to catch two yes/no statements that flatly
+# disagree, and returns UNCERTAIN for anything without a 가능/불가 style
+# marker -- which is every measurement there is. Reading that UNCERTAIN as
+# "the writer declined to commit" disqualified precisely the approved answers
+# that state a number, so Learning could settle "지원하나요?" but never
+# "몇 개인가요?" -- the questions it is most often approved for.
+_QUANTITY_STATEMENT = re.compile(
+    r"\d+(?:[.,]\d+)?\s*"
+    r"(?:개|대|장|인치|cm|mm|m|kg|g|w|hz|ms|년|월|일|시간|분|x|×)?"
+    r"[^.!?\n]*"
+    r"(?:입니다|이에요|예요|됩니다|습니다|이며|이고|입니다\.)"
 )
 
 # Fact values that carry a polarity of their own. A boolean-ish product fact
@@ -95,14 +112,55 @@ def _text(value: object) -> str:
 
 
 def is_hedged(answer: object) -> bool:
-    """True when the answer declines to commit to what it is being read for."""
+    """True when the answer declines to commit to what it is being read for.
+
+    A hedge marker settles it outright, and a clear yes/no polarity settles the
+    opposite. What remains is everything the polarity detector has no opinion
+    about, which includes every measurement -- so a stated quantity in a
+    declarative sentence counts as committing, and anything else stays hedged.
+    """
 
     text = _text(answer)
     if not text:
         return True
     if any(marker in text for marker in HEDGE_MARKERS):
         return True
-    return detect_polarity(text) == "UNCERTAIN"
+    if detect_polarity(text) != "UNCERTAIN":
+        return False
+    return not _QUANTITY_STATEMENT.search(text)
+
+
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
+
+def quantities(value: object) -> frozenset[float]:
+    """Every number stated in ``value``.
+
+    Admitting measurements as definite (see ``is_hedged``) means the conflict
+    checks have to be able to see a measurement disagree. Polarity cannot:
+    "3개입니다" and "2개입니다" are both UNCERTAIN to it, so without this the
+    two would have been treated as agreeing, and one of them published.
+
+    Bare numbers, deliberately: a unit-aware comparison would have to decide
+    that 6.5kg and 6500g are the same claim and that 3개 and 3.0 are too, and
+    getting that wrong in either direction is worse than the small cost of
+    treating an incidental number as a claim. Disagreement here only ever
+    routes an inquiry to a person.
+    """
+
+    return frozenset(
+        float(match.group()) for match in _NUMBER.finditer(_text(value))
+    )
+
+
+def quantities_conflict(left: object, right: object) -> bool:
+    """True when both state numbers and share none of them."""
+
+    left_values = quantities(left)
+    right_values = quantities(right)
+    if not left_values or not right_values:
+        return False
+    return not (left_values & right_values)
 
 
 def value_polarity(value: object) -> str:
@@ -168,7 +226,11 @@ def approved_conflicts(
                 "matched_subquestion"
             ):
                 continue
-            if not facts_conflict(left.get("answer"), right.get("answer")):
+            if not facts_conflict(
+                left.get("answer"), right.get("answer")
+            ) and not quantities_conflict(
+                left.get("answer"), right.get("answer")
+            ):
                 continue
             found.append({
                 "left_learning_id": left.get("learning_example_id"),
@@ -179,6 +241,21 @@ def approved_conflicts(
                 "kind": "APPROVED_LEARNING_VS_APPROVED_LEARNING",
             })
     return tuple(found)
+
+
+def _fact_quantity_text(value: object) -> str:
+    """The numbers a fact value states, whatever shape it is stored in.
+
+    Values arrive as scalars (``3``), mappings (``{"inch": 43}``) and lists
+    (``[450, 500, 550]``); flattening to text lets one number comparison read
+    all three without teaching it each field's schema.
+    """
+
+    if isinstance(value, Mapping):
+        return " ".join(str(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item) for item in value)
+    return str(value or "")
 
 
 def fact_conflicts(
@@ -197,11 +274,20 @@ def fact_conflicts(
     found: list[dict[str, Any]] = []
     for item in usable:
         answer_polarity = detect_polarity(item.get("answer"))
-        if answer_polarity == "UNCERTAIN":
-            continue
         for fact in facts:
-            polarity = value_polarity(getattr(fact, "value", None))
-            if polarity in {"UNCERTAIN", answer_polarity}:
+            value = getattr(fact, "value", None)
+            polarity = value_polarity(value)
+            opposed_polarity = (
+                answer_polarity != "UNCERTAIN"
+                and polarity not in {"UNCERTAIN", answer_polarity}
+            )
+            # A verified count must also be able to contradict an approved
+            # answer that states a different count; neither text carries a
+            # polarity, so polarity alone would call them compatible.
+            opposed_quantity = quantities_conflict(
+                item.get("answer"), _fact_quantity_text(value)
+            )
+            if not opposed_polarity and not opposed_quantity:
                 continue
             found.append({
                 "learning_id": item.get("learning_example_id"),

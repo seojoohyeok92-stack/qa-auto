@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Iterable, TypedDict
 
 from api.order import (
+    OrderNotFoundError,
     get_order_summary,
     get_orders_by_order_id,
     get_product_orders,
@@ -287,6 +288,21 @@ def lookup_general_order_id(
             ),
             cached=False,
         )
+    except OrderNotFoundError:
+        # Naver answered, and its answer was "no such order". That is a fact
+        # about the number the customer gave us, not a failure of ours -- and
+        # collapsing it into ORDER_LOOKUP_FAILED told staff the API was down
+        # every time somebody mistyped an order number.
+        return {
+            "success": False,
+            "lookup_number": normalized,
+            "lookup_type": "ORDER_ID",
+            "orders": [],
+            "error_code": "ORDER_NOT_FOUND",
+            "error_message": "일반 주문번호에 해당하는 주문 결과가 없습니다.",
+            "cached": False,
+            "queried_at": _now_iso(),
+        }
     except Exception:
         return {
             "success": False,
