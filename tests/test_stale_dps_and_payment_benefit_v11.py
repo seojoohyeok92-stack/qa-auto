@@ -25,6 +25,7 @@ import pytest
 from answer.facts import build_answer_facts
 from answer.models import AnswerRequest, AnswerResult, AnswerStatus
 from dps.dates import STALE_DPS_SCHEDULE, is_schedule_stale
+from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from services.auto_processing_eligibility_service import (
@@ -321,6 +322,33 @@ def test_blocked_inquiries_never_reach_post(
     database: Database, question: str
 ) -> None:
     inquiry_id = _blocked_inquiry(database, question)
+    if question != CARD_QUESTION:
+        # Pin the pipeline-level assertion to an actual stale DPS result. A
+        # delivery question with no order number now correctly posts the
+        # confirmed order-number request template and is not stale-DPS input.
+        AnswerRepository(database).create_program_draft(
+            inquiry_id,
+            AnswerResult(
+                status=AnswerStatus.GENERATED,
+                category="배송",
+                reason="stale DPS fixture",
+                answer="설치예정일은 2026년 8월 3일입니다.",
+                provider="rules",
+                auto_answerable=True,
+                needs_review=False,
+                metadata={
+                    "selected_answer_route": "DELIVERY_WITH_INSTALLATION_DATE",
+                    "generation_mode": "DPS",
+                    "validator_result": {"status": "PASS", "passed": True},
+                    "processing_plan": {
+                        "requires_dps_lookup": True,
+                        "dps_lookup_status": "SUCCESS",
+                        "valid_dps_snapshot_available": False,
+                        "analysis": {"manual_review_required": False},
+                    },
+                },
+            ),
+        )
     posts = CountingPostService()
     pipeline = AutoPostPipelineService(database, post_service=posts)
 

@@ -112,6 +112,12 @@ _COMPATIBILITY_CLAIM = re.compile(r"(호환|장착|부착)\w*\s*(됩니다|가�
 _BENEFIT_CLAIM = re.compile(
     r"(할인|혜택|무이자|캐시백|적립|사은품)\w*\s*(됩니다|가능합니다|적용됩니다|드립니다)"
 )
+_FEATURE_CLAIM = re.compile(
+    r"(?P<feature>airplay|에어플레이|미러링)"
+    r"[^.!?\n]{0,80}?"
+    r"(?P<polarity>지원하지\s*않|지원|미지원|불가능|가능하지\s*않|가능)",
+    re.IGNORECASE,
+)
 
 
 def _sentences(answer: str) -> list[str]:
@@ -164,6 +170,45 @@ def ungrounded_claims(answer: str, evidence: str) -> list[str]:
             r"할인|혜택|무이자|캐시백|적립", haystack
         ):
             findings.append("근거 없는 혜택·할인을 확정했습니다.")
+    return list(dict.fromkeys(findings))
+
+
+def ungrounded_feature_claims(answer: str, evidence: str) -> list[str]:
+    """Find definite AirPlay/mirroring claims without matching evidence."""
+
+    corpus = re.sub(r"\s+", "", str(evidence or "").lower())
+    findings: list[str] = []
+    for match in _FEATURE_CLAIM.finditer(str(answer or "")):
+        feature = match.group("feature").lower()
+        polarity_text = re.sub(r"\s+", "", match.group("polarity").lower())
+        negative = any(
+            marker in polarity_text
+            for marker in ("지원하지않", "미지원", "불가능", "가능하지않")
+        )
+        field = (
+            "airplay_support"
+            if feature in {"airplay", "에어플레이"}
+            else "screen_mirroring"
+        )
+        field_backed = field in corpus and (
+            any(marker in corpus for marker in (":no", ":false", ":미지원", ":불가"))
+            if negative
+            else any(marker in corpus for marker in (":yes", ":true", ":지원", ":가능"))
+        )
+        aliases = (
+            ("airplay", "에어플레이")
+            if field == "airplay_support"
+            else ("미러링", "screenmirroring", "screen_mirroring")
+        )
+        text_backed = any(alias in corpus for alias in aliases) and (
+            any(marker in corpus for marker in ("지원하지않", "미지원", "불가능", "가능하지않"))
+            if negative
+            else any(marker in corpus for marker in ("지원", "가능"))
+        )
+        if not field_backed and not text_backed:
+            findings.append(
+                f"검증된 상품 기능 근거 없이 확정했습니다: {match.group('feature')}"
+            )
     return list(dict.fromkeys(findings))
 
 
@@ -717,6 +762,7 @@ class AnswerValidator:
             if part
         )
         errors.extend(ungrounded_claims(draft.answer, corpus))
+        errors.extend(ungrounded_feature_claims(draft.answer, corpus))
         if not review.answered_all_questions and intent.questions:
             review_signals.append("복합 질문 일부의 답변 누락 가능성이 있습니다.")
         phase9_rules = self._phase9_rules(

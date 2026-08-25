@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from answer.exceptions import AnswerAlreadyPostedError
+from answer.exceptions import AnswerAlreadyPostedError, AutoAnswerProhibitedError
 from answer.models import AnswerRequest, AnswerStatus
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
@@ -314,13 +314,14 @@ def test_promised_deadline_question_runs_dps_and_uses_authoritative_date(
 
 def test_change_request_is_never_auto_answerable(database: Database) -> None:
     inquiry_id = add_inquiry(database, "설치일을 변경해 주세요.")
-    outcome = AnswerService(
+    client = FakeClient(success_response())
+    with pytest.raises(AutoAnswerProhibitedError):
+        AnswerService(
         database,
-        dps_enrichment=service(database, FakeClient(success_response())),
-    ).generate_for_inquiry(inquiry_id)
-    assert outcome.result.status is AnswerStatus.GENERATED
-    assert outcome.result.auto_answerable is False
-    assert "일정 변경" in outcome.result.answer
+        dps_enrichment=service(database, client),
+        ).generate_for_inquiry(inquiry_id)
+    assert client.calls == []
+    assert AnswerRepository(database).active_for_inquiry(inquiry_id) is None
 
 
 def test_mixed_question_keeps_general_answer_when_dps_fails(

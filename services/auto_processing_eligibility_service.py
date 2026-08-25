@@ -408,7 +408,12 @@ class AutoProcessingEligibilityService:
             if not order_request_route:
                 reasons.append("ORDER_LOOKUP_NOT_TRUSTED")
 
-        dps_required = bool(plan.get("requires_dps_lookup"))
+        # ORDER_ID_REQUEST is a terminal, confirmed operational template for
+        # the current turn.  DPS may be a business requirement for the
+        # customer's eventual schedule answer, but it is neither executable
+        # nor evidence for the safe request asking for the missing order id.
+        # Other routes retain the full DPS trust/snapshot gates.
+        dps_required = bool(plan.get("requires_dps_lookup")) and not order_request_route
         if dps_required and str(plan.get("dps_lookup_status") or "").upper() != "SUCCESS":
             reasons.append("DPS_RESULT_NOT_TRUSTED")
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):

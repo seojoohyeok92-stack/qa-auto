@@ -219,6 +219,9 @@ SCHEDULE_CHANGE_WORDS = (
     "배송 일정 변경",
     "변경해 주세요",
     "변경해주세요",
+    "빨리 받을 수 있나요",
+    "더 빨리 받을 수 있나요",
+    "일찍 받을 수 있나요",
 )
 # A schedule *change* is a request to perform work on the order, not a
 # question about it. Matched as target + action together so that asking
@@ -230,15 +233,26 @@ SCHEDULE_CHANGE_TARGET_WORDS = (
     "설치일정",
     "설치 날짜",
     "설치날짜",
+    "설치 예정일",
+    "설치예정일",
+    "설치 요청일",
+    "설치요청일",
     "배송일",
     "배송 일정",
     "배송일정",
     "배송 날짜",
     "배송날짜",
+    "배송 예정일",
+    "배송예정일",
+    "배송 요청일",
+    "배송요청일",
     "방문일",
     "방문 시간",
     "방문시간",
     "방문 일정",
+    "기사 일정",
+    "기사님 일정",
+    "기사 방문",
     "수령일",
 )
 SCHEDULE_CHANGE_ACTION_WORDS = (
@@ -322,6 +336,18 @@ COMPATIBILITY_RELATION_WORDS = (
 
 
 def _is_compatibility_question(question: str) -> bool:
+    # Removing and reattaching the product's own basic stand is an assembly
+    # fact, not a claim that a customer's separate accessory will fit.  It may
+    # be answered by an exact verified Product Fact or exact-model Approved
+    # Learning; actual bracket/third-party fit questions remain compatibility.
+    basic_stand_assembly = any(
+        word in question for word in ("스탠드", "받침대", "다리")
+    ) and any(
+        word in question
+        for word in ("탈부착", "탈착", "분리", "떼었다", "떼고", "다시 장착")
+    )
+    if basic_stand_assembly:
+        return False
     return any(
         word in question for word in COMPATIBILITY_OBJECT_WORDS
     ) and any(word in question for word in COMPATIBILITY_RELATION_WORDS)
@@ -332,11 +358,44 @@ def _is_unverifiable_payment_benefit(question: str) -> bool:
 
 
 def _is_schedule_change_request(question: str) -> bool:
+    # "It was postponed; when is it now?" reports a changed state and asks
+    # for the current schedule.  It is a lookup, not a request that Q&A Auto
+    # perform another change.  Passive/result wording plus an explicit lookup
+    # marker is required so "please postpone it" still takes the staff path.
+    passive_delay = any(
+        word in question
+        for word in (
+            "미뤄지", "미뤄졌", "늦춰지", "늦춰졌", "연기되", "변경되",
+            "변경됐", "바뀌었", "바뀌었는데",
+        )
+    )
+    lookup_request = any(
+        word in question
+        for word in ("언제", "지금", "현재", "되나요", "오나요", "오시나요")
+    )
+    if passive_delay and lookup_request:
+        return False
     if any(word in question for word in SCHEDULE_CHANGE_WORDS):
         return True
-    return any(
+    action = any(word in question for word in SCHEDULE_CHANGE_ACTION_WORDS)
+    if not action:
+        return False
+    if any(
         word in question for word in SCHEDULE_CHANGE_TARGET_WORDS
-    ) and any(word in question for word in SCHEDULE_CHANGE_ACTION_WORDS)
+    ):
+        return True
+    # Customers often omit the word "date" while still making an operational
+    # request ("installation earlier", "adjust the driver's schedule").
+    # Action wording remains mandatory so ordinary schedule lookups are not
+    # captured.  A temporal destination covers the terse follow-up
+    # "move it to this week" after Naver has supplied the inquiry context.
+    return any(
+        word in question
+        for word in ("배송", "설치", "기사", "방문", "일정")
+    ) or any(
+        word in question
+        for word in ("이번 주", "다음 주", "이번주", "다음주", "내일", "하루")
+    )
 # Expressions that require a person to look at the actual case before the
 # customer gets any reply. Matched as substrings against the whitespace
 # normalized question, so each entry is chosen to be unambiguous on its own:
@@ -636,6 +695,14 @@ class InquiryAnalysisService:
 
     def analyze(self, request: AnswerRequest) -> InquiryAnalysis:
         subquestions = split_subquestions(request.question)
+        if len(subquestions) == 1 and _is_schedule_change_request(
+            request.question
+        ):
+            # The splitter can retain two sentence fragments as one candidate
+            # and the connector refinement can then separate the schedule
+            # target from its action.  Judge this indivisible operational
+            # request on the full original text before attempting that split.
+            return self._analyze_single(request)
         if len(subquestions) == 1:
             # The deterministic splitter keys on sentence enders and list
             # punctuation, so a connector-joined compound arrives as one
@@ -738,6 +805,27 @@ class InquiryAnalysisService:
             )
             for subquestion in subquestions
         ]
+        # Sentence splitting can separate the schedule target ("installation
+        # date") from the requested action ("move it earlier").  Each fragment
+        # is harmless alone, but the full customer request requires an actual
+        # staff action.  Preserve both the useful per-part analysis and the
+        # whole-message safety judgement in the compound aggregation.
+        if _is_schedule_change_request(request.question) and not any(
+            item.inquiry_subtype == "SCHEDULE_CHANGE_REQUEST" for item in parts
+        ):
+            whole = self._analyze_single(request)
+            # Target and action split across sentences are one operational
+            # request, not two independently useful questions.  Keep compound
+            # drafting only when another genuinely different question (A/S,
+            # a product feature, etc.) is also present.
+            other_intent = any(
+                item.inquiry_subtype != "UNCLASSIFIED"
+                and not item.delivery_related
+                for item in parts
+            )
+            if not other_intent:
+                return whole
+            parts.append(whole)
         # A fragment that classifies as nothing in particular, sitting beside
         # real questions, is a greeting or a closing remark ("확인 부탁드립니다.")
         # rather than an unanswerable question, and must not drag the whole

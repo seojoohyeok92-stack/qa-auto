@@ -59,14 +59,25 @@ class UatOrderService:
         self,
         inquiry_id: int,
         *,
+        validated_order_number: str | None = None,
         force_refresh: bool = False,
         correlation_id: str | None = None,
     ) -> OrderLookupResult:
         inquiry = self.inquiries.get(inquiry_id)
         if inquiry is None:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
+        # The inquiry body is parsed before this service is called.  Product
+        # Q&A rows commonly have an empty ``order_id`` column even when the
+        # customer wrote a valid general order number in the body, so the
+        # validated hand-off must take precedence over the persisted columns.
+        # Whether lookup is required remains the processing plan's decision;
+        # accepting this value here only preserves the already-validated
+        # identifier once that decision has been made.
         number = str(
-            inquiry.get("order_id") or inquiry.get("product_order_id") or ""
+            validated_order_number
+            or inquiry.get("order_id")
+            or inquiry.get("product_order_id")
+            or ""
         ).strip()
         if not number:
             result: OrderLookupResult = {

@@ -55,6 +55,7 @@ from services.product_fact_guard import (
     classify_product_fact,
     extract_model_code,
 )
+from services.pre_generation_gate import PreGenerationGate
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
 
@@ -1123,7 +1124,29 @@ class AnswerService:
                     inquiry_id,
                     "MANUAL_REVIEW_REQUIRED",
                 )
-            if not phase9_analysis.can_generate_answer:
+            # At this point order/DPS evidence has not been collected yet.
+            # ``plan.needs_staff_review`` may therefore be a preliminary
+            # "lookup pending" state, not a final manual-only finding.  Only
+            # classifier-proven manual/high-risk causes may stop before those
+            # lookups; the normal later gate judges evidence-dependent holds.
+            pre_generation = PreGenerationGate.evaluate_plan(
+                analysis=(
+                    analysis_data
+                    if phase9_analysis.manual_review_required
+                    or plan.is_high_risk
+                    else {}
+                ),
+                plan=(
+                    plan.to_dict()
+                    if phase9_analysis.manual_review_required
+                    or plan.is_high_risk
+                    else {}
+                ),
+            )
+            if (
+                pre_generation.skip_generation
+                or not phase9_analysis.can_generate_answer
+            ):
                 # A working safety gate, not a failure: say so in the event
                 # code as well as the level, so the dashboard does not count a
                 # correctly blocked high-risk inquiry as a system fault.
@@ -1145,6 +1168,10 @@ class AnswerService:
                         "policy_blocked": True,
                         "policy_reason": policy_reason,
                         "safe_error_code": "AUTO_ANSWER_PROHIBITED",
+                        "pre_generation_gate_stage": pre_generation.stage,
+                        "pre_generation_gate_reasons": list(
+                            pre_generation.reasons
+                        ),
                     },
                 )
                 raise AutoAnswerProhibitedError(
@@ -1206,6 +1233,7 @@ class AnswerService:
                         order_lookup_result = (
                             self.order_lookup_service.lookup_for_inquiry(
                                 inquiry_id,
+                                validated_order_number=request.order_id,
                                 force_refresh=force_dps_refresh,
                                 correlation_id=correlation_id,
                             )
@@ -1270,6 +1298,20 @@ class AnswerService:
                     plan.order_lookup_status
                 )
             is_delivery_schedule = plan.is_delivery
+            # Classify product-fact sensitivity before choosing a general
+            # answer route. A non-authoritative SAFE_RULE used to skip
+            # Approved Learning retrieval and was then rejected by this same
+            # guard downstream. Exact templates and PRODUCT_DB keep their
+            # existing authority; sensitive prose rules must reach Hybrid so
+            # exact-model evidence can actually be evaluated.
+            product_fact_guard = classify_product_fact(
+                request.question,
+                inquiry_type=phase9_analysis.inquiry_type.value,
+                inquiry_subtype=phase9_analysis.inquiry_subtype,
+                product_id=request.metadata.get("product_id"),
+                product_name=request.product_name,
+                option_name=request.option_name,
+            )
             if is_delivery_schedule:
                 # Delivery/installation schedules are routed before the rule
                 # engine so broad legacy shipping templates can never hide a
@@ -1960,8 +2002,10 @@ class AnswerService:
                             "validator_result": template_validation.status,
                         },
                     )
-                elif prefer_template and _is_safe_rule_result(
-                    base_rule_result
+                elif (
+                    prefer_template
+                    and _is_safe_rule_result(base_rule_result)
+                    and not product_fact_guard.sensitive
                 ):
                     result = _apply_safe_rule_metadata(
                         base_rule_result,
@@ -2055,6 +2099,12 @@ class AnswerService:
                                         base_rule_result.answer
                                     )
                                     or template_failure != "NOT_FOUND"
+                                    or (
+                                        product_fact_guard.sensitive
+                                        and _is_safe_rule_result(
+                                            base_rule_result
+                                        )
+                                    )
                                 )
                             )
                             else base_rule_result
@@ -2391,14 +2441,6 @@ class AnswerService:
                 or result.metadata.get("generation_mode")
                 or plan.selected_answer_route
             ).upper()
-            product_fact_guard = classify_product_fact(
-                request.question,
-                inquiry_type=phase9_analysis.inquiry_type.value,
-                inquiry_subtype=phase9_analysis.inquiry_subtype,
-                product_id=request.metadata.get("product_id"),
-                product_name=request.product_name,
-                option_name=request.option_name,
-            )
             # B5: the Product Knowledge DB is a second way to satisfy the same
             # requirement the PRODUCT_DB route already satisfies -- a fact
             # about *this* product that a person verified. It is never a
@@ -2440,6 +2482,7 @@ class AnswerService:
                 product_fact_guard.sensitive
                 and product_knowledge.matched
                 and product_knowledge.has_safe_facts
+                and product_knowledge.supports_question(request.question)
                 and prompt_included
                 and validator_cleared
             )
@@ -2488,6 +2531,9 @@ class AnswerService:
                 "product_knowledge": product_knowledge.to_dict(),
                 "product_facts_in_prompt": prompt_included,
                 "product_facts_validator_cleared": validator_cleared,
+                "product_fact_claims_supported": (
+                    product_knowledge.supports_question(request.question)
+                ),
             }
             result.metadata["product_fact_guard"] = guard_metadata
             if product_knowledge.has_safe_facts:

@@ -106,9 +106,12 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
     (("틸트", "각도조절", "각도 조절"),
      ("tilt_range_degrees",), ("accessory_tilt_range_degrees",)),
     (("스탠드", "거치대", "받침대"),
-     ("stand_type",),
+     ("stand_type", "stand_detachable"),
      ("accessory_materials", "accessory_max_load_kg", "accessory_color",
       "accessory_shelf_included", "accessory_base_plate_options_mm")),
+    (("airplay", "에어플레이"), ("airplay_support",), ()),
+    (("미러링", "screen mirroring", "screen_mirroring"),
+     ("screen_mirroring", "mirroring_without_wifi"), ()),
     (("운영체제", "os", "타이젠", "tizen"), ("operating_system",), ()),
     (("웹브라우저", "브라우저", "인터넷 사용"), ("web_browser",), ()),
     (("모델명", "모델코드", "모델 코드", "품번", "모델번호"),
@@ -203,6 +206,22 @@ class ProductKnowledgeResult:
     def covers_all(self, fields: Iterable[str]) -> bool:
         wanted = {str(item) for item in fields if str(item).strip()}
         return bool(wanted) and wanted <= set(self.safe_field_keys())
+
+    def supports_question(self, question: object) -> bool:
+        """Whether safe facts cover every material claim in ``question``.
+
+        ``has_safe_facts`` only says retrieval found something.  It must not
+        let a Wi-Fi standard, size or weight vouch for an AirPlay claim, nor
+        let an accessory's VESA range answer the display's own VESA holes.
+        Each tuple is an alternative field group; every detected claim must
+        have at least one safe field from its group.
+        """
+
+        groups = required_fact_groups(question)
+        if not groups:
+            return self.has_safe_facts
+        safe = self.safe_field_keys()
+        return all(bool(safe.intersection(group)) for group in groups)
 
     def evidence_text(self) -> str:
         """Flat text for the deterministic grounding check.
@@ -300,13 +319,65 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
         return (), ()
     fields: list[str] = []
     topics: list[str] = []
+    for group in required_fact_groups(text):
+        fields.extend(group)
     for keywords, base_fields, accessory_fields in FIELD_TOPICS:
         if not any(keyword in text for keyword in keywords):
             continue
         topics.append(keywords[0])
         fields.extend(base_fields)
+        # A bare "this product's VESA holes" means the base display even when
+        # the customer says they plan to install a wall bracket.  Accessory
+        # VESA is selected only when the accessory itself owns the requested
+        # support range/specification.
+        if base_fields == ("vesa_mm",):
+            if _explicit_accessory_vesa_scope(text):
+                fields.extend(accessory_fields)
+            continue
         fields.extend(accessory_fields)
     return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(topics))
+
+
+def _explicit_accessory_vesa_scope(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in (
+            "브라켓의 vesa", "브라켓 vesa 지원", "브라켓 지원 vesa",
+            "거치대의 vesa", "거치대 vesa 지원", "스탠드의 vesa",
+            "받침대의 vesa", "지원 베사 범위", "지원 vesa 범위",
+        )
+    )
+
+
+def required_fact_groups(question: object) -> tuple[frozenset[str], ...]:
+    """Material product claims and the fields allowed to support each one."""
+
+    text = " ".join(str(question or "").lower().split())
+    groups: list[frozenset[str]] = []
+    if "airplay" in text or "에어플레이" in text:
+        groups.append(frozenset({"airplay_support"}))
+    if any(word in text for word in ("미러링", "screen mirroring")):
+        groups.append(frozenset({"screen_mirroring"}))
+        if any(word in text for word in ("와이파이 없이", "wifi 없이", "wi-fi 없이")):
+            groups.append(frozenset({"mirroring_without_wifi"}))
+    if "hdmi" in text or "에이치디엠아이" in text:
+        if any(word in text for word in ("몇 개", "몇개", "개수", "갯수", "포트 수", "단자 수")):
+            groups.append(frozenset({"hdmi_port_count"}))
+        else:
+            groups.append(frozenset({
+                "hdmi_port_count", "hdmi_present", "hdmi_version",
+            }))
+    if "vesa" in text or "베사" in text:
+        groups.append(frozenset({
+            "accessory_vesa_mm" if _explicit_accessory_vesa_scope(text)
+            else "vesa_mm"
+        }))
+    if any(word in text for word in ("스탠드", "받침대", "다리")) and any(
+        word in text
+        for word in ("탈부착", "탈착", "분리", "떼었다", "떼고", "다시 장착")
+    ):
+        groups.append(frozenset({"stand_detachable"}))
+    return tuple(dict.fromkeys(groups))
 
 
 class ProductKnowledgeService:

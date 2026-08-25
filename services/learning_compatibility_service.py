@@ -98,7 +98,8 @@ TOPIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "STAND_BRACKET_VESA",
         re.compile(
-            r"VESA|베사|브라켓|벽걸이|스탠드\s*(?:형|설치|구성|포함|호환)|거치대|마운트",
+            r"VESA|베사|브라켓|벽걸이|스탠드|받침대|"
+            r"다리\s*(?:탈부착|탈착|분리|장착)|거치대|마운트",
             re.IGNORECASE,
         ),
     ),
