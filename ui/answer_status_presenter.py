@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from answer.hold_reasons import REASON_LABELS as _REASON_LABELS
+from answer.hold_reasons import describe_reason as _describe_reason
 from services.auto_post_pipeline_service import AutoPostPipelineService
 from services.auto_processing_eligibility_service import (
     AutoProcessingEligibility,
@@ -34,52 +36,13 @@ from services.auto_processing_eligibility_service import (
 )
 
 
-# Every reason the gate can actually produce, in the operator's language.
-# Codes not listed here are shown as-is rather than guessed at, so a reason
-# added later is visible instead of silently mistranslated.
-REASON_LABELS: dict[str, str] = {
-    # Idempotency
-    "ALREADY_ANSWERED_OR_POSTED": "이미 답변이 등록되어 있어 중복 등록하지 않습니다.",
-    # Privacy / transport integrity
-    "PII_EXPOSURE": "개인정보가 노출될 수 있어 자동 등록을 차단했습니다.",
-    "SECRET_EXPOSURE": "인증정보가 노출될 수 있어 자동 등록을 차단했습니다.",
-    "FINAL_ANSWER_REQUIRED": "등록할 답변 본문이 비어 있습니다.",
-    "UNRESOLVED_PLACEHOLDER": "답변에 치환되지 않은 자리표시자가 남아 있습니다.",
-    "PAYLOAD_FINAL_ANSWER_MISMATCH": "등록 payload와 최종 답변이 일치하지 않습니다.",
-    "UNSUPPORTED_SOURCE_TYPE": "지원하지 않는 문의 유형이라 자동 등록하지 않습니다.",
-    # Validator
-    "VALIDATOR_NOT_PASS": "Validator 안전 검증을 통과하지 못했습니다.",
-    "VALIDATOR_REVIEW_REQUIRED": "Validator가 직원 확인을 요청했습니다.",
-    # Route / policy
-    "INTENT_NOT_AUTO_POSTABLE": "이 답변 경로는 자동 등록 대상이 아닙니다.",
-    "ANSWER_REQUIRES_MANUAL_REVIEW": "직원 확인이 필요한 답변입니다.",
-    "PRODUCT_FACT_NOT_VERIFIED": "상품 정보 확인이 필요합니다.",
-    "PRODUCT_COMPATIBILITY_NOT_VERIFIED": "호환 여부가 검증되지 않았습니다.",
-    "PROCESSING_PLAN_REQUIRES_REVIEW": "문의 처리 계획상 직원 확인이 필요합니다.",
-    "POLICY_OR_HIGH_RISK_REVIEW": "위험·분쟁 가능성이 있어 직원 판단이 필요합니다.",
-    "DRAFT_REVIEW_REQUIRED": "답변 초안이 직원 검토 대상으로 판정되었습니다.",
-    # Order / DPS
-    "REQUIRED_ORDER_ID_MISSING_OR_INVALID": "필요한 주문번호를 확인하지 못했습니다.",
-    "ORDER_LOOKUP_NOT_TRUSTED": "주문 조회 결과를 신뢰할 수 없습니다.",
-    "DPS_RESULT_NOT_TRUSTED": "DPS 조회 결과를 신뢰할 수 없습니다.",
-    "DPS_SNAPSHOT_NOT_VALIDATED": "DPS 설치 일정 스냅샷이 검증되지 않았습니다.",
-    # Recorded but not blocking
-    "ORDER_ID_REQUESTED_FROM_CUSTOMER": "고객에게 주문번호를 요청하는 답변입니다.",
-    "INTENT_CONFIDENCE_LOW": "문의 분류 신뢰도가 낮게 측정되었습니다.",
-    "INTENT_CONFIDENCE_UNKNOWN": "문의 분류 신뢰도를 확인하지 못했습니다.",
-    "GPT_CONFIDENCE_LOW": "GPT 자체 신뢰도가 낮게 측정되었습니다.",
-    "GPT_CONFIDENCE_UNKNOWN": "GPT 자체 신뢰도를 확인하지 못했습니다.",
-    "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": (
-        "문의 유형을 분류하지 못했지만 Validator는 통과했습니다."
-    ),
-    "PRELIMINARY_REVIEW_RESOLVED": (
-        "사전 검토 신호가 현재 분석·근거·Validator 확인으로 해소되었습니다."
-    ),
-}
+# The reason vocabulary is shared with the KakaoTalk notifier so the
+# dashboard and the message an operator actually reads give the same
+# sentence for the same code. Re-exported here under the names this
+# module has always published.
+REASON_LABELS = _REASON_LABELS
+describe_reason = _describe_reason
 
-# The gate builds this one dynamically from the route, so it cannot be a fixed
-# key. Anything else unknown is shown verbatim.
-_ROUTE_PREFIX = "ROUTE_"
 
 _VALIDATION_LABELS = {
     "PASS": "PASS · 통과",
@@ -129,21 +92,6 @@ def pipeline_route(draft: dict[str, Any] | None) -> str:
     return AutoPostPipelineService._route(draft)
 
 
-def describe_reason(code: str) -> str:
-    """The operator-facing sentence for one gate reason code."""
-
-    text = str(code or "").strip()
-    if not text:
-        return ""
-    known = REASON_LABELS.get(text)
-    if known:
-        return known
-    if text.startswith(_ROUTE_PREFIX):
-        route = text[len(_ROUTE_PREFIX):] or "UNKNOWN"
-        return f"답변 경로 {route} 은(는) 직원 확인 대상입니다."
-    return text
-
-
 @dataclass(frozen=True)
 class AnswerStatusView:
     """What the detail panel should say, and why."""
@@ -162,6 +110,12 @@ class AnswerStatusView:
     advisory: tuple[str, ...] = ()
     review_signals: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    # Product Knowledge summary for this draft, display only. The gate decides
+    # elsewhere; this exists so staff can see which product facts were verified
+    # and which were withheld, and therefore why a spec question is on hold.
+    product_fact_label: str = ""
+    product_facts: tuple[tuple[str, str], ...] = ()
+    product_fact_exclusions: tuple[tuple[str, str], ...] = ()
 
     @property
     def warning_count(self) -> int:
@@ -318,4 +272,78 @@ def build_answer_status(
         advisory=advisory,
         review_signals=signals,
         errors=errors,
+        **_product_fact_view(draft),
     )
+
+
+def _product_fact_view(draft: dict[str, Any]) -> dict[str, Any]:
+    """Read back what the Product Knowledge service already decided.
+
+    Purely a read: the safe/unsafe verdict was made by
+    ``ProductKnowledgeService`` at generation time and is replayed here, so
+    the screen can never disagree with the pipeline about which facts counted.
+    """
+
+    guard = _mapping(_mapping(draft.get("metadata_json")).get(
+        "product_fact_guard"
+    ))
+    knowledge = _mapping(guard.get("product_knowledge"))
+    if not knowledge:
+        return {}
+    safe = [item for item in knowledge.get("safe_facts") or [] if isinstance(item, dict)]
+    excluded = [
+        item for item in knowledge.get("excluded_facts") or []
+        if isinstance(item, dict)
+    ]
+    if not safe and not excluded:
+        label = ""
+        if knowledge.get("unavailable_reason"):
+            label = _PRODUCT_FACT_UNAVAILABLE.get(
+                str(knowledge["unavailable_reason"]), ""
+            )
+        return {"product_fact_label": label} if label else {}
+    label = f"VERIFIED · {len(safe)}건"
+    if excluded:
+        label += f" (제외 {len(excluded)}건)"
+    return {
+        "product_fact_label": label,
+        "product_facts": tuple(
+            (
+                str(item.get("field_key") or ""),
+                "{}{}".format(
+                    item.get("value"),
+                    f" {item['unit']}" if item.get("unit") else "",
+                ),
+            )
+            for item in safe
+        ),
+        "product_fact_exclusions": tuple(
+            (
+                str(item.get("field_key") or ""),
+                _PRODUCT_FACT_EXCLUSIONS.get(
+                    str(item.get("exclusion_reason") or ""),
+                    str(item.get("exclusion_reason") or ""),
+                ),
+            )
+            for item in excluded
+        ),
+    }
+
+
+_PRODUCT_FACT_UNAVAILABLE = {
+    "PRODUCT_NOT_IN_PRODUCT_DB": "상품DB에 등록되지 않은 상품입니다.",
+    "PRODUCT_FACTS_DB_UNAVAILABLE": "상품DB를 사용할 수 없습니다.",
+    "NO_PRODUCT_ID": "상품 식별자가 없어 상품DB를 조회하지 못했습니다.",
+}
+_PRODUCT_FACT_EXCLUSIONS = {
+    "VERIFICATION_NEEDS_REVIEW": "상품DB 검증 대기 중이라 근거로 쓰지 않았습니다.",
+    "RESOLUTION_CONFLICT": "상품DB 출처 간 값이 충돌해 근거로 쓰지 않았습니다.",
+    "RESOLUTION_NEEDS_REVIEW": "상품DB 값 확정 전이라 근거로 쓰지 않았습니다.",
+    "VALUE_EMPTY_OR_UNKNOWN": "값이 확인되지 않았습니다(미지원이라는 뜻이 아닙니다).",
+    "NO_ACTIVE_PROVENANCE": "출처 기록이 없어 근거로 쓰지 않았습니다.",
+    "PROVENANCE_NOT_VERIFIED": "출처가 아직 검증되지 않았습니다.",
+    "MODEL_SCOPE_MISMATCH": "다른 모델의 값이라 근거로 쓰지 않았습니다.",
+    "SUPERSEDED_BY_LATER_RUN": "최신 수집본으로 대체된 값입니다.",
+    "VOLATILE_LISTING_FACT": "가격·재고처럼 자주 바뀌는 값이라 제외했습니다.",
+    "NO_SELECTED_VALUE": "확정된 값이 없습니다.",
+}

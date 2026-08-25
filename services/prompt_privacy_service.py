@@ -5,7 +5,7 @@ from typing import Any
 
 from answer.governance_models import PrivacySanitizationResult
 from answer.prompt_builder import ADDRESS_PATTERN, EMAIL_ANY_PATTERN
-from answer.text_utils import PHONE_PATTERN
+from answer.text_utils import PHONE_PATTERN, is_official_contact_number
 
 
 SENSITIVE_KEYS = {
@@ -75,9 +75,22 @@ class PromptPrivacyService:
             if not isinstance(value, str):
                 return value
             text = value
+            # An approved published contact number is organisation data, not
+            # personal data; masking it hides what the customer needs to call.
+            if PHONE_PATTERN.search(text):
+                replaced = PHONE_PATTERN.sub(
+                    lambda match: (
+                        match.group(0)
+                        if is_official_contact_number(match.group(0))
+                        else "<masked-phone>"
+                    ),
+                    text,
+                )
+                if replaced != text:
+                    masked.append("phone")
+                    text = replaced
             substitutions = (
                 (EMAIL_ANY_PATTERN, "<masked-email>", "email"),
-                (PHONE_PATTERN, "<masked-phone>", "phone"),
                 (ADDRESS_PATTERN, "<masked-address>", "address"),
                 (ORDER_PATTERN, "<masked-order>", "order-number"),
             )

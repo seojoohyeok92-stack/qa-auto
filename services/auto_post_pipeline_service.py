@@ -257,20 +257,35 @@ class AutoPostPipelineService:
                 draft_outcome = self.drafts.ensure_for_inquiry(
                     inquiry_id, correlation_id=run_id
                 )
-                if draft_outcome.status in {"FAILED", "SKIPPED_ALREADY_ANSWERED"}:
+                if draft_outcome.status in {
+                    "FAILED", "SKIPPED_ALREADY_ANSWERED", "POLICY_BLOCKED",
+                }:
+                    message = "자동 답변을 준비하지 못해 해당 문의를 건너뛰었습니다."
                     if draft_outcome.status == "SKIPPED_ALREADY_ANSWERED":
                         counters["skipped_count"] += 1
                         event = "AUTO_POST_SKIPPED_ALREADY_ANSWERED"
+                    elif draft_outcome.status == "POLICY_BLOCKED":
+                        # Blocked on purpose. It still skips auto-post exactly
+                        # as before; only the counter and event stop calling a
+                        # working safety gate a failure.
+                        counters["skipped_count"] += 1
+                        event = "AUTO_POST_SKIPPED_POLICY_BLOCKED"
+                        message = (
+                            "정책상 자동 답변이 금지된 문의로 자동등록을 "
+                            "건너뛰고 직원 검토로 넘겼습니다."
+                        )
                     else:
                         counters["failed_count"] += 1
                         event = "AUTO_ANSWER_FAILED"
                     self.logs.record_inquiry(
-                        inquiry_id, event,
-                        "자동 답변을 준비하지 못해 해당 문의를 건너뛰었습니다.",
+                        inquiry_id, event, message,
                         level="WARNING",
                         details={
                             "auto_post_run_id": run_id,
                             "error_code": draft_outcome.error_code,
+                            "policy_blocked": (
+                                draft_outcome.status == "POLICY_BLOCKED"
+                            ),
                         },
                     )
                     continue

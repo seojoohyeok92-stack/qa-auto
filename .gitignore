@@ -26,6 +26,15 @@ cache/
 *.db-journal
 *.sqlite
 *.sqlite3
+
+# The Product Knowledge database is shipped with the code: it is a versioned,
+# read-only knowledge source built by a separate project, not runtime state,
+# and the server needs it to answer product-specification questions. This is
+# the ONLY database that belongs in the repository -- the operational DB, its
+# WAL/SHM sidecars and every backup stay excluded by the rules above, so a
+# deploy can never overwrite the server's live data with a development copy.
+!data/product_facts.db
+
 data/backups/
 data/dps_agent_state.json
 data/dps_connection.json
@@ -49,3 +58,10 @@ desktop.ini
 # Local legacy handoff notes superseded by README/DEPLOYMENT
 CHATGPT_FINAL_COMPLETION_NOTES.txt
 PATCH_README.txt
+
+# Read-only production diagnostics. These hold real customer inquiry text,
+# product ids and answer bodies pulled from the operational DB, so they stay
+# local: useful while investigating, never part of the repository.
+gate_*.txt
+diagnose_*_output.txt
+*_gate.txt

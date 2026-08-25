@@ -137,16 +137,32 @@ class AutoProcessingEligibilityService:
         "위험·분쟁 관련 표현이 있어 직원 판단이 필요합니다" is a positive risk
         classification and must always hold the answer; falling off the end of
         the keyword tables is not. Only the second is recognised here, and it
-        is recognised positively -- both the category and the subtype have to
-        say "no rule matched" -- so a new review category can never be mistaken
-        for a classifier gap.
+        is recognised positively -- the classifier has to say "no rule matched"
+        -- so a new review category can never be mistaken for a classifier gap.
+
+        A compound inquiry needs the second form below. Its subtype is
+        COMPOUND_MULTI_INTENT and its category comes from the representative
+        sub-question, so the single-question shape never matches even when the
+        *only* thing asking for review is one unclassified fragment beside a
+        perfectly ordinary question. ``manual_review_sources`` carries one
+        entry per contributing sub-question, and every one of them must be a
+        classifier gap: a single risk, cancel, schedule-change or empty-question
+        source keeps the hold. Absent or empty sources mean the cause is
+        unknown, which stays blocked.
         """
 
-        return (
+        if (
             str(analysis.get("question_category") or "").upper()
             == "INFORMATION_INSUFFICIENT"
             and str(analysis.get("inquiry_subtype") or "").upper()
             == "UNCLASSIFIED"
+        ):
+            return True
+        sources = analysis.get("manual_review_sources")
+        if not isinstance(sources, (list, tuple)) or not sources:
+            return False
+        return all(
+            str(source or "").upper() == "UNCLASSIFIED" for source in sources
         )
 
     @classmethod

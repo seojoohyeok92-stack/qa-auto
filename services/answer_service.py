@@ -12,13 +12,17 @@ from answer.exceptions import (
     AnswerEngineError,
     AnswerGenerationError,
     AnswerGenerationInProgressError,
+    AutoAnswerProhibitedError,
+    GenerationSkippedError,
 )
+from answer.hold_reasons import primary_reason
 from answer.models import AnswerResult, AnswerStatus
 from answer.inquiry_processing_plan import InquiryProcessingPlan
 from answer.answer_format import format_final_answer
 from answer.answer_validator import AnswerValidator
+from answer.safe_draft import review_required_safe_result as _review_required_safe_result
 from answer.source_adapter import answer_request_from_inquiry
-from answer.text_utils import restore_question_mark
+from answer.text_utils import restore_question_mark, split_subquestions
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.dps_repository import DpsRepository
@@ -32,7 +36,14 @@ from services.dps_enrichment_service import (
 )
 from services.dps_lookup_policy import DpsLookupDecision, DpsLookupStatus
 from services.hybrid_answer_service import HybridAnswerService
+from services.auto_processing_eligibility_service import (
+    AutoProcessingEligibilityService,
+)
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.product_knowledge_service import (
+    ProductKnowledgeResult,
+    ProductKnowledgeService,
+)
 from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
 )
@@ -40,7 +51,10 @@ from services.phase9_answer_policy import apply_phase9_rule_policy
 from services.gpt_governance_service import GovernedHybridAnswerService
 from services.uat_order_service import UatOrderService
 from services.order_service import lookup_general_order_id
-from services.product_fact_guard import classify_product_fact
+from services.product_fact_guard import (
+    classify_product_fact,
+    extract_model_code,
+)
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
 
@@ -293,85 +307,6 @@ def _neutral_gpt_context(
     )
 
 
-def _review_required_safe_result(
-    request: Any,
-    *,
-    template_preferred: bool,
-    failure_code: str,
-    questions: tuple[str, ...] = (),
-) -> AnswerResult:
-    """Return the last-resort, non-empty customer draft for GPT outages.
-
-    A provider or validator failure is an expected operational state.  It must
-    not leave an unanswered inquiry without a Program Answer; staff can replace
-    this conservative draft later.
-
-    When the GPT UNDERSTANDING step already decomposed the inquiry before the
-    failure, ``questions`` carries what the customer actually asked.  Echoing
-    those back keeps this safety draft on-topic instead of a static
-    "사용 방법 또는 기능"/"주문 또는 상품" category label that may not match
-    the real question (e.g. a product-availability question mislabeled as a
-    usage/feature question).  With no decomposed questions available (a
-    failure before UNDERSTANDING even ran), the generic category fallback is
-    kept as the last resort.
-    """
-
-    cleaned_questions = tuple(
-        dict.fromkeys(
-            restore_question_mark(item)
-            for item in questions
-            if str(item).strip()
-        )
-    )
-    if cleaned_questions:
-        if len(cleaned_questions) == 1:
-            confirmation_body = f'문의주신 "{cleaned_questions[0]}"'
-        else:
-            bullet_list = "\n".join(f"- {item}" for item in cleaned_questions)
-            confirmation_body = f"문의주신 아래 내용은\n\n{bullet_list}"
-        answer = format_final_answer(
-            f"""{confirmation_body} 관련하여 정확한 정보 확인이 필요합니다.
-
-확인되지 않은 내용을 임의로 안내하지 않고 직원 검토가 필요한 상태로 처리하겠습니다."""
-        )
-    else:
-        product_inquiry = str(request.inquiry_type).upper() == "PRODUCT_INQUIRY"
-        subject = (
-            "문의하신 상품의 사용 방법 또는 기능"
-            if product_inquiry
-            else "문의하신 주문 또는 상품 관련 내용"
-        )
-        answer = format_final_answer(
-            f"""{subject}은 정확한 정보 확인이 필요한 문의입니다.
-
-확인되지 않은 내용을 임의로 안내하지 않고 직원 검토가 필요한 상태로 처리하겠습니다."""
-        )
-    return AnswerResult(
-        status=AnswerStatus.NEEDS_REVIEW,
-        category="직원검토/안전초안",
-        reason="자동 답변 공급자 또는 검증 단계 실패 시 사용하는 안전 초안입니다.",
-        answer=answer,
-        provider="safe_rule",
-        auto_answerable=False,
-        needs_review=True,
-        matched_rule="REVIEW_REQUIRED_SAFE_DRAFT",
-        metadata={
-            "answer_type": "review_required_safe_draft",
-            "answer_source": "SAFE_TEMPLATE",
-            "generation_mode": "SAFE_RULE",
-            "selected_answer_route": "REVIEW_REQUIRED_SAFE_DRAFT",
-            "template_preferred": bool(template_preferred),
-            "template_override": False,
-            "template_id": "REVIEW_REQUIRED_SAFE_DRAFT",
-            "template_name": "REVIEW_REQUIRED_SAFE_DRAFT",
-            "gpt_called": True,
-            "safe_failure_code": str(failure_code)[:100],
-            "draft_created": True,
-            "requires_manual_review": True,
-        },
-    )
-
-
 class AnswerService:
     def __init__(
         self,
@@ -383,11 +318,16 @@ class AnswerService:
         inquiry_analysis: InquiryAnalysisService | None = None,
         processing_plans: InquiryProcessingPlanService | None = None,
         order_lookup_service: UatOrderService | None = None,
+        product_knowledge: ProductKnowledgeService | None = None,
     ) -> None:
         self.database = database
         self._engine = engine
         self._dps_enrichment = dps_enrichment
         self._hybrid_service = hybrid_service
+        self._eligibility: AutoProcessingEligibilityService | None = None
+        # Separate knowledge source, read-only, in its own database. Injected
+        # so tests can point it at a fixture without touching the real file.
+        self.product_knowledge = product_knowledge or ProductKnowledgeService()
         self.analysis = inquiry_analysis or InquiryAnalysisService()
         self.plans = processing_plans or InquiryProcessingPlanService(
             database, analysis=self.analysis
@@ -422,10 +362,55 @@ class AnswerService:
         return self._dps_enrichment
 
     @property
+    def eligibility(self) -> AutoProcessingEligibilityService:
+        """The single publishing policy, reused for reporting, never re-stated."""
+
+        if self._eligibility is None:
+            self._eligibility = AutoProcessingEligibilityService()
+        return self._eligibility
+
+    @property
     def hybrid_service(self) -> HybridAnswerService:
         if self._hybrid_service is None:
             self._hybrid_service = GovernedHybridAnswerService(self.database)
         return self._hybrid_service
+
+    def _hold_reason_for(
+        self,
+        *,
+        inquiry: dict[str, Any],
+        draft: dict[str, Any],
+        result: AnswerResult,
+    ) -> tuple[str, tuple[str, ...]]:
+        """The publishing gate's own verdict, in the operator's language.
+
+        Soft reasons are never allowed to stand in for a hard one: telling an
+        operator "분류 신뢰도가 낮음" when the actual block is "직원 확인 필요"
+        describes the wrong problem and invites the wrong action. They are
+        still reported after the hard reasons, so nothing recorded is lost.
+        """
+
+        try:
+            verdict = self.eligibility.evaluate(
+                inquiry=inquiry,
+                draft=draft,
+                route=str(
+                    result.metadata.get("selected_answer_route")
+                    or result.metadata.get("generation_mode")
+                    or ""
+                ),
+            )
+        except Exception:
+            LOGGER.exception(
+                "미등록 사유 계산 실패: inquiry_id=%s", inquiry.get("id")
+            )
+            return "", ()
+        if verdict.safe:
+            return "", ()
+        return (
+            primary_reason(verdict.reasons, verdict.soft_reasons),
+            tuple((*verdict.reasons, *verdict.soft_reasons)),
+        )
 
     def _notify_active_draft_safely(
         self,
@@ -442,10 +427,26 @@ class AnswerService:
             plan.needs_staff_review
             or result.status is not AnswerStatus.GENERATED
         )
+        # Why the answer was written is what the pipeline records; why it is
+        # not on Naver is what an operator has to act on. Those are different
+        # questions, and the notification used to answer only the first --
+        # ``result.reason`` describes the generation route, so a held inquiry
+        # reported how its draft was composed and never said what was blocking
+        # it. The publishing gate is asked directly instead, so the message
+        # carries the same reason the dashboard shows for the same inquiry.
+        hold_reason = ""
+        hold_codes: tuple[str, ...] = ()
+        generation_skipped = bool(
+            result.metadata.get("generation_skipped")
+        )
+        if needs_review:
+            hold_reason, hold_codes = self._hold_reason_for(
+                inquiry=inquiry, draft=draft, result=result
+            )
         try:
             notification_enqueued = notify_qna_safely(
                 title=(
-                    "[네이버 Q&A 자동답변 보류]"
+                    "[Q&A 미등록 / 직원 확인 필요]"
                     if needs_review
                     else "[네이버 Q&A 답변 생성 완료]"
                 ),
@@ -467,6 +468,9 @@ class AnswerService:
                 notify_key=(
                     f"answer_draft_created:{inquiry_id}:{draft['id']}"
                 ),
+                hold_reason=hold_reason,
+                hold_codes=hold_codes,
+                generation_skipped=generation_skipped,
             )
             if notification_enqueued:
                 self.logs.record_inquiry(
@@ -848,6 +852,19 @@ class AnswerService:
             analysis_data = phase9_analysis.to_dict()
             request.metadata["phase9_analysis"] = analysis_data
             request.metadata["processing_plan"] = plan.to_dict()
+            # B5: looked up *here*, before any provider call, because a fact
+            # the model never read cannot justify anything downstream. The
+            # result rides on request.metadata so the hybrid path can put the
+            # safe facts in the prompt and in the validator's evidence.
+            # Sub-questions are passed separately so a compound inquiry keeps
+            # the fields each part asks about.
+            product_knowledge = self.product_knowledge.facts_for_inquiry(
+                product_id=request.metadata.get("product_id"),
+                questions=split_subquestions(request.question),
+                question=request.question,
+                model_code=extract_model_code(request.product_name),
+            )
+            request.metadata["product_knowledge"] = product_knowledge
             self.logs.record_inquiry(
                 inquiry_id,
                 "PROCESSING_PLAN_STARTED",
@@ -1103,18 +1120,32 @@ class AnswerService:
                     "MANUAL_REVIEW_REQUIRED",
                 )
             if not phase9_analysis.can_generate_answer:
+                # A working safety gate, not a failure: say so in the event
+                # code as well as the level, so the dashboard does not count a
+                # correctly blocked high-risk inquiry as a system fault.
+                policy_reason = str(
+                    phase9_analysis.inquiry_subtype or "AUTO_ANSWER_PROHIBITED"
+                ).upper()
                 self.logs.record_inquiry(
                     inquiry_id,
-                    "ANSWER_PREREQUISITE_FAILED",
-                    "자동 Draft 생성이 금지된 고위험 또는 빈 문의입니다.",
+                    "ANSWER_POLICY_BLOCKED",
+                    (
+                        "빈 문의라 자동 Draft를 생성하지 않습니다."
+                        if policy_reason == "EMPTY_QUESTION"
+                        else "고위험·분쟁 문의 정책에 따라 자동 Draft를 "
+                        "생성하지 않고 직원 검토로 넘깁니다."
+                    ),
                     level="WARNING",
                     details={
                         **decision_details,
+                        "policy_blocked": True,
+                        "policy_reason": policy_reason,
                         "safe_error_code": "AUTO_ANSWER_PROHIBITED",
                     },
                 )
-                raise AnswerGenerationError(
-                    "이 문의는 자동 답변 생성이 금지되어 직원 확인이 필요합니다."
+                raise AutoAnswerProhibitedError(
+                    "이 문의는 자동 답변 생성이 금지되어 직원 확인이 필요합니다.",
+                    policy_reason=policy_reason,
                 )
             order_lookup_result: dict[str, Any] | None = None
             if plan.is_delivery and plan.order_id_status == "VALID":
@@ -2005,6 +2036,7 @@ class AnswerService:
                             },
                         )
                     safe_review_fallback = False
+                    generation_skipped = False
                     try:
                         gpt_rule_context = (
                             _neutral_gpt_context(
@@ -2089,6 +2121,62 @@ class AnswerService:
                                     if validation is not None
                                     else "PASS"
                                 ),
+                            },
+                        )
+                    except GenerationSkippedError as skipped:
+                        # The Pre-generation Gate decided before any provider
+                        # call that no answer it produced could be published.
+                        # The customer still gets a reply and staff still get
+                        # something to edit -- the same conservative draft a
+                        # provider failure produces -- but it is recorded as a
+                        # decision, not an outage, and gpt_called stays False
+                        # so nobody is told an answer was composed.
+                        result = _review_required_safe_result(
+                            request,
+                            template_preferred=prefer_template,
+                            failure_code="GENERATION_SKIPPED",
+                            questions=split_subquestions(request.question),
+                            generation_skipped=True,
+                            skip_reasons=skipped.reasons,
+                        )
+                        validation = self.validator.validate_route(
+                            result.answer,
+                            route="REVIEW_REQUIRED_SAFE_DRAFT",
+                        )
+                        if not validation.passed:
+                            raise AnswerGenerationError(
+                                "생성 생략 안전 답변이 Validator를 통과하지 못했습니다."
+                            ) from skipped
+                        safe_review_fallback = True
+                        generation_skipped = True
+                        result.metadata["hybrid"] = {
+                            "validation": validation.to_dict(),
+                            "fallback_used": False,
+                            "provider": "pre_generation_gate",
+                            "generation_skipped": True,
+                            "generation_skip_stage": skipped.stage,
+                            "generation_skip_reasons": list(skipped.reasons),
+                        }
+                        result.metadata["validator_result"] = (
+                            validation.to_dict()
+                        )
+                        self.logs.record_inquiry(
+                            inquiry_id,
+                            "GENERATION_SKIPPED_BY_PRE_GATE",
+                            "자동등록 불가가 이미 확정되어 답변 생성을 생략했습니다.",
+                            level="WARNING",
+                            details={
+                                **decision_details,
+                                "selected_answer_route": (
+                                    "REVIEW_REQUIRED_SAFE_DRAFT"
+                                ),
+                                "generation_mode": "SAFE_RULE",
+                                "gpt_called": False,
+                                "pre_generation_gate_stage": skipped.stage,
+                                "pre_generation_gate_reasons": list(
+                                    skipped.reasons
+                                ),
+                                "correlation_id": correlation_id,
                             },
                         )
                     except Exception as fallback_error:
@@ -2251,7 +2339,13 @@ class AnswerService:
                             ),
                             "dps_lookup_attempted": False,
                             "delivery_date_found": False,
-                            "gpt_called": True,
+                            # False when the gate stopped ahead of the
+                            # provider. Reporting True there would tell an
+                            # operator an answer had been composed and
+                            # rejected, and would put a phantom call in the
+                            # cost telemetry.
+                            "gpt_called": not generation_skipped,
+                            "generation_skipped": generation_skipped,
                             "draft_created": True,
                             "delivery_question": False,
                         }
@@ -2301,18 +2395,116 @@ class AnswerService:
                 product_name=request.product_name,
                 option_name=request.option_name,
             )
+            # B5: the Product Knowledge DB is a second way to satisfy the same
+            # requirement the PRODUCT_DB route already satisfies -- a fact
+            # about *this* product that a person verified. It is never a
+            # shortcut: the service returns a fact only when it is VERIFIED,
+            # not CONFLICT/NEEDS_REVIEW, ACTIVE, non-empty, backed by ACTIVE
+            # VERIFIED provenance, and attached to this product_id. A product
+            # that merely exists in the DB proves nothing, so the topic the
+            # customer asked about has to be among the verified fields.
+            # Same lookup the provider was given -- reused, never repeated, so
+            # the gate can only ever judge the facts the model actually saw.
+            product_knowledge = request.metadata.get("product_knowledge")
+            if not isinstance(product_knowledge, ProductKnowledgeResult):
+                product_knowledge = self.product_knowledge.facts_for_inquiry(
+                    product_id=request.metadata.get("product_id"),
+                    question=request.question,
+                    model_code=product_fact_guard.model_code,
+                )
+            # A verified fact only settles the product-fact requirement when
+            # the whole evidence chain actually happened: the fact was safe,
+            # it reached the provider prompt, and the validator cleared the
+            # answer against that same fact. Any link missing and the existing
+            # PRODUCT_FACT_NOT_VERIFIED hold stays exactly as it was.
+            hybrid_metadata = (
+                result.metadata.get("hybrid")
+                if isinstance(result.metadata.get("hybrid"), dict) else {}
+            )
+            prompt_included = bool(
+                hybrid_metadata.get("product_facts_in_prompt")
+            )
+            validation_metadata = (
+                hybrid_metadata.get("validation")
+                if isinstance(hybrid_metadata.get("validation"), dict) else {}
+            )
+            validator_cleared = bool(
+                validation_metadata.get("passed") is True
+                and not validation_metadata.get("errors")
+            )
+            knowledge_verified = bool(
+                product_fact_guard.sensitive
+                and product_knowledge.matched
+                and product_knowledge.has_safe_facts
+                and prompt_included
+                and validator_cleared
+            )
+            # A third way to satisfy the same requirement, for the many
+            # products whose specification the Product DB has not catalogued
+            # yet. The DB having no row for a field says nothing about the
+            # product -- treating that silence as "unverified forever" threw
+            # away the answers staff wrote and a person approved, which for
+            # those fields is the best evidence the system has.
+            #
+            # It is not a softer test, only a different one: the answer must
+            # be approved, resolved to this exact product, actually supporting
+            # this question, unhedged, and contradicted by nothing -- and the
+            # validator must still have cleared the answer that was written
+            # from it. See ``learning_evidence_policy``.
+            learning_evidence = (
+                hybrid_metadata.get("approved_learning_evidence")
+                if isinstance(
+                    hybrid_metadata.get("approved_learning_evidence"), dict
+                )
+                else {}
+            )
+            learning_verified = bool(
+                product_fact_guard.sensitive
+                and learning_evidence.get("usable")
+                and not learning_evidence.get("conflict")
+                and validator_cleared
+            )
             current_fact_verified = bool(
                 product_fact_guard.sensitive and final_route == "PRODUCT_DB"
-            )
+            ) or knowledge_verified or learning_verified
             guard_metadata = {
                 **product_fact_guard.to_dict(),
                 "current_fact_verified": current_fact_verified,
-                "current_fact_source": "PRODUCT_DB" if current_fact_verified else None,
+                "current_fact_source": (
+                    "PRODUCT_DB"
+                    if product_fact_guard.sensitive
+                    and final_route == "PRODUCT_DB"
+                    else "PRODUCT_FACTS_DB" if knowledge_verified
+                    else "APPROVED_LEARNING" if learning_verified else None
+                ),
+                "approved_learning_evidence": dict(learning_evidence),
                 "auto_post_allowed": (
                     not product_fact_guard.sensitive or current_fact_verified
                 ),
+                "product_knowledge": product_knowledge.to_dict(),
+                "product_facts_in_prompt": prompt_included,
+                "product_facts_validator_cleared": validator_cleared,
             }
             result.metadata["product_fact_guard"] = guard_metadata
+            if product_knowledge.has_safe_facts:
+                # Carried so the validator can ground a product claim against
+                # the same facts, and so staff can see what was relied on.
+                result.metadata["product_facts"] = [
+                    item.to_dict() for item in product_knowledge.safe_facts
+                ]
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "PRODUCT_FACTS_APPLIED",
+                    "검증된 상품 Fact를 답변 근거로 사용했습니다.",
+                    details={
+                        "product_id": product_knowledge.product_id,
+                        "listing_id": product_knowledge.listing_id,
+                        "fields": sorted(product_knowledge.safe_field_keys()),
+                        "safe_count": len(product_knowledge.safe_facts),
+                        "excluded_count": len(product_knowledge.excluded_facts),
+                        "topics": list(product_knowledge.topics),
+                    },
+                )
             if product_fact_guard.sensitive and not current_fact_verified:
                 # The draft may still be useful to staff, but no Product DB
                 # miss/GPT route may assert a past model's fact automatically.
@@ -2842,14 +3034,37 @@ class AnswerService:
             )
             return AnswerGenerationOutcome(result=result, draft=draft)
         except Exception as error:
+            # A policy block unwinds through the same path as a genuine
+            # failure, so it used to be written to the workflow, the activity
+            # log and the application log as a system error three more times
+            # over. The block itself is unchanged -- it still raises, still
+            # leaves no draft -- but it is reported as a decision.
+            policy_blocked = isinstance(error, AutoAnswerProhibitedError)
             if step_started:
                 try:
-                    self.workflows.fail_step(
-                        inquiry_id,
-                        StepCode.ANSWER_GENERATED,
-                        _error_code(error),
-                        _user_error_message(error),
-                    )
+                    if policy_blocked:
+                        self.workflows.skip_step(
+                            inquiry_id,
+                            StepCode.ANSWER_GENERATED,
+                            metadata={
+                                "policy_blocked": True,
+                                "policy_reason": error.policy_reason
+                                or "AUTO_ANSWER_PROHIBITED",
+                            },
+                        )
+                    else:
+                        self.workflows.fail_step(
+                            inquiry_id,
+                            StepCode.ANSWER_GENERATED,
+                            _error_code(error),
+                            _user_error_message(error),
+                        )
+                    # NEEDS_ATTENTION is what puts an inquiry in front of a
+                    # person: the staff queue selects on
+                    # workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION').
+                    # A blocked high-risk inquiry has no draft, so this is the
+                    # only thing keeping it visible -- it must be set for the
+                    # policy path too, not just for failures.
                     self.inquiries.update_status(
                         inquiry_id,
                         InquiryStatus.NEEDS_ATTENTION,
@@ -2860,33 +3075,55 @@ class AnswerService:
                         inquiry_id,
                     )
             try:
-                self.logs.record_inquiry(
-                    inquiry_id,
-                    "PROCESSING_PLAN_FAILED",
-                    "처리계획 실행 중 시스템 오류가 발생했습니다.",
-                    level="ERROR",
-                    details={
-                        "safe_error_code": _error_code(error),
-                        "correlation_id": correlation_id,
-                    },
-                )
-                self.logs.record_inquiry(
-                    inquiry_id,
-                    "ANSWER_GENERATION_FAILED",
-                    _user_error_message(error),
-                    level="ERROR",
-                    details={"error_type": error.__class__.__name__},
-                )
+                if policy_blocked:
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "PROCESSING_PLAN_POLICY_BLOCKED",
+                        "정책상 자동 답변이 금지되어 처리계획을 중단했습니다.",
+                        level="WARNING",
+                        details={
+                            "policy_blocked": True,
+                            "policy_reason": error.policy_reason
+                            or "AUTO_ANSWER_PROHIBITED",
+                            "safe_error_code": _error_code(error),
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                else:
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "PROCESSING_PLAN_FAILED",
+                        "처리계획 실행 중 시스템 오류가 발생했습니다.",
+                        level="ERROR",
+                        details={
+                            "safe_error_code": _error_code(error),
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "ANSWER_GENERATION_FAILED",
+                        _user_error_message(error),
+                        level="ERROR",
+                        details={"error_type": error.__class__.__name__},
+                    )
             except Exception:
                 LOGGER.exception(
                     "답변 생성 실패 활동 로그 기록 오류: inquiry_id=%s",
                     inquiry_id,
                 )
-            LOGGER.exception(
-                "답변 생성 실패: inquiry_id=%s error_type=%s",
-                inquiry_id,
-                error.__class__.__name__,
-            )
+            if policy_blocked:
+                LOGGER.info(
+                    "정책상 자동 답변 금지: inquiry_id=%s policy_reason=%s",
+                    inquiry_id,
+                    error.policy_reason,
+                )
+            else:
+                LOGGER.exception(
+                    "답변 생성 실패: inquiry_id=%s error_type=%s",
+                    inquiry_id,
+                    error.__class__.__name__,
+                )
             if isinstance(error, AnswerEngineError):
                 raise
             raise AnswerGenerationError(_user_error_message(error)) from error

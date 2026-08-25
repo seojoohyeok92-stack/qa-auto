@@ -100,11 +100,50 @@ ANSWER_VIEW_PRESENTATION: dict[str, tuple[str, str]] = {
 }
 
 
-def answer_view_presentation(selected_view: str | None) -> tuple[str, str, str]:
+def staff_edit_body(
+    draft: dict[str, Any] | None,
+    *,
+    posted_answer_body: str = "",
+) -> tuple[str, str, bool]:
+    """What the 직원 수정본 box shows, and where that text actually came from.
+
+    The box is seeded with the program answer when nobody has edited anything
+    yet, which is convenient to edit from but is not a staff correction. It was
+    still labelled ``STAFF_EDITED``, so an untouched machine draft read on
+    screen as a human-verified one. The seed stays; only the claim about its
+    origin is now derived from the stored text rather than from the tab name.
+    """
+
+    if not draft:
+        return "", AnswerProvenance.PROGRAM_GENERATED.value, False
+    edited = str(draft.get("edited_answer") or "")
+    if edited.strip():
+        return edited, AnswerProvenance.STAFF_EDITED.value, True
+    if str(posted_answer_body or "").strip():
+        return posted_answer_body, AnswerProvenance.NAVER_POSTED.value, False
+    return (
+        str(draft.get("original_answer") or ""),
+        AnswerProvenance.PROGRAM_GENERATED.value,
+        False,
+    )
+
+
+def answer_view_presentation(
+    selected_view: str | None,
+    *,
+    staff_edit_provenance: str | None = None,
+) -> tuple[str, str, str]:
     label = str(selected_view or "Program Answer")
     provenance, tone = ANSWER_VIEW_PRESENTATION.get(
         label, ANSWER_VIEW_PRESENTATION["Program Answer"]
     )
+    if label == "직원 수정본" and staff_edit_provenance:
+        provenance = staff_edit_provenance
+        if provenance != AnswerProvenance.STAFF_EDITED.value:
+            # Same editable box, honest badge: the operator must be able to see
+            # at a glance that nobody has reviewed this wording yet.
+            provenance = f"{provenance} · 직원 미수정"
+            tone = "program"
     return label, provenance, tone
 
 
@@ -1410,8 +1449,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 label_visibility="collapsed",
                 width="stretch",
             )
+            staff_seed, staff_seed_provenance, staff_edit_exists = staff_edit_body(
+                draft, posted_answer_body=posted_answer_body
+            )
             view_label, view_provenance, view_tone = answer_view_presentation(
-                selected_view
+                selected_view,
+                staff_edit_provenance=staff_seed_provenance,
             )
             st.markdown(
                 f'<div class="answer-source-marker source-{view_tone}">'
@@ -1430,11 +1473,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         ):
             if selected_view == "직원 수정본" and draft:
                 if edit_key not in st.session_state:
-                    st.session_state[edit_key] = str(
-                        draft.get("edited_answer")
-                        or posted_answer_body
-                        or draft.get("original_answer")
-                        or ""
+                    st.session_state[edit_key] = staff_seed
+                if not staff_edit_exists:
+                    st.caption(
+                        "아직 직원 수정 이력이 없습니다. 아래 본문은 "
+                        f"{staff_seed_provenance} 원문이며, 저장하기 전까지 "
+                        "직원 수정본으로 기록되지 않습니다."
                     )
                 st.text_area(
                     "직원 수정본",

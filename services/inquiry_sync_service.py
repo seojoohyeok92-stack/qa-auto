@@ -430,6 +430,10 @@ class InquirySyncService:
                                 if automatic.status in {"CREATED", "EXISTING"}
                                 else "AUTOMATIC_DRAFT_SKIPPED"
                                 if automatic.status.startswith("SKIPPED")
+                                # A deliberate policy block is not a failure;
+                                # the inquiry still gets no draft either way.
+                                else "AUTOMATIC_DRAFT_POLICY_BLOCKED"
+                                if automatic.status == "POLICY_BLOCKED"
                                 else "AUTOMATIC_DRAFT_FAILED"
                             ),
                             {

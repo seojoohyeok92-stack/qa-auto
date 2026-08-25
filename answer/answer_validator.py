@@ -14,7 +14,8 @@ from answer.hybrid_models import (
     ValidationRuleResult,
 )
 from answer.inquiry_analysis import AnswerStrategy, InquiryAnalysis
-from answer.text_utils import PHONE_PATTERN
+from answer.text_utils import contains_personal_phone
+from services.auto_post_validation_service import INTERNAL_PLACEHOLDER
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
     classify_topics,
@@ -72,8 +73,34 @@ FORBIDDEN_CLAIMS = (
 #
 # These detect the classes that are both high risk and deterministically
 # checkable. Prose that asserts nothing verifiable is deliberately left alone.
+# Units. The original list covered periods, money and a couple of sizes, so a
+# product specification stated as a count or a rating -- "HDMI 단자는 2개입니다",
+# "주사율은 180Hz입니다" -- carried no detectable claim and could be asserted
+# with nothing behind it. Ordered longest-first inside each alternation so
+# that "개월" is not consumed as "개", and "Gbps"/"Mbps" not as "bps".
+_QUANTITY_UNITS_KO = (
+    # duration and frequency of occurrence (existing behaviour, unchanged)
+    "개월", "년", "일", "주일", "주", "회",
+    # counts of physical things
+    "개", "포트", "채널", "구",
+    # money and ratios (existing behaviour, unchanged)
+    "퍼센트", "%", "만원", "천원", "원",
+    # measurements written in Korean
+    "인치", "리터", "와트", "도",
+)
+# Latin-script units need a letter boundary so "2GB" is a claim while the "g"
+# inside a word is not. Korean units must NOT carry that guard: a particle
+# always follows ("2개입니다"), and requiring a non-Hangul character after the
+# unit silently disabled every one of them.
+_QUANTITY_UNITS_LATIN = (
+    "kHz", "Hz", "Gbps", "Mbps", "GB", "MB", "mm", "cm", "kg", "W", "g",
+)
 _QUANTITY_CLAIM = re.compile(
-    r"(?<![\d.])(\d[\d,]*)\s*(개월|년|일|주|주일|회|퍼센트|%|원|만원|천원|인치|kg|리터)"
+    r"(?<![\d.])(\d[\d,]*(?:\.\d+)?)\s*(?:("
+    + "|".join(re.escape(unit) for unit in _QUANTITY_UNITS_KO)
+    + r")|("
+    + "|".join(re.escape(unit) for unit in _QUANTITY_UNITS_LATIN)
+    + r")(?![A-Za-z]))"
 )
 # Wording that defers rather than asserts. A deferred sentence promises
 # nothing, so it needs no evidence.
@@ -117,12 +144,21 @@ def ungrounded_claims(answer: str, evidence: str) -> list[str]:
         measurable = CUSTOMER_DATE_PATTERN.sub(" ", sentence)
         measurable = ISO_DATE_PATTERN.sub(" ", measurable)
         for match in _QUANTITY_CLAIM.finditer(measurable):
-            quantity = f"{match.group(1)}{match.group(2)}"
+            # group 2 is the Korean unit, group 3 the Latin one; exactly one
+            # of them matched.
+            quantity = f"{match.group(1)}{match.group(2) or match.group(3)}"
             if re.sub(r"\s+", "", quantity) not in haystack:
                 findings.append(
                     f"근거 없는 수치·기간을 확정했습니다: {quantity}"
                 )
-        if _COMPATIBILITY_CLAIM.search(sentence) and "호환" not in haystack:
+        compatibility = _COMPATIBILITY_CLAIM.search(sentence)
+        # The evidence has to support the claim the answer actually made.
+        # This asked for the literal word "호환" whatever the claim was, so an
+        # approved answer stating "스탠드 탈부착 가능합니다" could not ground an
+        # answer saying exactly that -- the evidence said 부착, the check
+        # wanted 호환. Looking for the term the claim itself used is both
+        # narrower (a 호환 claim still needs 호환) and correct.
+        if compatibility and compatibility.group(1) not in haystack:
             findings.append("근거 없는 호환 여부를 확정했습니다.")
         if _BENEFIT_CLAIM.search(sentence) and not re.search(
             r"할인|혜택|무이자|캐시백|적립", haystack
@@ -240,11 +276,16 @@ class AnswerValidator:
             )
         )
         sensitive = bool(
-            PHONE_PATTERN.search(text)
+            contains_personal_phone(text)
             or EMAIL_ANY_PATTERN.search(text)
             or re.search(r"(?<!\d)\d{12,24}(?!\d)", text)
         )
         add("TEMPLATE_NON_EMPTY", bool(text), "템플릿 답변이 비어 있습니다.")
+        add(
+            "TEMPLATE_INTERNAL_PLACEHOLDER_BLOCK",
+            not bool(INTERNAL_PLACEHOLDER.search(text)),
+            "내부 마스킹 표시가 고객 답변에 남아 있습니다.",
+        )
         add(
             "TEMPLATE_PLACEHOLDERS_RESOLVED",
             not unresolved,
@@ -390,7 +431,7 @@ class AnswerValidator:
             "검증되지 않은 배송 날짜나 시간을 포함하지 않았습니다.",
         )
         sensitive = bool(
-            PHONE_PATTERN.search(text)
+            contains_personal_phone(text)
             or EMAIL_ANY_PATTERN.search(text)
             or re.search(r"(?<!\d)\d{12,24}(?!\d)", text)
         )
@@ -474,7 +515,7 @@ class AnswerValidator:
         )
         add(
             "DELIVERY_PERSONAL_DATA_BLOCK",
-            not bool(PHONE_PATTERN.search(text) or EMAIL_ANY_PATTERN.search(text)),
+            not bool(contains_personal_phone(text) or EMAIL_ANY_PATTERN.search(text)),
             "개인정보 형태의 값을 포함하지 않았습니다.",
         )
         add(
@@ -534,7 +575,7 @@ class AnswerValidator:
                 errors.append(f"존재하지 않는 Fact를 사용했습니다: {path}")
             else:
                 checked.append(path)
-        if PHONE_PATTERN.search(draft.answer) or EMAIL_ANY_PATTERN.search(
+        if contains_personal_phone(draft.answer) or EMAIL_ANY_PATTERN.search(
             draft.answer
         ):
             errors.append("답변에 개인정보 형태의 값이 포함되어 있습니다.")

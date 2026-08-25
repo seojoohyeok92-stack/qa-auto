@@ -4,7 +4,13 @@ import re
 from dataclasses import dataclass
 
 from .answer_format import combine_answer_bodies, format_auto_answer, korean_date
-from .config_loader import AnswerConfig, load_answer_config
+from .config_loader import (
+    VALIDITY_ACTIVE,
+    AnswerConfig,
+    active_install_schedule_rules,
+    install_schedule_status,
+    load_answer_config,
+)
 from .exceptions import AnswerGenerationError
 from .models import (
     AnswerRequest,
@@ -457,7 +463,12 @@ class AnswerEngine:
             return self.no_answer("리뷰이벤트/직원확인", "리뷰 이벤트 개별 접수 상태 확인이 필요합니다.")
 
         if self._is_moving_style_install_product(product) and any(k in q for k in events["delayed_delivery_keywords"]):
-            return self.yes("리뷰이벤트/배송지연", events["delayed_delivery_answer"], "무빙스타일 설치 상품의 리뷰 참여 기간 완화 안내입니다.")
+            body = self._with_event_notice(
+                events["delayed_delivery_answer"],
+                events.get("delayed_delivery_event_notice"),
+                events.get("delayed_delivery_event_validity"),
+            )
+            return self.yes("리뷰이벤트/배송지연", body, "무빙스타일 설치 상품의 리뷰 참여 기간 완화 안내입니다.")
 
         if any(k in q for k in events["answerable_keywords"]):
             return self.yes("리뷰이벤트", events["general_answer"], "리뷰 이벤트 지급 시점/작성 방법 일반 안내입니다.")
@@ -586,14 +597,24 @@ class AnswerEngine:
         ])
 
     def _install_new_order_body(self, product: str) -> str:
+        return self._install_new_order_source(product)[0]
+
+    def _install_new_order_source(self, product: str) -> tuple[str, bool]:
+        """The new-order schedule body and whether a valid rule supplied it."""
+
         rule = self._install_schedule_rule(product)
         if rule:
             body = str(rule.get("신규주문안내") or "").strip()
             if body:
-                return body
+                return body, True
         if self._is_g9_install_product(product):
-            return self.config.shipping["g9_install_answer"]
-        return self.config.shipping["install_new_order_answer"]
+            return self.config.shipping["g9_install_answer"], True
+        # No schedule is valid today. Fall back to wording that names no date
+        # and no event, rather than to the last event notice that happened to
+        # be written into the config.
+        return self._shipping_default(
+            "install_new_order_default_answer", "install_new_order_answer"
+        ), False
 
     def _install_existing_order_body(self, product: str, happycall: bool = False) -> str:
         rule = self._install_schedule_rule(product)
@@ -608,23 +629,57 @@ class AnswerEngine:
         return self.config.shipping["install_existing_order_answer"]
 
     def _install_schedule_choice_body(self, product: str) -> str:
-        new_order_body = self._install_new_order_body(product)
-        if new_order_body != self.config.shipping["install_new_order_answer"]:
+        new_order_body, from_rule = self._install_new_order_source(product)
+        if from_rule:
             return (
                 "설치일은 고객님께서 일정 조율 가능합니다.\n\n"
                 f"{new_order_body}\n\n"
                 "설치 일정 관련 안내는 결제 후 수취인의 카카오톡 알림톡으로 발송되며, 이후 안내에 따라 원하시는 일정으로 조율해 주시면 됩니다."
             )
-        return self.config.shipping["install_schedule_choice_answer"]
+        return self._shipping_default(
+            "install_schedule_choice_default_answer",
+            "install_schedule_choice_answer",
+        )
+
+    def _with_event_notice(
+        self,
+        body: str,
+        notice: object,
+        validity: object,
+    ) -> str:
+        """Append a time-bound event sentence only while its window is open.
+
+        The permanent part of the answer (the relaxed review window) is always
+        correct; the backlog sentence beside it stops being true the moment the
+        event ends, so it is gated by the same validity rules the install
+        schedules use instead of living inside the fixed wording.
+        """
+
+        text = str(notice or "").strip()
+        if not text or not isinstance(validity, dict):
+            return body
+        if install_schedule_status(validity) != VALIDITY_ACTIVE:
+            return body
+        return body.rstrip() + "\n\n" + text
+
+    def _shipping_default(self, preferred_key: str, legacy_key: str) -> str:
+        """Prefer the date-free default, tolerating an older config file."""
+
+        value = str(self.config.shipping.get(preferred_key) or "").strip()
+        return value or self.config.shipping[legacy_key]
 
     def _install_schedule_rule(self, product: str) -> dict | None:
-        if not self.install_schedule_rules:
+        # Expired and not-yet-started schedules are skipped here rather than at
+        # load time, so a long-running process cannot keep serving an event
+        # notice that lapsed after it started.
+        usable = active_install_schedule_rules(self.install_schedule_rules)
+        if not usable:
             return None
         product_text = compact(product)
         normalized = re.sub(r"[^a-z0-9가-힣]", "", str(product or "").lower())
         matched: list[dict] = []
         broad_install_keywords = {"비즈니스tv", "사이니지", "삼성", "tv", "티비"}
-        for rule in self.install_schedule_rules:
+        for rule in usable:
             product_keywords = split_keywords(rule.get("상품키워드"))
             model_keywords = split_keywords(rule.get("모델키워드"))
             distinctive_product_keywords = [

@@ -354,7 +354,20 @@ def format_qna_message(
     answer: str,
     reason: str = "",
     action: str = "",
+    hold_reason: str = "",
+    hold_codes: tuple = (),
+    generation_skipped: bool = False,
 ) -> str:
+    """The message an operator reads.
+
+    A held inquiry answers a different question from a posted one. "How
+    was this answer written" is what the pipeline finds interesting; the
+    operator needs "why is this not on Naver, and is it waiting for me".
+    So a hold leads with the blocking reason, says plainly whether an
+    answer was even composed, and only then shows the draft as reference
+    -- while a successful post keeps exactly the message it always had.
+    """
+
     lines = [
         f"상품명: {product or '-'}",
     ]
@@ -368,13 +381,43 @@ def format_qna_message(
         [
             "",
             f"질문: {question or '-'}",
-            "",
-            f"답변: {answer or '-'}",
         ]
     )
 
+    held = bool(hold_reason or hold_codes)
+
+    if held:
+        lines.extend(
+            [
+                "",
+                f"미등록 사유: {hold_reason or '자동 등록 조건을 충족하지 않았습니다.'}",
+            ]
+        )
+        if hold_codes:
+            lines.append(f"세부 사유: {', '.join(hold_codes)}")
+        lines.extend(
+            [
+                "",
+                f"답변 생성: {'생략됨' if generation_skipped else '완료'}",
+                "네이버 등록: 안 됨",
+            ]
+        )
+        # A skipped generation has no answer worth showing: the draft is
+        # the fixed "직원이 확인하겠습니다" holding reply, and printing it
+        # under "답변:" reads as though that is what will be posted.
+        if not generation_skipped:
+            lines.extend(["", f"생성 답변(참고): {answer or '-'}"])
+    else:
+        lines.extend(
+            [
+                "",
+                f"답변: {answer or '-'}",
+            ]
+        )
+
     if (
         reason
+        and not held
         and action not in {"posted", "dry_run"}
     ):
         lines.extend(
@@ -398,6 +441,9 @@ def notify_qna_safely(
     action: str = "",
     inquiry_id: str = "",
     notify_key: str = "",
+    hold_reason: str = "",
+    hold_codes: tuple = (),
+    generation_skipped: bool = False,
 ) -> bool:
     """
     동일한 문의는 카카오톡으로 한 번만 알린다.
@@ -446,6 +492,9 @@ def notify_qna_safely(
             answer=answer,
             reason=reason,
             action=action,
+            hold_reason=hold_reason,
+            hold_codes=tuple(hold_codes or ()),
+            generation_skipped=generation_skipped,
         )
 
         outbox = enqueue_kakao_message(

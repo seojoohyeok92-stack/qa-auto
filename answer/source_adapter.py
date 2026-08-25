@@ -39,6 +39,32 @@ _GENERIC_TITLE = re.compile(
     r"^(?:일반)?(?:상품|제품|설치|배송)(?:관련)?(?:문의|질문)$"
 )
 
+# A 16-digit number the customer explicitly labelled as their order number.
+# The channel only fills the order_id column when the inquiry was opened from
+# the order itself; a customer who types the number into a product Q&A leaves
+# that column empty, and the analysis then treated a clearly stated order
+# number as merely a CANDIDATE and replied asking for the number they had
+# already given. The label is required: a bare 16-digit run stays a candidate,
+# because nothing says it is an order number rather than a card, a phone or a
+# tracking number.
+_LABELLED_ORDER_ID = re.compile(
+    r"(?:주문\s*번호|주문번호|오더\s*번호|주문\s*no|order\s*(?:no|number|id))"
+    r"[^0-9]{0,12}((?<!\d)\d{16}(?!\d))",
+    re.IGNORECASE,
+)
+
+
+def order_id_from_text(value: Any) -> str:
+    """The order number the customer stated, when they stated exactly one.
+
+    Two or more distinct labelled numbers are ambiguous and yield nothing, so
+    the existing "which one do you mean" handling still applies.
+    """
+
+    matches = _LABELLED_ORDER_ID.findall(str(value or ""))
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else ""
+
 
 def _is_generic_inquiry_title(value: Any) -> bool:
     """True only for a channel/category label with no customer-specific fact.
@@ -120,6 +146,14 @@ def answer_request_from_inquiry(row: dict[str, Any]) -> AnswerRequest:
                 raw.get("order_id"),
                 raw.get("orderId"),
                 original.get("orderId"),
+                # Last: the number the customer wrote in the message itself.
+                # Every channel-supplied source wins over it, so this only
+                # fills the gap where the column is empty.
+                order_id_from_text(
+                    _combined_inquiry_text(
+                        row.get("title"), row.get("content")
+                    )
+                ),
             )
         ),
         product_order_id=normalize_space(
@@ -215,7 +249,16 @@ def answer_request_from_work_item(
                 work_item.get("writer_id"),
             )
         ),
-        order_id=normalize_space(work_item.get("order_id")),
+        order_id=normalize_space(
+            _first(
+                work_item.get("order_id"),
+                order_id_from_text(
+                    _combined_inquiry_text(
+                        work_item.get("title"), work_item.get("content")
+                    )
+                ),
+            )
+        ),
         product_order_id=normalize_space(product_order_id),
         existing_answer=normalize_question_text(
             work_item.get("existing_answer")

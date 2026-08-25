@@ -51,6 +51,15 @@ class InquiryAnalysis:
     manual_review_required: bool
     auto_answerable: bool
     detected_intent: str = "GENERAL"
+    # Which finding(s) raised ``manual_review_required``. On a compound inquiry
+    # the flag is OR-ed across sub-questions, so the flag alone cannot say
+    # whether a person is needed because the message carries real risk or
+    # because one sub-question missed the keyword tables. One entry per
+    # contributing sub-question, holding that sub-question's own subtype.
+    # Empty whenever no review is required -- and deliberately empty on any
+    # analysis built outside this classifier, so a caller that cannot see the
+    # cause must treat the hold as unexplained.
+    manual_review_sources: tuple[str, ...] = ()
 
     @property
     def delivery_question(self) -> bool:
@@ -106,6 +115,7 @@ class InquiryAnalysis:
         result["answer_strategy"] = self.answer_strategy.value
         result["selected_fact_keys"] = list(self.selected_fact_keys)
         result["reasons"] = list(self.reasons)
+        result["manual_review_sources"] = list(self.manual_review_sources)
         result["delivery_question"] = self.delivery_question
         result["delivery_related"] = self.delivery_related
         result["needs_delivery_lookup"] = self.needs_delivery_lookup

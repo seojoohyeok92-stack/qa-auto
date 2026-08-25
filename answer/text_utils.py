@@ -82,11 +82,66 @@ NAME_LABEL_PATTERN = re.compile(
     r"([가-힣A-Za-z]{2,20})"
 )
 
+# Numbers published for customers to call. They are contact details of an
+# organisation, not personal data, so redacting one produces an answer that
+# hides the very thing the customer needs -- and, once such an answer is stored
+# as a learning example, the redaction token is what later answers copy.
+#
+# Deliberately an explicit list of approved numbers, never a pattern: a rule
+# broad enough to recognise "a company number" would also stop masking real
+# customers whose number happens to fit it. Adding an entry is a decision about
+# one specific published number.
+OFFICIAL_CONTACT_NUMBERS = (
+    "1588-3366",     # 삼성전자 고객센터 (approved)
+    "02-706-2678",   # 오제앤에스 고객센터 (approved)
+)
+_OFFICIAL_CONTACT_PATTERN = re.compile(
+    "|".join(
+        re.escape(number).replace(r"\-", r"[- ]?")
+        for number in OFFICIAL_CONTACT_NUMBERS
+    )
+) if OFFICIAL_CONTACT_NUMBERS else None
+
+
+def is_official_contact_number(value: object) -> bool:
+    """True when the text is an approved published contact number."""
+
+    text = re.sub(r"\s+", "", str(value or ""))
+    if not text or _OFFICIAL_CONTACT_PATTERN is None:
+        return False
+    match = _OFFICIAL_CONTACT_PATTERN.fullmatch(text)
+    return match is not None
+
+
+def contains_personal_phone(text: object) -> bool:
+    """True only when a phone number that is *not* an approved one appears.
+
+    Used wherever a check asks "does this answer expose a phone number". The
+    company's published number appearing in a customer answer is the intended
+    outcome, not an exposure, so a bare pattern search reports it as a privacy
+    failure and blocks a correct answer.
+    """
+
+    return any(
+        not is_official_contact_number(match.group(0))
+        for match in PHONE_PATTERN.finditer(str(text or ""))
+    )
+
+
+def _mask_phones_except_official(value: str) -> str:
+    """Mask phone numbers, leaving approved published ones intact."""
+
+    def replace(match: re.Match[str]) -> str:
+        found = match.group(0)
+        return found if is_official_contact_number(found) else "<masked-phone>"
+
+    return PHONE_PATTERN.sub(replace, value)
+
 
 def mask_personal_information(text: object) -> str:
     value = str(text or "")
     value = EMAIL_PATTERN.sub("<masked-email>", value)
-    value = PHONE_PATTERN.sub("<masked-phone>", value)
+    value = _mask_phones_except_official(value)
     value = LONG_NUMBER_PATTERN.sub(r"\1****\2", value)
     value = NAME_LABEL_PATTERN.sub(
         lambda match: f"{match.group(1)}{match.group(2)}<masked-name>",

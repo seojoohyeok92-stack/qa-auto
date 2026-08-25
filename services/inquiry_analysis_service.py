@@ -156,6 +156,61 @@ PRODUCT_GENERAL_WORDS = (
     "네이버 포인트",
     "무빙스타일",
 )
+# Courtesy wording that carries no question. Listed as *complete* expressions
+# rather than stems, because a stem swallows real words -- bare "감사" would
+# match 삼성 감사제 and bare "네" would match 네이버. Matched against the
+# whitespace-stripped text, so spaced variants are covered without listing
+# them. This is the only literal list here; what decides the verdict is
+# whether anything is *left* after removing them, not the list itself.
+COURTESY_ONLY_EXPRESSIONS = (
+    # greeting
+    "안녕하세요", "안녕하십니까", "안녕하세여", "안녕히계세요", "안녕히가세요",
+    "반갑습니다", "반가워요", "안녕", "하이", "헬로",
+    # thanks
+    "감사합니다", "감사드립니다", "감사해요", "감사요", "고맙습니다", "고마워요",
+    "땡큐", "thankyou", "thanks", "hello", "hi",
+    # closing / acknowledgement
+    "수고하세요", "수고하십시오", "수고많으세요", "수고하셨습니다",
+    "좋은하루되세요", "좋은하루보내세요", "잘부탁드립니다", "잘부탁합니다",
+    "알겠습니다", "확인했습니다", "넵", "네네",
+)
+# Longest first so "안녕하세요" is consumed before the shorter "안녕".
+_COURTESY_RE = re.compile(
+    "|".join(
+        re.escape(item)
+        for item in sorted(COURTESY_ONLY_EXPRESSIONS, key=len, reverse=True)
+    ),
+    re.IGNORECASE,
+)
+# A syllable, digit or letter is the smallest unit that can carry meaning.
+# Korean jamo alone (ㅁㄴㅇㄹ, ㅋㅋㅋ) and punctuation are not.
+_MEANINGFUL_CHAR_RE = re.compile(r"[가-힣0-9A-Za-z]")
+
+
+def _has_no_substantive_question(question: str) -> bool:
+    """True only when the message asks nothing at all.
+
+    Two structural findings, both of which have to be proven -- an inquiry is
+    treated as substantive unless shown otherwise, so an unusual but real
+    question is never mistaken for chatter:
+
+    1. nothing that can carry meaning is present (loose jamo, emoticons,
+       punctuation), or
+    2. removing courtesy wording leaves nothing that can carry meaning.
+
+    Length is deliberately not consulted: "설치되나요?" is short and real.
+    """
+
+    text = re.sub(r"\s+", "", str(question or ""))
+    if not text:
+        # An empty inquiry is a separate finding (EMPTY_QUESTION) and keeps
+        # its own handling below.
+        return False
+    if not _MEANINGFUL_CHAR_RE.search(text):
+        return True
+    return not _MEANINGFUL_CHAR_RE.search(_COURTESY_RE.sub("", text))
+
+
 CANCEL_WORDS = ("취소", "반품", "교환", "환불")
 SCHEDULE_CHANGE_WORDS = (
     "설치일 변경",
@@ -777,6 +832,16 @@ class InquiryAnalysisService:
                 if compatibility
                 else representative.detected_intent
             ),
+            # Union of every contributing sub-question's cause. ``manual`` is
+            # OR-ed above, which loses *why*: one risky sub-question and one
+            # unclassified fragment produce the same True. Keeping both causes
+            # means a caller can require that all of them are classifier gaps
+            # before treating the hold as one.
+            manual_review_sources=tuple(dict.fromkeys(
+                source
+                for item in parts
+                for source in item.manual_review_sources
+            )),
         )
 
     def _analyze_single(self, request: AnswerRequest) -> InquiryAnalysis:
@@ -930,6 +995,23 @@ class InquiryAnalysisService:
             confidence = 0.92
             manual = False
             reasons.append("제품 사양·기능 관련 일반 문의입니다.")
+        elif _has_no_substantive_question(question):
+            # Nothing was asked, so there is nothing an automatic answer could
+            # be right about. Placed after every keyword branch so that a real
+            # finding still wins ("안녕하세요, 제품이 파손돼서 왔어요" stays
+            # HIGH_RISK_OR_DISPUTE), and before the category fallbacks so that
+            # the channel's category cannot turn a greeting into an answerable
+            # product question. A draft is still generated for staff; only
+            # publishing it automatically is withheld -- the subtype is not
+            # UNCLASSIFIED, so the classifier-gap relaxation cannot reach it.
+            kind = InquiryType.INFORMATION_INSUFFICIENT
+            subtype = "NO_SUBSTANTIVE_QUESTION"
+            requires_order = False
+            requires_dps = False
+            strategy = AnswerStrategy.REQUEST_ADDITIONAL_INFORMATION
+            confidence = 0.99
+            manual = True
+            reasons.append("인사·감사 표현만 있고 실제 질문이 없습니다.")
         elif "배송" in legacy_type:
             kind = InquiryType.DELIVERY_INSTALLATION_STATUS
             subtype = "LEGACY_DELIVERY_CATEGORY"
@@ -1046,6 +1128,12 @@ class InquiryAnalysisService:
             manual_review_required=manual,
             auto_answerable=not manual,
             detected_intent=detected_intent or "GENERAL",
+            # The subtype *is* the cause: every branch above that sets
+            # ``manual`` names its own finding there (HIGH_RISK_OR_DISPUTE,
+            # CANCEL_RETURN_EXCHANGE, SCHEDULE_CHANGE_REQUEST, EMPTY_QUESTION,
+            # UNCLASSIFIED, ...). Recording it lets a caller tell a real
+            # finding apart from a classifier gap without re-deriving either.
+            manual_review_sources=(subtype,) if manual else (),
         )
 
     @staticmethod

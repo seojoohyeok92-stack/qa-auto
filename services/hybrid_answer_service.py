@@ -21,8 +21,17 @@ from answer.providers.interfaces import JsonGptProvider
 from answer.text_utils import split_subquestions
 from answer.providers.provider_factory import create_gpt_provider
 from services.draft_generation_service import DraftGenerationService
+from answer.exceptions import GenerationSkippedError
+from services import learning_evidence_policy
 from services.gpt_understanding_service import GptUnderstandingService
+from services.pre_generation_gate import PreGenerationGate
 from services.self_review_service import SelfReviewService
+
+
+def _join_evidence(*parts: str) -> str:
+    """Concatenate grounding corpora, skipping the empty ones."""
+
+    return "\n".join(part for part in parts if part and part.strip())
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,83 @@ class HybridAnswerService:
                 time.monotonic() - started, 3
             )
         return telemetry
+
+    @staticmethod
+    def _product_facts_context(request: AnswerRequest) -> dict[str, Any]:
+        """The safe product facts this inquiry may quote, prompt-ready.
+
+        Read from the lookup AnswerService already performed before any
+        provider call. Only ``ProductKnowledgeService`` decides what is safe;
+        nothing here re-judges a fact, and an unsafe one never appears.
+        """
+
+        knowledge = request.metadata.get("product_knowledge")
+        block = getattr(knowledge, "prompt_block", None)
+        if not callable(block):
+            return {}
+        rendered = block()
+        if not rendered:
+            return {}
+        return {
+            "product_facts": {
+                "instructions": rendered,
+                "facts": [
+                    item.to_dict() for item in knowledge.safe_facts
+                ],
+                "product_id": knowledge.product_id,
+            }
+        }
+
+    @staticmethod
+    def _apply_evidence_conflicts(
+        request: AnswerRequest, learning_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record contradictions between the evidence the model was given.
+
+        Retrieval already withholds verified *signals* that disagree, but two
+        approved Learning answers can still contradict each other, and an
+        approved answer can contradict a VERIFIED product fact. Neither was
+        checked anywhere, so the model would have been handed both sides and
+        left to pick -- exactly the choice this pipeline never lets it make.
+
+        The contradiction is written into the sub-question's existing CONFLICT
+        status rather than a new field, so every downstream reader (the
+        prompt's answer policy, the validator, the publishing gate) treats it
+        as the conflict it already knows how to refuse.
+        """
+
+        knowledge = request.metadata.get("product_knowledge")
+        decision = learning_evidence_policy.evaluate(
+            learning_context=learning_context,
+            safe_facts=getattr(knowledge, "safe_facts", ()) or (),
+        )
+        learning_context["approved_learning_evidence"] = decision.to_dict()
+        if not decision.conflict:
+            return learning_context
+        disputed = {
+            str(item.get("subquestion") or "")
+            for item in decision.conflicts
+        }
+        evidence = learning_context.get("subquestion_evidence")
+        if isinstance(evidence, list):
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("subquestion") or "") not in disputed:
+                    continue
+                item["status"] = "CONFLICT"
+                item["evidence_coverage"] = "UNSUPPORTED"
+                item["answer_required"] = False
+                item["source"] = decision.reason
+        return learning_context
+
+    @staticmethod
+    def _product_facts_evidence(request: AnswerRequest) -> str:
+        """Flat product-fact text for the deterministic grounding check."""
+
+        knowledge = request.metadata.get("product_knowledge")
+        evidence = getattr(knowledge, "evidence_text", None)
+        return evidence() if callable(evidence) else ""
 
     @staticmethod
     def _evidence_texts(learning_context: dict[str, Any]) -> str:
@@ -393,6 +479,20 @@ class HybridAnswerService:
         draft: DraftResult | None = None
         review: SelfReviewResult | None = None
         validation: ValidationResult | None = None
+        # PRE-GENERATION GATE (1/2) -- the processing plan.
+        # Evaluated here, ahead of the provider-started event, because this is
+        # the last point at which nothing has been spent. It asks the
+        # publishing gate's own question: is there a hard reason that no
+        # generated answer could clear? Anything that generation might still
+        # resolve is deliberately allowed through to the normal path.
+        plan_gate = PreGenerationGate.evaluate_plan(
+            analysis=request.metadata.get("phase9_analysis"),
+            plan=request.metadata.get("processing_plan"),
+        )
+        if plan_gate.skip_generation:
+            raise GenerationSkippedError(
+                reasons=plan_gate.reasons, stage=plan_gate.stage
+            )
         try:
             events.append(
                 HybridEvent(
@@ -444,6 +544,29 @@ class HybridAnswerService:
                     # regeneration below can reuse it without a second
                     # Learning/Historical DB lookup.
                     learning_context = {}
+                # Product facts travel alongside Learning, never merged into
+                # it: Learning carries tone, policy and past answers, product
+                # facts carry this product's verified specification. Both
+                # reach the prompt; neither overwrites the other.
+                learning_context.update(self._product_facts_context(request))
+                # PRE-GENERATION GATE (2/2) -- the retrieved evidence.
+                # Retrieval and the product-fact lookup are local reads, so
+                # both sides of a contradiction are known while the provider
+                # is still untouched. If the sources for a sub-question flatly
+                # disagree, no wording of an answer is publishable, and asking
+                # the model to write one would only mean handing it both sides
+                # of a dispute a person has to settle.
+                learning_context = self._apply_evidence_conflicts(
+                    request, learning_context
+                )
+                evidence_gate = PreGenerationGate.evaluate_evidence(
+                    learning_context
+                )
+                if evidence_gate.skip_generation:
+                    raise GenerationSkippedError(
+                        reasons=evidence_gate.reasons,
+                        stage=evidence_gate.stage,
+                    )
                 draft = self.drafts.generate(
                     facts,
                     intent,
@@ -582,7 +705,10 @@ class HybridAnswerService:
                 analysis=analysis,
                 selected_facts=selected_facts,
                 subquestion_evidence=learning_context.get("subquestion_evidence"),
-                evidence_texts=self._evidence_texts(learning_context),
+                evidence_texts=_join_evidence(
+                    self._evidence_texts(learning_context),
+                    self._product_facts_evidence(request),
+                ),
             )
             _mark = _stage("validation", _mark)
             events.append(
@@ -687,7 +813,10 @@ class HybridAnswerService:
                     analysis=analysis,
                     selected_facts=selected_facts,
                     subquestion_evidence=learning_context.get("subquestion_evidence"),
-                    evidence_texts=self._evidence_texts(learning_context),
+                    evidence_texts=_join_evidence(
+                    self._evidence_texts(learning_context),
+                    self._product_facts_evidence(request),
+                ),
                 )
                 events.append(
                     HybridEvent(
@@ -752,10 +881,29 @@ class HybridAnswerService:
                 "analysis": analysis.to_dict() if analysis else {},
                 "selected_facts": selected_facts.to_dict(),
             }
+            product_facts_context = self._product_facts_context(request)
             metadata["hybrid"] = {
                 "enabled": True,
                 "provider": self.provider.name,
                 "fallback_used": False,
+                # Recorded from the context that was actually built for this
+                # generation. The auto-post gate requires this to be true
+                # before a product fact may settle anything, so that a fact
+                # the model never read can never justify publishing.
+                "product_facts_in_prompt": bool(product_facts_context),
+                # The approved-Learning verdict from this same generation.
+                # Persisted rather than recomputed downstream so the gate can
+                # only ever judge the evidence the model was actually given.
+                "approved_learning_evidence": dict(
+                    learning_context.get("approved_learning_evidence") or {}
+                ),
+                "product_fact_fields": sorted(
+                    str(item.get("field_key") or "")
+                    for item in (
+                        product_facts_context.get("product_facts", {})
+                        .get("facts", [])
+                    )
+                ),
                 "provider_telemetry": self._provider_telemetry(
                     started=generation_started
                 ),
@@ -841,6 +989,11 @@ class HybridAnswerService:
                 False,
                 tuple(events),
             )
+        except GenerationSkippedError:
+            # A decision, not a provider failure. Falling back to the rule
+            # answer here would publish the very assertion the gate just
+            # refused to let anyone compose.
+            raise
         except Exception as error:
             return self._fallback(
                 rule_result,

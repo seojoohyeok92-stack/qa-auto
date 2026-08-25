@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from answer.text_utils import mask_personal_information
+from answer.text_utils import (
+    is_official_contact_number,
+    mask_personal_information,
+)
 
 
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -34,7 +37,17 @@ class LearningPrivacyService:
                 text = text.replace(clean, "<masked-name>")
         text = mask_personal_information(text)
         text = EMAIL.sub("<masked-email>", text)
-        text = PHONE.sub("<masked-phone>", text)
+        # Approved published contact numbers stay readable: a stored
+        # example that redacts the company's own number teaches later
+        # answers to print the redaction token.
+        text = PHONE.sub(
+            lambda match: (
+                match.group(0)
+                if is_official_contact_number(match.group(0))
+                else "<masked-phone>"
+            ),
+            text,
+        )
         text = ORDER_ID.sub("<masked-order-id>", text)
         text = PRODUCT_ORDER_ID.sub("<masked-product-order-id>", text)
         text = ADDRESS.sub("<masked-address>", text)

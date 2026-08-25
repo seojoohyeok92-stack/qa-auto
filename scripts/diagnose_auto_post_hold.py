@@ -37,9 +37,29 @@ from services.inquiry_analysis_service import (  # noqa: E402
 )
 
 
+# Auto-post decisions are only the last step. An inquiry can be stopped before
+# a draft is ever written -- the policy gate for a high-risk inquiry raises
+# before generation -- and those events start with ANSWER_/AUTOMATIC_DRAFT_/
+# PROCESSING_PLAN_, so a query limited to AUTO_POST%/AUTO_PROCESSING% showed
+# nothing at all for exactly the inquiries that never reached the gate.
+# NOTE: '_' is a single-character wildcard in SQLite LIKE, which is harmless
+# here (the patterns stay anchored on their literal prefixes).
 AUTO_EVENT_PATTERNS = (
     "AUTO_PROCESSING%",
     "AUTO_POST%",
+    "AUTO_ANSWER%",
+    "AUTOMATIC_DRAFT%",
+    "ANSWER_%",
+    "PROCESSING_PLAN%",
+    "DRAFT_%",
+    "PRODUCT_FACT%",
+    "GPT_%",
+    "TEMPLATE_%",
+    "INTENT_%",
+    "INQUIRY_INTENT%",
+    "ORDER_LOOKUP%",
+    "DPS_LOOKUP%",
+    "LEARNING_%",
 )
 PRELIMINARY_DERIVED_REASONS = {
     "ANSWER_REQUIRES_MANUAL_REVIEW",
@@ -204,9 +224,48 @@ def _auto_events(
         FROM activity_logs
         WHERE inquiry_id=? AND ({clauses})
         ORDER BY created_at DESC, id DESC
-        LIMIT 30
+        LIMIT 200
         """,
         (inquiry_id, *AUTO_EVENT_PATTERNS),
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["details"] = _json_object(item.pop("details_json", None))
+        result.append(item)
+    return result
+
+
+def _blocking_events(
+    connection: sqlite3.Connection,
+    inquiry_id: int,
+) -> list[dict[str, Any]]:
+    """Every event that recorded a stop, whatever its event_code prefix.
+
+    Selected by what the row *says* (level, or a blocking marker in details)
+    rather than by name, so a stop recorded under a code this script has never
+    heard of is still reported.
+    """
+
+    rows = connection.execute(
+        """
+        SELECT id, event_code, level, message, details_json, created_at
+        FROM activity_logs
+        WHERE inquiry_id=?
+          AND (
+              level IN ('WARNING','ERROR','CRITICAL')
+              OR details_json LIKE '%policy_blocked%'
+              OR details_json LIKE '%safe_error_code%'
+              OR details_json LIKE '%blocked%'
+              OR event_code LIKE '%BLOCK%'
+              OR event_code LIKE '%FAIL%'
+              OR event_code LIKE '%SKIP%'
+              OR event_code LIKE '%REVIEW_REQUIRED%'
+          )
+        ORDER BY created_at DESC, id DESC
+        LIMIT 100
+        """,
+        (inquiry_id,),
     ).fetchall()
     result = []
     for row in rows:
@@ -461,6 +520,129 @@ def _classification(
     return independent, label
 
 
+def _report_without_draft(
+    connection: sqlite3.Connection,
+    requested_id: str,
+    inquiry: dict[str, Any],
+    local_id: int,
+) -> dict[str, Any]:
+    """Report an inquiry that never produced an answer draft.
+
+    Sections that read a draft (C/D/E/F, and the preliminary-review checks)
+    are reported as NOT_APPLICABLE with the reason, rather than silently
+    omitted, so the absence is visible as a finding instead of as missing
+    output.
+    """
+
+    current_analysis, current_analysis_error = _current_analysis(inquiry)
+    events = _auto_events(connection, local_id)
+    blocking = _blocking_events(connection, local_id)
+    workflow = _workflow(connection, local_id)
+    drafts_total = int(connection.execute(
+        "SELECT COUNT(*) FROM answer_drafts WHERE inquiry_id=?",
+        (local_id,),
+    ).fetchone()[0])
+
+    print("\n" + "=" * 88)
+    print(
+        f"{requested_id}  local_inquiry_id={local_id}  "
+        f"draft_id=None  active_draft=False  (DRAFT_NOT_CREATED)"
+    )
+
+    _print_section("A", "inquiry 기본 정보")
+    _print_value("inquiry_id", inquiry.get("external_inquiry_id") or requested_id)
+    _print_value("local_inquiry_id", local_id)
+    _print_value("inquiry_text", inquiry.get("content") or inquiry.get("title"))
+    _print_value("title", inquiry.get("title"))
+    _print_value("product", inquiry.get("product_name"))
+    _print_value("option", inquiry.get("option_name"))
+    _print_value(
+        "current_status",
+        {
+            "workflow_status": inquiry.get("workflow_status"),
+            "answer_status": inquiry.get("answer_status"),
+            "post_status": inquiry.get("post_status"),
+            "approval_status": inquiry.get("approval_status"),
+            "phase9_status": inquiry.get("phase9_status"),
+            "source_answered": bool(inquiry.get("source_answered")),
+        },
+    )
+    _print_value(
+        "answer_draft_status",
+        {
+            "draft_rows_for_inquiry": drafts_total,
+            "active_draft": None,
+            "note": "answer_drafts에 이 문의의 행이 없습니다"
+            if drafts_total == 0
+            else "행은 있으나 조회에 실패했습니다",
+        },
+    )
+
+    _print_section("B", "저장된 InquiryAnalysis")
+    _print_value(
+        "stored_analysis",
+        "NOT_APPLICABLE: draft가 없어 저장된 InquiryAnalysis도 없습니다",
+    )
+    _print_value("current_deterministic_analysis", _analysis_view(current_analysis))
+    _print_value("current_analysis_error", current_analysis_error)
+    _print_value(
+        "current_can_generate_answer", current_analysis.get("can_generate_answer")
+    )
+    _print_value(
+        "current_manual_review_required",
+        current_analysis.get("manual_review_required"),
+    )
+
+    for letter, title in (
+        ("C", "답변 생성 결과"),
+        ("D", "Grounding / Learning"),
+        ("E", "Validator"),
+        ("F", "현재 AutoProcessingEligibilityService 재계산"),
+    ):
+        _print_section(letter, title)
+        _print_value(
+            "status",
+            "NOT_APPLICABLE: draft가 생성되지 않아 이 단계 기록이 존재하지 않습니다",
+        )
+
+    _print_section("G", "실제 자동처리 당시 DB 기록")
+    _print_value("blocking_or_warning_events", blocking)
+    _print_value("all_pipeline_events", events)
+    _print_value("workflow_steps", workflow)
+
+    _print_section("H", "preliminary review 해소 조건")
+    _print_value(
+        "status",
+        "NOT_APPLICABLE: draft가 없어 preliminary review 판정 대상이 아닙니다",
+    )
+
+    _print_section("I", "최종 요약")
+    _print_value("classification", "DRAFT_NOT_CREATED")
+    _print_value(
+        "auto_post_reachable",
+        False,
+    )
+    _print_value(
+        "note",
+        "Auto Post 파이프라인은 active draft를 요구하므로 이 상태에서는 "
+        "자동등록 후보가 되지 않습니다. 차단 사유는 위 "
+        "blocking_or_warning_events 를 확인하세요.",
+    )
+
+    return {
+        "requested_id": requested_id,
+        "local_inquiry_id": local_id,
+        "classification": "DRAFT_NOT_CREATED",
+        "draft_rows_for_inquiry": drafts_total,
+        "workflow_status": inquiry.get("workflow_status"),
+        "phase9_status": inquiry.get("phase9_status"),
+        "current_can_generate_answer": current_analysis.get("can_generate_answer"),
+        "blocking_event_codes": [
+            item.get("event_code") for item in blocking
+        ],
+    }
+
+
 def _report_one(
     connection: sqlite3.Connection,
     requested_id: str,
@@ -475,13 +657,12 @@ def _report_one(
     local_id = int(inquiry["id"])
     draft, is_active = _active_draft(connection, local_id)
     if draft is None:
-        print("\n" + "=" * 88)
-        print(f"{requested_id}: ACTIVE_OR_LATEST_DRAFT_NOT_FOUND")
-        return {
-            "requested_id": requested_id,
-            "local_inquiry_id": local_id,
-            "error": "ACTIVE_OR_LATEST_DRAFT_NOT_FOUND",
-        }
+        # An inquiry with no draft row is not a dead end for diagnosis -- it is
+        # its own finding, and the most important one to explain. Printing a
+        # single ACTIVE_OR_LATEST_DRAFT_NOT_FOUND line withheld the inquiry
+        # text, the analysis and the very events that say why generation never
+        # ran. Everything that does not depend on a draft is still reported.
+        return _report_without_draft(connection, requested_id, inquiry, local_id)
 
     metadata = draft["metadata_json"]
     plan_value = metadata.get("processing_plan")
@@ -682,6 +863,10 @@ def _report_one(
     _print_value("recorded_soft_reasons", latest_recorded_details.get("soft_reasons"))
     _print_value("recorded_timestamp", latest_recorded.get("created_at"))
     _print_value("all_auto_processing_and_post_events", events)
+    _print_value(
+        "blocking_or_warning_events",
+        _blocking_events(connection, local_id),
+    )
     _print_value("workflow_steps", _workflow(connection, local_id))
 
     _print_section("H", "preliminary review 해소 조건")
@@ -755,6 +940,14 @@ def _parse_args() -> argparse.Namespace:
         help="Existing SQLite database path; opened with mode=ro",
     )
     parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Optional path to also write the full report to (UTF-8). "
+            "The report is always printed to stdout."
+        ),
+    )
+    parser.add_argument(
         "inquiry_ids",
         nargs="+",
         help="External/source/local inquiry ids to inspect",
@@ -762,9 +955,34 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class _Tee:
+    """Write to stdout and, when requested, to a report file as well."""
+
+    def __init__(self, stream: Any, handle: Any = None) -> None:
+        self._stream = stream
+        self._handle = handle
+
+    def write(self, text: str) -> int:
+        if self._handle is not None:
+            self._handle.write(text)
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+        self._stream.flush()
+
+
 def main() -> int:
     args = _parse_args()
     connection, database_path = _connect_readonly(args.database)
+    handle = None
+    original_stdout = sys.stdout
+    if args.output:
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = output_path.open("w", encoding="utf-8")
+        sys.stdout = _Tee(original_stdout, handle)
     try:
         print("READ-ONLY AUTO POST HOLD DIAGNOSTIC")
         print(f"database: {database_path}")
@@ -778,7 +996,7 @@ def main() -> int:
         ]
         total_changes = connection.total_changes
         print("\n" + "=" * 88)
-        print("THREE-INQUIRY COMPARISON")
+        print(f"SUMMARY ({len(summaries)} inquiries)")
         print(json.dumps(summaries, ensure_ascii=False, indent=2, default=str))
         print(f"\nSQLite connection total_changes: {total_changes}")
         if total_changes != 0:
@@ -786,6 +1004,10 @@ def main() -> int:
                 f"READ_ONLY_INVARIANT_FAILED: total_changes={total_changes}"
             )
     finally:
+        sys.stdout = original_stdout
+        if handle is not None:
+            handle.close()
+            print(f"report written: {Path(args.output).expanduser().resolve()}")
         connection.close()
     return 0
 

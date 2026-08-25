@@ -12,6 +12,31 @@ PLACEHOLDER = re.compile(
     r"(?<!\{)\{(?:name|customer|order|date|model|answer|placeholder)[^{}]*\}(?!\}))",
     re.IGNORECASE,
 )
+# Redaction tokens this codebase writes when it masks something. They exist so
+# personal data never reaches a prompt, a log or the learning store -- they are
+# internal bookkeeping and must never be shown to a customer.
+#
+# One of them did reach customers: an approved answer containing the company's
+# own switchboard number was masked on its way into the learning store, so the
+# stored example literally reads "<masked-phone>로 문의 바랍니다". Retrieval put
+# that text in the prompt and the model copied it into a new answer. Nothing
+# stopped it: the placeholder rule above only recognises {{...}}/${...}/[[...]]
+# /{name}, and the PII check passes because re-masking already-masked text
+# changes nothing.
+#
+# Listed literally rather than as <...> so that ordinary angle brackets in an
+# answer are not mistaken for a leak. Only tokens that actually exist in this
+# codebase are listed; nothing new is invented here.
+INTERNAL_REDACTION_TOKENS = (
+    "masked-phone", "masked-email", "masked-name", "masked-address",
+    "masked-order", "masked-order-id", "masked-product-order-id",
+    "masked-secret", "masked-internal-url", "masked-file-path",
+    "masked-parent", "masked-value",
+)
+INTERNAL_PLACEHOLDER = re.compile(
+    r"<(?:{})>".format("|".join(re.escape(t) for t in INTERNAL_REDACTION_TOKENS)),
+    re.IGNORECASE,
+)
 SECRET = re.compile(
     r"(?i)(?:authorization\s*[:=]|bearer\s+[A-Za-z0-9._~+/=-]{8,}|"
     r"(?:access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|api[_ -]?key|password)\s*[:=])"
@@ -37,6 +62,12 @@ class AutoPostTechnicalValidator:
             errors.append("FINAL_ANSWER_REQUIRED")
         if PLACEHOLDER.search(text):
             errors.append("UNRESOLVED_PLACEHOLDER")
+        if INTERNAL_PLACEHOLDER.search(text):
+            # Deliberately not repaired: the answer says a redaction happened
+            # but not what was redacted, and guessing would risk publishing a
+            # real customer's number as if it were the company's. A person
+            # decides what the sentence should say.
+            errors.append("INTERNAL_PLACEHOLDER_EXPOSURE")
         if SECRET.search(text):
             errors.append("SECRET_EXPOSURE")
         if text and self.privacy.mask(text) != text:

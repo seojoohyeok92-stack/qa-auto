@@ -104,11 +104,30 @@ def test_config_loader_rejects_invalid_json(tmp_path) -> None:
         load_answer_config(data_root)
 
 
-def test_config_cache_can_be_cleared(tmp_path) -> None:
+def test_unchanged_config_is_served_from_cache(tmp_path) -> None:
     data_root = tmp_path / "answer_data"
     shutil.copytree(DEFAULT_DATA_ROOT, data_root)
     clear_config_cache()
     first = load_answer_config(data_root)
+    assert load_answer_config(data_root) is first
+
+
+def test_edited_config_is_reloaded_without_restart(tmp_path) -> None:
+    """An operator edit must reach customers without clearing the cache.
+
+    This assertion used to be the opposite: the cache was keyed on the data
+    root alone, so an edited schedule or policy kept serving the old text for
+    the life of the process. Nothing on the server ever called
+    ``clear_config_cache``, so on a long-running Streamlit process a corrected
+    delivery estimate simply never took effect.
+    """
+
+    data_root = tmp_path / "answer_data"
+    shutil.copytree(DEFAULT_DATA_ROOT, data_root)
+    clear_config_cache()
+    first = load_answer_config(data_root)
+    assert "cache_probe" not in first.answer_policy
+
     policy_path = data_root / "configs" / "answer_policy.json"
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     policy["cache_probe"] = "changed"
@@ -116,8 +135,20 @@ def test_config_cache_can_be_cleared(tmp_path) -> None:
         json.dumps(policy, ensure_ascii=False),
         encoding="utf-8",
     )
-    cached = load_answer_config(data_root)
-    assert "cache_probe" not in cached.answer_policy
+
+    reloaded = load_answer_config(data_root)
+    assert reloaded is not first
+    assert reloaded.answer_policy["cache_probe"] == "changed"
+
+
+def test_config_cache_can_be_cleared(tmp_path) -> None:
+    """``clear_config_cache`` still forces a reload for callers that use it."""
+
+    data_root = tmp_path / "answer_data"
+    shutil.copytree(DEFAULT_DATA_ROOT, data_root)
+    clear_config_cache()
+    first = load_answer_config(data_root)
     clear_config_cache()
     reloaded = load_answer_config(data_root)
-    assert reloaded.answer_policy["cache_probe"] == "changed"
+    assert reloaded is not first
+    assert reloaded.answer_policy == first.answer_policy

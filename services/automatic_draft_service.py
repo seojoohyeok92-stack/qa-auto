@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from answer.exceptions import AutoAnswerProhibitedError
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
@@ -113,6 +114,32 @@ class AutomaticDraftService:
                 inquiry_id=int(inquiry_id),
                 draft_id=int(active["id"]),
                 route=route,
+            )
+        except AutoAnswerProhibitedError as blocked:
+            # The gate did its job. Reporting it as an ERROR made a correct
+            # high-risk block indistinguishable from an outage, so it is
+            # recorded as the deliberate policy decision it is. The outcome is
+            # unchanged: no draft, no auto-post, staff review.
+            self.logs.record_inquiry(
+                int(inquiry_id),
+                "AUTOMATIC_DRAFT_POLICY_BLOCKED",
+                "정책상 자동 답변 생성이 금지된 문의로 직원 검토 대상입니다.",
+                level="WARNING",
+                details={
+                    "correlation_id": trace_id,
+                    "policy_blocked": True,
+                    "policy_reason": blocked.policy_reason
+                    or "AUTO_ANSWER_PROHIBITED",
+                    "safe_error_code": blocked.reason_code
+                    or "AUTO_ANSWER_PROHIBITED",
+                    "selected_answer_route": "BLOCKED_REVIEW_REQUIRED",
+                },
+            )
+            return AutomaticDraftOutcome(
+                status="POLICY_BLOCKED",
+                inquiry_id=int(inquiry_id),
+                route="BLOCKED_REVIEW_REQUIRED",
+                error_code=blocked.reason_code or "AUTO_ANSWER_PROHIBITED",
             )
         except Exception as error:
             error_code = error.__class__.__name__.upper()[:100]

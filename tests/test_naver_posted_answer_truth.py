@@ -252,9 +252,14 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     assert "현재 표시: <b>네이버 실제 등록 답변</b>" in rendered
     assert "Source: NAVER_POSTED" in rendered
 
+    # This draft has no ``edited_answer``: nobody has corrected anything, so
+    # the 직원 수정본 tab is only seeded with the posted text. It used to be
+    # badged STAFF_EDITED regardless, which claimed a human had reviewed
+    # wording nobody had touched. The seed still shows; the badge now names
+    # where the text actually came from.
     expected_views = (
         ("Program Answer", "program", "PROGRAM_GENERATED"),
-        ("직원 수정본", "staff", "STAFF_EDITED"),
+        ("직원 수정본", "program", "NAVER_POSTED · 직원 미수정"),
         ("네이버 실제 등록 답변", "naver", "NAVER_POSTED"),
         ("Final Answer", "final", "FINAL_ANSWER"),
     )
@@ -269,6 +274,36 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     app.segmented_control[0].set_value("Program Answer")
     app.run(timeout=40)
     assert "Program Answer" in app.text_area[0].value
+
+
+def test_real_staff_edit_is_still_badged_staff_edited(tmp_path) -> None:
+    """The counterpart to the badge change: a genuine edit keeps STAFF_EDITED."""
+
+    database, inquiry_id, draft = _answered_with_existing_draft(tmp_path)
+    AnswerRepository(database).save_edited_answer(
+        int(draft["id"]), "직원이 직접 고쳐 쓴 답변입니다."
+    )
+    app = AppTest.from_string(
+        f'''
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from ui.review_workspace import _render_answer_panel
+db=Database(r"{database.path}")
+db.initialize()
+_render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
+'''
+    ).run(timeout=40)
+    assert not app.exception
+    app.segmented_control[0].set_value("직원 수정본")
+    app.run(timeout=40)
+
+    rendered = "\n".join(item.value for item in app.markdown)
+    assert "Source: STAFF_EDITED" in rendered
+    assert "직원 미수정" not in rendered
+    assert "source-staff" in rendered
+    # The repository wraps a saved edit in the shared header/footer.
+    assert "직원이 직접 고쳐 쓴 답변입니다." in app.text_area[0].value
+    assert "네이버에 실제 등록된 답변입니다." not in app.text_area[0].value
 
 
 def test_unedited_naver_answer_approval_promotes_only_posted_truth(
