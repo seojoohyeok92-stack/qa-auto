@@ -382,3 +382,58 @@ def test_an_ordinary_product_question_is_not_skipped_through_the_real_plan(
     assert PreGenerationGate.evaluate_plan(
         analysis=serialised["analysis"], plan=serialised
     ).skip_generation is False
+
+
+# --------------------- staff-readable message, traceable internal record
+def test_the_raw_codes_are_still_recorded_internally(database, notifications):
+    """The message is readable; the audit trail is still exact.
+
+    Shortening the message must not cost the ability to trace a hold back to
+    the gate reason that caused it, so the codes move to the activity log
+    rather than disappearing.
+    """
+
+    from repositories.log_repository import LogRepository
+
+    inquiry_id = create_inquiry(database, ORDINARY, sid="GATE-CODES")
+    AnswerService(
+        database, engine=CountingEngine(rule_result()),
+    ).generate_for_inquiry(inquiry_id)
+
+    entries = [
+        entry
+        for entry in LogRepository(database).recent_for_inquiry(
+            inquiry_id, limit=200
+        )
+        if entry["event_code"] == "KAKAO_NOTIFICATION_ENQUEUED"
+    ]
+    assert entries, "the notification was never recorded"
+    details = entries[0]["details_json"]
+    assert isinstance(details, dict)
+    assert details.get("hold_reason_codes"), "raw codes were lost"
+    assert all(
+        code.isupper() or "_" in code for code in details["hold_reason_codes"]
+    )
+
+
+def test_the_message_a_staff_member_receives_carries_no_internal_code(
+    database, notifications
+):
+    from kakao_notify import format_qna_message
+
+    inquiry_id = create_inquiry(database, ORDINARY, sid="GATE-READABLE")
+    AnswerService(
+        database, engine=CountingEngine(rule_result()),
+    ).generate_for_inquiry(inquiry_id)
+
+    sent = notifications[0]
+    rendered = format_qna_message(
+        product=sent["product"], option_name=sent["option_name"],
+        question=sent["question"], answer=sent["answer"],
+        reason=sent["reason"], action=sent["action"],
+        hold_reason=sent["hold_reason"], hold_codes=sent["hold_codes"],
+        generation_skipped=sent["generation_skipped"],
+    )
+    for code in sent["hold_codes"]:
+        assert code not in rendered, f"{code} would reach a staff member"
+    assert "세부 사유:" in rendered

@@ -108,3 +108,112 @@ def _codes(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+# ---------------------------------------------------------------------------
+# Staff-facing short labels for the KakaoTalk message.
+#
+# The sentences above are written for the dashboard, where there is room to
+# explain. A phone notification is read in a few seconds by someone deciding
+# whether to open the console, so the same reason needs a much shorter form --
+# a noun phrase naming the problem, not a sentence describing it.
+#
+# This is a display vocabulary only. The codes themselves, the gate that
+# produces them, and everything written to the database and the logs are
+# untouched: the raw codes are still recorded, and only the rendered message
+# differs.
+STAFF_REASON_LABELS: dict[str, str] = {
+    # Idempotency
+    "ALREADY_ANSWERED_OR_POSTED": "이미 등록됨",
+    # Privacy / transport integrity
+    "PII_EXPOSURE": "개인정보 포함",
+    "SECRET_EXPOSURE": "인증정보 포함",
+    "FINAL_ANSWER_REQUIRED": "답변 본문 없음",
+    "UNRESOLVED_PLACEHOLDER": "미완성 문구 포함",
+    "INTERNAL_PLACEHOLDER_EXPOSURE": "내부 문구 포함",
+    "PAYLOAD_FINAL_ANSWER_MISMATCH": "등록 데이터 불일치",
+    "UNSUPPORTED_SOURCE_TYPE": "지원하지 않는 문의 유형",
+    # Validator
+    "VALIDATOR_NOT_PASS": "검증 실패",
+    "VALIDATOR_REVIEW_REQUIRED": "검증 확인 필요",
+    # Route / policy
+    "INTENT_NOT_AUTO_POSTABLE": "자동등록 대상 아님",
+    "ANSWER_REQUIRES_MANUAL_REVIEW": "직원 확인 필요",
+    "PROCESSING_PLAN_REQUIRES_REVIEW": "직원 검토 필요",
+    "POLICY_OR_HIGH_RISK_REVIEW": "위험·분쟁 가능성",
+    "DRAFT_REVIEW_REQUIRED": "초안 검토 필요",
+    "PRODUCT_FACT_NOT_VERIFIED": "상품 정보 근거 부족",
+    "PRODUCT_COMPATIBILITY_NOT_VERIFIED": "호환 여부 미확인",
+    # Evidence
+    "EVIDENCE_CONFLICT": "근거 충돌",
+    "APPROVED_LEARNING_CONFLICT": "학습 답변 간 충돌",
+    "PRODUCT_FACT_VS_LEARNING_CONFLICT": "상품 정보와 학습 답변 충돌",
+    # Order / DPS
+    "REQUIRED_ORDER_ID_MISSING_OR_INVALID": "주문번호 필요",
+    "ORDER_LOOKUP_NOT_TRUSTED": "주문 조회 불가",
+    "DPS_RESULT_NOT_TRUSTED": "배송·설치 조회 불가",
+    "DPS_SNAPSHOT_NOT_VALIDATED": "설치 일정 미확정",
+    # Recorded but not blocking
+    "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": "문의 유형 불명확",
+    "INTENT_CONFIDENCE_LOW": "분류 신뢰도 낮음",
+    "INTENT_CONFIDENCE_UNKNOWN": "분류 신뢰도 확인 불가",
+    "GPT_CONFIDENCE_LOW": "답변 신뢰도 낮음",
+    "GPT_CONFIDENCE_UNKNOWN": "답변 신뢰도 확인 불가",
+}
+
+# Codes that describe how processing went, not why the answer was not posted.
+# Listing them under "미등록 사유" invites the reader to act on something that
+# is not a problem: PRELIMINARY_REVIEW_RESOLVED literally reports a hold that
+# was *lifted*, and ORDER_ID_REQUESTED_FROM_CUSTOMER describes what the answer
+# says rather than what stopped it. Hidden from the message only -- both are
+# still produced, still recorded, and still shown on the dashboard.
+STAFF_HIDDEN_REASONS = frozenset({
+    "PRELIMINARY_REVIEW_RESOLVED",
+    "ORDER_ID_REQUESTED_FROM_CUSTOMER",
+})
+
+# Shown instead of a raw code nobody outside this codebase can read. A reason
+# added later must never reach a staff member as "SOME_NEW_CODE"; it should
+# read as "something else needs a look", while the code itself stays in the
+# logs for whoever is debugging.
+STAFF_UNKNOWN_LABEL = "추가 확인 필요"
+
+_STAFF_SEPARATOR = " · "
+# Past this many, the message stops being scannable and the tail adds nothing:
+# an operator opening the console sees the full list anyway.
+_STAFF_MAX_ITEMS = 5
+
+
+def staff_reason_labels(codes: object) -> tuple[str, ...]:
+    """Short Korean labels for one hold, deduplicated, in order.
+
+    Two codes that mean the same thing to a staff member collapse into one
+    entry -- several unreadable route codes, or several unrecognised ones,
+    would otherwise fill the message with repetition.
+    """
+
+    labels: list[str] = []
+    for code in _codes(codes):
+        if code in STAFF_HIDDEN_REASONS:
+            continue
+        label = STAFF_REASON_LABELS.get(code)
+        if label is None:
+            label = (
+                "답변 경로 확인 필요"
+                if code.startswith(_ROUTE_PREFIX)
+                else STAFF_UNKNOWN_LABEL
+            )
+        labels.append(label)
+    return tuple(dict.fromkeys(labels))
+
+
+def staff_reason_summary(codes: object) -> str:
+    """The one-line "세부 사유" a staff member reads on their phone."""
+
+    labels = staff_reason_labels(codes)
+    if not labels:
+        return ""
+    if len(labels) > _STAFF_MAX_ITEMS:
+        shown = labels[:_STAFF_MAX_ITEMS]
+        return _STAFF_SEPARATOR.join(shown) + f" 외 {len(labels) - len(shown)}건"
+    return _STAFF_SEPARATOR.join(labels)

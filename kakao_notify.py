@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from answer.hold_reasons import staff_reason_summary
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT.parent
@@ -393,8 +395,13 @@ def format_qna_message(
                 f"미등록 사유: {hold_reason or '자동 등록 조건을 충족하지 않았습니다.'}",
             ]
         )
-        if hold_codes:
-            lines.append(f"세부 사유: {', '.join(hold_codes)}")
+        # Internal reason codes are how the pipeline talks to itself. A staff
+        # member reading this on their phone gets the same reasons as short
+        # Korean phrases instead; the codes themselves are unchanged and stay
+        # in the activity log for whoever needs to trace one.
+        detail = staff_reason_summary(hold_codes)
+        if detail:
+            lines.append(f"세부 사유: {detail}")
         lines.extend(
             [
                 "",

@@ -480,6 +480,10 @@ class AnswerService:
                     details={
                         "draft_id": draft["id"],
                         "recipient": "staff_qna_room",
+                        # The message shows short Korean phrases; the codes
+                        # themselves are kept here so a hold can still be
+                        # traced back to the exact gate reason that caused it.
+                        "hold_reason_codes": list(hold_codes),
                     },
                 )
         except Exception as error:
