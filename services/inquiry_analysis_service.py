@@ -10,7 +10,11 @@ from answer.inquiry_analysis import (
     OrderIdStatus,
 )
 from answer.models import AnswerRequest
-from answer.text_utils import split_subquestions
+from answer.text_utils import (
+    CURRENT_DELIVERY_SCHEDULE_QUERY,
+    CURRENT_INSTALLATION_SCHEDULE_QUERY,
+    split_subquestions,
+)
 
 
 GENERAL_ORDER_ID_PATTERN = re.compile(r"(?<!\d)\d{16}(?!\d)")
@@ -442,14 +446,35 @@ HIGH_RISK_WORDS = (
     "책임",
     "과실",
 )
+# Strong markers: the customer names the purchase itself, so the question is
+# about what would happen if they bought -- an explicit "when" does not change
+# that ("오늘 주문하면 언제 받을 수 있나요?").
 PRE_PURCHASE_DELIVERY_WORDS = (
     "오늘주문하면",
     "지금주문하면",
     "주문하면",
+    # Customers write the same pre-purchase condition several ways, and only
+    # "…하면" was listed, so "오늘 주문시 언제 배송되나요?" was read as an
+    # existing order and answered by asking for an order number the customer
+    # does not have yet.
+    "주문시",
+    "주문하시면",
+    "구매시",
+    "구매하시면",
     "주문할예정",
     "구매하려",
     "구매예정",
     "구매하면",
+    "주문할예정",
+    "구매하려",
+    "구매예정",
+)
+# Weaker markers: they describe *feasibility* ("can I have it by Saturday?",
+# "how long does delivery take?") rather than naming a purchase. On their own
+# they cannot outrank an explicit "when", because "언제 받을 수 있나요?" from
+# someone who has already ordered is a schedule lookup, not a policy question
+# -- that reading is what stopped it requiring an order number.
+PRE_PURCHASE_FEASIBILITY_WORDS = (
     "배송얼마나걸",
     "배송기간",
     "받을수있",
@@ -457,6 +482,7 @@ PRE_PURCHASE_DELIVERY_WORDS = (
     "배송가능",
     "설치가능",
 )
+EXPLICIT_WHEN = re.compile(r"언제|며칠|몇일")
 POST_PURCHASE_DELIVERY_WORDS = (
     "주문했",
     "주문완료",
@@ -512,12 +538,23 @@ class InquiryAnalysisService:
         # not a score.  Keep this block ahead of legacy keyword scoring and
         # provider inference so newly-synced inquiries cannot inherit a stale
         # GENERAL classification.
+        # "When does the *notice* arrive?" -- about the message, not the
+        # shipment. Checked before the schedule shapes below so the two are
+        # never merged: both contain 언제, and one contains 발송
+        # ("알림톡은 언제 발송되나요?").
+        #
+        # "안내문자" is listed beside "문자안내" because customers write it
+        # both ways and only one spelling was here, so "배송 안내 문자는 언제
+        # 오나요?" was read as a shipment question.
         notification_policy = any(
             token in compact
             for token in (
                 "배송알림톡",
                 "알림톡은언제",
+                "알림톡언제",
                 "문자안내",
+                "안내문자",
+                "안내문자는언제",
                 "일반배송정책",
                 "이벤트배송정책",
             )
@@ -557,7 +594,7 @@ class InquiryAnalysisService:
                 "기사님언제",
                 "기사님은언제",
             )
-        ):
+        ) or CURRENT_INSTALLATION_SCHEDULE_QUERY.search(compact):
             return "INSTALLATION_DATE"
         if any(
             token in compact
@@ -578,7 +615,7 @@ class InquiryAnalysisService:
                 "출고",
                 "배송지연",
             )
-        ):
+        ) or CURRENT_DELIVERY_SCHEDULE_QUERY.search(compact):
             return "DELIVERY_DATE"
         if any(
             token in compact
@@ -683,13 +720,23 @@ class InquiryAnalysisService:
             return False
         if re.search(r"\d{1,2}(?:월|[./-])\d{1,2}(?:일)?주문", compact):
             return False
+        # "받을" only matched one inflection; "받아볼수", "받아보" and
+        # "받는" are the same word doing the same job in a pre-purchase
+        # question, and missing them sent "오늘 주문하면 언제쯤 받아볼수
+        # 있을까요?" down the existing-order path.
         delivery_context = any(
             word in compact
-            for word in ("배송", "발송", "도착", "받을", "설치")
+            for word in ("배송", "발송", "도착", "받을", "받아", "받는", "수령", "설치")
         )
-        return delivery_context and any(
-            word in compact for word in PRE_PURCHASE_DELIVERY_WORDS
-        )
+        if not delivery_context:
+            return False
+        if any(word in compact for word in PRE_PURCHASE_DELIVERY_WORDS):
+            return True
+        # Feasibility wording alone settles it only when the customer did not
+        # ask *when*.
+        return any(
+            word in compact for word in PRE_PURCHASE_FEASIBILITY_WORDS
+        ) and not EXPLICIT_WHEN.search(compact)
 
     # A connector joins two clauses, but it does not on its own mean there
     # are two questions: "50인치, 60인치 중 어떤 게 좋나요" is one comparison.

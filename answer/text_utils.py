@@ -233,3 +233,30 @@ def split_subquestions(
     # wanted two separate answers.
     deduplicated = list(dict.fromkeys(meaningful))
     return tuple(deduplicated) if deduplicated else (text,)
+
+
+# "When is my order shipping / arriving / being installed?" -- a question about
+# one customer's own schedule, whatever noun they use for it.
+#
+# Defined here, in the lowest layer, because two places need exactly the same
+# notion and must never drift: the classifier decides routing from it, and the
+# rule engine uses it to refuse a question this block does not answer.
+_SCHEDULE_PARTICLE = r"[가이은는을를도]?"
+_WHEN = r"(?:언제|며칠|몇일)"
+# The noun may be followed by a schedule word before the particle:
+# "배송 예정일이 언제", "설치 일정이 언제".
+_SCHEDULE_NOUN = r"(?:\s*(?:예정일|예정|일정|날짜))?"
+CURRENT_DELIVERY_SCHEDULE_QUERY = re.compile(
+    rf"(?:배송|발송|출고|도착|수령){_SCHEDULE_NOUN}{_SCHEDULE_PARTICLE}\s*(?:쯤)?\s*{_WHEN}"
+    rf"|{_WHEN}\s*(?:쯤)?\s*(?:배송|발송|출고|도착|수령|받|보내|오)"
+)
+CURRENT_INSTALLATION_SCHEDULE_QUERY = re.compile(
+    rf"(?:설치|기사|기사님|방문){_SCHEDULE_NOUN}{_SCHEDULE_PARTICLE}\s*(?:쯤)?\s*{_WHEN}"
+    rf"|{_WHEN}\s*(?:쯤)?\s*(?:설치|방문)"
+)
+
+# Words that make the *notice* the subject rather than the shipment. The
+# classifier checks this before the shapes above; the rule engine has no such
+# ordering, so its second-line guard consults this explicitly -- otherwise
+# "알림톡은 언제 오나요?" would be refused by a branch that answers it well.
+NOTICE_SUBJECT_QUERY = re.compile(r"알림톡|안내\s*문자|문자\s*안내|연락\s*(?:이|은)?\s*언제")

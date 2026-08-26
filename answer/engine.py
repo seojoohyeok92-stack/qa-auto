@@ -20,6 +20,9 @@ from .models import (
 from .providers.base import AnswerProvider
 from .providers.rule_provider import RuleProvider
 from .text_utils import (
+    CURRENT_DELIVERY_SCHEDULE_QUERY,
+    CURRENT_INSTALLATION_SCHEDULE_QUERY,
+    NOTICE_SUBJECT_QUERY,
     compact,
     estimate_question_count,
     find_any,
@@ -577,6 +580,31 @@ class AnswerEngine:
                     body += "\n\n따라서 현재 기준으로는 수령/설치까지 일주일 이상 소요될 가능성이 높습니다."
                 body = self._append_install_extras(body, question)
                 return self.yes("배송/설치신규", body, "방문설치 신규 주문 일정 안내입니다.")
+            # Last resort of the shipping block: anything mentioning a
+            # shipping word for an install product that was not recognised as
+            # a new-order question gets the existing-order notification
+            # guidance ("알림톡은 설치일 전날 발송됩니다").
+            #
+            # That is guidance about *how notice is given*, not an answer to
+            # "when is mine coming". Production inquiry 686472270 asked
+            # "언제 발송되나요?" with no order number; the classifier did not
+            # recognise 발송 as a schedule word, so the processing plan never
+            # routed it to ORDER_ID_REQUEST, this fall-through answered it,
+            # and the notification guidance was auto-posted to a customer
+            # asking about their own shipment.
+            #
+            # The classifier now recognises that phrasing and routes it before
+            # the engine is reached. This is the second line, using the same
+            # predicate rather than a second opinion: one definition in
+            # text_utils, consulted in both places.
+            if not NOTICE_SUBJECT_QUERY.search(q) and (
+                CURRENT_DELIVERY_SCHEDULE_QUERY.search(q)
+                or CURRENT_INSTALLATION_SCHEDULE_QUERY.search(q)
+            ):
+                return self.no_answer(
+                    "배송/개별주문일정확인",
+                    "개별 주문의 배송·설치 일정 문의는 주문 조회가 필요합니다.",
+                )
             body = self._install_existing_order_body(product)
             body = self._append_install_extras(body, question)
             return self.yes("배송/설치기존", body, "방문설치 기존 주문 일정 안내입니다.")

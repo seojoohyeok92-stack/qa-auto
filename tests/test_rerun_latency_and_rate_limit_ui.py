@@ -36,13 +36,20 @@ def database(tmp_path) -> Database:
 
 
 def _inquiry(database: Database, source_id: str) -> int:
+    # A product-specification question, deliberately: these tests are about
+    # what happens when the *provider* refuses, so the inquiry has to be one
+    # that needs a provider at all. "설치는 언제 되나요?" used to serve here,
+    # but it is a current-order schedule question and is now answered by the
+    # deterministic ORDER_ID_REQUEST template without any provider round trip
+    # -- which left these tests asserting a rate-limit error that could never
+    # be raised. The routing is correct; the fixture was the wrong question.
     return InquiryRepository(database).upsert_work_item(
         {
             "store_code": "S",
             "source_type": "NAVER",
             "source_question_id": source_id,
             "inquiry_type": "상품",
-            "content": "설치는 언제 되나요?",
+            "content": "이 제품 화면이 잘 보이는 편인가요?",
             "registered_at": "2026-08-24T00:00:00+09:00",
             "raw_json": {},
         }
