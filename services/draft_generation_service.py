@@ -27,6 +27,37 @@ _REQUIRED_FACT_DETAIL = re.compile(
     r"호환|브라켓|모델|옵션|배송|도착|설치일|예정일|날짜|기간|A/S|AS|"
     r"할인|혜택|주문|환불|반품|취소|파손|분쟁|책임|개인정보"
 )
+# The operational subset of the above. Deferring one of these to the installer
+# is not an answer: they are commitments about somebody's order, a date, or
+# money, and a person decides them however safely the sentence is worded. The
+# product-advisory terms (호환/브라켓/모델/옵션) are deliberately absent -- those
+# are exactly what an answer may safely defer once it has answered the
+# question, which is what inquiry 686504818 did.
+_OPERATIONAL_COMMITMENT_DETAIL = re.compile(
+    r"배송|도착|설치일|예정일|날짜|기간|주문|환불|반품|교환|취소|"
+    r"파손|분쟁|책임|보상|개인정보|결제|금액|가격|비용|요금|"
+    r"할인|혜택|A/S|AS|재고|입고"
+)
+
+
+def _all_subquestions_answered(value: Any) -> bool:
+    """Whether the draft reported answering every sub-question it was given.
+
+    The provider records this per sub-question alongside the retrieval status
+    it used, and it reports ``answered: false`` honestly -- inquiries 2655,
+    2692 and 2702 all did. An empty or malformed record is not a yes.
+    """
+
+    if not isinstance(value, list) or not value:
+        return False
+    for item in value:
+        if not isinstance(item, dict):
+            return False
+        if not bool(item.get("answered")):
+            return False
+        if str(item.get("status") or "").upper() != "ANSWERABLE":
+            return False
+    return True
 
 
 class DraftGenerationService:
@@ -136,12 +167,36 @@ class DraftGenerationService:
     ) -> dict[str, Any]:
         """Classify a narrowly-defined manual detail as optional.
 
-        Everything is required by default.  Optional detail needs all three
-        independent signals: the customer explicitly requested a summary, the
-        missing item is a finer-grained manual/assembly detail rather than a
-        customer-impacting fact, and the generated answer safely defers that
-        detail to an authoritative manual or installer.  Validator authority
-        remains downstream; a rejected answer is never made safe here.
+        Everything is required by default.  Two independent paths can lower a
+        single item to optional; neither can lower one the other rejects, and
+        Validator authority remains downstream either way -- a rejected answer
+        is never made safe here.
+
+        The first path is the summary request: the customer explicitly asked
+        for a summary, the missing item is a finer-grained manual/assembly
+        detail rather than a customer-impacting fact, and the answer defers it
+        to an authoritative manual or installer.
+
+        The second path asks the question that actually separates a safe
+        answer from an unsafe one: **did the draft answer what was asked?**
+        ``missing_information`` is the model listing what it does not know,
+        which is not the same finding as the answer being unsupported.
+        Inquiry 686504818 asked whether a separately bought bracket could wall
+        mount a 50인치 TV; the draft answered it from verified product facts
+        and two APPROVED learnings, then named the two things it could not
+        know -- the bracket the customer has yet to buy, and the wall in their
+        parents' home -- and told them to confirm both with the installer. No
+        catalog of ours can ever hold either, so review could only ever
+        produce the same sentence. Meanwhile 2655 ("USB-C 65W 충전 가능한가요"),
+        2692 ("HDMI 단자가 몇 개") and 2702 all reported ``answered: false``
+        with NO_RELIABLE_SOURCE and replied "확인이 어렵습니다" -- questions
+        about our own product that we failed to answer, which is a real
+        finding and still goes to a person.
+
+        So this path requires every sub-question to be answered, the answer to
+        visibly hand the unknown off, the provider not to have asked for
+        review itself, and the item not to be an operational commitment about
+        an order, a date, or money.
         """
 
         if not isinstance(raw, dict):
@@ -159,6 +214,15 @@ class DraftGenerationService:
         )
         summary_requested = bool(_SUMMARY_REQUEST.search(questions))
         safe_deferral = bool(_SAFE_DETAIL_DEFERRAL.search(answer_context))
+        provider_review = bool(raw.get("requires_review"))
+        # Fails closed: no sub-question record at all is not evidence that the
+        # question was answered.
+        answered_everything = _all_subquestions_answered(
+            raw.get("subquestion_results")
+        )
+        deferrable = bool(
+            answered_everything and safe_deferral and not provider_review
+        )
         required: list[str] = []
         optional: list[str] = []
         details: list[dict[str, str]] = []
@@ -169,6 +233,8 @@ class DraftGenerationService:
                 and _OPTIONAL_DETAIL_QUALIFIER.search(item)
                 and _OPTIONAL_MANUAL_DETAIL.search(item)
                 and not _REQUIRED_FACT_DETAIL.search(item)
+            ) or bool(
+                deferrable and not _OPERATIONAL_COMMITMENT_DETAIL.search(item)
             )
             severity = (
                 "OPTIONAL_DETAIL"
@@ -185,8 +251,12 @@ class DraftGenerationService:
         copied["optional_missing_information"] = optional
         if missing and optional and not required:
             copied["requires_review"] = False
+            # Which path cleared it is kept on the draft, so a hold that is
+            # lifted here is still explainable from the persisted record.
             copied["warnings"] = list(raw.get("warnings") or []) + [
-                "OPTIONAL_DETAIL_DEFERRED_TO_MANUAL_OR_INSTALLER"
+                "OPTIONAL_DETAIL_ANSWERED_WITH_SAFE_DEFERRAL"
+                if deferrable
+                else "OPTIONAL_DETAIL_DEFERRED_TO_MANUAL_OR_INSTALLER"
             ]
         elif required:
             copied["requires_review"] = True
