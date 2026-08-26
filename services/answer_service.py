@@ -48,6 +48,10 @@ from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
 )
 from services.phase9_answer_policy import apply_phase9_rule_policy
+from services.semantic_coverage_service import (
+    SemanticCoverageService,
+    is_enabled as semantic_coverage_enabled,
+)
 from services.gpt_governance_service import GovernedHybridAnswerService
 from services.uat_order_service import UatOrderService
 from services.order_service import lookup_general_order_id
@@ -349,6 +353,49 @@ class AnswerService:
         self.answers = AnswerRepository(database)
         self.dps = DpsRepository(database)
         self.validator = AnswerValidator()
+        self.semantic_coverage = SemanticCoverageService()
+
+    def _record_semantic_coverage(
+        self,
+        inquiry_id: int,
+        request: AnswerRequest,
+        result: AnswerResult,
+    ) -> None:
+        """Measure question/answer correspondence and record it. Decides nothing.
+
+        Phase 1 is observation. The verdict is attached to the draft metadata
+        and written to the activity log so the operational false-positive rate
+        can be measured; no caller reads it, and the evaluator is wrapped so a
+        fault in the measurement can never fail an answer that was otherwise
+        ready to save.
+        """
+
+        if not semantic_coverage_enabled():
+            return
+        try:
+            coverage = self.semantic_coverage.evaluate(
+                question=request.question,
+                answer=result.answer,
+                route=str(result.metadata.get("selected_answer_route") or ""),
+            )
+            payload = coverage.to_dict()
+            result.metadata["semantic_coverage"] = payload
+            self.logs.record_inquiry(
+                inquiry_id,
+                f"SEMANTIC_COVERAGE_{coverage.status}",
+                "고객 질문과 답변의 대응 여부를 관찰 기록했습니다."
+                " (Phase 1: 자동등록 판정에는 영향을 주지 않습니다)",
+                level="INFO",
+                details=payload,
+            )
+        except Exception as error:  # pragma: no cover - defensive only
+            self.logs.record_inquiry(
+                inquiry_id,
+                "SEMANTIC_COVERAGE_ERROR",
+                "질문 대응 관찰에 실패했습니다. 답변 생성에는 영향이 없습니다.",
+                level="WARNING",
+                details={"error_type": type(error).__name__},
+            )
 
     def _use_synthetic_order_snapshot(self) -> bool:
         """Whether this instance is a legacy unit test with a DPS double.
@@ -2681,6 +2728,15 @@ class AnswerService:
                 raise AnswerGenerationError(
                     "답변 생성 결과가 비어 있어 초안을 저장할 수 없습니다."
                 )
+            # Phase 1 soft gate: observe whether the answer addresses what was
+            # asked, and record it. Placed after the final rendering boundary
+            # so every route is measured the same way, and deliberately after
+            # every decision above has already been made -- nothing below reads
+            # this key, so a FAIL cannot alter the validator verdict,
+            # requires_review, eligibility, auto-post or the approval state.
+            # The measurement is never allowed to break generation either: an
+            # evaluator fault is recorded and the answer proceeds.
+            self._record_semantic_coverage(inquiry_id, request, result)
             dps_metadata = (
                 request.metadata.get("dps")
                 if isinstance(request.metadata.get("dps"), dict)
