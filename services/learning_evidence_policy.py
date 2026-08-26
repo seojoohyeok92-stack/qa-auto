@@ -37,8 +37,10 @@ import re
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable, Mapping
 
+from answer.answer_format import extract_answer_body
 from answer.evidence_support import SUPPORTED_THRESHOLD
 from answer.learning_signal import detect_polarity, facts_conflict
+from services.auto_post_validation_service import INTERNAL_PLACEHOLDER
 
 # Product identity verdicts the compatibility gate issues when it resolved the
 # candidate to this exact product. Anything else it returns is either a hard
@@ -51,10 +53,72 @@ EXACT_PRODUCT_MATCHES = frozenset({
 # A person hedging. The polarity detector already reads most hedged phrasings
 # as UNCERTAIN; these catch the ones that pair a hedge with a definite verb
 # ("가능할 것 같습니다"), where the affirmative marker would otherwise win.
+#
+# A literal-substring list is the wrong shape for Korean: the same hedge
+# appears as 보입니다 / 보여집니다 / 보이며 / 보이는데, and listing every
+# inflection is how "것으로 보입니다" came to be missing while "것 같" was
+# present -- which let an approved answer reading "사용 가능하실 것으로
+# 보입니다" stand as a definite fact. The patterns below match the *stem* of
+# each hedge and let the ending vary.
 HEDGE_MARKERS = (
     "것 같", "것같", "듯 합니다", "듯합니다", "아마", "추정", "예상됩니다",
     "확인이 필요", "확인 후", "확인해 보", "알아보",
 )
+
+_HEDGE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # ...것으로 보입니다 / 보여집니다 / 보이며 — the one that got through.
+    re.compile(r"보입니다|보여집니다|보이며|보이는데|보여요"),
+    # 예상 / 추정 / 추측 / 판단 / 사료 in any ending.
+    re.compile(r"예상[되돼]|예상됩니다|추정[되됩]|추측|판단[되됩]|사료[되됩]"),
+    # "...할 것으로", "...인 것으로" — a projection, not a statement.
+    re.compile(r"[을ㄹ] 것으로|인 것으로|것으로 [보예판사]"),
+    # 가능성 / ~일 수 있 / ~수도 있 — possibility, not fact.
+    re.compile(r"가능성이|[울ㄹ] 수(?:도)? 있|있을 수 있|다를 수 있|상이할 수 있"),
+    # Deferral: the writer is telling the customer to check elsewhere.
+    re.compile(r"확인이 (?:필요|되어야)|확인 후|확인해 ?[보주]|확인 바랍|"
+               r"확인하시기|확인해주시기|문의(?:해|하시어) ?보|알아보"),
+    # Explicit uncertainty about their own statement.
+    re.compile(r"정확하[지진] ?않|정확도가|불확실|명확하지 ?않|장담"),
+    # Hearsay.
+    re.compile(r"[로으로] 알고 ?있|알려져 ?있|듣기로"),
+    # Approximation used as the answer itself.
+    re.compile(r"대략|어느 ?정도|약간|보통은|일반적으로는"),
+)
+
+
+def claim_body(answer: object) -> str:
+    """The part of the answer that states something, without the frame.
+
+    Every answer this system writes is wrapped in the company template, and
+    that template's closing reads "...담당자가 확인 후 안내드리겠습니다".
+    Scanning the whole answer for hedges therefore found "확인 후" in the
+    boilerplate of *every* answer, so no answer the pipeline had ever
+    produced could serve as evidence -- including "LS27D400 모델은 스피커가
+    내장되어 있지 않습니다", which is as definite as a claim gets.
+
+    The frame says nothing about the product, so it is removed before the
+    uncertainty check. A deferral written in the body ("주문·배송 상태 확인이
+    필요합니다") still reads as a deferral.
+    """
+
+    body = extract_answer_body(str(answer or ""))
+    return _text(body or answer)
+
+
+def hedge_reason(answer: object) -> str | None:
+    """Which uncertainty marker this answer carries, or None."""
+
+    text = claim_body(answer)
+    if not text:
+        return "EMPTY"
+    for marker in HEDGE_MARKERS:
+        if marker in text:
+            return marker
+    for pattern in _HEDGE_PATTERNS:
+        found = pattern.search(text)
+        if found:
+            return found.group(0)
+    return None
 
 # A stated quantity in a declarative sentence: "HDMI 단자는 3개입니다",
 # "본체 무게는 6.5kg입니다", "해상도는 3840x2160입니다".
@@ -120,14 +184,56 @@ def is_hedged(answer: object) -> bool:
     declarative sentence counts as committing, and anything else stays hedged.
     """
 
-    text = _text(answer)
+    text = claim_body(answer)
     if not text:
         return True
-    if any(marker in text for marker in HEDGE_MARKERS):
+    if hedge_reason(answer) is not None:
         return True
     if detect_polarity(text) != "UNCERTAIN":
         return False
     return not _QUANTITY_STATEMENT.search(text)
+
+
+def contamination_reason(value: object) -> str | None:
+    """The redaction token this text carries, or None.
+
+    ``<masked-phone>`` and its siblings are written when the pipeline removes
+    something. A stored answer containing one is a record of a removal, not a
+    statement about the product, and the token itself must never reach a
+    customer -- so such an answer can neither prove a claim nor be shown to
+    the model as an example worth copying.
+    """
+
+    found = INTERNAL_PLACEHOLDER.search(_text(value))
+    return found.group(0) if found else None
+
+
+def usable_as_factual_evidence(item: Mapping[str, Any] | Any) -> bool:
+    """Whether one retrieved item's text may ground a factual claim.
+
+    Deliberately shallow: identity, approval and topic scope are judged by
+    the compatibility gate and ``_qualifying`` below. This answers only the
+    question those two never ask -- is the *text itself* the kind of thing
+    that can prove something?
+    """
+
+    if not isinstance(item, Mapping):
+        return False
+    if item.get("style_only"):
+        return False
+    # Learning items carry ``answer``; historical cases are raw rows and carry
+    # ``seller_answer``. Reading only one of them would silently drop a whole
+    # evidence class from the grounding corpus.
+    text = _text(
+        item.get("answer")
+        or item.get("final_answer")
+        or item.get("seller_answer")
+    )
+    if not text:
+        return False
+    if contamination_reason(text) is not None:
+        return False
+    return not is_hedged(text)
 
 
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")

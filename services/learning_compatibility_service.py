@@ -160,6 +160,23 @@ BRAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 MODEL_STOPWORDS = {
     "SMART", "UHD4K", "QLED4K", "OLED4K", "HDMI2", "HDMI20", "HDMI21",
 }
+# A measurement is not a model code. MODEL_PATTERN accepts any 5+ character
+# run mixing letters and digits, so "214cm(85인치)" in a product title yields
+# the model code "214CM" -- and two different listings of the same size then
+# match as EXPLICIT_MODEL_CODE_MATCH, which is the strongest identity verdict
+# the gate can issue. Real operational rows show this: "214CM" is stored as
+# the model code for both the 벽걸이 and the 스탠드 listing, so a stand or VESA
+# fact from one would have settled the other. Dimensions are excluded here
+# rather than repaired in the data, because the fallback -- product_id and
+# distinctive-name matching -- is already correct and already in place.
+DIMENSION_TOKEN = re.compile(
+    r"^\d+(?:[.,]\d+)?(?:CM|MM|M|INCH|IN|KG|G|W|HZ|K|MS)$",
+    re.IGNORECASE,
+)
+
+
+def _is_dimension_token(value: str) -> bool:
+    return bool(DIMENSION_TOKEN.match(value.strip()))
 
 
 @dataclass(frozen=True)
@@ -238,13 +255,14 @@ def _model_code(*values: object) -> str | None:
         explicit = _clean(value)
         if explicit:
             code = explicit.upper()
-            if code not in MODEL_STOPWORDS:
+            if code not in MODEL_STOPWORDS and not _is_dimension_token(code):
                 return code
     for value in values[2:]:
         text = str(value or "").upper()
         candidates = [
             match for match in MODEL_PATTERN.findall(text)
             if match.upper() not in MODEL_STOPWORDS
+            and not _is_dimension_token(match)
             and extract_model_code(match) is not None
         ]
         if candidates:

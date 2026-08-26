@@ -11,6 +11,7 @@ from services.learning_compatibility_service import (
     LearningCompatibilityService,
     extract_product_identity,
 )
+from services.learning_evidence_policy import contamination_reason
 from services.learning_privacy_service import LearningPrivacyService
 
 
@@ -130,6 +131,7 @@ class SimilarAnswerService:
         rejection_counts = {
             "BELOW_SIMILARITY_THRESHOLD": 0,
             "CONTEXT_POLICY_REJECTED": 0,
+            "REDACTION_TOKEN_CONTAMINATED": 0,
         }
         compatibility_diagnostics: list[dict[str, Any]] = []
         type_mismatch_count = 0
@@ -142,6 +144,15 @@ class SimilarAnswerService:
             option=option_name,
         )
         for item in candidates:
+            # A stored answer containing "<masked-phone>" is a record that
+            # something was removed, not a sentence anyone should read or
+            # copy. Showing it to the model is how the token reached a
+            # customer once already (see INTERNAL_REDACTION_TOKENS), so it is
+            # dropped here rather than merely demoted -- the row itself stays
+            # in the database, untouched and auditable.
+            if contamination_reason(item.get("final_answer")) is not None:
+                rejection_counts["REDACTION_TOKEN_CONTAMINATED"] += 1
+                continue
             if inquiry_type and item.get("inquiry_type") != inquiry_type:
                 # Inquiry type is intentionally a relevance signal, not a hard
                 # equality filter. Taxonomies differ between old and new data.

@@ -23,6 +23,7 @@ from answer.providers.provider_factory import create_gpt_provider
 from services.draft_generation_service import DraftGenerationService
 from answer.exceptions import GenerationSkippedError
 from services import learning_evidence_policy
+from services.learning_evidence_policy import usable_as_factual_evidence
 from services.gpt_understanding_service import GptUnderstandingService
 from services.pre_generation_gate import PreGenerationGate
 from services.product_knowledge_service import required_fact_groups
@@ -294,28 +295,62 @@ class HybridAnswerService:
 
     @staticmethod
     def _evidence_texts(learning_context: dict[str, Any]) -> str:
-        """Every text the model was actually given, for grounding checks.
+        """The texts that may *prove* a factual claim, for grounding checks.
 
         The validator can see the facts but not the retrieved answers, so
         without this a claim taken straight from an approved learning example
-        would look unsupported.
+        would look unsupported. What belongs here is therefore exactly what
+        the pipeline is willing to call evidence -- and three kinds of
+        retrieved text are not:
+
+        ``seller_style_examples``
+            Learning harvested from past Naver answers with no review. The
+            prompt already tells the model these are not facts
+            (``seller_style_examples_are_facts: false``) and
+            ``learning_evidence_policy`` refuses them outright, but this
+            corpus admitted them anyway -- so an unreviewed sentence could
+            ground a claim the two other layers had already rejected. They
+            still reach the prompt for tone; they no longer prove anything.
+
+        ``good_patterns`` / ``bad_patterns``
+            Guidance about how to write, never about the product.
+
+        hedged and redaction-contaminated answers
+            An answer that declines to commit cannot establish a definite
+            claim, and one containing a ``<masked-...>`` token is a record of
+            something removed, not a statement about the product.
+
+        Narrowing this corpus can only make the validator stricter: a claim
+        it can no longer find becomes an ungrounded-claim error.
         """
 
         parts: list[str] = []
-        for key in ("similar_approved_answers", "seller_style_examples",
-                    "historical_cases"):
+        for key in ("similar_approved_answers", "historical_cases"):
             for item in learning_context.get(key) or []:
-                if isinstance(item, dict):
-                    parts.extend(
-                        str(value) for value in item.values()
-                        if isinstance(value, str)
-                    )
+                if not isinstance(item, dict):
+                    continue
+                if not usable_as_factual_evidence(item):
+                    continue
+                parts.extend(
+                    str(value) for value in item.values()
+                    if isinstance(value, str)
+                )
         signals = learning_context.get("feedback_signals")
         if isinstance(signals, dict):
-            for group in signals.values():
-                for item in group or []:
+            for key in ("verified_facts", "corrections"):
+                for item in signals.get(key) or []:
                     if isinstance(item, dict):
                         parts.append(str(item.get("content") or ""))
+        return " ".join(part for part in parts if part)
+
+    @staticmethod
+    def _style_reference_texts(learning_context: dict[str, Any]) -> str:
+        """Tone references. Kept separate so nothing can grade them as proof."""
+
+        parts: list[str] = []
+        for item in learning_context.get("seller_style_examples") or []:
+            if isinstance(item, dict):
+                parts.append(str(item.get("answer") or ""))
         return " ".join(part for part in parts if part)
 
 

@@ -829,7 +829,24 @@ class AnswerEngine:
                 "NAS 직접 접속은 TV 지원 앱/연결 방식과 NAS 방식에 따라 달라져 삼성 고객센터 확인을 안내합니다.",
             )
 
-        if self._is_business_tv_product(product) and any(k in q for k in ["미러링", "화면공유", "화면 공유", "스마트뷰", "smartview", "스마트 뷰", "airplay", "아이폰"]):
+        # Curated product-family rule: mirroring support is a property of the
+        # business-TV line, and this rule states what that line does.
+        #
+        # It used to fire on "airplay"/"아이폰" as well, and then answered a
+        # question it had not been written for. Real inquiry 686394444 asked
+        # "아이폰 에어플레이 지원되나요? 와이파이 없이도 미러링 가능한가요?"
+        # and received "미러링 기능을 지원합니다 / 아이폰 미러링은 지원하지
+        # 않습니다" -- stated with full certainty, with no learning attached
+        # and no ``airplay_support`` or ``mirroring_without_wifi`` fact for
+        # that product. AirPlay is a distinct feature that varies by model
+        # (operational Learning records both "에어플레이 미지원" for one model
+        # and AirPlay instructions for another), so this rule cannot settle
+        # it. Such a question now falls through to the evidence-based path,
+        # which says the specification needs checking when nothing verifies
+        # it. A mirroring question still gets the mirroring rule.
+        if self._is_business_tv_product(product) and any(
+            k in q for k in ["미러링", "화면공유", "화면 공유", "스마트뷰", "smartview", "스마트 뷰"]
+        ):
             return self.yes(
                 "비즈니스TV/미러링",
                 "문의하신 제품은 미러링 기능을 지원합니다.\n\n다만 아이폰 미러링은 지원하지 않는 점 참고 부탁드립니다.",
