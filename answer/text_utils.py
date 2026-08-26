@@ -262,6 +262,120 @@ CURRENT_INSTALLATION_SCHEDULE_QUERY = re.compile(
 NOTICE_SUBJECT_QUERY = re.compile(r"알림톡|안내\s*문자|문자\s*안내|연락\s*(?:이|은)?\s*언제")
 
 
+# The allow-list for install_existing_order_answer ("설치 예정일 관련 알림톡은
+# 설치일 전날 수취인의 카카오톡으로 발송됩니다").
+#
+# That template used to be the shipping block's *default*: for an install
+# product, anything mentioning a shipping keyword that matched no earlier
+# branch received it. Enumerating the test corpus found 75 questions getting
+# that body and only 7 asking about the notice -- among the rest were
+# "보증기간이 얼마나 되나요?", "캐시백 받을 수 있나요?" and "배송 중 깨진 것
+# 같은데 어떻게 하나요?", a damage report answered with kakao guidance. Since
+# the block is a FIXED_POLICY_SHIPPING match kind, the default also outranked
+# GPT and was published.
+#
+# So the template is now opt-in. It answers exactly one thing: when and how
+# the schedule is announced. NOTICE_SUBJECT_QUERY covers most of it but reads
+# only "연락이 언제"; customers write the halves in either order
+# ("설치기사님한테 언제 연락이 오나요?"), and ask for advance contact without
+# using either word ("기사님 방문 전에 연락 오나요?").
+DELIVERY_NOTICE_QUERY = re.compile(
+    r"알림톡|안내문자|문자안내|문자는언제|문자가언제|"
+    r"연락(?:이|은|을)?(?:언제|미리|먼저|오|주)|"
+    r"언제[^?!.]{0,6}연락|미리연락|사전연락|방문전(?:에)?연락"
+)
+
+
+def is_delivery_notice_question(question: str) -> bool:
+    """Whether the customer asks when or how the schedule is announced."""
+
+    return bool(DELIVERY_NOTICE_QUERY.search(compact(question)))
+
+
+# "이번 주말에 설치해주세요." is not a question about installation; it tells us
+# when to come. It was classified GENERAL_INSTALLATION_GUIDANCE -- ordinary
+# information -- because the schedule-change predicate looks for a change verb
+# (변경/바꿔/미뤄) beside a schedule noun (설치일/배송일), and this sentence has
+# neither: there is no existing date being moved.
+#
+# Both halves are required, which is what keeps the policy question out.
+# "주말 설치 가능한가요?" names a time but asks whether we ever do it;
+# "벽걸이로 설치해주세요" is an instruction with no schedule in it at all.
+_SCHEDULE_TIME_TARGET = re.compile(
+    r"오늘|내일|모레|글피|이번주말|주말|평일|이번주|다음주|담주|이번달|다음달|"
+    r"월요일|화요일|수요일|목요일|금요일|토요일|일요일|"
+    r"\d{1,2}월\d{1,2}일|\d{1,2}일에|오전|오후"
+)
+_OPERATIONAL_IMPERATIVE = re.compile(
+    r"(?:설치|배송|배달|방문|출고|발송)(?:을|를)?(?:해|해서)?"
+    r"(?:주세요|주시겠|주실|주시면|부탁|해주|해주세요)"
+)
+
+
+def is_operational_schedule_request(question: str) -> bool:
+    """Whether the customer instructs us to deliver or install at a given time."""
+
+    text = compact(question)
+    if not _OPERATIONAL_IMPERATIVE.search(text):
+        return False
+    return bool(_SCHEDULE_TIME_TARGET.search(text))
+
+
+# "주문시 며칠 소요되나요" and "토요일에도 배달 가능하나요" are questions about
+# the delivery *policy*, not about one customer's shipment. Neither names an
+# order, so neither can be answered from an order lookup -- and neither is
+# answered by the existing-order notification template ("알림톡은 설치일 전날
+# 발송됩니다"), which the shipping block used to hand out as its last resort.
+#
+# The two are kept apart because the right outcome differs. A duration
+# question has an honest answer for an install product: it depends on when the
+# installer can be scheduled. A weekend question does not -- the shipping
+# config holds no Saturday or holiday rule at all, so the only safe reply is
+# to decline and let the evidence pipeline and a person handle it. Inventing
+# one would be exactly the fabrication the rest of the pipeline exists to stop.
+_DELIVERY_SUBJECT = r"(?:배송|배달|발송|출고|도착|수령|받)"
+_HOW_LONG = r"(?:며칠|몇일|얼마나|얼마|어느\s*정도)"
+GENERAL_DELIVERY_DURATION_QUERY = re.compile(
+    rf"{_DELIVERY_SUBJECT}[^?!.]{{0,12}}(?:{_HOW_LONG}|기간)"
+    rf"|{_HOW_LONG}[^?!.]{{0,12}}{_DELIVERY_SUBJECT}"
+    rf"|{_DELIVERY_SUBJECT}\s*(?:기간|기한)"
+    rf"|{_HOW_LONG}[^?!.]{{0,6}}(?:소요|걸리|걸려|걸릴)"
+    rf"|(?:주문|구매|결제)[^?!.]{{0,10}}{_HOW_LONG}"
+)
+# "보증기간이 얼마나 되나요", "A/S 무상기간" -- a duration, but not delivery's.
+_NON_DELIVERY_DURATION = re.compile(
+    r"보증|무상|a/?s|에이에스|반품|환불|취소|교환|점검|보관"
+)
+WEEKEND_DELIVERY_POLICY_QUERY = re.compile(
+    rf"(?:토요일|일요일|주말|공휴일|휴일)[^?!.]{{0,14}}(?:{_DELIVERY_SUBJECT}|설치|가능)"
+    rf"|(?:{_DELIVERY_SUBJECT}|설치)[^?!.]{{0,10}}(?:토요일|일요일|주말|공휴일|휴일)"
+)
+# "토요일로 배송일 변경해주세요" names Saturday too, but it asks us to move the
+# schedule. That belongs to the schedule-change policy, not here.
+_SCHEDULE_CHANGE_REQUEST = re.compile(
+    r"변경|바꿔|바꾸|옮겨|미뤄|당겨|땡겨|앞당|조율"
+    r"|(?:설치|배송|배달)\s*해\s*주세요|(?:설치|배송|배달)\s*부탁"
+)
+
+
+def is_weekend_delivery_policy_question(question: str) -> bool:
+    """Whether the customer asks *whether* we deliver on a weekend or holiday."""
+
+    text = compact(question)
+    if _SCHEDULE_CHANGE_REQUEST.search(text):
+        return False
+    return bool(WEEKEND_DELIVERY_POLICY_QUERY.search(text))
+
+
+def is_general_delivery_policy_question(question: str) -> bool:
+    """Whether the customer asks how long delivery generally takes."""
+
+    text = compact(question)
+    if _NON_DELIVERY_DURATION.search(text):
+        return False
+    return bool(GENERAL_DELIVERY_DURATION_QUERY.search(text))
+
+
 # "배송 올 때 공구도 같이 오나요?" -- the shipment is the *occasion*, not the
 # subject. What is being asked about is an item and whether it comes in the box.
 #

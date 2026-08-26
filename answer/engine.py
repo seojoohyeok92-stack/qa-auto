@@ -24,7 +24,10 @@ from .text_utils import (
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
     NOTICE_SUBJECT_QUERY,
     compact,
+    is_delivery_notice_question,
+    is_general_delivery_policy_question,
     is_package_contents_question,
+    is_weekend_delivery_policy_question,
     estimate_question_count,
     find_any,
     has_any,
@@ -614,7 +617,7 @@ class AnswerEngine:
             # the engine is reached. This is the second line, using the same
             # predicate rather than a second opinion: one definition in
             # text_utils, consulted in both places.
-            if not NOTICE_SUBJECT_QUERY.search(q) and (
+            if not is_delivery_notice_question(question) and (
                 CURRENT_DELIVERY_SCHEDULE_QUERY.search(q)
                 or CURRENT_INSTALLATION_SCHEDULE_QUERY.search(q)
             ):
@@ -622,9 +625,57 @@ class AnswerEngine:
                     "배송/개별주문일정확인",
                     "개별 주문의 배송·설치 일정 문의는 주문 조회가 필요합니다.",
                 )
-            body = self._install_existing_order_body(product)
-            body = self._append_install_extras(body, question)
-            return self.yes("배송/설치기존", body, "방문설치 기존 주문 일정 안내입니다.")
+            # Third line, for the two policy questions that name no order at
+            # all. "혹시 토요일에도 배달 가능하나요? / 주문시 며칠 소요되나요"
+            # matched none of the branches above, so it reached the default
+            # below and was answered with the notification template -- which
+            # tells the customer when the 알림톡 arrives and answers neither
+            # question. Because the shipping block is a FIXED_POLICY_SHIPPING
+            # match kind, that default also outranked GPT and became the
+            # published answer.
+            #
+            # A weekend rule is checked first and separately: the shipping
+            # config has none, so there is nothing to answer from and the
+            # honest move is to decline rather than to pick the nearest
+            # template. A duration question does have an answer here, and it
+            # is the new-order body -- for an install product the wait is the
+            # installer's schedule, which is exactly what that body explains.
+            if is_weekend_delivery_policy_question(question):
+                return self.no_answer(
+                    "배송/주말정책확인",
+                    "주말·공휴일 배송 가능 여부는 확정된 운영 기준이 없어 담당자 확인이 필요합니다.",
+                )
+            if is_general_delivery_policy_question(question):
+                body = self._install_new_order_body(product)
+                body = self._append_install_extras(body, question)
+                return self.yes(
+                    "배송/설치신규",
+                    body,
+                    "방문설치 상품의 일반 배송 소요기간 안내입니다.",
+                )
+            # Default deny. This branch used to answer *everything* that got
+            # this far with the existing-order notification body, which made a
+            # confirmed operational template the fallback for any question
+            # containing a shipping word: 보증기간, 캐시백, A/S, even "배송 중
+            # 깨진 것 같은데 어떻게 하나요?". 75 corpus questions received it
+            # and only 7 were about the notice.
+            #
+            # Handing the rest back rather than refusing them matters: this
+            # block runs before _install_common_info and _old_appliance_pickup,
+            # so those rules never got a chance at the questions it swallowed.
+            # Returning None lets the A/S and visiting-installer rules answer
+            # what is theirs, and sends the remainder to the evidence pipeline
+            # -- where a missing basis becomes staff review rather than a
+            # confident answer to a question nobody asked.
+            if is_delivery_notice_question(question):
+                body = self._install_existing_order_body(product)
+                body = self._append_install_extras(body, question)
+                return self.yes(
+                    "배송/설치기존",
+                    body,
+                    "방문설치 기존 주문의 알림톡·사전연락 안내입니다.",
+                )
+            return None
 
         if any(k in q for k in ["송장", "운송장", "분리배송", "스탠드언제", "스탠드는언제"]):
             return self.no_answer("배송/부분배송", "송장번호/부분배송/스탠드 별도배송은 실제 출고 이력 확인이 필요합니다.")

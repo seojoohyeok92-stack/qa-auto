@@ -13,7 +13,9 @@ from answer.models import AnswerRequest
 from answer.text_utils import (
     CURRENT_DELIVERY_SCHEDULE_QUERY,
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
+    is_operational_schedule_request,
     is_package_contents_question,
+    is_weekend_delivery_policy_question,
     split_subquestions,
 )
 
@@ -390,6 +392,15 @@ def _is_schedule_change_request(question: str) -> bool:
         return False
     if any(word in question for word in SCHEDULE_CHANGE_WORDS):
         return True
+    # "이번 주말에 설치해주세요." asks staff to schedule the visit, but it
+    # moves no existing date, so it carries neither a change verb nor a
+    # schedule noun and was classified GENERAL_INSTALLATION_GUIDANCE -- an
+    # ordinary information question, auto-answerable. Naming a time *and*
+    # instructing us is the same operational request as moving a date, and
+    # belongs on the same staff path. "주말 설치 가능한가요?" names a time but
+    # asks whether we do it at all, and stays an ordinary policy question.
+    if is_operational_schedule_request(question):
+        return True
     action = any(word in question for word in SCHEDULE_CHANGE_ACTION_WORDS)
     if not action:
         return False
@@ -735,9 +746,18 @@ class InquiryAnalysisService:
             return True
         # Feasibility wording alone settles it only when the customer did not
         # ask *when*.
-        return any(
+        #
+        # "can I have it by Saturday?" is named above as the example of this
+        # tier, but no wording for it was ever listed, so "토요일에도
+        # 배송되나요?" fell through to the existing-order path: it was read as
+        # DELIVERY_DATE and demanded an order number and a DPS lookup for a
+        # customer asking about the weekend policy. It sits in the weak tier
+        # deliberately -- "제 주문 토요일에 언제 도착하나요?" carries an
+        # explicit "when" and stays a schedule lookup.
+        feasibility = any(
             word in compact for word in PRE_PURCHASE_FEASIBILITY_WORDS
-        ) and not EXPLICIT_WHEN.search(compact)
+        ) or is_weekend_delivery_policy_question(question)
+        return feasibility and not EXPLICIT_WHEN.search(compact)
 
     # A connector joins two clauses, but it does not on its own mean there
     # are two questions: "50인치, 60인치 중 어떤 게 좋나요" is one comparison.
