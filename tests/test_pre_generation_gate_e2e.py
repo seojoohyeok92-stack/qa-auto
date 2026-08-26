@@ -360,8 +360,13 @@ def test_a_schedule_change_request_is_skipped_through_the_real_plan(database):
     decision = PreGenerationGate.evaluate_plan(
         analysis=serialised["analysis"], plan=serialised
     )
-    assert decision.skip_generation is True
-    assert decision.reasons
+    # Updated expectation: with no order number there is nothing to look up,
+    # so generation costs no external call and produces the deterministic safe
+    # template instead of leaving staff a blank reply. The hold is unchanged --
+    # the publishing gate still refuses it, which the golden auto-post suite
+    # asserts end to end.
+    assert decision.skip_generation is False
+    assert serialised["analysis"]["can_execute_dps_lookup"] is False
 
 
 def test_an_ordinary_product_question_is_not_skipped_through_the_real_plan(

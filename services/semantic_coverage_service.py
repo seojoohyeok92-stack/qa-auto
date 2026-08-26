@@ -96,6 +96,10 @@ TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
         rf"(?:며칠|몇일|얼마나|어느정도)[^?!.]{{0,12}}{_DELIVERY}",
         r"(?:며칠|몇일|얼마나|어느정도)[^?!.]{0,6}(?:소요|걸리|걸려|걸릴)",
         rf"(?:주문|구매|결제)[^?!.]{{0,10}}(?:며칠|몇일|얼마나|어느정도)",
+        # "주문하면 바로 배송되나요" asks how soon without asking how long, and
+        # matched nothing at all -- so the answer drifting to installer
+        # scheduling could not even be observed. Immediacy is the same topic.
+        rf"(?:바로|즉시|당일|곧바로)[^?!.]{{0,4}}{_DELIVERY}",
         # An explicit figure is the other way to answer it.
         r"\d+\s*(?:~|-|에서)?\s*\d*\s*(?:영업일|일|주|시간)[^?!.]{0,8}(?:소요|걸리|걸립|걸려|정도|이내|안에)",
         r"(?:소요|걸리|걸립|걸려)[^?!.]{0,8}\d+\s*(?:영업일|일|주|시간)",
@@ -126,6 +130,11 @@ TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
     "SCHEDULE_CHANGE": (
         r"(?:일정|날짜|설치일|배송일|방문일|예정일)[^?!.]{0,10}(?:변경|바꿔|바꾸|옮겨|미뤄|미루|당겨|앞당|조율|연기)",
         r"(?:변경|바꿔|바꾸|옮겨|미뤄|당겨|앞당|조율|연기)[^?!.]{0,10}(?:일정|날짜|설치일|배송일|방문일|예정일)",
+        # Asking to be moved *earlier* is the same request without naming a
+        # date. "기사님 빠른설치 부탁드릴게요" carries no 변경 and no 날짜, so
+        # it matched nothing and the request had no topic at all.
+        r"(?:빠른|빨리|빠르게|서둘러|급하|최대한빨리|가능한빨리)[^?!.]{0,6}(?:설치|배송|출고|발송|방문)",
+        r"(?:설치|배송|출고|발송|방문)[^?!.]{0,6}(?:빨리|빠르게|서둘러|앞당)",
     ),
     "INSTALLATION_METHOD": (
         r"벽걸이", r"타공", r"스탠드",
@@ -171,6 +180,16 @@ TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
     "STORE_PICKUP": (
         r"방문수령", r"직접수령", r"매장수령", r"픽업",
     ),
+    # What the product *is*, as opposed to a property it has. Anchored on the
+    # concept nouns alone rather than on the question shape ("차이가 뭔가요"),
+    # because an answer explaining a smart TV states it -- it does not ask it.
+    # Without this, "스마트티비는 처음인데 인터넷티비랑 다른건가요" carried no
+    # topic at all, so a draft that ignored it was recorded as UNDETERMINED and
+    # the question disappeared with nothing to show it had been dropped.
+    "PRODUCT_CONCEPT": (
+        r"스마트tv", r"스마트티비", r"인터넷tv", r"인터넷티비",
+        r"셋톱", r"셋탑", r"스마트기능",
+    ),
 }
 
 _COMPILED: dict[str, tuple[re.Pattern[str], ...]] = {
@@ -210,6 +229,7 @@ ORDER_SPECIFIC_TOPICS = frozenset({
 
 
 _SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
+_SCHEDULE_MARKER = re.compile(r"언제|며칠|몇일|몇시|예정일|일정")
 
 
 def _sentence_topics(sentence: str) -> set[str]:
@@ -234,6 +254,15 @@ def _sentence_topics(sentence: str) -> set[str]:
     # source of false positives in the Phase 1 audit.
     if "NOTIFICATION" in found:
         found -= {"DELIVERY_SCHEDULE", "INSTALLATION_SCHEDULE"}
+    # "언제설치가능한가요?" asks *when*, and the method anchors read "설치가능"
+    # as "is installation possible" -- a second, wrong subject on a sentence
+    # that has only one. Left in, it made a clean confirmed-date answer look
+    # like it had skipped a question about installation method.
+    #
+    # A sentence carrying a schedule marker is about the schedule; "벽걸이 설치
+    # 가능한가요?" has no such marker and keeps its method reading.
+    if found & {"DELIVERY_SCHEDULE", "INSTALLATION_SCHEDULE"} and _SCHEDULE_MARKER.search(flat):
+        found -= {"INSTALLATION_METHOD"}
     return found
 
 

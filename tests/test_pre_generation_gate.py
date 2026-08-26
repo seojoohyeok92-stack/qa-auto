@@ -490,11 +490,38 @@ def test_I_686352380_is_not_blocked_by_the_gate():
     ).skip_generation is False
 
 
-def test_J_a_schedule_change_request_is_skipped_before_the_provider():
-    """Changing a booked date is an action only a person can take."""
+def test_J_a_schedule_change_request_with_no_order_is_still_drafted():
+    """Updated expectation, and why it changed.
+
+    This used to assert the skip: changing a booked date is an action only a
+    person can take, so composing an answer looked like pure cost. What it
+    actually produced was a blank reply -- staff opened the inquiry to nothing
+    at all, and the customer's request was nowhere in the record.
+
+    With no order number there is no schedule to look up, so generation makes
+    no external call and phase9 answers from a deterministic safe template that
+    states no date and names what was asked. The hold is untouched: the reasons
+    below are the same, and the publishing gate still refuses it.
+    """
 
     analysis = _analysis_for("설치일 변경 가능한가요?")
     assert analysis["inquiry_subtype"] == "SCHEDULE_CHANGE_REQUEST"
+    assert analysis["can_execute_dps_lookup"] is False
+    decision = PreGenerationGate.evaluate_plan(
+        analysis=analysis, plan={"needs_staff_review": True}
+    )
+    assert decision.skip_generation is False
+
+
+def test_J_a_schedule_change_request_with_an_order_still_skips():
+    """The order number makes it a real lookup, and the skip saves that call."""
+
+    analysis = _analysis_for("설치일 변경 가능한가요?")
+    analysis = {
+        **analysis,
+        "can_execute_dps_lookup": True,
+        "order_id_validated": True,
+    }
     decision = PreGenerationGate.evaluate_plan(
         analysis=analysis, plan={"needs_staff_review": True}
     )

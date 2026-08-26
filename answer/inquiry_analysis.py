@@ -60,6 +60,41 @@ class InquiryAnalysis:
     # analysis built outside this classifier, so a caller that cannot see the
     # cause must treat the hold as unexplained.
     manual_review_sources: tuple[str, ...] = ()
+    # One record per atomic question the customer actually asked, each holding
+    # that question's own verdict. ``manual_review_required`` above is the OR
+    # across them and is what the safety gates read; it answers "does a person
+    # need to see this inquiry", which is a different question from "which of
+    # these can we answer".
+    #
+    # Conflating the two is what produced the reported failure: a four-question
+    # inquiry where one part needed a person came back with nothing answered at
+    # all. Keeping the per-question verdicts lets a draft answer what it can
+    # and name what it cannot, while the inquiry still goes to review.
+    #
+    # Runtime only -- serialised into existing JSON metadata, never a column.
+    # Empty on any analysis built outside this classifier, so a caller that
+    # cannot see the breakdown must not assume there was only one question.
+    subquestion_analyses: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def answerable_subquestions(self) -> tuple[dict[str, Any], ...]:
+        """The atomic questions this classifier believes can be answered."""
+
+        return tuple(
+            item
+            for item in self.subquestion_analyses
+            if not item.get("manual_review_required")
+        )
+
+    @property
+    def unresolved_subquestions(self) -> tuple[dict[str, Any], ...]:
+        """The atomic questions that need a person, with their own reason."""
+
+        return tuple(
+            item
+            for item in self.subquestion_analyses
+            if item.get("manual_review_required")
+        )
 
     @property
     def delivery_question(self) -> bool:
@@ -116,6 +151,9 @@ class InquiryAnalysis:
         result["selected_fact_keys"] = list(self.selected_fact_keys)
         result["reasons"] = list(self.reasons)
         result["manual_review_sources"] = list(self.manual_review_sources)
+        result["subquestion_analyses"] = [
+            dict(item) for item in self.subquestion_analyses
+        ]
         result["delivery_question"] = self.delivery_question
         result["delivery_related"] = self.delivery_related
         result["needs_delivery_lookup"] = self.needs_delivery_lookup
@@ -150,4 +188,9 @@ class InquiryAnalysis:
             ),
             auto_answerable=bool(value.get("auto_answerable")),
             detected_intent=str(value.get("detected_intent") or "GENERAL"),
+            subquestion_analyses=tuple(
+                dict(item)
+                for item in value.get("subquestion_analyses", ())
+                if isinstance(item, dict)
+            ),
         )

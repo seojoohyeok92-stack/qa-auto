@@ -13,8 +13,10 @@ from answer.models import AnswerRequest
 from answer.text_utils import (
     CURRENT_DELIVERY_SCHEDULE_QUERY,
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
+    is_general_delivery_policy_question,
     is_operational_schedule_request,
     is_package_contents_question,
+    is_product_concept_question,
     is_weekend_delivery_policy_question,
     split_subquestions,
 )
@@ -387,6 +389,34 @@ def _is_schedule_status_lookup(question: str) -> bool:
     return passive_delay and lookup_request
 
 
+def _subquestion_records(
+    pairs: list[tuple[str, InquiryAnalysis]],
+) -> tuple[dict[str, object], ...]:
+    """One record per atomic question, holding that question's own verdict.
+
+    Deliberately the same fields the aggregate carries, so "why is the whole
+    inquiry held?" and "which part holds it?" are answered from the same
+    vocabulary. Nothing here decides anything: the aggregate flags above are
+    what the safety gates read, and this only records how they were reached.
+    """
+
+    records: list[dict[str, object]] = []
+    for text, item in pairs:
+        records.append({
+            "question": text,
+            "inquiry_subtype": item.inquiry_subtype,
+            "detected_intent": item.detected_intent,
+            "answer_strategy": item.answer_strategy.value,
+            "requires_order_lookup": item.requires_order_lookup,
+            "requires_dps_lookup": item.requires_dps_lookup,
+            "requires_order_id": item.requires_order_id,
+            "manual_review_required": item.manual_review_required,
+            "can_generate_answer": item.can_generate_answer,
+            "confidence": item.confidence,
+        })
+    return tuple(records)
+
+
 def _is_schedule_change_request(question: str) -> bool:
     if _is_schedule_status_lookup(question):
         return False
@@ -732,13 +762,33 @@ class InquiryAnalysisService:
             return False
         if re.search(r"\d{1,2}(?:월|[./-])\d{1,2}(?:일)?주문", compact):
             return False
+        # A general delivery-policy question is one concept, and it had three
+        # separate definitions: this word list, the rule engine's shipping
+        # keywords, and the predicates in text_utils. They disagreed, and the
+        # gap was where inquiries fell through. "혹시 토요일에도 배달
+        # 가능하나요? / 주문시 며칠 소요되나요" is two ordinary policy
+        # questions, but this list has no 배달 and no "며칠 소요", so neither
+        # part reached the pre-purchase path: both classified UNCLASSIFIED,
+        # which set manual_review_required and dragged the whole inquiry to a
+        # person at confidence 0.45.
+        #
+        # The text_utils predicates are the definition the rule engine already
+        # routes on, so consulting them here is what keeps the two layers from
+        # drifting apart again.
+        if is_general_delivery_policy_question(
+            question
+        ) or is_weekend_delivery_policy_question(question):
+            return True
         # "받을" only matched one inflection; "받아볼수", "받아보" and
         # "받는" are the same word doing the same job in a pre-purchase
         # question, and missing them sent "오늘 주문하면 언제쯤 받아볼수
         # 있을까요?" down the existing-order path.
         delivery_context = any(
             word in compact
-            for word in ("배송", "발송", "도착", "받을", "받아", "받는", "수령", "설치")
+            for word in (
+                "배송", "배달", "발송", "도착", "받을", "받아", "받는",
+                "수령", "설치",
+            )
         )
         if not delivery_context:
             return False
@@ -875,12 +925,20 @@ class InquiryAnalysisService:
         ability to answer survives if *any* part can be answered.
         """
 
-        parts = [
-            self._analyze_single(
-                dataclasses.replace(request, question=subquestion)
+        # Text and verdict are carried together from here on. The filtering
+        # below drops fragments, and the whole-message rescues append one, so
+        # a parallel list would silently fall out of step -- and the per-question
+        # record built at the end has to name the question it judged.
+        pairs: list[tuple[str, InquiryAnalysis]] = [
+            (
+                subquestion,
+                self._analyze_single(
+                    dataclasses.replace(request, question=subquestion)
+                ),
             )
             for subquestion in subquestions
         ]
+        parts = [analysis for _, analysis in pairs]
         # The whole-message rescue below has a mirror image. Splitting can also
         # separate the *report* of a change from the question about it:
         # "설치가 미뤄졌다고 들었는데 / 언제 오나요?" leaves one fragment holding
@@ -913,6 +971,7 @@ class InquiryAnalysisService:
             )
             if not other_intent:
                 return whole
+            pairs.append((request.question, whole))
             parts.append(whole)
         # A fragment that classifies as nothing in particular, sitting beside
         # real questions, is a greeting or a closing remark ("확인 부탁드립니다.")
@@ -932,22 +991,32 @@ class InquiryAnalysisService:
         # the very flag that was meant to hold it back. Keep such a part in the
         # aggregation (and in the sub-question count) while the representative
         # intent below still comes from a classified part.
-        judged = [
-            item
-            for item in parts
+        pairs = [
+            (text, item)
+            for text, item in pairs
             if item.inquiry_subtype != "UNCLASSIFIED"
             or item.manual_review_required
             or item.requires_order_id
             or item.requires_order_lookup
             or item.requires_dps_lookup
         ]
-        parts = judged
+        parts = [item for _, item in pairs]
         # Sub-questions that all mean the same thing are not a compound
         # inquiry either; relabelling them would change nothing except to
         # lose the specific intent the pipeline downstream relies on.
         subtypes = {item.inquiry_subtype for item in parts}
         if len(subtypes) == 1:
-            return self._analyze_single(request)
+            # One intent, but still two questions. "혹시 토요일에도 배달
+            # 가능하나요? / 주문시 며칠 소요되나요" are both delivery-policy
+            # questions and rightly share a subtype -- yet the weekend half has
+            # no confirmed rule behind it and the duration half does, so a
+            # draft has to tell them apart. Returning the single-question
+            # analysis unchanged threw the breakdown away and left the model
+            # with one blob again.
+            return dataclasses.replace(
+                self._analyze_single(request),
+                subquestion_analyses=_subquestion_records(pairs),
+            )
 
         # The representative carries the inquiry type, order status, strategy
         # and intent, so it must be a part the classifier actually recognised.
@@ -1001,6 +1070,7 @@ class InquiryAnalysisService:
             reasons=tuple(dict.fromkeys(reasons)),
             manual_review_required=manual,
             auto_answerable=not manual,
+            subquestion_analyses=_subquestion_records(pairs),
             # Preserved so the auto-post gate still raises
             # PRODUCT_COMPATIBILITY_NOT_VERIFIED for the compound inquiry.
             detected_intent=(
@@ -1172,6 +1242,12 @@ class InquiryAnalysisService:
         elif (
             any(word in question for word in PRODUCT_GENERAL_WORDS)
             or is_package_contents_question(question)
+            # A question about what the product *is*, rather than about a
+            # property it has. The word list above enumerates attributes and
+            # therefore never recognised "스마트티비는 처음인데 인터넷티비랑
+            # 다른건가요" -- which fell to UNCLASSIFIED and, through the
+            # compound OR, held a four-question inquiry for a person.
+            or is_product_concept_question(question)
         ):
             kind = InquiryType.PRODUCT_GENERAL
             subtype = "PRODUCT_SPEC_OR_FEATURE"

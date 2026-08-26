@@ -52,21 +52,22 @@ def normalize_for_comparison(text: object) -> str:
 
 
 def estimate_question_count(question: str) -> tuple[int, str]:
+    """How many questions the inquiry carries, and them joined for display.
+
+    Delegates to ``split_subquestions`` so the count staff see and the parts
+    the classifier judges can never disagree. They used to be two separate
+    splitters with two different regexes: on a numbered list whose items wrap
+    onto a second line the classifier saw six fragments where this one saw
+    four, and neither number matched the four questions the customer wrote.
+    """
+
     text = str(question or "").strip()
     if not text:
         return 0, ""
-    parts = [
-        part.strip()
-        for part in re.split(
-            r"(?:\n+|[?？]|(?:^|\s)\d+[.)]\s*)",
-            text,
-        )
-        if part and part.strip()
-    ]
-    meaningful = [part for part in parts if len(part) >= 4]
-    if not meaningful:
-        meaningful = [text]
-    return max(1, len(meaningful)), " / ".join(meaningful[:6])
+    parts = split_subquestions(text)
+    if not parts:
+        parts = (text,)
+    return max(1, len(parts)), " / ".join(parts[:6])
 
 
 EMAIL_PATTERN = re.compile(
@@ -165,7 +166,14 @@ _SUBQUESTION_MARK = "␟"
 # add a meaningless sub-question that then classifies as UNCLASSIFIED and
 # would hold an otherwise safe compound inquiry for review.
 _FILLER_ONLY = re.compile(r"(?:궁금해요|궁금합니다|알려주세요|여쭤봅니다|입니다)[.!]*")
-_LIST_SPLIT = re.compile(r"(?:\n+|[?？]|(?:^|\s)\d+[.)]\s*)")
+# MULTILINE so a list marker is recognised at the start of every line, not only
+# the first: without it "2." and "3." stayed glued to their own question text.
+_LIST_SPLIT = re.compile(r"(?:\n+|[?？]|(?:^|\s)\d+[.)]\s*)", re.M)
+# An explicit list marker at the start of a line: "1.", "2)", " 3. ".
+_NUMBERED_MARKER = re.compile(r"(?:^|\n)\s*\d+[.)]\s")
+# A newline that is *not* followed by the next list marker -- i.e. a wrap
+# inside the current item rather than the boundary of the next one.
+_WRAPPED_LINE = re.compile(r"\n+(?!\s*\d+[.)]\s)")
 
 
 # Korean polite interrogative tails, and the imperative tails that look like
@@ -209,6 +217,24 @@ def split_subquestions(
     text = str(question or "").strip()
     if not text:
         return ()
+    # A customer who numbers their questions has already told us where the
+    # boundaries are, and a newline inside one of those items is a line wrap
+    # rather than a new question. Splitting on it anyway cut real inquiries
+    # mid-sentence:
+    #
+    #   "3. 기존 벽에 타공구멍이 있는데
+    #    같은 곳에 타공 설치 가능한지"
+    #
+    # became "기존 벽에 타공구멍이 있는데" -- a clause carrying no question,
+    # which then classified as UNCLASSIFIED and, because the compound
+    # aggregation ORs manual_review_required across parts, held the whole
+    # four-question inquiry for review. Four questions were read as six, two of
+    # them meaningless.
+    #
+    # Only when the markers are unambiguous: a single stray "1." is a sentence,
+    # not a list.
+    if len(_NUMBERED_MARKER.findall(text)) >= 2:
+        text = _WRAPPED_LINE.sub(" ", text)
     parts: list[str] = []
     for chunk in _LIST_SPLIT.split(text):
         chunk = (chunk or "").strip()
@@ -341,6 +367,12 @@ GENERAL_DELIVERY_DURATION_QUERY = re.compile(
     rf"|{_DELIVERY_SUBJECT}\s*(?:기간|기한)"
     rf"|{_HOW_LONG}[^?!.]{{0,6}}(?:소요|걸리|걸려|걸릴)"
     rf"|(?:주문|구매|결제)[^?!.]{{0,10}}{_HOW_LONG}"
+    # "주문하면 바로 배송되나요" asks how soon without asking how long. It is
+    # the same policy question, and leaving it out here meant the answer was
+    # never rearranged to lead with it -- while the coverage evaluator, which
+    # keeps its own anchor table, had already learned to recognise it. One
+    # concept, two tables, and they drifted.
+    rf"|(?:바로|즉시|당일|곧바로)[^?!.]{{0,4}}{_DELIVERY_SUBJECT}"
 )
 # "보증기간이 얼마나 되나요", "A/S 무상기간" -- a duration, but not delivery's.
 _NON_DELIVERY_DURATION = re.compile(
@@ -425,3 +457,41 @@ def is_package_contents_question(question: object) -> bool:
 
     text = compact(question)
     return bool(ITEM_SUBJECT.search(text) and INCLUSION_OR_PREPARATION.search(text))
+
+
+# "스마트티비는 처음인데 인터넷티비랑 다른건가요?" is a product question, and it
+# classified as UNCLASSIFIED -- which set manual_review_required and, through
+# the compound OR, held a four-question inquiry for a person.
+#
+# The gate in front of PRODUCT_SPEC_OR_FEATURE is a list of product
+# *attributes* (사양, 기능, 크기, 무게, HDMI, 인치...). It recognises a question
+# that names a measurable property and misses one that asks what the product
+# *is* or how it differs from something else -- the shape a customer uses when
+# the concept, not the number, is what they do not know.
+#
+# Same construction as is_package_contents_question above: a subject in the
+# product domain *and* a definition/comparison/independence relation, both
+# required. Neither half alone is enough, so "무타공 설치인가요" (no product
+# subject) and "제품 언제 오나요" (no concept relation) are untouched.
+#
+# This decides *classification* only. Whether any particular feature is true of
+# this product is still answered from Product Knowledge or verified Learning,
+# and stays unanswerable without them.
+PRODUCT_CONCEPT_SUBJECT = re.compile(
+    r"티비|tv|모니터|스마트tv|인터넷tv|셋톱|셋탑|제품|상품|기기|화면|넷플릭스|유튜브|스마트기능"
+)
+PRODUCT_CONCEPT_RELATION = re.compile(
+    r"차이|다른건가|다른가요|다른가|무엇인가요|뭔가요|뭐예요|뭐인가요|어떤건가"
+    r"|무슨\s*차이|같은건가|같은가요|인가요"
+    r"|없이(?:도)?\s*(?:사용|시청|볼|되나|가능)"
+)
+
+
+def is_product_concept_question(question: object) -> bool:
+    """Whether the question asks what the product is or how it differs."""
+
+    text = compact(question)
+    return bool(
+        PRODUCT_CONCEPT_SUBJECT.search(text)
+        and PRODUCT_CONCEPT_RELATION.search(text)
+    )

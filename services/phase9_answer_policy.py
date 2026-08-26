@@ -472,11 +472,29 @@ def apply_phase9_rule_policy(
     # requires_review, so the customer is never told an invented date and a
     # person still sees the inquiry. The guard in answer_service stays exactly
     # as strict; this simply stops delivery inquiries reaching it unrouted.
+    #
+    # The safe template still has to say the right safe thing. A customer who
+    # writes "오늘 주문했는데 해피콜 및 기사님 빠른설치 부탁드릴게요" is asking
+    # a person to do something, and the classifier records exactly that --
+    # SCHEDULE_CHANGE_REQUEST, manual_review_required, order id MISSING. This
+    # guard answered every unrouted delivery inquiry with "주문 조회가
+    # 필요합니다", which threw that meaning away and replied only about the
+    # order number. Keyed on the same predicate the main branch uses, so the
+    # two cannot drift.
     if analysis.delivery_question:
+        change_request = _is_schedule_change(analysis)
         return routed_result(
             route="DELIVERY_LOOKUP_REQUIRED",
-            template="PHASE9_DELIVERY_LOOKUP_REQUIRED",
-            answer=DELIVERY_LOOKUP_REQUIRED_ANSWER,
+            template=(
+                "PHASE9_DELIVERY_CHANGE_REVIEW"
+                if change_request
+                else "PHASE9_DELIVERY_LOOKUP_REQUIRED"
+            ),
+            answer=(
+                DELIVERY_CHANGE_REVIEW_ANSWER
+                if change_request
+                else DELIVERY_LOOKUP_REQUIRED_ANSWER
+            ),
             answer_type="manual_review_required",
             source="SAFE_TEMPLATE",
             requires_review=True,

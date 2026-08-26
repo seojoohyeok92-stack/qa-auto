@@ -36,6 +36,14 @@ from .text_utils import (
 )
 
 
+# A body that already opens with a figure ("1~2주", "3영업일") or with an
+# immediacy statement has answered the timing question itself.
+_DIRECT_TIMING_ANSWER = re.compile(
+    r"\d+\s*(?:~|-|에서)?\s*\d*\s*(?:영업일|일|주|주일|시간|개월)"
+    r"|바로\s*배송|즉시|당일\s*(?:발송|배송|출고)"
+)
+
+
 @dataclass
 class AnswerResult:
     status: str
@@ -598,6 +606,7 @@ class AnswerEngine:
                 body = self._install_new_order_body(product)
                 if any(k in q for k in ["일주일", "1주일"]):
                     body += "\n\n따라서 현재 기준으로는 수령/설치까지 일주일 이상 소요될 가능성이 높습니다."
+                body = self._lead_with_the_question(body, question)
                 body = self._append_install_extras(body, question)
                 return self.yes("배송/설치신규", body, "방문설치 신규 주문 일정 안내입니다.")
             # Last resort of the shipping block: anything mentioning a
@@ -647,6 +656,7 @@ class AnswerEngine:
                 )
             if is_general_delivery_policy_question(question):
                 body = self._install_new_order_body(product)
+                body = self._lead_with_the_question(body, question)
                 body = self._append_install_extras(body, question)
                 return self.yes(
                     "배송/설치신규",
@@ -684,6 +694,39 @@ class AnswerEngine:
             return self.yes("배송/택배", self.config.shipping["parcel_default_answer"], "택배배송 기본 안내입니다.")
 
         return None
+
+    # Asserts nothing the confirmed policy does not already say. That policy is
+    # "결제 확인 후 설치 기사님 일정에 맞춰 배송·설치가 진행됩니다" -- a
+    # scheduled delivery, which is what "not immediate" means. No duration and
+    # no date is introduced, because none is confirmed anywhere.
+    # Kept to the direct answer alone. Spelling out "결제 확인 후 설치 일정에
+    # 맞춰 진행됩니다" here too would say the same thing twice, since that is
+    # the sentence the body already opens with.
+    _NOT_IMMEDIATE_LEAD = "주문 즉시 바로 배송되는 방식은 아닙니다."
+
+    def _lead_with_the_question(self, body: str, question: str) -> str:
+        """Answer what was asked first; keep the notice as the follow-up.
+
+        "주문하면 바로 배송되나요" was answered with the new-order body, which
+        opens on installer scheduling and then explains the 알림톡. Both
+        sentences are true and neither says, in the customer's own terms, that
+        the answer to their question is no. A reply whose first line is about
+        the notification has inverted the question and its footnote.
+
+        Only prepended when the customer actually asked about timing *and* the
+        body does not already answer it. An active schedule rule opens with a
+        real figure -- "배송/설치까지 빠르면 1~2주 정도 소요되고 있습니다" --
+        which is a better answer than this sentence; adding it there would say
+        the same thing twice and bury the number the customer wanted.
+        """
+
+        text = str(body or "").strip()
+        if not text or not is_general_delivery_policy_question(question):
+            return text
+        opening = text.split("\n\n")[0]
+        if _DIRECT_TIMING_ANSWER.search(opening):
+            return text
+        return f"{self._NOT_IMMEDIATE_LEAD}\n\n{text}"
 
     def _is_new_install_shipping_question(self, question: str) -> bool:
         q = compact(question)

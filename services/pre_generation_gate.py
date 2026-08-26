@@ -75,7 +75,9 @@ class PreGenerationGate:
         return AutoProcessingEligibilityService._intent_unclassified(analysis)
 
     @staticmethod
-    def _answer_still_has_value(analysis: dict[str, Any]) -> bool:
+    def _answer_still_has_value(
+        analysis: dict[str, Any], plan: dict[str, Any]
+    ) -> bool:
         """Whether a draft is worth writing even though it cannot be posted.
 
         Publishing is not the only thing generation is for. A compound inquiry
@@ -87,13 +89,42 @@ class PreGenerationGate:
         outcome for the customer than the provider call costs.
 
         So "cannot be auto-posted" and "not worth generating" are kept apart.
-        Only an inquiry that is a single indivisible request for staff action
-        is skipped; the hold itself is unchanged either way.
+        The hold itself is unchanged either way.
+
+        A delivery or schedule inquiry qualifies for the same reason, and it is
+        the case that showed the rule was drawn too narrowly. "사장님 오늘
+        주문했는데 해피콜 및 기사님 빠른설치 부탁드릴게요" is a single request
+        for staff action, so it was skipped and the customer's own message came
+        back with no draft at all -- staff opened the inquiry to a blank reply.
+        Yet phase9 owns exactly this inquiry and answers it from a deterministic
+        safe template ("요청하신 배송·설치 일정 변경은 담당자 확인이
+        필요합니다"), which states no date, promises nothing, and names what the
+        customer actually asked for. Writing that is strictly better than
+        writing nothing, and it is not the model composing a claim.
+
+        Narrowed to the case where the DPS lookup *cannot* run -- no validated
+        order number, so there is nothing to look up. Generation then costs
+        nothing outside this process and the safe template is the whole of what
+        could ever be said. When the order number is there, the schedule is a
+        real lookup: skipping still saves that call, and the inquiry keeps the
+        handling it has today rather than gaining a DPS round trip as a side
+        effect of wanting a draft.
+
+        Genuinely unanswerable inquiries are still skipped: EMPTY_QUESTION and
+        HIGH_RISK_OR_DISPUTE are refused earlier by ``can_generate_answer``,
+        and a plan that found real risk is refused here -- "worth drafting"
+        never outranks a risk finding, whatever the inquiry is about.
         """
 
-        return (
+        if bool(plan.get("is_high_risk")):
+            return False
+        if (
             str(analysis.get("inquiry_subtype") or "").upper()
             == "COMPOUND_MULTI_INTENT"
+        ):
+            return True
+        return bool(analysis.get("delivery_question")) and not bool(
+            analysis.get("can_execute_dps_lookup")
         )
 
     @classmethod
@@ -117,7 +148,7 @@ class PreGenerationGate:
             return _CONTINUE
         if cls._resolvable_by_generation(analysis, plan):
             return _CONTINUE
-        if cls._answer_still_has_value(analysis):
+        if cls._answer_still_has_value(analysis, plan):
             return _CONTINUE
 
         reasons: list[str] = []

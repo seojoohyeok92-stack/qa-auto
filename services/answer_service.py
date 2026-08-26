@@ -17,8 +17,9 @@ from answer.exceptions import (
 )
 from answer.hold_reasons import primary_reason
 from answer.models import AnswerResult, AnswerStatus
+from answer.inquiry_analysis import InquiryAnalysis
 from answer.inquiry_processing_plan import InquiryProcessingPlan
-from answer.answer_format import format_final_answer
+from answer.answer_format import extract_answer_body, format_final_answer
 from answer.answer_validator import AnswerValidator
 from answer.safe_draft import review_required_safe_result as _review_required_safe_result
 from answer.source_adapter import answer_request_from_inquiry
@@ -48,6 +49,9 @@ from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
 )
 from services.phase9_answer_policy import apply_phase9_rule_policy
+from services.atomic_completeness_service import (
+    AtomicCompletenessService,
+)
 from services.semantic_coverage_service import (
     SemanticCoverageService,
     is_enabled as semantic_coverage_enabled,
@@ -354,6 +358,113 @@ class AnswerService:
         self.dps = DpsRepository(database)
         self.validator = AnswerValidator()
         self.semantic_coverage = SemanticCoverageService()
+        self.completeness = AtomicCompletenessService()
+
+    def _complete_atomic_answer(
+        self,
+        inquiry_id: int,
+        request: AnswerRequest,
+        result: AnswerResult,
+        analysis: InquiryAnalysis,
+    ) -> str:
+        """Make sure no part of the question left the draft without a trace.
+
+        The model is told to address every atomic question and usually does;
+        when it does not, the part simply vanishes and nothing downstream
+        notices, because the validator asks whether the answer is safe and the
+        eligibility gate asks whether it may be published. Neither asks whether
+        it is complete.
+
+        Only a partial answer is completed, and only with a sentence that
+        states no fact. Publication is untouched: the validator still runs on
+        the completed text and the eligibility gate still decides on its own
+        reasons. A fault here can never fail an answer that was ready to save.
+        """
+
+        body = extract_answer_body(result.answer)
+        try:
+            completeness = self.completeness.evaluate(
+                question=request.question,
+                answer=body,
+                subquestions=analysis.subquestion_analyses,
+            )
+        except Exception as error:  # pragma: no cover - defensive only
+            self.logs.record_inquiry(
+                inquiry_id,
+                "ATOMIC_COMPLETENESS_FAILED",
+                "질문 완결성 점검에 실패했습니다. 답변 생성에는 영향이 없습니다.",
+                level="WARNING",
+                details={"error_type": type(error).__name__},
+            )
+            return result.answer
+
+        payload = completeness.to_dict()
+        result.metadata["atomic_completeness"] = payload
+        if not completeness.needs_completion:
+            self.logs.record_inquiry(
+                inquiry_id,
+                "ATOMIC_ANSWER_COMPLETE",
+                "고객이 물은 각 항목이 답변 또는 확인 필요로 표시되었습니다.",
+                level="INFO",
+                details=payload,
+            )
+            return result.answer
+
+        completed = self.completeness.complete(
+            body, completeness.deferral_sentence
+        )
+        self.logs.record_inquiry(
+            inquiry_id,
+            "ATOMIC_ANSWER_COMPLETED",
+            "답변에서 빠진 문의 항목을 확인 필요로 명시했습니다.",
+            level="INFO",
+            details=payload,
+        )
+        return completed
+
+    def _record_atomic_questions(
+        self,
+        inquiry_id: int,
+        analysis: InquiryAnalysis,
+    ) -> None:
+        """Record how the inquiry was split and what each part was judged to be.
+
+        Diagnostic only. ``manual_review_required`` on the aggregate is what
+        the safety gates read and is untouched; this records which atomic
+        question raised it, so "a person is needed" can be told apart from
+        "nothing could be answered" without replaying the inquiry against a
+        copy of the operational database.
+        """
+
+        records = analysis.subquestion_analyses
+        if not records:
+            return
+        try:
+            unresolved = analysis.unresolved_subquestions
+            self.logs.record_inquiry(
+                inquiry_id,
+                "ATOMIC_QUESTION_ANALYZED",
+                f"문의를 {len(records)}개 질문으로 나누어 각각 판단했습니다.",
+                level="INFO",
+                details={
+                    "total": len(records),
+                    "answerable": len(analysis.answerable_subquestions),
+                    "unresolved": len(unresolved),
+                    "unresolved_subtypes": [
+                        str(item.get("inquiry_subtype") or "")
+                        for item in unresolved
+                    ],
+                    "subquestions": [dict(item) for item in records],
+                },
+            )
+        except Exception as error:  # pragma: no cover - defensive only
+            self.logs.record_inquiry(
+                inquiry_id,
+                "ATOMIC_QUESTION_TRACE_FAILED",
+                "질문 분해 진단 기록에 실패했습니다. 답변 생성에는 영향이 없습니다.",
+                level="WARNING",
+                details={"error_type": type(error).__name__},
+            )
 
     def _record_semantic_coverage(
         self,
@@ -2723,6 +2834,9 @@ class AnswerService:
             # routes) crosses the same final rendering boundary.  The
             # formatter is idempotent, so already formatted legacy/template
             # answers cannot produce a duplicate wrapper.
+            result.answer = self._complete_atomic_answer(
+                inquiry_id, request, result, phase9_analysis
+            )
             result.answer = format_final_answer(result.answer)
             if not is_valid_draft(result.answer):
                 raise AnswerGenerationError(
@@ -2736,6 +2850,7 @@ class AnswerService:
             # requires_review, eligibility, auto-post or the approval state.
             # The measurement is never allowed to break generation either: an
             # evaluator fault is recorded and the answer proceeds.
+            self._record_atomic_questions(inquiry_id, phase9_analysis)
             self._record_semantic_coverage(inquiry_id, request, result)
             dps_metadata = (
                 request.metadata.get("dps")

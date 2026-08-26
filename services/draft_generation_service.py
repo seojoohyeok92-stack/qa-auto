@@ -60,6 +60,72 @@ def _all_subquestions_answered(value: Any) -> bool:
     return True
 
 
+def _atomic_question_payload(
+    analysis: InquiryAnalysis | None,
+    learning_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Each question the customer asked, with its own verdict and evidence.
+
+    The classifier already decides these one at a time and the aggregate then
+    ORs them together, which is the right input to the *safety* gates and the
+    wrong input to drafting: one part needing a person told the model nothing
+    about the other three. Handing the parts over individually is what lets a
+    draft answer what it can and defer only what it must.
+
+    Evidence is attached per question rather than pooled, so a Learning found
+    for the bracket question cannot present itself as grounds for the smart-TV
+    one. Retrieval already decided which sub-question each source belongs to;
+    this only keeps that pairing intact instead of flattening it.
+    """
+
+    records = getattr(analysis, "subquestion_analyses", ()) or ()
+    if len(records) < 2:
+        # A single question needs no breakdown -- the whole prompt is about it.
+        return []
+    evidence_by_question: dict[str, dict[str, Any]] = {}
+    for item in (learning_context.get("subquestion_evidence") or []):
+        if isinstance(item, dict):
+            key = str(item.get("subquestion") or "").strip()
+            if key:
+                evidence_by_question[key] = item
+
+    payload: list[dict[str, Any]] = []
+    for index, record in enumerate(records, start=1):
+        question = str(record.get("question") or "").strip()
+        evidence = evidence_by_question.get(question) or {}
+        review_required = bool(record.get("manual_review_required"))
+        payload.append({
+            "index": index,
+            "question": question,
+            "inquiry_subtype": record.get("inquiry_subtype"),
+            "detected_intent": record.get("detected_intent"),
+            "answerable": not review_required,
+            "review_required": review_required,
+            "evidence_status": evidence.get("status"),
+            "evidence_coverage": evidence.get("evidence_coverage"),
+            "evidence_source": evidence.get("source"),
+            "learning_ids": list(evidence.get("learning_ids") or []),
+            "product_fact_fields": list(
+                evidence.get("product_fact_fields") or []
+            ),
+            "unresolved_reason": (
+                str(record.get("inquiry_subtype") or "UNRESOLVED")
+                if review_required
+                else None
+            ),
+        })
+    return payload
+
+
+ATOMIC_QUESTION_INSTRUCTIONS = (
+    "문의에 포함된 각 질문을 하나도 빠뜨리지 말고 순서대로 다룬다.",
+    "evidence가 있는 질문만 사실로 답한다.",
+    "review_required 또는 근거가 없는 질문은 추측하지 않고 확인이 필요하다고만 안내한다.",
+    "확인이 필요한 질문 때문에 답변 가능한 다른 질문까지 회피하지 않는다.",
+    "각 질문의 근거는 그 질문에 연결된 evidence만 사용한다.",
+)
+
+
 class DraftGenerationService:
     def __init__(
         self,
@@ -139,6 +205,12 @@ class DraftGenerationService:
             ],
             **evidence,
         }
+        atomic_questions = _atomic_question_payload(analysis, learning_context)
+        if atomic_questions:
+            prompt_input["atomic_questions"] = atomic_questions
+            prompt_input["atomic_question_instructions"] = list(
+                ATOMIC_QUESTION_INSTRUCTIONS
+            )
         if retry_feedback:
             prompt_input["prior_attempt_feedback"] = retry_feedback
         context.update(learning_context)
