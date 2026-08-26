@@ -24,6 +24,7 @@ from .text_utils import (
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
     NOTICE_SUBJECT_QUERY,
     compact,
+    is_package_contents_question,
     estimate_question_count,
     find_any,
     has_any,
@@ -556,6 +557,22 @@ class AnswerEngine:
         if not any(k in q for k in self.config.shipping["shipping_keywords"]):
             return None
 
+        # The keyword gate above is deliberately broad -- "배송", "언제",
+        # "받을수", "도착", "설치기사님" all open this block, so that no
+        # shipping question is missed. Nothing then checked what the question
+        # was *about*, so mentioning delivery in passing was enough to be
+        # answered with the delivery policy: "배송 올 때 공구도 같이 오나요?"
+        # received "택배배송 상품은 오후 3시 이전 결제 주문에 한해 당일
+        # 발송되며..." and that was auto-posted.
+        #
+        # Here the shipment is the occasion, not the subject. Returning None
+        # rather than a refusal hands the question back to the rest of the
+        # engine and then to the normal evidence pipeline, where a verified
+        # product fact or an approved same-product Learning can answer what
+        # actually comes in the box.
+        if is_package_contents_question(question):
+            return None
+
         if self._is_order_specific_parcel_shipping(product, question):
             return self.no_answer("배송/개별주문확인", "결제일과 현재 배송상태가 포함된 개별 주문 배송 문의는 실제 주문/출고 이력 확인이 필요합니다.")
 
@@ -843,7 +860,17 @@ class AnswerEngine:
                 "스마트 M5 USB 저장장치 동영상 재생 및 포맷 형식 안내입니다.",
             )
 
-        if self._is_smart_monitor_product(product) and any(k in q for k in ["rf", "rf단자", "지상파", "일반티비", "일반tv", "일반방송", "케이블", "채널"]):
+        # "케이블" was listed bare and meant cable *television*, but it is also
+        # the word for the lead in the box: "배송 올 때 케이블도 같이 오나요?"
+        # was answered with "이 스마트모니터는 RF 단자가 없어 지상파를 직접
+        # 수신할 수 없습니다". Only the broadcast sense opens this rule now;
+        # the accessory sense is left to the evidence pipeline.
+        if self._is_smart_monitor_product(product) and any(
+            k in q for k in [
+                "rf", "rf단자", "지상파", "일반티비", "일반tv", "일반방송",
+                "케이블방송", "케이블tv", "케이블채널", "유선방송", "채널",
+            ]
+        ):
             return self.yes(
                 "스마트모니터/방송수신",
                 "문의하신 스마트모니터는 RF 단자가 없어 일반 TV처럼 지상파 방송을 직접 수신해 시청할 수 없습니다.\n\n인터넷을 통한 OTT 시청으로 이용하시거나, 지상파/케이블 방송 시청이 필요하신 경우 셋톱박스 연결이 필수입니다.",

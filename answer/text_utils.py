@@ -260,3 +260,54 @@ CURRENT_INSTALLATION_SCHEDULE_QUERY = re.compile(
 # ordering, so its second-line guard consults this explicitly -- otherwise
 # "알림톡은 언제 오나요?" would be refused by a branch that answers it well.
 NOTICE_SUBJECT_QUERY = re.compile(r"알림톡|안내\s*문자|문자\s*안내|연락\s*(?:이|은)?\s*언제")
+
+
+# "배송 올 때 공구도 같이 오나요?" -- the shipment is the *occasion*, not the
+# subject. What is being asked about is an item and whether it comes in the box.
+#
+# The rule engine's shipping block is entered on a bare keyword OR ("배송",
+# "언제", "받을수", "도착", "설치기사님"...), which is recall-first by design.
+# That is fine as long as something afterwards checks what the question is
+# actually about; nothing did, so a parcel product plus the word 배송 was
+# enough to return the shipping-duration policy. Real inquiry: "배송 올때
+# 조립에 필요한 일회용 공구도 같이 오나요? 제가 개별로 준비해야하는 공구가
+# 있나요?" was answered with "택배배송 상품은 오후 3시 이전 결제 주문에 한해
+# 당일 발송되며..." and auto-posted.
+#
+# Two things must both be present, so this stays narrow: a noun naming an
+# *item*, and wording asking whether it is included or must be prepared.
+# "배송은 보통 며칠 걸리나요?" names no item and is untouched.
+ITEM_SUBJECT = re.compile(
+    r"공구|드라이버|렌치|육각|나사|볼트|피스|"
+    r"부속|부품|구성품|구성|악세서리|액세서리|사은품|"
+    r"리모컨|케이블|전선|어댑터|아답터|충전기|설명서|매뉴얼|"
+    r"받침대|스탠드|거치대|브라켓|브래킷|배터리|건전지"
+)
+INCLUSION_OR_PREPARATION = re.compile(
+    r"같이\s*(?:오|옵|보내|배송|포함|들어|드리)|"
+    r"함께\s*(?:오|옵|보내|배송|포함|들어|드리)|"
+    r"동봉|"
+    r"포함\s*(?:되|인가|하나|돼|됩|인지)|"
+    r"들어\s*있|들었|들어있|"
+    r"가지고\s*오|가져\s*오|챙겨\s*오|"
+    r"따로\s*(?:준비|구매|사|구입)|"
+    r"별도\s*(?:로)?\s*(?:준비|구매|사|구입)|"
+    r"개별\s*(?:로)?\s*(?:준비|구매|사|구입)|"
+    # Deliberately not "필요한가/있어야": those are the ordinary way to ask
+    # anything ("스탠드 설치에 타공이 필요한가요?"), and matching them would
+    # pull installation questions in here. What is wanted is the customer
+    # asking whether *they* must supply the item.
+    r"준비해야|준비하나|준비물"
+)
+
+
+def is_package_contents_question(question: object) -> bool:
+    """Whether the question asks what comes with the product, not about shipping.
+
+    Both halves are required -- an item and an inclusion/preparation attribute
+    -- so a shipping-duration question is never captured and a bare product
+    question ("스탠드 색상이 뭔가요?") is not either.
+    """
+
+    text = compact(question)
+    return bool(ITEM_SUBJECT.search(text) and INCLUSION_OR_PREPARATION.search(text))

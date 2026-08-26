@@ -13,6 +13,7 @@ from answer.models import AnswerRequest
 from answer.text_utils import (
     CURRENT_DELIVERY_SCHEDULE_QUERY,
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
+    is_package_contents_question,
     split_subquestions,
 )
 
@@ -1122,8 +1123,15 @@ class InquiryAnalysisService:
             confidence = 0.96
             manual = False
             reasons.append("주문 상태 확인 표현을 찾았습니다.")
-        elif detected_intent == "INSTALLATION_METHOD" or any(
-            word in question for word in INSTALLATION_GENERAL_WORDS
+        elif detected_intent == "INSTALLATION_METHOD" or (
+            any(word in question for word in INSTALLATION_GENERAL_WORDS)
+            # "배송 올 때 스탠드도 같이 오나요?" contains 스탠드, which opens
+            # the installation branch, but the customer is asking what is in
+            # the box -- a fact about the product's contents, not about how it
+            # gets installed. Asking how to install a stand is unaffected: the
+            # contents predicate needs the item *and* an inclusion or
+            # "must I supply it" attribute.
+            and not is_package_contents_question(question)
         ):
             kind = InquiryType.INSTALLATION_GENERAL
             subtype = (
@@ -1141,7 +1149,10 @@ class InquiryAnalysisService:
                 if detected_intent == "INSTALLATION_METHOD"
                 else "특정 주문과 무관한 설치 일반 문의입니다."
             )
-        elif any(word in question for word in PRODUCT_GENERAL_WORDS):
+        elif (
+            any(word in question for word in PRODUCT_GENERAL_WORDS)
+            or is_package_contents_question(question)
+        ):
             kind = InquiryType.PRODUCT_GENERAL
             subtype = "PRODUCT_SPEC_OR_FEATURE"
             requires_order = False
@@ -1149,6 +1160,10 @@ class InquiryAnalysisService:
             strategy = AnswerStrategy.GENERAL_GUIDANCE
             confidence = 0.92
             manual = False
+            # "무엇이 함께 오는가"는 그 상품의 구성 사실이므로, 배송 정책이
+            # 아니라 Product Fact·동일상품 Learning이 답해야 하는 질문이다.
+            # 이 분기에 오면 product_fact_guard가 구성품 문의로 인식해 검증된
+            # 근거를 요구하고, 근거가 없을 때만 직원 검토로 간다.
             reasons.append("제품 사양·기능 관련 일반 문의입니다.")
         elif _has_no_substantive_question(question):
             # Nothing was asked, so there is nothing an automatic answer could
