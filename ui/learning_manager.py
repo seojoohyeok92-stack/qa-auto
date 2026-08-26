@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -671,6 +672,61 @@ def _render_structured_signal_manager(database: Database) -> None:
             st.rerun()
 
 
+
+_EXPORT_PATH_KEY = "learning_manager_export_path"
+_EXCEL_MIME = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+
+def _render_excel_export() -> None:
+    """Generate the operational workbook and hand it to the operator.
+
+    The file path -- not the bytes -- is what survives between reruns, so
+    clicking Download does not rebuild the workbook and a page rerun does not
+    make the button vanish. Generation is read-only: the export opens both
+    databases with ``mode=ro`` and verifies afterwards that neither file
+    changed.
+    """
+
+    with st.expander("Q&A / Learning Excel 내보내기", expanded=False):
+        st.caption(
+            "현재 운영 데이터를 하나의 Excel 파일로 저장합니다. "
+            "데이터를 읽기만 하며 문의·Learning은 변경되지 않습니다."
+        )
+        if st.button("Excel 파일 만들기", key="learning_manager_export_run"):
+            try:
+                from scripts.export_qa_learning_excel import export
+
+                with st.spinner("Excel 파일을 만드는 중입니다..."):
+                    path, counts = export()
+            except Exception as error:  # noqa: BLE001 - shown to the operator
+                st.session_state.pop(_EXPORT_PATH_KEY, None)
+                st.error(f"Excel 생성에 실패했습니다: {error}")
+            else:
+                st.session_state[_EXPORT_PATH_KEY] = str(path)
+                st.success(
+                    "생성 완료 · "
+                    + " / ".join(f"{name} {count}행" for name, count in counts.items())
+                )
+
+        saved = str(st.session_state.get(_EXPORT_PATH_KEY) or "")
+        if not saved:
+            return
+        path = Path(saved)
+        if not path.exists():
+            st.session_state.pop(_EXPORT_PATH_KEY, None)
+            return
+        st.download_button(
+            "Excel 내려받기",
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime=_EXCEL_MIME,
+            key="learning_manager_export_download",
+        )
+        st.caption(f"저장 위치: {path}")
+
+
 def render_learning_manager(database: Database | None) -> None:
     st.session_state["current_page"] = "learning"
     # The admin-mode toggle lives on Dashboard and Streamlit removes widget
@@ -832,3 +888,4 @@ def render_learning_manager(database: Database | None) -> None:
         )
 
     _render_structured_signal_manager(database)
+    _render_excel_export()

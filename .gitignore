@@ -65,3 +65,6 @@ PATCH_README.txt
 gate_*.txt
 diagnose_*_output.txt
 *_gate.txt
+
+# 운영 데이터가 담긴 Excel Export 결과물 (scripts/export_qa_learning_excel.py)
+exports/
