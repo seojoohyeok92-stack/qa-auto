@@ -144,9 +144,14 @@ def test_acceptance_case_e_low_similarity_correct_evidence_outranks_high_similar
     )
     ids_in_order = [int(item["id"]) for item in results]
     assert correct_but_dissimilar_id in ids_in_order
-    assert ids_in_order.index(correct_but_dissimilar_id) < ids_in_order.index(
-        wrong_but_similar_id
-    )
+    # Updated expectation, and the reason. The wrong-but-similar row's answer
+    # is "...주문번호는 2026****2541 입니다" -- a partially blanked number, which
+    # the Learning evidence policy now treats as the redaction residue it is
+    # and drops before ranking. It therefore no longer appears at all, which is
+    # a stronger outcome than being outranked. What this test exists to prove --
+    # that answer support beats raw similarity -- is asserted below on the row
+    # that wins.
+    assert wrong_but_similar_id not in ids_in_order
     winner = next(item for item in results if int(item["id"]) == correct_but_dissimilar_id)
     assert winner["answer_support"] > 0.0
 

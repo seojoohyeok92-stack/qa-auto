@@ -105,6 +105,50 @@ def claim_body(answer: object) -> str:
     return _text(body or answer)
 
 
+# The subset of the markers above that means *the writer is guessing*, as
+# opposed to the writer deferring. Both belong in ``hedge_reason`` -- neither
+# kind of sentence commits to a fact, which is what the validator's conflict
+# checks need to know -- but they are not the same finding when deciding what
+# may be shown to the model as an approved answer.
+#
+# "결제 확인 후 설치 기사님 일정에 맞춰 배송이 진행됩니다" is the store's actual
+# new-order policy, and it carries "확인 후" as a *sequence*, not a deferral.
+# Rejecting it as a guess would have thrown away one of the few genuinely
+# reusable delivery policies in the corpus, which is the false-rejection this
+# work is meant to avoid rather than cause.
+_ESTIMATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"보입니다|보여집니다|보이며|보이는데|보여요"),
+    re.compile(r"예상[되돼]|예상됩니다|추정[되됩]|추측|판단[되됩]|사료[되됩]"),
+    re.compile(r"[을ㄹ] 것으로|인 것으로|것으로 [보예판사]"),
+    re.compile(r"가능성이|[울ㄹ] 수(?:도)? 있|있을 수 있|다를 수 있|상이할 수 있"),
+    re.compile(r"정확하[지진] ?않|정확도가|불확실|명확하지 ?않|장담"),
+    re.compile(r"[로으로] 알고 ?있|알려져 ?있|듣기로"),
+    re.compile(r"대략|어느 ?정도|약간|보통은|일반적으로는"),
+)
+_ESTIMATION_MARKERS = ("것 같", "것같", "듯 합니다", "듯합니다", "아마", "추정", "예상됩니다")
+
+
+def estimation_reason(answer: object) -> str | None:
+    """Which *guess* marker this answer carries, or None.
+
+    Narrower than ``hedge_reason`` on purpose: an answer that says a person
+    will check is honest and reusable, while an answer that guesses at the
+    fact is the one that must not be offered as grounds for a definite claim.
+    """
+
+    text = claim_body(answer)
+    if not text:
+        return "EMPTY"
+    for marker in _ESTIMATION_MARKERS:
+        if marker in text:
+            return marker
+    for pattern in _ESTIMATION_PATTERNS:
+        found = pattern.search(text)
+        if found:
+            return found.group(0)
+    return None
+
+
 def hedge_reason(answer: object) -> str | None:
     """Which uncertainty marker this answer carries, or None."""
 
@@ -194,6 +238,19 @@ def is_hedged(answer: object) -> bool:
     return not _QUANTITY_STATEMENT.search(text)
 
 
+# A number with its middle blanked out -- "주문번호 2026****2541". Eleven live
+# rows carry one, and one of those is factual-eligible. It is the same thing a
+# ``<masked-order>`` token is: a record that something was removed. Copied into
+# a new answer it would hand a customer an order number that does not exist.
+#
+# Digits are required on both sides so a decorative "***" separator, or a
+# seller writing "★★★", is not mistaken for a redaction. Scoped to the Learning
+# evidence policy rather than added to INTERNAL_PLACEHOLDER, which the
+# validator also reads -- widening a published answer's blocking rule is a
+# separate decision from deciding what may be reused as evidence.
+_PARTIALLY_MASKED_NUMBER = re.compile(r"\d{2,}\*{2,}\d{2,}")
+
+
 def contamination_reason(value: object) -> str | None:
     """The redaction token this text carries, or None.
 
@@ -204,8 +261,12 @@ def contamination_reason(value: object) -> str | None:
     the model as an example worth copying.
     """
 
-    found = INTERNAL_PLACEHOLDER.search(_text(value))
-    return found.group(0) if found else None
+    text = _text(value)
+    found = INTERNAL_PLACEHOLDER.search(text)
+    if found:
+        return found.group(0)
+    partial = _PARTIALLY_MASKED_NUMBER.search(text)
+    return partial.group(0) if partial else None
 
 
 def usable_as_factual_evidence(item: Mapping[str, Any] | Any) -> bool:

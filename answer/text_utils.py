@@ -495,3 +495,24 @@ def is_product_concept_question(question: object) -> bool:
         PRODUCT_CONCEPT_SUBJECT.search(text)
         and PRODUCT_CONCEPT_RELATION.search(text)
     )
+
+
+# Which seller the customer bought from, however they name it. Used by two
+# layers that must never disagree: the rule engine's event branch, which has to
+# refuse to answer a seller-identity question with the rebate period, and the
+# Learning compatibility gate, which has to refuse the same substitution in
+# retrieved evidence.
+#
+# The engine's guard knew only "구매처". A customer wrote "판매처를 뭐라고
+# 검색해야 하나요" after being told their entry was wrong, fell past it, and
+# received the generic 온누리 answer -- the rebate window and an event URL,
+# auto-posted, answering a question nobody had asked.
+SELLER_IDENTITY_QUERY = re.compile(
+    r"판매처|판매자|판매점|구매처|스토어\s*명|상호|업체\s*명|어디서\s*구매"
+)
+
+
+def is_seller_identity_question(question: object) -> bool:
+    """Whether the customer is asking which seller to name."""
+
+    return bool(SELLER_IDENTITY_QUERY.search(compact(question)))

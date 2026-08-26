@@ -27,6 +27,7 @@ from .text_utils import (
     is_delivery_notice_question,
     is_general_delivery_policy_question,
     is_package_contents_question,
+    is_seller_identity_question,
     is_weekend_delivery_policy_question,
     estimate_question_count,
     find_any,
@@ -517,7 +518,11 @@ class AnswerEngine:
         if any(k in q for k in ["패키지코드", "패키지코드좀", "반려", "구매처보완", "구매처입력", "정확히구매처"]):
             return self.no_answer("행사/직원확인", "패키지코드 반려/구매처 보완은 행사 신청 상태와 구매 구성을 확인해야 합니다.")
 
-        if "구매처" in q:
+        # "판매처", "판매자", "스토어명" -- the same question, and the guard
+        # knew only one of its names. Anything it missed fell through to the
+        # generic rebate answer below, which states the application window and
+        # an event URL and says nothing about which seller to enter.
+        if is_seller_identity_question(question):
             return self.no_answer("행사/직원확인", "감사페스티벌 구매처 입력/보완 문의는 행사 신청 상태 확인이 필요합니다.")
 
         if any(k in q for k in ["모델코드", "모델명에뭘", "모델코드에뭘", "뭘넣"]):

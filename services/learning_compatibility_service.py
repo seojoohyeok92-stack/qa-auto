@@ -4,7 +4,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
-from answer.text_utils import normalize_product_name
+from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
 from services.product_fact_guard import extract_model_code
 
 
@@ -39,6 +39,71 @@ STRICT_PRODUCT_TOPICS = {
 }
 
 GENERIC_TOPICS = {"OTHER", "GENERAL_POLICY", "PRODUCT_SPEC"}
+
+# Topics say what an answer is *about*; these say what is being asked *of* it.
+#
+# A customer asked which seller name to enter on the 온누리 rebate form after
+# being told their entry was wrong. The store holds an approved answer about
+# the rebate's application period, and both texts contain "온누리", so
+# PROMOTION_EVENT matched on both sides and the period answer was selected as
+# grounds for a question about the seller name. It answered a question nobody
+# asked, with a URL and a date range attached.
+#
+# The subject was never the problem -- both really are about 온누리. What was
+# missing is the attribute: 행사+기간 and 행사+판매처 are different questions,
+# as are 배송+기간 and 배송+변경, 설치+방법 and 설치+비용, 브라켓+호환 and
+# 브라켓+구성품. One dimension, not one rule per promotion.
+ATTRIBUTE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "PERIOD",
+        re.compile(
+            r"기간|기한|마감|종료일|시작일|며칠|언제까지|언제부터|유효",
+            re.IGNORECASE,
+        ),
+    ),
+    # Shared with the rule engine's event branch, so the two layers cannot
+    # disagree about what counts as asking which seller to name.
+    ("SELLER_IDENTITY", SELLER_IDENTITY_QUERY),
+    (
+        # "얼마나 걸리나요" is a duration, not a price, so 얼마 may not match
+        # loosely -- it would put COST on half the delivery questions in the
+        # store and start rejecting their own answers.
+        "COST",
+        re.compile(
+            r"비용|가격|요금|무료|유료|추가금|금액|얼마(?:인|예요|에요|일까|입니까|죠)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "METHOD",
+        re.compile(
+            r"방법|어떻게\s*(?:하|되|신청|진행)|절차|신청\s*방법|입력\s*(?:하|해)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # Not a bare "포함되": "설치비도 포함되어 있나요" is about what the price
+        # covers, not about what is in the box, and reading it as CONTENTS made
+        # it clash with the identically-meant "설치가 포함된 가격인가요" -- the
+        # gate rejecting a question against its own answer.
+        "CONTENTS",
+        re.compile(
+            r"구성품|동봉|같이\s*오|함께\s*오|별도\s*구매|따로\s*구매|포함품",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "COMPATIBILITY",
+        re.compile(r"호환|맞나요|맞는지|규격이\s*맞|사용\s*가능한", re.IGNORECASE),
+    ),
+    (
+        "CHANGE_REQUEST",
+        re.compile(
+            r"변경|바꿔|바꾸|수정하라|수정해|옮겨|미뤄|당겨|취소해", re.IGNORECASE
+        ),
+    ),
+)
+
 
 TOPIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -401,6 +466,39 @@ def profile_knowledge(
     )
 
 
+def attributes_of(text: object) -> frozenset[str]:
+    """Which properties of the subject this text is about."""
+
+    body = str(text or "")
+    return frozenset(
+        name for name, pattern in ATTRIBUTE_PATTERNS if pattern.search(body)
+    )
+
+
+def _attribute_conflict(
+    query_text: str, candidate_text: str
+) -> tuple[str, str] | None:
+    """Whether the two are about different properties of the same subject.
+
+    Both sides must be specific and they must share *nothing*. Sharing one
+    attribute is enough to keep them together: the customer who asked which
+    seller name to enter also reported being told to correct it, so their
+    question carries CHANGE_REQUEST as well as SELLER_IDENTITY, and the stored
+    seller-name answer carries METHOD as well. Requiring full coverage in both
+    directions rejected the one answer that actually answered them.
+
+    A side with no attribute at all is generic guidance and is left alone --
+    rejecting it would throw away most of the reusable corpus, which is the
+    false rejection this work exists to avoid rather than cause.
+    """
+
+    query = attributes_of(query_text)
+    candidate = attributes_of(candidate_text)
+    if not query or not candidate or query & candidate:
+        return None
+    return sorted(query)[0], sorted(candidate)[0]
+
+
 def _topic_compatibility(
     query_topics: tuple[str, ...], candidate_topics: tuple[str, ...]
 ) -> tuple[bool, str, str, float]:
@@ -450,6 +548,22 @@ class LearningCompatibilityService:
         topic_ok, topic_match, topic_reason, topic_adjustment = _topic_compatibility(
             query_topics, profile.topics
         )
+        # Same subject, different property. Checked after the topic gate and
+        # reported through it, because "about 온누리 but about its period, not
+        # its seller" is a topic mismatch in every sense that matters here --
+        # it just needed a second dimension to be visible at all.
+        attribute_conflict = _attribute_conflict(
+            str(current_question or ""),
+            " ".join(
+                str(value or "")
+                for value in (candidate_question, candidate_answer)
+            ),
+        )
+        if topic_ok and attribute_conflict is not None:
+            asked, offered = attribute_conflict
+            topic_ok = False
+            topic_match = "MISMATCH"
+            topic_reason = f"ATTRIBUTE_MISMATCH_{asked}_VS_{offered}"
         if not topic_ok:
             return CompatibilityDecision(
                 False, True, topic_reason, 0.0, profile.scope,

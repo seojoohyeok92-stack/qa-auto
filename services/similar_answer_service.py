@@ -11,7 +11,10 @@ from services.learning_compatibility_service import (
     LearningCompatibilityService,
     extract_product_identity,
 )
-from services.learning_evidence_policy import contamination_reason
+from services.learning_evidence_policy import (
+    contamination_reason,
+    estimation_reason,
+)
 from services.learning_privacy_service import LearningPrivacyService
 
 
@@ -46,6 +49,17 @@ CONTEXT_ANCHOR_CONCEPTS = {
 
 def normalize_learning_question(value: object) -> str:
     return " ".join(TOKEN.findall(str(value or "").lower()))
+
+
+def _normalized_answer(value: object) -> str:
+    """Identity of an answer's *content*, for spotting repeat copies.
+
+    Whitespace only, deliberately: two rows are the same evidence when the
+    sentences are the same, and normalising further would start merging
+    answers that differ in a number.
+    """
+
+    return re.sub(r"\s+", "", str(value or ""))
 
 
 class SimilarAnswerService:
@@ -270,6 +284,11 @@ class SimilarAnswerService:
     def context(self, question: str, **filters: Any) -> dict[str, Any]:
         results = self.search(question, **filters)
         approved, seller = [], []
+        factual_seen: set[str] = set()
+        demotion_counts: dict[str, int] = {
+            "HEDGED_FACTUAL_DEMOTED": 0,
+            "DUPLICATE_EVIDENCE": 0,
+        }
         for item in results:
             payload = {
                 "learning_example_id": int(item["id"]),
@@ -295,7 +314,46 @@ class SimilarAnswerService:
                 ),
                 "compatibility": item.get("compatibility") or {},
             }
-            (seller if item["style_only"] else approved).append(payload)
+            # An answer that says outright it is unsure -- "8월 둘째 주 이후로
+            # 예상됩니다", "전날 연락드릴 것으로 보입니다" -- was reaching the
+            # model labelled APPROVED, and 10 such rows in the live store carry
+            # rating 5 and HUMAN_VERIFIED_NAVER_POSTED. Whoever approved them
+            # approved a guess; the authority is real and the certainty is not,
+            # so the sentence must not be offered as grounds for a definite
+            # claim.
+            #
+            # ``estimation_reason`` and not the broader hedge or
+            # ``usable_as_factual_evidence`` checks. The latter asks the
+            # validator's question -- does this commit to a polarity or a
+            # quantity it could weigh against another claim -- and answers no
+            # for plain declaratives like "이 제품은 LED 패널을 사용합니다".
+            # ``hedge_reason`` is wider still and counts a deferral, which
+            # would have rejected the store's own new-order delivery policy
+            # over the words "결제 확인 후". What must not be offered as proof
+            # is a guess, and that is what this asks.
+            #
+            # Demoted rather than dropped. The sentence is still written in the
+            # seller's voice, so it keeps its value as a tone reference; what
+            # it loses is the claim to prove something.
+            factual = not item["style_only"] and (
+                estimation_reason(item["final_answer"]) is None
+            )
+            if factual:
+                normalized = _normalized_answer(item["final_answer"])
+                if normalized in factual_seen:
+                    # The same sentence stored many times is one fact, not
+                    # several independent corroborations of it. The live store
+                    # holds 122 repeat copies; letting them fill separate slots
+                    # both crowds out other evidence and makes a single claim
+                    # look independently confirmed.
+                    demotion_counts["DUPLICATE_EVIDENCE"] += 1
+                    continue
+                factual_seen.add(normalized)
+                approved.append(payload)
+                continue
+            if not item["style_only"]:
+                demotion_counts["HEDGED_FACTUAL_DEMOTED"] += 1
+            seller.append(payload)
         features = Counter()
         lengths = []
         style_pool = filters.get("candidate_pool")
@@ -320,5 +378,8 @@ class SimilarAnswerService:
                 "typical_closing": next((v for (k, v), _ in features.most_common() if k == "closing"), ""),
                 "average_sentence_length": round(sum(lengths) / len(lengths), 1) if lengths else None,
             },
-            "learning_retrieval": dict(getattr(self, "last_trace", {})),
+            "learning_retrieval": {
+                **dict(getattr(self, "last_trace", {})),
+                **demotion_counts,
+            },
         }
