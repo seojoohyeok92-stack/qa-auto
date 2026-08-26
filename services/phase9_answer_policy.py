@@ -238,6 +238,15 @@ def _routing_metadata(
     return routed
 
 
+def _is_schedule_change(analysis: InquiryAnalysis) -> bool:
+    """Whether the customer asked us to *move* the schedule, not read it."""
+
+    return (
+        analysis.inquiry_subtype == "SCHEDULE_CHANGE_REQUEST"
+        or str(analysis.detected_intent or "").upper() == "SCHEDULE_CHANGE"
+    )
+
+
 def apply_phase9_rule_policy(
     request: AnswerRequest,
     result: AnswerResult,
@@ -377,13 +386,18 @@ def apply_phase9_rule_policy(
             source="SAFE_TEMPLATE",
             requires_review=True,
         )
+    # ``delivery_question`` is the analysis object's own definition of "this
+    # asks about a delivery or installation schedule", and it already covers
+    # both the subtype set that used to be written out here and the delivery
+    # intents. Spelling the subtypes out again silently excluded
+    # COMPOUND_MULTI_INTENT -- which is what a customer writes whenever they
+    # ask two things at once ("오늘 주문했는데 언제 받아볼 수 있을까요? 대략적인
+    # 배송 예정이라도 알 수 없나요?"). Those inquiries matched no branch here,
+    # fell through to the tail, and answer_service rejected the unrecognised
+    # answer_source by raising -- so a successful DPS lookup produced no draft
+    # at all.
     if (
-        analysis.inquiry_subtype
-        in {
-            "DELIVERY_OR_INSTALLATION_SCHEDULE",
-            "LEGACY_DELIVERY_CATEGORY",
-            "SCHEDULE_CHANGE_REQUEST",
-        }
+        analysis.delivery_question
         and analysis.order_id_validated
         and str(dps.get("lookup_status") or "").upper() == "SUCCESS"
         and not date_value
@@ -424,27 +438,45 @@ def apply_phase9_rule_policy(
             requires_review=True,
         )
     if (
-        analysis.inquiry_subtype
-        in {
-            "DELIVERY_OR_INSTALLATION_SCHEDULE",
-            "LEGACY_DELIVERY_CATEGORY",
-            "SCHEDULE_CHANGE_REQUEST",
-        }
+        analysis.delivery_question
         and analysis.order_id_validated
         and analysis.requires_dps_lookup
     ):
         return routed_result(
             route="DELIVERY_LOOKUP_REQUIRED",
+            # Keyed on the intent as well as the subtype, for the same reason
+            # as above: a customer who asks to move the date *and* asks
+            # something else is COMPOUND_MULTI_INTENT, and telling them "주문
+            # 조회가 필요합니다" answers a question they did not ask.
             template=(
                 "PHASE9_DELIVERY_CHANGE_REVIEW"
-                if analysis.inquiry_subtype == "SCHEDULE_CHANGE_REQUEST"
+                if _is_schedule_change(analysis)
                 else "PHASE9_DELIVERY_LOOKUP_REQUIRED"
             ),
             answer=(
                 DELIVERY_CHANGE_REVIEW_ANSWER
-                if analysis.inquiry_subtype == "SCHEDULE_CHANGE_REQUEST"
+                if _is_schedule_change(analysis)
                 else DELIVERY_LOOKUP_REQUIRED_ANSWER
             ),
+            answer_type="manual_review_required",
+            source="SAFE_TEMPLATE",
+            requires_review=True,
+        )
+    # A delivery-schedule inquiry that matched no branch above is a routing
+    # gap, and the caller treats an unrecognised answer_source as fatal --
+    # AnswerGenerationError, no draft written, "답변 생성 버튼을 눌러 초안을
+    # 생성하세요" left on screen even though the DPS lookup had succeeded.
+    #
+    # A gap in the routing table is not a reason to produce nothing. The safe
+    # template says only that the schedule still needs checking and carries
+    # requires_review, so the customer is never told an invented date and a
+    # person still sees the inquiry. The guard in answer_service stays exactly
+    # as strict; this simply stops delivery inquiries reaching it unrouted.
+    if analysis.delivery_question:
+        return routed_result(
+            route="DELIVERY_LOOKUP_REQUIRED",
+            template="PHASE9_DELIVERY_LOOKUP_REQUIRED",
+            answer=DELIVERY_LOOKUP_REQUIRED_ANSWER,
             answer_type="manual_review_required",
             source="SAFE_TEMPLATE",
             requires_review=True,
