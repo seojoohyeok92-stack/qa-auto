@@ -251,6 +251,64 @@ def is_hedged(answer: object) -> bool:
 _PARTIALLY_MASKED_NUMBER = re.compile(r"\d{2,}\*{2,}\d{2,}")
 
 
+# --- provenance ------------------------------------------------------------
+#
+# "A person approved this" is one bit, and it was being asked to carry a
+# distinction it cannot hold. 299 of the 306 human_verified rows are seller
+# answers that were already posted on Naver and later marked verified in bulk;
+# 7 are answers a member of staff actually edited or reviewed in this system.
+# Ranking read the bit alone, so the 299 sat at or above the 7.
+#
+# The store already records the difference -- ``answer_provenance`` says who
+# wrote the text, ``facts_authority`` says what it was accepted as -- so the
+# class is read, never inferred. Nothing here guesses from the answer body.
+#
+# Staff who compose an answer from scratch (DIRECT_HUMAN) are deliberately
+# absent: no column distinguishes them from an edited draft today, and
+# inventing the class would mean guessing. They fall to UNKNOWN_PROVENANCE,
+# which sits at the bottom of the ladder rather than the top.
+APPROVED_EDITED = "APPROVED_EDITED"
+APPROVED_UNEDITED = "APPROVED_UNEDITED"
+SELLER_ANSWER_VERIFIED = "SELLER_ANSWER_VERIFIED"
+SELLER_ANSWER = "SELLER_ANSWER"
+HISTORICAL_PROMOTED = "HISTORICAL_PROMOTED"
+UNKNOWN_PROVENANCE = "UNKNOWN_PROVENANCE"
+
+# Authority *within* Learning, used only to order candidates relevance and the
+# compatibility gate have already accepted as equally applicable. It is not a
+# licence to admit anything: a class absent from this table keeps whatever the
+# existing source table gives it.
+LEARNING_AUTHORITY: Mapping[str, int] = {
+    APPROVED_EDITED: 8,
+    APPROVED_UNEDITED: 6,
+    SELLER_ANSWER_VERIFIED: 4,
+}
+
+
+def classify_provenance(item: Mapping[str, Any]) -> str:
+    """Which kind of answer a Learning row actually is."""
+
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    source = str(item.get("learning_source") or "").upper()
+    origin = str(metadata.get("source_origin") or "").upper()
+    provenance = str(metadata.get("answer_provenance") or "").upper()
+
+    # Checked first: a promoted historical case is historical whatever else is
+    # stamped on it, and must not reach a staff tier through its source name.
+    if origin == HISTORICAL_PROMOTED:
+        return HISTORICAL_PROMOTED
+    if metadata.get("human_verified") is not True:
+        return SELLER_ANSWER if source == SELLER_ANSWER else UNKNOWN_PROVENANCE
+    if provenance == "STAFF_EDITED" or source == APPROVED_EDITED:
+        return APPROVED_EDITED
+    if provenance == "PROGRAM_GENERATED" or source == APPROVED_UNEDITED:
+        return APPROVED_UNEDITED
+    if provenance == "NAVER_POSTED":
+        return SELLER_ANSWER_VERIFIED
+    return UNKNOWN_PROVENANCE
+
+
 def contamination_reason(value: object) -> str | None:
     """The redaction token this text carries, or None.
 

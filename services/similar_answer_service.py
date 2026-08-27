@@ -12,6 +12,8 @@ from services.learning_compatibility_service import (
     extract_product_identity,
 )
 from services.learning_evidence_policy import (
+    LEARNING_AUTHORITY,
+    classify_provenance,
     contamination_reason,
     estimation_reason,
 )
@@ -49,6 +51,50 @@ CONTEXT_ANCHOR_CONCEPTS = {
 
 def normalize_learning_question(value: object) -> str:
     return " ".join(TOKEN.findall(str(value or "").lower()))
+
+
+# Authority may only settle what relevance cannot. Adjacent candidates in the
+# live corpus are separated by a median of 0.043 and a lower quartile of 0.018,
+# so 0.01 sits below the point where a gap means anything -- inside it the two
+# answers are equally on-point and which one to trust is a question about who
+# wrote them. Banding rather than a pairwise epsilon comparison because sorting
+# needs a total order; the cost is that a near-tie straddling a band edge falls
+# back to pure relevance, which errs toward leaving the existing order alone.
+AUTHORITY_TIE_BAND = 0.01
+
+
+def _band(value: float) -> int:
+    return int(value / AUTHORITY_TIE_BAND)
+
+
+def _ranking_key(relevance: float, item: dict[str, Any], priority: int):
+    """Relevance, then whether the answer is on point, then who wrote it.
+
+    Answer support sits above authority deliberately. ``relevance`` already
+    folds support into a single number, so two candidates can land in the same
+    band with completely different composition -- one whose question looks
+    similar but whose answer addresses nothing the customer asked, and one that
+    actually covers part of it. Ranking the band by authority alone promoted
+    the first kind: measured over 275 live questions it moved ten answers into
+    the factual slot whose support was 0.058 on average, six of them exactly
+    zero. Provenance is a reason to prefer an answer that already answers the
+    question, never a reason to prefer one that does not.
+    """
+
+    support = _band(float(item.get("answer_support") or 0.0))
+    return (
+        _band(relevance), support,
+        # Inside the band, an answer that covers nothing the customer asked has
+        # no claim on a slot for being well sourced -- without this a verified
+        # answer with zero support displaced a tone reference and took an
+        # evidence slot it could not fill.
+        priority if support else 0,
+        # Exactly equal relevance is a different situation: nothing else is
+        # left to separate the candidates, and authority has always decided it.
+        # So it is applied again below the raw score, where it can only order
+        # a true tie and can no longer overturn a real difference.
+        relevance, priority, item["rating"], item["created_at"],
+    )
 
 
 def _normalized_answer(value: object) -> str:
@@ -99,8 +145,13 @@ class SimilarAnswerService:
         source_origin = str(
             metadata.get("source_origin") if isinstance(metadata, dict) else ""
         ).upper()
-        if isinstance(metadata, dict) and metadata.get("human_verified") is True:
-            return 10
+        # Provenance first. ``human_verified`` used to short-circuit to 10 here,
+        # which put every bulk-verified seller answer above the handful a
+        # member of staff actually edited. It is now read as a signal *within*
+        # a class, not as a class of its own.
+        authority = LEARNING_AUTHORITY.get(classify_provenance(item))
+        if authority is not None:
+            return authority
         if source_origin == "HISTORICAL_PROMOTED":
             return 1
         if source == "AUTO_POST_CORRECTED":
@@ -250,9 +301,8 @@ class SimilarAnswerService:
             if len(compatibility_diagnostics) < 40:
                 compatibility_diagnostics.append(diagnostic)
         ranked.sort(
-            key=lambda pair: (
-                pair[0], self._source_priority(pair[1]),
-                pair[1]["rating"], pair[1]["created_at"],
+            key=lambda pair: _ranking_key(
+                pair[0], pair[1], self._source_priority(pair[1])
             ),
             reverse=True,
         )
