@@ -516,3 +516,44 @@ def is_seller_identity_question(question: object) -> bool:
     """Whether the customer is asking which seller to name."""
 
     return bool(SELLER_IDENTITY_QUERY.search(compact(question)))
+
+
+# Whether the customer is asking for a commitment to a date, not for the
+# policy. "오늘 주문하면 9일까지 받아볼 수 있을까요?" and "배송은 보통 며칠
+# 걸리나요?" are both pre-purchase delivery questions, and only the second one
+# standing policy can answer. The first names a deadline, and for an order
+# that does not exist yet nothing in the system knows whether it will be met.
+#
+# Read on ``compact`` text, so every pattern is written without spaces.
+#
+# "언제까지" is deliberately excluded: that asks *when* the product arrives,
+# which is the ordinary schedule question the existing routes already handle.
+# What is caught here is the customer proposing a date and asking yes or no.
+_DELIVERY_DEADLINE = re.compile(
+    # 9일까지 / 9월5일까지 / 24일전까지 / 19일이전
+    r"(?:\d{1,2}월)?\d{1,2}일(?:까지(?!도)|전까지|이전|안에|내에)"
+    # 금요일까지 / 화요일전까지
+    r"|[월화수목금토일]요일(?:까지|전|이전)"
+    # 이번주안에 / 다음주까지 / 담주전에
+    r"|(?:이번|금|다음|담)주(?:안에|내에|까지|전까지|전에)"
+    r"|(?:이번|다음|담)달(?:안에|내에|까지)"
+    r"|특정날짜까지"
+    # 오늘까지 -- but not "오늘까지도", which is a complaint about how long
+    # something has already been going on, not a deadline.
+    r"|(?:오늘|내일|모레|주말)까지(?!도)"
+)
+_DELIVERY_ARRIVAL = re.compile(
+    r"받|도착|배송|배달|설치|수령|오나요|올까요|와요|보내"
+)
+_ASKS_WHEN = re.compile(r"언제까지")
+
+
+def is_delivery_deadline_question(question: object) -> bool:
+    """Whether the customer asks if delivery/installation can meet a deadline."""
+
+    text = compact(question)
+    if _ASKS_WHEN.search(text):
+        return False
+    return bool(
+        _DELIVERY_DEADLINE.search(text) and _DELIVERY_ARRIVAL.search(text)
+    )

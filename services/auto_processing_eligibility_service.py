@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from answer.source_adapter import answer_request_from_inquiry
+from answer.text_utils import is_delivery_deadline_question
 from services.auto_post_validation_service import AutoPostTechnicalValidator
 from services.inquiry_analysis_service import InquiryAnalysisService
 
@@ -418,6 +419,32 @@ class AutoProcessingEligibilityService:
             reasons.append("DPS_RESULT_NOT_TRUSTED")
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):
             reasons.append("DPS_SNAPSHOT_NOT_VALIDATED")
+
+        # A date the customer named, which nothing here can promise.
+        #
+        # "오늘 주문하면 9일까지 받아볼 수 있을까요?" was answered with the
+        # standing visit-installation policy and auto-posted: validator PASS,
+        # coverage UNKNOWN, no blocking reason. Topically it is a delivery
+        # answer; it simply does not say whether the ninth is possible.
+        #
+        # A deadline can only be confirmed from a trusted schedule, so the
+        # gate is the schedule, not the wording: with a SUCCESS DPS lookup and
+        # a validated snapshot the existing schedule routes answer it and this
+        # never fires. Without one -- a new purchase, or a lookup that did not
+        # land -- there is no basis, and the reply goes to staff rather than
+        # to the customer. Checked on every route, because the same
+        # unanswerable question also reaches GPT.
+        confirmed_schedule = (
+            str(plan.get("dps_lookup_status") or "").upper() == "SUCCESS"
+            and bool(plan.get("valid_dps_snapshot_available"))
+        )
+        if not confirmed_schedule and is_delivery_deadline_question(
+            " ".join(
+                str(inquiry.get(field) or "")
+                for field in ("title", "content")
+            )
+        ):
+            reasons.append("DELIVERY_DEADLINE_NOT_CONFIRMABLE")
 
         # Evidence + Authority first: a pessimistic confidence number from the
         # provider is not itself a safety finding. When retrieval proved every

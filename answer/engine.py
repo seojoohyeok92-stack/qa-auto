@@ -24,6 +24,7 @@ from .text_utils import (
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
     NOTICE_SUBJECT_QUERY,
     compact,
+    is_delivery_deadline_question,
     is_delivery_notice_question,
     is_general_delivery_policy_question,
     is_package_contents_question,
@@ -593,6 +594,27 @@ class AnswerEngine:
             return self.no_answer("배송/개별주문확인", "결제일과 현재 배송상태가 포함된 개별 주문 배송 문의는 실제 주문/출고 이력 확인이 필요합니다.")
 
         if self._is_install_product(product):
+            # Asked whether a date can be met, before any order exists.
+            #
+            # "혹시 오늘 주문하면 9일까지 받아볼 수 있을까요?" contains
+            # "주문하면", so _is_new_install_shipping_question matched it and
+            # the new-order body was returned: 결제 확인 후 설치 기사님 일정에
+            # 맞춰 진행됩니다. Every word of that is true and none of it says
+            # whether the ninth is possible. Because the shipping block is an
+            # exact-template match kind, it outranked GPT and was published.
+            #
+            # Nothing here can confirm a date for an order that does not exist
+            # -- there is no order, so no DPS schedule, and standing policy
+            # states no lead time. Declining is the only honest answer, and it
+            # is what the weekend-policy branch below already does for the same
+            # reason. An existing order with a confirmed DPS date never reaches
+            # this block; it is answered from that schedule.
+            if is_delivery_deadline_question(question):
+                return self.no_answer(
+                    "배송/기한확인",
+                    "특정 날짜까지 배송·설치가 가능한지는 확정된 근거가 없어 "
+                    "담당자 확인이 필요합니다.",
+                )
             pickup = self._old_appliance_pickup(product, question)
             if pickup and self._is_new_install_shipping_question(question):
                 body = self._install_new_order_body(product) + "\n\n" + self.config.shipping["old_appliance_pickup_answer"]

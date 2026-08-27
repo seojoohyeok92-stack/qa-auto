@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import sys
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -459,7 +460,30 @@ class NaverAutoPostScheduler:
 
 _REGISTRY_LOCK = RLock()
 _SCHEDULERS: dict[str, NaverAutoPostScheduler] = {}
-_STARTUP_RUNTIME_RESET_DONE: set[str] = set()
+
+# Which databases this *interpreter* has already forced OFF at startup.
+#
+# This deliberately does not live in a module global. Streamlit reloads a
+# changed module inside the running process, and a reloaded module re-executes
+# its top level -- so a module-level set forgets everything it knew. The guard
+# below then read "this process has never run" and forced the switch OFF again,
+# in the same process, with no restart and nobody having pressed Stop. That is
+# the operator report: the screen refreshed and 자동처리 was off.
+#
+# ``sys`` is never reloaded, so an attribute on it lasts exactly as long as the
+# interpreter does -- which is the lifetime the guard is supposed to have. A
+# pid would not do: pids are recycled, and a genuinely new process inheriting a
+# recycled pid would skip the reset and resume posting unattended, which is the
+# one thing this must never allow.
+_RESET_REGISTRY_ATTRIBUTE = "_oje_auto_post_startup_reset_done"
+
+
+def _startup_reset_registry() -> set[str]:
+    registry = getattr(sys, _RESET_REGISTRY_ATTRIBUTE, None)
+    if not isinstance(registry, set):
+        registry = set()
+        setattr(sys, _RESET_REGISTRY_ATTRIBUTE, registry)
+    return registry
 
 
 def reset_auto_post_runtime_on_process_start(database: Database) -> bool:
@@ -482,9 +506,10 @@ def reset_auto_post_runtime_on_process_start(database: Database) -> bool:
 
     key = str(Path(database.path).resolve())
     with _REGISTRY_LOCK:
-        if key in _STARTUP_RUNTIME_RESET_DONE:
+        registry = _startup_reset_registry()
+        if key in registry:
             return False
-        _STARTUP_RUNTIME_RESET_DONE.add(key)
+        registry.add(key)
     repository = AutoPostRepository(database)
     settings = repository.settings()
     if not settings.get("enabled"):
