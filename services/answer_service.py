@@ -52,6 +52,19 @@ from services.phase9_answer_policy import apply_phase9_rule_policy
 from services.atomic_completeness_service import (
     AtomicCompletenessService,
 )
+from answer.providers.provider_factory import create_gpt_provider
+from services.gpt_semantic_analyzer_service import (
+    GptSemanticAnalyzerService,
+)
+from services.semantic_action_support import (
+    evaluate as evaluate_action_support,
+)
+from services.semantic_analysis import (
+    SKIP_NO_DECISION_VALUE,
+    SemanticRouteDecision,
+    is_enabled as semantic_analyzer_enabled,
+    route as semantic_route,
+)
 from services.semantic_coverage_service import (
     SemanticCoverageService,
     is_enabled as semantic_coverage_enabled,
@@ -465,6 +478,157 @@ class AnswerService:
                 level="WARNING",
                 details={"error_type": type(error).__name__},
             )
+
+    def _record_semantic_action_support(
+        self,
+        inquiry_id: int,
+        request: AnswerRequest,
+        result: AnswerResult,
+        analysis: Any,
+    ) -> None:
+        """Understand the request, and record whether the answer addresses it.
+
+        Off unless ``OJE_SEMANTIC_ANALYZER_ENABLED`` says otherwise, because it
+        needs a real provider to mean anything and because turning a new model
+        dependency on for every deployment is not a decision this file gets to
+        make.
+
+        Even when on it is cheap: the router decides from text and the analysis
+        already in hand, and only the inquiries it flags -- 11.4% of the live
+        store -- reach the provider at all. Everything else returns here having
+        spent nothing.
+
+        Nothing below reads what is written except eligibility, which can only
+        add a hold. A fault of any kind is recorded and the answer proceeds:
+        this measurement must never be the reason a customer goes unanswered.
+        """
+
+        if not semantic_analyzer_enabled():
+            return
+        try:
+            question = str(request.question or "")
+            # The pipeline passes its analysis around as a value object in some
+            # paths and as a plain dict in others; the router reads it as a
+            # mapping either way.
+            if analysis is None:
+                analysis_dict: dict[str, Any] = {}
+            elif isinstance(analysis, dict):
+                analysis_dict = analysis
+            else:
+                to_dict = getattr(analysis, "to_dict", None)
+                analysis_dict = to_dict() if callable(to_dict) else {}
+            decision = semantic_route(question, analysis=analysis_dict)
+            payload: dict[str, Any] = {
+                "router": decision.to_dict(), "called": False,
+            }
+            # Would this answer be published if the semantic gate did not
+            # exist? The gate is block-only -- it can turn SAFE into
+            # REVIEW_REQUIRED and nothing else -- so on an answer that is
+            # already held, a model call cannot change what the customer
+            # receives. It would only find a second reason for a decision
+            # already taken, and a real call costs seconds.
+            #
+            # Measured against the live store this is where most of the cost
+            # was: of the inquiries the router flags, the large majority are
+            # already going to a person for some other reason.
+            if decision.use_semantic:
+                publishable = self._would_publish_without_semantics(
+                    inquiry_id, result,
+                )
+                payload["decision_value"] = publishable
+                if not publishable:
+                    decision = SemanticRouteDecision(
+                        use_semantic=False,
+                        reasons=(
+                            SKIP_NO_DECISION_VALUE, *decision.reasons,
+                        ),
+                    )
+                    payload["router"] = decision.to_dict()
+            if decision.use_semantic:
+                analyzer = self._semantic_analyzer()
+                if analyzer is not None:
+                    semantic = analyzer.analyze(question)
+                    payload["called"] = True
+                    payload["semantic"] = semantic.to_dict()
+                    payload["trace"] = dict(analyzer.last_trace)
+                    support = evaluate_action_support(
+                        semantic,
+                        route=str(
+                            result.metadata.get("selected_answer_route") or ""
+                        ),
+                        template_id=result.metadata.get("template_id"),
+                    )
+                    result.metadata["semantic_action_support"] = (
+                        support.to_dict()
+                    )
+                    payload["support"] = support.to_dict()
+            result.metadata["semantic_analysis"] = payload
+            self.logs.record_inquiry(
+                inquiry_id,
+                "SEMANTIC_ANALYSIS_RECORDED",
+                "문의 의미 분석 결과를 기록했습니다.",
+                level="INFO",
+                details=payload,
+            )
+        except Exception as error:  # pragma: no cover - defensive only
+            self.logs.record_inquiry(
+                inquiry_id,
+                "SEMANTIC_ANALYSIS_ERROR",
+                "의미 분석에 실패했습니다. 답변 생성에는 영향이 없습니다.",
+                level="WARNING",
+                details={"error_type": error.__class__.__name__},
+            )
+
+    def _would_publish_without_semantics(
+        self, inquiry_id: int, result: AnswerResult,
+    ) -> bool:
+        """Whether every existing gate would let this answer through.
+
+        Uses the real eligibility service rather than a copy of its rules, so
+        the two can never drift apart. It is pure computation -- no provider,
+        no network -- and the draft it is handed is the one about to be saved.
+        Any doubt resolves to True, which spends a call rather than skipping a
+        check.
+        """
+
+        try:
+            inquiry = self.inquiries.get(inquiry_id) or {}
+            metadata = dict(result.metadata)
+            validator = metadata.get("validator_result")
+            validator = validator if isinstance(validator, dict) else {}
+            draft = {
+                "original_answer": result.answer,
+                "validation_status": str(
+                    validator.get("status")
+                    or metadata.get("validation_status")
+                    or ""
+                ),
+                "validator_result_json": validator,
+                "review_status": str(metadata.get("review_status") or "PENDING"),
+                "posted": False,
+                "metadata_json": metadata,
+            }
+            verdict = self.eligibility.evaluate(
+                inquiry=inquiry, draft=draft,
+                route=str(metadata.get("selected_answer_route") or ""),
+            )
+            return verdict.decision == "SAFE"
+        except Exception:
+            return True
+
+    def _semantic_analyzer(self) -> GptSemanticAnalyzerService | None:
+        """One analyzer per service, so its cache survives repeat questions."""
+
+        existing = getattr(self, "_semantic_analyzer_instance", None)
+        if existing is not None:
+            return existing
+        try:
+            provider = create_gpt_provider()
+        except Exception:
+            return None
+        instance = GptSemanticAnalyzerService(provider)
+        self._semantic_analyzer_instance = instance
+        return instance
 
     def _record_semantic_coverage(
         self,
@@ -2852,6 +3016,9 @@ class AnswerService:
             # evaluator fault is recorded and the answer proceeds.
             self._record_atomic_questions(inquiry_id, phase9_analysis)
             self._record_semantic_coverage(inquiry_id, request, result)
+            self._record_semantic_action_support(
+                inquiry_id, request, result, phase9_analysis,
+            )
             dps_metadata = (
                 request.metadata.get("dps")
                 if isinstance(request.metadata.get("dps"), dict)

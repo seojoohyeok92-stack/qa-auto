@@ -5,6 +5,10 @@ from typing import Any
 
 from answer.source_adapter import answer_request_from_inquiry
 from answer.text_utils import is_delivery_deadline_question
+from services.semantic_action_support import (
+    REASON_CODE as SEMANTIC_ACTION_MISMATCH,
+    decision_from_metadata as semantic_action_decision,
+)
 from services.auto_post_validation_service import AutoPostTechnicalValidator
 from services.inquiry_analysis_service import InquiryAnalysisService
 
@@ -419,6 +423,23 @@ class AutoProcessingEligibilityService:
             reasons.append("DPS_RESULT_NOT_TRUSTED")
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):
             reasons.append("DPS_SNAPSHOT_NOT_VALIDATED")
+
+        # The answer addresses a different request than the one that was made.
+        #
+        # "고장난 기존 tv 수거 요청드려요" was auto-posted with A/S guidance:
+        # validator PASS, coverage PASS, no blocking reason -- each gate right
+        # by its own definition, and none of them asking whether the answer
+        # answered the question. This compares the action the customer asked
+        # for against what the answer we produced is able to address.
+        #
+        # Read from what generation recorded, never re-derived here: this stage
+        # has no provider and must not acquire one. A draft with no record, an
+        # unlabelled answer, or an understanding the model could not supply all
+        # leave this undetermined, and undetermined blocks nothing -- the gate
+        # can only ever add a hold.
+        action_support = semantic_action_decision(metadata)
+        if action_support.mismatched:
+            reasons.append(SEMANTIC_ACTION_MISMATCH)
 
         # A date the customer named, which nothing here can promise.
         #

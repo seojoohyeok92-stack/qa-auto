@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import requests
 
@@ -15,6 +15,7 @@ from answer.provider_errors import (
     GptProviderTimeoutError,
 )
 from answer.providers.gpt_provider import GptProvider
+from answer.providers.task_profiles import task_request_profile
 
 
 Transport = Callable[..., dict[str, Any]]
@@ -74,6 +75,7 @@ class OpenAIResponsesTransport:
         connect_timeout: float,
         read_timeout: float,
         total_timeout: float,
+        request_options: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         started = self.clock()
         body = {
@@ -90,6 +92,9 @@ class OpenAIResponsesTransport:
             ],
             "text": {"format": {"type": "json_object"}},
         }
+        # Per-task tuning, empty for every task that does not ask for it. The
+        # answer path sends exactly the body it always sent.
+        body.update(dict(request_options or {}))
         try:
             response = self.session.post(
                 self.endpoint,
@@ -200,12 +205,17 @@ class OpenAIJsonProvider(GptProvider):
             raise AnswerProviderUnavailableError(
                 "실제 OpenAI transport는 아직 연결되지 않았습니다."
             )
+        model, options = task_request_profile(
+            task, self.settings.model,
+            allowed_models=tuple(self.settings.allowed_models or ()),
+        )
         return self._transport(
             task=task,
             prompt=prompt,
             context=context,
-            model=self.settings.model,
+            model=model,
             connect_timeout=self.settings.connect_timeout_seconds,
             read_timeout=self._read_timeout(),
             total_timeout=self.settings.total_timeout_seconds,
+            request_options=options,
         )
