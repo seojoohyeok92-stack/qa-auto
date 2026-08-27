@@ -557,3 +557,166 @@ def is_delivery_deadline_question(question: object) -> bool:
     return bool(
         _DELIVERY_DEADLINE.search(text) and _DELIVERY_ARRIVAL.search(text)
     )
+
+
+# Whether the customer is reporting that something they ordered did not arrive.
+#
+# Inquiry 325318746 -- "오베닉 스마트마운트 스탠드가 안왔어요" -- was answered
+# with a description of the stand's model line and was eligible for auto-post.
+# Nothing in the pipeline could see that the customer was telling us about a
+# delivery, not asking about a product.
+#
+# This is not a wording problem. Whether a stand actually shipped is a question
+# about the order, the outbound record and the packing list; it is work for a
+# person, and an automatic reply of any kind marks the inquiry answered on
+# Naver, which is where staff look for the ones still needing them.
+#
+# Precision matters more than reach here, because the consequence is refusing
+# to answer at all. Two shapes qualify and nothing else does:
+#
+#   an arrival failure   "안 왔어요", "못 받았습니다", "누락됐어요" -- these say
+#                        something about delivery and nothing else, so any
+#                        ordered thing beside them is enough
+#   a plain absence      "없어요" says nothing about delivery on its own
+#                        ("전원 버튼이 없어요" is a product question), so it
+#                        counts only next to a countable part of the order,
+#                        and never inside a question
+_ARRIVAL_FAILURE = r"""(?:안왔|안옴|안와|못받|미수령|누락|빠[졌진]|안들어있
+|들어있지않|안들었|동봉안|동봉되지|미배송|미발송|안보내|(?<!나)오지않
+|배송안[됬됐되])"""
+# Joined without whitespace so the pattern can be written readably above.
+# "(?<!나)오지않" keeps "화면이 나오지 않습니다" out: a screen that will not
+# come on is a fault report, and shares four characters with a parcel that
+# did not come.
+_ARRIVAL_FAILURE = re.compile("".join(_ARRIVAL_FAILURE.split()))
+_PLAIN_ABSENCE = re.compile(r"없어요|없습니다|없네요|없던데|안보[여이]")
+
+# Physical things that arrive in the box or the shipment.
+#
+# "상품" and "제품" are deliberately absent. Almost every inquiry in the store
+# carries the title "상품 문의", so treating that word as an ordered item made
+# any "못 받" anywhere in a long message look like a missing delivery -- a
+# customer writing "톡톡 답변을 못 받아 재문의드립니다" was flagged as a
+# missing shipment.
+_ORDERED_COMPONENT = re.compile(
+    r"스탠드|스텐드|거치대|리모컨|리모콘|케이블|브라켓|사은품|증정품|구성품"
+    r"|부속품|부품|어댑터|아답터|전원선|받침|나사|볼트|설명서|배터리|마운트"
+    r"|선반|멀티탭|셋탑|셋톱|본체|스피커|다리"
+)
+# "상품" and "제품" are here despite almost every inquiry carrying the title
+# "상품 문의": the proximity window and the not-a-shipment list do the work of
+# telling "상품이 안왔어요" from "상품 문의 ... 답변을 못 받아".
+_ORDERED_WHOLE = re.compile(r"티비|tv|모니터|택배|물건|상품|제품")
+
+# Things a customer can fail to receive that are not the shipment: a reply, a
+# call, a voucher. "상품권을 못 받았다" is a benefit question, not a parcel.
+_NOT_A_SHIPMENT = re.compile(
+    r"답변|연락|전화|문자|알림톡|톡톡|상품권|쿠폰|포인트|적립|환급|혜택"
+    r"|캐시백|이벤트|당첨|리뷰|후기|주소"
+    # A tracking number is *about* the shipment, so it never belongs here:
+    # "스탠드 송장번호 알려주세요 스탠드가 안왔습니다" is a missing stand.
+)
+
+# Asking about the product rather than reporting about the shipment.
+_PRODUCT_QUESTION = re.compile(
+    r"포함(?:되|인|인가|하나)|기본구성|같이오|함께오|별도구매|따로구매|별도판매"
+    r"|호환|맞나요|어떤모델|무슨모델|모델명|몇세대|종류|재고|사양|스펙"
+    r"|가능한가요|가능할까요|인가요|일까요"
+)
+# When it will arrive, or whether a date can be met -- both are answerable and
+# neither is a report that something is absent.
+_SCHEDULE_QUESTION = re.compile(
+    r"언제|며칠|몇일|예정일|배송일|일정|얼마나걸|어디쯤|까지받|까지배송"
+    r"|늦어지|지연되|늦나요|늦어질"
+    # Asking us to look the delivery up is asking where the parcel is, which
+    # the pipeline answers from the order and DPS. "주문한 상품이 아직 안
+    # 왔어요. 배송 조회해 주세요" is that question, not a report that a part
+    # is missing from the box.
+    r"|조회|확인해주|알려주"
+)
+# It arrived and then broke. Damage is its own thing and has its own handling.
+_DAMAGE = re.compile(r"파손|깨[졌진져]|고장|불량|하자|손상|흠집|찍힘")
+# "빠졌다" means two different things. A bolt missing from the box was never
+# sent; a wheel that came off after assembly was. Only the second one talks
+# about having used the product, so that is what separates them.
+_AFTER_DELIVERY = re.compile(
+    r"조립|설치하|설치후|설치받|사용중|사용하|쓰[다던고]|쓰는|장착후|받아서"
+)
+
+# "본체만 왔어요" names no failure -- it says what did arrive, and the report is
+# in the word "만". The arrival verb is required so "스탠드만 구매 가능한가요"
+# stays a purchase question.
+_PARTIAL_DELIVERY = re.compile(
+    r"(?:일부|" + _ORDERED_COMPONENT.pattern + r"|" + _ORDERED_WHOLE.pattern
+    + r")[^가-힣]{0,4}만[^가-힣]{0,6}(?:왔|오고|도착|배송|받았|옴)"
+)
+
+# The two readings of "빠졌다", and the phrases that can only mean the first.
+_DETACHED = re.compile(r"빠[졌진]")
+_NEVER_ARRIVED = re.compile(
+    r"안왔|안옴|안와|못받|미수령|누락|안들어있|들어있지않|동봉안|미배송|미발송"
+)
+
+# How far apart the thing and the failure may sit and still be one statement.
+# "스탠드가 안왔어요" is four characters apart; a component named in one
+# sentence and a "못 받았다" three sentences later are two different subjects.
+_NEAR = 18
+
+
+def _reports_absence_of_a_shipment(text: str) -> bool:
+    """Whether a failure-to-arrive phrase actually attaches to an ordered item."""
+
+    for failure in _ARRIVAL_FAILURE.finditer(text):
+        window = text[max(0, failure.start() - _NEAR):failure.end() + _NEAR]
+        if _NOT_A_SHIPMENT.search(window):
+            continue
+        if _ORDERED_COMPONENT.search(window) or _ORDERED_WHOLE.search(window):
+            return True
+    return False
+
+
+def _absence_next_to_a_component(text: str) -> bool:
+    """"없어요" only reports a missing part when it is talking about one.
+
+    Without the distance check, a long message mentioning a 스텐드 in one
+    sentence and "과거 글을 볼 수 없네요" in another read as a missing stand.
+    """
+
+    for absence in _PLAIN_ABSENCE.finditer(text):
+        window = text[max(0, absence.start() - _NEAR):absence.end() + _NEAR]
+        if _NOT_A_SHIPMENT.search(window):
+            continue
+        if _ORDERED_COMPONENT.search(window):
+            return True
+    return False
+
+
+def is_missing_item_report(question: object) -> bool:
+    """Whether the customer says something they ordered has not arrived."""
+
+    text = compact(question)
+    if not text:
+        return False
+    if _PRODUCT_QUESTION.search(text):
+        return False
+    if _reports_absence_of_a_shipment(text):
+        if _DAMAGE.search(text):
+            return False
+        # "아직 미발송인데 좀 늦어지나요?" asks when the parcel will move. That
+        # is a schedule question the pipeline can answer, and only when no
+        # individual component is named -- "스탠드는 언제 오나요? TV는 받았어요"
+        # still reports one part absent.
+        if _SCHEDULE_QUESTION.search(text) and not _ORDERED_COMPONENT.search(text):
+            return False
+        # A part that came off during assembly arrived; it is not missing.
+        detached_after_use = bool(
+            _AFTER_DELIVERY.search(text)
+            and _DETACHED.search(text)
+            and not _NEVER_ARRIVED.search(text)
+        )
+        return not detached_after_use
+    if _PARTIAL_DELIVERY.search(text):
+        return True
+    if _absence_next_to_a_component(text):
+        return not (_SCHEDULE_QUESTION.search(text) or _DAMAGE.search(text))
+    return False

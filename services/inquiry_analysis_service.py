@@ -11,6 +11,7 @@ from answer.inquiry_analysis import (
 )
 from answer.models import AnswerRequest
 from answer.text_utils import (
+    is_missing_item_report,
     CURRENT_DELIVERY_SCHEDULE_QUERY,
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
     is_general_delivery_policy_question,
@@ -939,6 +940,13 @@ class InquiryAnalysisService:
             for subquestion in subquestions
         ]
         parts = [analysis for _, analysis in pairs]
+        # A missing shipment is decided on the undivided message. Split,
+        # "스탠드가 안왔어요 환불해주세요" becomes a refund question with a
+        # delivery remark attached, and the compound path drafts an answer for
+        # it -- the one outcome the policy exists to prevent. Both halves need
+        # the same person looking at the same order.
+        if is_missing_item_report(request.question):
+            return self._analyze_single(request)
         # The whole-message rescue below has a mirror image. Splitting can also
         # separate the *report* of a change from the question about it:
         # "설치가 미뤄졌다고 들었는데 / 언제 오나요?" leaves one fragment holding
@@ -1123,7 +1131,34 @@ class InquiryAnalysisService:
             order_status = OrderIdStatus.MISSING
 
         reasons: list[str] = []
-        if any(word in question for word in HIGH_RISK_WORDS):
+        # Checked before every other branch, including the high-risk one, so
+        # that a missing shipment is never reclassified by a word further down
+        # the table -- "오베닉 스마트마운트 스탠드가 안왔어요" was read as
+        # GENERAL_INSTALLATION_GUIDANCE at 0.94 confidence and answered with a
+        # description of the stand.
+        #
+        # Whether a part actually shipped is a question about the order, the
+        # outbound record and the packing list. No wording answers it, so the
+        # pipeline does not draft one: can_generate_answer refuses the subtype
+        # and the inquiry reaches a person with nothing attached. Posting any
+        # reply -- even "확인 후 안내드리겠습니다" -- would mark the inquiry
+        # answered on Naver, which is the list staff work from.
+        if is_missing_item_report(question):
+            kind = InquiryType.MANUAL_REVIEW_REQUIRED
+            subtype = "MISSING_ITEM_REPORT"
+            requires_order = False
+            # A validated order id does not make this answerable. DPS reports a
+            # schedule, not what was in the box, so looking it up would produce
+            # a confident answer to a question it cannot see.
+            requires_dps = False
+            strategy = AnswerStrategy.MANUAL_REVIEW
+            confidence = 0.99
+            manual = True
+            reasons.append(
+                "상품·구성품 미수령(누락) 신고는 실제 출고/구성품 확인이 "
+                "필요해 직원이 직접 처리합니다."
+            )
+        elif any(word in question for word in HIGH_RISK_WORDS):
             kind = InquiryType.MANUAL_REVIEW_REQUIRED
             subtype = "HIGH_RISK_OR_DISPUTE"
             requires_order = False

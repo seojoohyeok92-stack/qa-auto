@@ -67,6 +67,11 @@ PACKAGE_CONTENTS = "PACKAGE_CONTENTS"
 BENEFIT = "BENEFIT"
 CANCEL_RETURN = "CANCEL_RETURN"
 DAMAGE_REPORT = "DAMAGE_REPORT"
+# What arrived is not what was ordered -- an item is absent. Distinct from
+# DAMAGE_REPORT (it arrived broken) and from PACKAGE_CONTENTS (asking what
+# is included). "스탠드가 안왔어요" is neither of those, and with no class to
+# put it in it was answered as a question about the stand.
+MISSING_ITEM_REPORT = "MISSING_ITEM_REPORT"
 NOTIFICATION_POLICY = "NOTIFICATION_POLICY"
 ORDER_IDENTIFICATION = "ORDER_IDENTIFICATION"
 STORE_PICKUP = "STORE_PICKUP"
@@ -76,7 +81,8 @@ ACTIONS: frozenset[str] = frozenset({
     COLLECTION, REPAIR, DELIVERY_STATUS, DELIVERY_DEADLINE_CONFIRMATION,
     DELIVERY_POLICY, SCHEDULE_REQUEST, SCHEDULE_CHANGE, INSTALLATION_METHOD,
     INSTALLATION_SCHEDULE, PRODUCT_SPEC, PRODUCT_CONCEPT, PACKAGE_CONTENTS,
-    BENEFIT, CANCEL_RETURN, DAMAGE_REPORT, NOTIFICATION_POLICY,
+    BENEFIT, CANCEL_RETURN, DAMAGE_REPORT, MISSING_ITEM_REPORT,
+    NOTIFICATION_POLICY,
     ORDER_IDENTIFICATION, STORE_PICKUP, OTHER,
 })
 
@@ -85,6 +91,9 @@ ACTIONS: frozenset[str] = frozenset({
 # action, and the anchor table's tie between 고장 and 수거 stops existing.
 OBJECT_STATES: frozenset[str] = frozenset({
     "BROKEN", "OLD", "EXISTING", "NEW", "DAMAGED", "UNOPENED", "INSTALLED",
+    # The object never arrived. A state, not an action: the customer may be
+    # reporting it, asking when it will come, or asking to cancel it.
+    "NOT_RECEIVED",
 })
 
 REQUEST_TYPES: frozenset[str] = frozenset({
@@ -306,10 +315,40 @@ _REPAIR_WORD = re.compile(r"수리|고쳐|a/?s|에이에스|서비스센터|점�
 _REQUEST_SHAPE = re.compile(
     r"해주세요|해주시|주세요|부탁|요청|가능한가요|가능할까요|되나요|될까요"
 )
+# The customer is not asking about the product -- they are telling us something
+# went wrong with their order. The three triggers above all detect a classifier
+# that is unsure; this one exists because "오베닉 스마트마운트 스탠드가
+# 안왔어요" was classified confidently (0.94) and answered with a description of
+# the stand's model line. Confidence was never the problem.
+#
+# The absence marker has to sit next to something that was ordered, or an
+# ordinary usage question ("전원 버튼을 찾을 수 없네요") would look like a
+# delivery complaint.
+# "안 왔다" says something about delivery and nothing else. Paired with
+# anything that was ordered, it is a report.
+_DID_NOT_ARRIVE = re.compile(
+    r"안왔|안옴|못받|미수령|누락|빠[졌진]|안들어있|들어있지않|안들었"
+    r"|동봉안|미배송|미발송|안보내|오지않"
+)
+# "없어요" is not about delivery at all -- "전원 버튼을 찾을 수 없네요" is a
+# usage question. It only reads as a missing item beside a part of the order
+# that can be counted, never beside a bare "제품".
+_ABSENT = re.compile(r"없어요|없습니다|없네요|없던데|안보[여이]")
+_ORDERED_THING = re.compile(
+    r"스탠드|스텐드|거치대|리모컨|리모콘|케이블|브라켓|사은품|구성품|부속|부품"
+    r"|어댑터|아답터|전원선|받침|나사|볼트|설명서|배터리|마운트|선반|멀티탭"
+    r"|셋탑|셋톱|옵션|상품|제품|물건|티비|tv|모니터|본체"
+)
+_COMPONENT = re.compile(
+    r"스탠드|스텐드|거치대|리모컨|리모콘|케이블|브라켓|사은품|구성품|부속|부품"
+    r"|어댑터|아답터|전원선|받침|나사|볼트|설명서|배터리|마운트|선반|멀티탭"
+    r"|셋탑|셋톱|옵션"
+)
 
 TRIGGER_STATE_ACTION_CONFLICT = "STATE_AND_ACTION_COMPETE"
 TRIGGER_UNCLASSIFIED = "CLASSIFIER_HAS_NO_ACTION"
 TRIGGER_DEADLINE = "DEADLINE_CONSTRAINT"
+TRIGGER_ORDER_PROBLEM = "ORDER_PROBLEM_REPORTED"
 
 # Recorded when the router would have called, and the answer was already
 # being held for some other reason. See AnswerService for why that makes
@@ -376,6 +415,11 @@ def route(
 
     if is_delivery_deadline_question(question):
         reasons.append(TRIGGER_DEADLINE)
+
+    if (_DID_NOT_ARRIVE.search(text) and _ORDERED_THING.search(text)) or (
+        _ABSENT.search(text) and _COMPONENT.search(text)
+    ):
+        reasons.append(TRIGGER_ORDER_PROBLEM)
 
     # "manual_review_required is already set, so a person will see it" was
     # tried here as a way to skip the call, and measurement rejected it: the

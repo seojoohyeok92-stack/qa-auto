@@ -934,7 +934,20 @@ class AnswerEngine:
                     return self.no_answer("배터리/케이블", "M5 배터리 단자 불일치는 케이블 오발송 가능성이 있어 직원 응대가 필요합니다.")
                 return self.yes("배터리호환", self.config.models["battery_rules"]["m5_answer"], "M5 전 모델 배터리 호환 안내입니다.")
 
-        if any(k in q for k in ["오베닉", "몇세대", "세대"]):
+        # The rule's own reason says "오베닉/FMS 세대 문의" -- a question about
+        # which generation the stand is. The condition did not ask for one: the
+        # brand name alone was enough. "오베닉 스마트마운트 스탠드가 안왔어요"
+        # therefore received a description of the stand's model line, told the
+        # customer nothing about their missing stand, and passed every gate
+        # (validator PASS, coverage PASS via 스탠드, eligibility SAFE).
+        #
+        # A brand name is not a question about the brand. What makes this the
+        # right answer is the customer asking which model or generation it is,
+        # so that is what the condition now requires.
+        asks_which_model = any(
+            k in q for k in ["몇세대", "세대", "모델", "버전", "종류", "어떤것", "어떤거"]
+        )
+        if asks_which_model and any(k in q for k in ["오베닉", "몇세대", "세대", "스탠드", "스텐드"]):
             return self.yes("스탠드모델", self.config.models["stand_rules"]["obenic_fms_answer"], "오베닉/FMS 세대 문의 안내입니다.")
 
         is_stand_product = any(k in p for k in ["스탠드", "스텐드", "거치대", "fms", "삼탠바이미"])

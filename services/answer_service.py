@@ -329,6 +329,23 @@ def _neutral_gpt_context(
     )
 
 
+# What staff are told when the pipeline declines to draft. The message has to
+# name the actual policy: a missing shipment shown as "고위험·분쟁" sends the
+# reader looking for a dispute that is not there.
+_POLICY_BLOCK_MESSAGES = {
+    "EMPTY_QUESTION": "빈 문의라 자동 Draft를 생성하지 않습니다.",
+    "HIGH_RISK_OR_DISPUTE": (
+        "고위험·분쟁 문의 정책에 따라 자동 Draft를 생성하지 않고 직원 검토로 "
+        "넘깁니다."
+    ),
+    "MISSING_ITEM_REPORT": (
+        "상품·구성품 누락·미수령 신고입니다. 실제 출고·구성품 확인이 필요해 "
+        "자동 답변을 생성하지 않으며, 네이버에는 미답변으로 남습니다. "
+        "직원 확인이 필요합니다."
+    ),
+}
+
+
 class AnswerService:
     def __init__(
         self,
@@ -1509,11 +1526,10 @@ class AnswerService:
                 self.logs.record_inquiry(
                     inquiry_id,
                     "ANSWER_POLICY_BLOCKED",
-                    (
-                        "빈 문의라 자동 Draft를 생성하지 않습니다."
-                        if policy_reason == "EMPTY_QUESTION"
-                        else "고위험·분쟁 문의 정책에 따라 자동 Draft를 "
-                        "생성하지 않고 직원 검토로 넘깁니다."
+                    _POLICY_BLOCK_MESSAGES.get(
+                        policy_reason,
+                        "정책에 따라 자동 Draft를 생성하지 않고 직원 검토로 "
+                        "넘깁니다.",
                     ),
                     level="WARNING",
                     details={

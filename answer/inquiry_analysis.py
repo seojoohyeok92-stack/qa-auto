@@ -135,7 +135,13 @@ class InquiryAnalysis:
     def can_generate_answer(self) -> bool:
         """Whether the pipeline has a safe answer route for this inquiry."""
 
-        if self.inquiry_subtype in {"EMPTY_QUESTION", "HIGH_RISK_OR_DISPUTE"}:
+        # MISSING_ITEM_REPORT joins these because no wording resolves it. What
+        # the customer needs is someone checking the outbound record, and an
+        # automatic reply of any kind marks the inquiry answered on Naver --
+        # removing it from the list staff use to find the ones still open.
+        if self.inquiry_subtype in {
+            "EMPTY_QUESTION", "HIGH_RISK_OR_DISPUTE", "MISSING_ITEM_REPORT",
+        }:
             return False
         return True
 

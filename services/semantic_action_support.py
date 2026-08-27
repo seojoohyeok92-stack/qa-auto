@@ -91,6 +91,13 @@ ANSWER_ACTION_SUPPORT: dict[str, frozenset[str]] = {
     "제품정보/구성품확인": frozenset({PACKAGE_CONTENTS}),
     "제품사용": frozenset({PRODUCT_CONCEPT, PRODUCT_SPEC}),
     "방송시청": frozenset({PRODUCT_CONCEPT}),
+    # Which model the stand is. It answers a question about the product and
+    # says nothing about whether one arrived, which is how it came to answer
+    # "오베닉 스마트마운트 스탠드가 안왔어요".
+    "스탠드모델": frozenset({PRODUCT_SPEC, PRODUCT_CONCEPT}),
+    "스탠드호환": frozenset({INSTALLATION_METHOD, PRODUCT_SPEC}),
+    "스탠드사용법": frozenset({INSTALLATION_METHOD, PRODUCT_CONCEPT}),
+    "배터리호환": frozenset({PRODUCT_SPEC, PACKAGE_CONTENTS}),
 }
 
 # Routes that identify what an answer is about even when no template label
