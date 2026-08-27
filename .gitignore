@@ -68,3 +68,7 @@ diagnose_*_output.txt
 
 # 운영 데이터가 담긴 Excel Export 결과물 (scripts/export_qa_learning_excel.py)
 exports/
+
+# Single-inquiry diagnostic exports. Masked, but still customer text:
+# they are produced to be read and deleted, not versioned.
+diagnostics/
