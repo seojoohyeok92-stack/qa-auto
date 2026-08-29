@@ -23,10 +23,24 @@ The invariant these pin, in both directions:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from answer.answer_format import korean_date
+
+# The DPS schedule these doubles report must not sit before the day the
+# inquiry was registered: is_schedule_stale() then correctly refuses to present
+# it, the answer cannot confirm a date, and eligibility falls to
+# REVIEW_REQUIRED. Pinning a literal date made that true only until the day
+# passed -- these tests began failing when UTC rolled past 2026-08-28. The
+# fixture now states what it always meant, "an appointment still ahead",
+# and derives the Korean rendering from the same value.
+UPCOMING_DATE = (
+    datetime.now(timezone.utc) + timedelta(days=1)
+).strftime("%Y-%m-%d")
+UPCOMING_DATE_KR = korean_date(UPCOMING_DATE)
 
 from answer.engine import AnswerEngine
 from answer.source_adapter import answer_request_from_inquiry
@@ -424,8 +438,8 @@ class _FakeDps:
         self.calls.append(request.order_id)
         request.metadata["dps"] = {
             "lookup_required": True, "lookup_status": "SUCCESS",
-            "installation_date": "2026-08-28",
-            "installation_date_display": "2026-08-28",
+            "installation_date": UPCOMING_DATE,
+            "installation_date_display": UPCOMING_DATE,
             "delivery_status": "구매요청", "installation_status": "구매요청",
             "change_request": False, "general_segments": [],
             "dps_segments": [], "warnings": [], "cache_used": True,

@@ -27,13 +27,24 @@ cache/
 *.sqlite
 *.sqlite3
 
-# The Product Knowledge database is shipped with the code: it is a versioned,
-# read-only knowledge source built by a separate project, not runtime state,
-# and the server needs it to answer product-specification questions. This is
-# the ONLY database that belongs in the repository -- the operational DB, its
-# WAL/SHM sidecars and every backup stay excluded by the rules above, so a
-# deploy can never overwrite the server's live data with a development copy.
-!data/product_facts.db
+# The Product Knowledge database used to be shipped with the code, and this is
+# where the exception that allowed it lived. It no longer is. The artifact
+# built by the Product Facts project grew from 57 MiB to 135 MiB, past the
+# 100 MiB file that GitHub refuses outright, so the repository can no longer
+# carry it even if we wanted to.
+#
+# It is now a manually deployed artifact rather than a tracked file:
+#
+#   상품DB PC  builds and quality-gates the database, and publishes its SHA-256
+#   개발 PC    holds a byte-identical copy at data/product_facts.db
+#   서버 PC    receives the same file by hand, verified by the same SHA-256
+#
+# Nothing about how the code reads it changed -- ProductFactRepository still
+# opens data/product_facts.db read-only, and OJE_PRODUCT_FACTS_DB_PATH still
+# overrides that path. What changed is that git pull no longer delivers or
+# removes the file, so a deploy cannot silently replace the knowledge base.
+# The *.db rule above already covers it, along with the versioned copies and
+# the pre-switch backups kept beside it.
 
 data/backups/
 data/dps_agent_state.json

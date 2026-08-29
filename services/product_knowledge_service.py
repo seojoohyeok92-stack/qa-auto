@@ -42,6 +42,48 @@ ACTIVE = "ACTIVE"
 # they never become answer evidence.
 UNUSABLE_VOLATILITY = frozenset({"DYNAMIC_LISTING_FACT"})
 
+# ``listings.collection_status`` is written by the collector as exactly one of
+# two values (see the Product DB collector: a page that answers with a product
+# body is COLLECTION_SUCCESS, anything else is COLLECTION_FAILED). Only the
+# first means "this listing was read as it stands today".
+COLLECTION_SUCCESS = "COLLECTION_SUCCESS"
+
+# What a listing that could not be read today may still be quoted for.
+# A panel's size, ports and dimensions do not change when the listing stops
+# being collectible, so static product facts survive and are still judged by
+# every other condition. The listing's *own* terms do not survive: delivery
+# cutoffs, return windows, service phone numbers and partner status describe an
+# offer that is no longer confirmed to exist, and stating a stale one to a
+# customer is a promise the seller may not be able to keep.
+STALE_WHEN_NOT_CURRENT = frozenset({
+    "DYNAMIC_LISTING_FACT", "SEMI_STATIC_POLICY_FACT",
+})
+
+# Who made it, who brands it, where it was made. These three answer questions
+# about identity, and identity is the one thing a package listing cannot lend
+# to the things bundled inside it.
+IDENTITY_FIELDS = frozenset({"brand", "manufacturer", "country_of_origin"})
+
+# Words that name something bundled with the display rather than the display.
+# Deliberately short and literal: this list only decides whether to *withhold*
+# an identity value, never what to answer.
+COMPONENT_TERMS = (
+    "셋톱박스", "셋탑박스", "set-top", "stb", "스탠드", "거치대", "받침대",
+    "모니터암", "브라켓", "브래킷", "액세서리", "악세서리", "부속품", "구성품",
+)
+
+# The customer pointing at the listing itself ("이 스탠드", "본 상품"). A
+# stand-only listing's own brand question must keep working, and this is the
+# wording that distinguishes it from asking about a bundled part.
+SELF_REFERENCE_MARKERS = ("이 ", "본 ", "해당 ", "이번 ")
+
+# Samsung sells these as product lines, and the Product DB stores them in
+# ``brand`` beside real makers -- brand is "오디세이" for 8 listings and "삼성"
+# for 63. A line name in brand therefore proves the line, never the maker.
+PRODUCT_LINE_TERMS = (
+    "오디세이", "스마트모니터", "스마트 모니터", "무빙스타일", "무빙 스타일",
+)
+
 # Fields whose name marks them as belonging to the bundled accessory rather
 # than the display itself. A package listing carries both, and answering a
 # question about the monitor with the stand's VESA value (or the reverse) is
@@ -116,8 +158,25 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
     (("웹브라우저", "브라우저", "인터넷 사용"), ("web_browser",), ()),
     (("모델명", "모델코드", "모델 코드", "품번", "모델번호"),
      ("model_name", "model_code", "part_number"), ()),
-    (("제조사", "브랜드", "made in", "원산지", "제조국"),
-     ("manufacturer", "brand", "country_of_origin"), ()),
+    # brand, manufacturer and country_of_origin answer three different
+    # questions and are kept apart. "브랜드가 뭐예요" must not be answered with
+    # the manufacturing company, and -- the reason this split exists -- "삼성
+    # 제품인가요" must not be answered from brand, because brand holds product
+    # lines like 오디세이 as often as it holds a maker's name.
+    (("브랜드",), ("brand",), ()),
+    (("제조사", "제조원", "만든 곳", "만든곳", "made in", "제조업체"),
+     ("manufacturer",), ()),
+    (("원산지", "제조국", "생산지", "어디서 만든", "어디서 생산"),
+     ("country_of_origin",), ()),
+    # "삼성 제품인가요" / "삼성전자에서 나온 건가요" -- an identity question
+    # about the maker, which only manufacturer can settle.
+    (("삼성 제품", "삼성제품", "삼성전자 제품", "삼성전자제품",
+      "삼성에서 만든", "삼성전자에서 만든", "삼성 정품", "삼성정품"),
+     ("manufacturer",), ()),
+    # Product-line questions ("오디세이 맞나요"). brand and model_name are the
+    # only two places a line name is recorded; whether either actually carries
+    # the asked line is checked after retrieval, in _product_line_reason.
+    (PRODUCT_LINE_TERMS, ("brand", "model_name"), ()),
     (("인증", "kc", "인증번호"), ("certification_number",), ()),
     (("출시", "연식", "언제 나온"), ("release_month", "manufacture_date"),
      ("accessory_release_month",)),
@@ -195,6 +254,11 @@ class ProductKnowledgeResult:
     excluded_facts: tuple[ProductFact, ...] = ()
     unavailable_reason: str | None = None
     topics: tuple[str, ...] = dataclass_field(default=())
+    # Which listing state the facts were judged against, and whether the
+    # question was read as being about a bundled component. Both are recorded
+    # so a diagnostic can say *why* a fact was withheld without re-deriving it.
+    collection_status: str | None = None
+    component_subject: bool = False
 
     @property
     def has_safe_facts(self) -> bool:
@@ -269,6 +333,8 @@ class ProductKnowledgeResult:
             "safe_count": len(self.safe_facts),
             "excluded_count": len(self.excluded_facts),
             "unavailable_reason": self.unavailable_reason,
+            "collection_status": self.collection_status,
+            "component_subject": self.component_subject,
         }
 
 
@@ -336,6 +402,49 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
             continue
         fields.extend(accessory_fields)
     return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(topics))
+
+
+def asks_about_a_bundled_component(question: object) -> bool:
+    """Whether the question's subject is something bundled, not the listing.
+
+    A package listing carries one brand and one manufacturer, and they describe
+    what the seller lists -- not what is in the box beside it. Listing
+    11848813000 is sold as "삼성 85인치 4K UHD 스마트 비즈니스TV+OTT 구글TV
+    셋탑박스" with brand 삼성 / manufacturer 삼성전자, while the set-top box
+    that ships with it is SHAKS, made by 이노피아테크. Answering "셋톱박스도
+    삼성인가요?" from the listing's own identity states the wrong maker.
+
+    The listing's product type cannot decide this: three of the four listings
+    classified SETTOP_ACCESSORY are television packages, not set-top boxes. So
+    the decision is made from the question, and it is made fail-closed --
+    naming a component withholds the listing identity unless the customer
+    points at the listing itself ("이 스탠드", "본 상품"), which is how a
+    stand-only or set-top-only listing keeps answering its own brand question.
+    """
+
+    text = " ".join(str(question or "").lower().split())
+    if not text:
+        return False
+    mentioned = [term for term in COMPONENT_TERMS if term in text]
+    if not mentioned:
+        return False
+    for term in mentioned:
+        for marker in SELF_REFERENCE_MARKERS:
+            if marker + term in text:
+                return False
+    return True
+
+
+def _product_line_terms_in(question: object) -> tuple[str, ...]:
+    text = " ".join(str(question or "").lower().split())
+    return tuple(term for term in PRODUCT_LINE_TERMS if term in text)
+
+
+def _mentions_line(value: Any, terms: Iterable[str]) -> bool:
+    """Whether a stored value spells out one of the asked product lines."""
+
+    rendered = _render_value(value).lower().replace(" ", "")
+    return any(str(term).lower().replace(" ", "") in rendered for term in terms)
 
 
 def _explicit_accessory_vesa_scope(text: str) -> bool:
@@ -510,8 +619,16 @@ class ProductKnowledgeService:
         safe: list[ProductFact] = []
         excluded: list[ProductFact] = []
         expected_model = str(model_code or "").strip().upper() or None
+        collection_status = str(listing.get("collection_status") or "") or None
+        component_subject = asks_about_a_bundled_component(combined)
+        product_lines = _product_line_terms_in(combined)
         for row in rows:
-            fact = self._judge(row, provenance, expected_model=expected_model)
+            fact = self._judge(
+                row, provenance, expected_model=expected_model,
+                collection_status=collection_status,
+                component_subject=component_subject,
+                product_lines=product_lines,
+            )
             (safe if fact.safe_for_answer else excluded).append(fact)
         return ProductKnowledgeResult(
             product_id=key,
@@ -521,6 +638,8 @@ class ProductKnowledgeService:
             topics=topics,
             safe_facts=tuple(safe),
             excluded_facts=tuple(excluded),
+            collection_status=collection_status,
+            component_subject=component_subject,
         )
 
     # ------------------------------------------------------------------
@@ -545,6 +664,9 @@ class ProductKnowledgeService:
         provenance: dict[tuple[str, str], list[dict[str, Any]]],
         *,
         expected_model: str | None,
+        collection_status: str | None = None,
+        component_subject: bool = False,
+        product_lines: tuple[str, ...] = (),
     ) -> ProductFact:
         field_key = str(row.get("field") or "")
         fact_id = str(row.get("canonical_fact_id") or "")
@@ -565,6 +687,10 @@ class ProductKnowledgeService:
         reason = self._exclusion_reason(
             row=row, value=value, provenance=rows_provenance,
             expected_model=expected_model, row_model=row_model,
+            collection_status=collection_status,
+            component_scope=component_scope,
+            component_subject=component_subject,
+            product_lines=product_lines,
         )
         return ProductFact(
             product_id=str(row.get("product_id") or ""),
@@ -596,6 +722,10 @@ class ProductKnowledgeService:
         provenance: Sequence[dict[str, Any]],
         expected_model: str | None,
         row_model: str | None,
+        collection_status: str | None = None,
+        component_scope: str = BASE_DEVICE_SCOPE,
+        component_subject: bool = False,
+        product_lines: tuple[str, ...] = (),
     ) -> str | None:
         """The first condition this fact fails, or None when usable."""
 
@@ -606,8 +736,17 @@ class ProductKnowledgeService:
         resolution = str(row.get("resolution_status") or "").upper()
         if resolution in UNUSABLE_RESOLUTIONS:
             return f"RESOLUTION_{resolution}"
-        if str(row.get("volatility") or "") in UNUSABLE_VOLATILITY:
+        volatility = str(row.get("volatility") or "")
+        if volatility in UNUSABLE_VOLATILITY:
             return "VOLATILE_LISTING_FACT"
+        # The listing could not be read as it stands today -- it was delisted,
+        # blocked or otherwise unreadable at collection time. Anything that
+        # describes the listing rather than the product is no longer current.
+        # Unknown, empty and unexpected statuses take this branch too: a status
+        # we cannot recognise is not evidence that the listing is live.
+        if str(collection_status or "").strip().upper() != COLLECTION_SUCCESS:
+            if volatility in STALE_WHEN_NOT_CURRENT:
+                return "COLLECTION_STATUS_NOT_CURRENT"
         if not row.get("selected_value_id"):
             return "NO_SELECTED_VALUE"
         if _is_empty(value):
@@ -628,6 +767,27 @@ class ProductKnowledgeService:
             return "PROVENANCE_NOT_VERIFIED"
         if expected_model and row_model and expected_model != row_model:
             return "MODEL_SCOPE_MISMATCH"
+        # The conditions above ask "is this fact sound?". The two below ask
+        # "does this fact answer *this* question?", so they run last, on a fact
+        # already known to be verified and backed.
+        field_key = str(row.get("field") or "")
+        # A bundled component's maker is not the listing's maker. Withheld, not
+        # denied: the field simply becomes unknown for this question.
+        if (
+            component_subject
+            and component_scope == BASE_DEVICE_SCOPE
+            and field_key in IDENTITY_FIELDS
+        ):
+            return "COMPONENT_SUBJECT_UNRESOLVED"
+        # A product-line question may only be grounded by a stored value that
+        # actually spells the line out. Absence stays unknown and never becomes
+        # "this is not an 오디세이".
+        if (
+            product_lines
+            and field_key in {"brand", "model_name"}
+            and not _mentions_line(value, product_lines)
+        ):
+            return "PRODUCT_LINE_NOT_IN_VALUE"
         return None
 
 

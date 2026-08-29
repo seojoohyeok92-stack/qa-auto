@@ -388,15 +388,45 @@ def test_real_db_sample_product_resolves_verified_specs():
 
 @real_db
 def test_real_db_absent_field_stays_absent():
-    """Coverage gaps must surface as 'unknown', never as a usable fact."""
+    """Coverage gaps must surface as 'unknown', never as a usable fact.
+
+    The gap is found at run time rather than named here. This test used to
+    assert that product 10194603339 had no verified HDMI port count -- true of
+    one artifact, and false of the next one, which collected that very number.
+    A coverage hole that happens to exist today is not a contract; what the
+    store must never do is turn *any* hole into a claim. So the test asks the
+    shipped database which holes it currently has and checks the rule against
+    those.
+    """
 
     service = ProductKnowledgeService(ProductFactRepository(REAL_DB))
-    result = service.facts_for_inquiry(
-        product_id="10194603339", question="HDMI 단자가 몇 개인가요?"
+    connection = sqlite3.connect(
+        REAL_DB.resolve().as_uri() + "?mode=ro", uri=True
     )
-    # This listing has hdmi_present but no verified port count.
-    assert "hdmi_port_count" not in result.safe_field_keys()
-    assert "없" not in result.evidence_text()
+    try:
+        products = [row[0] for row in connection.execute(
+            "SELECT product_id FROM listings ORDER BY product_id")]
+    finally:
+        connection.close()
+
+    questions = {
+        "hdmi_port_count": "HDMI 단자가 몇 개인가요?",
+        "vesa_mm": "베사 규격이 어떻게 되나요?",
+        "weight_with_stand_kg": "무게가 얼마인가요?",
+        "bluetooth_version": "블루투스 되나요?",
+    }
+    checked = 0
+    for product_id in products:
+        for field, question in questions.items():
+            result = service.facts_for_inquiry(
+                product_id=product_id, question=question)
+            if not result.matched or field in result.safe_field_keys():
+                continue  # not a gap for this product
+            checked += 1
+            text = (result.evidence_text() + result.prompt_block()).lower()
+            for negative in ("없습니다", "미지원", "지원하지", "not supported"):
+                assert negative not in text, (product_id, field, negative)
+    assert checked, "shipped DB has no coverage gap left to check"
 
 
 @real_db

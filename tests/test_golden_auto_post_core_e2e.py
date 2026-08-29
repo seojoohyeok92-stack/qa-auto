@@ -7,10 +7,24 @@ AutomaticDraftService, eligibility and AutoPostPipelineService.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from answer.answer_format import korean_date
+
+# The DPS schedule these doubles report must not sit before the day the
+# inquiry was registered: is_schedule_stale() then correctly refuses to present
+# it, the answer cannot confirm a date, and eligibility falls to
+# REVIEW_REQUIRED. Pinning a literal date made that true only until the day
+# passed -- these tests began failing when UTC rolled past 2026-08-28. The
+# fixture now states what it always meant, "an appointment still ahead",
+# and derives the Korean rendering from the same value.
+UPCOMING_DATE = (
+    datetime.now(timezone.utc) + timedelta(days=1)
+).strftime("%Y-%m-%d")
+UPCOMING_DATE_KR = korean_date(UPCOMING_DATE)
 
 from api.naver_answer_client import NaverAnswerResponse
 from answer.models import AnswerRequest, AnswerResult, AnswerStatus
@@ -103,7 +117,7 @@ class RecordingOrderLookup:
 
 
 class RecordingDps:
-    def __init__(self, *, date: str = "2026-08-28") -> None:
+    def __init__(self, *, date: str = UPCOMING_DATE) -> None:
         self.date = date
         self.calls = 0
         self.skip_calls = 0

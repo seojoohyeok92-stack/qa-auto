@@ -19,10 +19,24 @@ succeeded must never end with an empty Program Answer.**
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from answer.answer_format import korean_date
+
+# The DPS schedule these doubles report must not sit before the day the
+# inquiry was registered: is_schedule_stale() then correctly refuses to present
+# it, the answer cannot confirm a date, and eligibility falls to
+# REVIEW_REQUIRED. Pinning a literal date made that true only until the day
+# passed -- these tests began failing when UTC rolled past 2026-08-28. The
+# fixture now states what it always meant, "an appointment still ahead",
+# and derives the Korean rendering from the same value.
+UPCOMING_DATE = (
+    datetime.now(timezone.utc) + timedelta(days=1)
+).strftime("%Y-%m-%d")
+UPCOMING_DATE_KR = korean_date(UPCOMING_DATE)
 
 from answer.inquiry_analysis import (
     AnswerStrategy,
@@ -181,7 +195,7 @@ OPERATIONAL_ROWS = [
         ("dispatch", "문의", "모니터 언제 발송되나요?"),
     ],
 )
-@pytest.mark.parametrize("installation_date", [None, "2026-08-28"])
+@pytest.mark.parametrize("installation_date", [None, UPCOMING_DATE])
 def test_dps_success_always_produces_an_answer(
     case: str, title: str, question: str, installation_date: str | None
 ) -> None:
@@ -219,11 +233,11 @@ def test_compound_delivery_inquiry_is_routed_not_dropped(
 
 
 def test_confirmed_schedule_is_answered_from_dps() -> None:
-    result = route_with_dps("언제설치가능한가요?", installation_date="2026-08-28")
+    result = route_with_dps("언제설치가능한가요?", installation_date=UPCOMING_DATE)
 
     assert source_of(result) == "dps"
     assert route_of(result) == "DELIVERY_WITH_INSTALLATION_DATE"
-    assert "2026년 8월 28일" in result.answer
+    assert UPCOMING_DATE_KR in result.answer
 
 
 def test_dps_success_without_a_confirmed_date_invents_nothing() -> None:
@@ -369,7 +383,7 @@ def test_validated_order_number_survives_the_delivery_routing() -> None:
     result = route_with_dps(
         f"주문번호 {ORDER_NUMBER}입니다. 배송 일정 문의",
         source_type="PRODUCT_INQUIRY",
-        installation_date="2026-08-28",
+        installation_date=UPCOMING_DATE,
     )
     assert route_of(result) != "ORDER_ID_REQUEST"
     assert result.answer.strip()
@@ -391,7 +405,7 @@ def test_delivery_routing_never_returns_an_unroutable_source() -> None:
     """
 
     for lookup_status in ("SUCCESS", "PENDING", "NOT_STARTED", "UNKNOWN_STATE"):
-        for date in (None, "2026-08-28"):
+        for date in (None, UPCOMING_DATE):
             for question in (
                 "언제쯤 배송이 될까요? 아직 출발도 안해서 연락드려봅니다.",
                 "배송 일정 문의",
@@ -507,7 +521,7 @@ def generate(database, inquiry_id: int, dps_metadata: dict[str, Any]):
 
 
 @pytest.mark.parametrize(("case", "title", "question"), OPERATIONAL_ROWS)
-@pytest.mark.parametrize("installation_date", [None, "2026-08-28"])
+@pytest.mark.parametrize("installation_date", [None, UPCOMING_DATE])
 def test_program_answer_is_never_empty_after_dps_success(
     database, case: str, title: str, question: str, installation_date: str | None
 ) -> None:
@@ -536,11 +550,11 @@ def test_confirmed_date_reaches_the_draft_and_clears_eligibility(database) -> No
         database, "E2E-CONFIRMED", question="언제설치가능한가요?"
     )
 
-    generate(database, inquiry_id, dps_success("2026-08-28"))
+    generate(database, inquiry_id, dps_success(UPCOMING_DATE))
 
     draft = AnswerRepository(database).latest_for_inquiry(inquiry_id)
     assert draft is not None
-    assert "2026년 8월 28일" in draft["original_answer"]
+    assert UPCOMING_DATE_KR in draft["original_answer"]
 
     inquiry = InquiryRepository(database).get(inquiry_id)
     eligibility = AutoProcessingEligibilityService().evaluate(
@@ -599,7 +613,7 @@ def test_no_order_number_asks_for_it_without_touching_dps(database) -> None:
     inquiry_id = store_inquiry(
         database, "E2E-NO-ORDER", question="언제 발송되나요?", order_id=None
     )
-    stub = _StubDps(dps_success("2026-08-28"))
+    stub = _StubDps(dps_success(UPCOMING_DATE))
 
     AnswerService(
         database, dps_enrichment=stub, hybrid_service=_ForbiddenHybrid()
@@ -621,7 +635,7 @@ def test_product_order_id_alone_is_not_treated_as_an_order_number(database) -> N
         order_id=None,
         product_order_id="2026082198559811",
     )
-    stub = _StubDps(dps_success("2026-08-28"))
+    stub = _StubDps(dps_success(UPCOMING_DATE))
 
     AnswerService(
         database, dps_enrichment=stub, hybrid_service=_ForbiddenHybrid()
@@ -636,7 +650,7 @@ def test_already_answered_inquiry_is_blocked_by_idempotency(database) -> None:
     inquiry_id = store_inquiry(
         database, "E2E-ANSWERED", question="언제설치가능한가요?"
     )
-    generate(database, inquiry_id, dps_success("2026-08-28"))
+    generate(database, inquiry_id, dps_success(UPCOMING_DATE))
     draft = AnswerRepository(database).latest_for_inquiry(inquiry_id)
 
     inquiry = dict(InquiryRepository(database).get(inquiry_id))

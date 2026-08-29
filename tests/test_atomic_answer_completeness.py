@@ -24,10 +24,24 @@ never makes it publishable.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from answer.answer_format import korean_date
+
+# The DPS schedule these doubles report must not sit before the day the
+# inquiry was registered: is_schedule_stale() then correctly refuses to present
+# it, the answer cannot confirm a date, and eligibility falls to
+# REVIEW_REQUIRED. Pinning a literal date made that true only until the day
+# passed -- these tests began failing when UTC rolled past 2026-08-28. The
+# fixture now states what it always meant, "an appointment still ahead",
+# and derives the Korean rendering from the same value.
+UPCOMING_DATE = (
+    datetime.now(timezone.utc) + timedelta(days=1)
+).strftime("%Y-%m-%d")
+UPCOMING_DATE_KR = korean_date(UPCOMING_DATE)
 
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
@@ -276,8 +290,8 @@ class _FakeDps:
         self.calls.append(request.order_id)
         request.metadata["dps"] = {
             "lookup_required": True, "lookup_status": "SUCCESS",
-            "installation_date": "2026-08-28",
-            "installation_date_display": "2026-08-28",
+            "installation_date": UPCOMING_DATE,
+            "installation_date_display": UPCOMING_DATE,
             "delivery_status": "구매요청", "installation_status": "구매요청",
             "change_request": False, "general_segments": [],
             "dps_segments": [], "warnings": [], "cache_used": True,
@@ -447,7 +461,7 @@ def test_case_g_order_number_still_uses_dps(tmp_path) -> None:
     result = run(tmp_path, "G", "언제설치가능한가요?", order_id=ORDER_NUMBER)
 
     assert result["dps_calls"] == [ORDER_NUMBER]
-    assert "2026년 8월 28일" in result["answer"]
+    assert UPCOMING_DATE_KR in result["answer"]
     assert result["validation_status"] == "PASS"
     assert result["auto_post_allowed"] is True
     assert result["completeness"].get("completed") is False

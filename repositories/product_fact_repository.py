@@ -13,10 +13,12 @@ place and cannot be bypassed by a caller that queries the tables directly.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,43 @@ class ProductFactRepository:
 
     def available(self) -> bool:
         return self.path.is_file()
+
+    def identity(self, *, digest: bool = False) -> dict[str, Any]:
+        """Which Product Facts artifact this process is actually reading.
+
+        The knowledge base is a file that gets replaced, and two copies with
+        the same name can be months apart: the development machine ran for
+        weeks on a snapshot taken before a normalization pass, and nothing in
+        the running system could say so. Path, size and mtime answer that
+        cheaply enough to record on every diagnostic.
+
+        ``digest`` reads the whole file to produce a SHA-256, which is the only
+        way to prove two copies are the same artifact. It is off by default
+        because the file is ~57 MB: ask for it in a diagnostic, never on the
+        answering path.
+        """
+
+        info: dict[str, Any] = {
+            "path": str(self.path),
+            "available": self.available(),
+            "size_bytes": None,
+            "modified_at": None,
+            "sha256": None,
+        }
+        if not info["available"]:
+            return info
+        stat = self.path.stat()
+        info["size_bytes"] = stat.st_size
+        info["modified_at"] = datetime.fromtimestamp(
+            stat.st_mtime, tz=timezone.utc
+        ).isoformat(timespec="seconds")
+        if digest:
+            hasher = hashlib.sha256()
+            with self.path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            info["sha256"] = hasher.hexdigest()
+        return info
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

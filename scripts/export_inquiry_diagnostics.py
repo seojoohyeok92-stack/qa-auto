@@ -562,6 +562,30 @@ def evidence_section(
     }
 
 
+def knowledge_db_identity() -> dict[str, Any]:
+    """Which Product Facts artifact this machine would answer from.
+
+    Recorded because the same filename can hold months-apart copies, and a
+    diagnostic that cannot name the artifact cannot explain a wrong fact. The
+    digest is what actually identifies it -- two copies called
+    ``product_facts.db`` are the same artifact only when it matches.
+
+    No row of the database is read, and the directory is left out: the export
+    names a file, never a machine. The configured path can be absolute, so only
+    its final component is emitted.
+    """
+
+    try:
+        from repositories.product_fact_repository import ProductFactRepository
+
+        repository = ProductFactRepository()
+        info = repository.identity(digest=repository.available())
+        info["file"] = Path(info.pop("path")).name
+        return info
+    except Exception as error:  # noqa: BLE001 - a diagnostic never fails hard
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
 def product_fact_section(metadata: Mapping[str, Any]) -> dict[str, Any]:
     guard = metadata.get("product_fact_guard")
     guard = guard if isinstance(guard, Mapping) else {}
@@ -573,7 +597,9 @@ def product_fact_section(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "current_fact_source": guard.get("current_fact_source"),
         "claims_supported": facts if isinstance(facts, (list, dict, bool))
         else NOT_AVAILABLE,
-        "note": "identifiers and verdicts only; product_facts.db is not read",
+        "knowledge_db": knowledge_db_identity(),
+        "note": "identifiers, verdicts and the artifact fingerprint; "
+                "product_facts.db is not read",
     }
 
 
