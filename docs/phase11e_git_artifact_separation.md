@@ -310,28 +310,176 @@ missing item / diagnostic export / stale DPS / DPS 날짜 4개 파일 — 총 18
 
 ## 14. 전체 테스트
 
-(아래에서 갱신)
+```
+3526 passed in 1077.85s (0:17:57)
+```
+
+**3,526 passed / 0 failed / 0 skipped.**
+
+기존 테스트를 삭제하거나 skip 처리해서 0 failed를 만들지 않았습니다 —
+Phase 11-D에서 DPS 날짜 fixture의 wall-clock 의존을 제거한 결과이며,
+그 4개 테스트는 지금도 `SAFE` 기대값을 그대로 단언합니다.
 
 ---
 
 ## 15. DB 무변경
 
-(아래에서 갱신)
+테스트 실행 후 재확인.
+
+| 파일 | size | SHA-256 | 판정 |
+|---|---|---|---|
+| `data/product_facts.db` | 142,131,200 | `e0cdd363…6f55a078` | **불변** |
+| `data/product_facts_final.db` | 142,131,200 | `e0cdd363…6f55a078` | **불변** |
+| `data/product_facts_before_phase11d_…db` | 60,170,240 | `cddf3082…ac82ac4c` | **불변** |
+
+mtime도 작업 시작 시점과 동일하며, WAL/SHM/journal 잔여 파일은 없습니다.
+구버전 백업을 포함해 **어느 파일도 삭제하지 않았습니다.**
 
 ---
 
 ## 16. Staged 파일 / Commit / Push
 
-(아래에서 갱신)
+### Staged 검증
+
+대상 파일을 **명시적으로 지정해 stage**했습니다(`git add .` 미사용).
+
+| 유형 | 건수 | 내용 |
+|---|---|---|
+| A (추가) | 7 | 보고서 6개 + `tests/test_product_facts_safety_gate_11b.py` |
+| M (수정) | 9 | `.gitignore`, production 3개, tests 5개 |
+| **D (삭제)** | **1** | **`data/product_facts.db` — index에서만 제거** |
+
+금지 항목 검사에서 `data/product_facts.db`가 걸렸으나 **삭제(D) 항목**이며,
+§26이 예상한 tracked → untracked 전환입니다. §7의 서버 pull 안전 분석을 마치고
+§17의 보호 절차를 확정한 뒤 진행했습니다.
+
+- 추가·수정되는 파일 중 `.db` **없음**
+- staged blob 최대 크기 **61,944 bytes** (`docs/phase11a_…md`)
+- **100 MB 이상 staged 파일 없음**
+- `.env`, 운영 `oje_automation` DB, WAL/SHM/journal, `diagnostics/` 모두 미포함
+
+### Commit
+
+```
+b70b4aa  26.8.30 - Product Facts 최종 DB 연동 및 Safety Gate 적용
+17 files changed, 4591 insertions(+), 35 deletions(-)
+```
+
+저장소의 기존 커밋 관례(`Co-Authored-By` / `Claude-Session` trailer)를 따르기 위해
+push 전 로컬 커밋에 trailer를 추가했습니다. 공개된 history는 건드리지 않았습니다.
+
+### Push
+
+```
+To https://github.com/seojoohyeok92-stack/qa-auto.git
+   3950e8b..b70b4aa  main -> main
+```
+
+| 검증 | 결과 |
+|---|---|
+| HEAD == origin/main | `b70b4aa` **동일** |
+| `git status` | **clean** |
+| 원격 HEAD에 `data/product_facts.db` | **없음** |
+| `git ls-files data/` | **0건** |
+| 개발 PC 디스크의 DB 3개 | **전부 존재, SHA 불변** |
+
+force push는 사용하지 않았습니다.
 
 ---
 
 ## 17. 서버 PC 다음 절차
 
-(아래에서 갱신)
+**이번 Phase에서는 서버를 건드리지 않았습니다.** 아래는 §7 실험으로 검증한 절차입니다.
+
+### 결론: pull 전에 DB를 반드시 별도 보호해야 합니다
+
+서버의 `data/product_facts.db`는 추적 중이던 구버전 위에 최종 DB를 수동 복사한 상태이므로
+Git에게는 **locally modified tracked file**입니다. 이 상태에서 `git pull`을 하면
+시나리오 1대로 **pull이 중단**됩니다(DB는 보존되지만 코드 업데이트를 못 받음).
+그리고 만약 어떤 이유로 파일이 HEAD와 동일했다면 시나리오 2대로 **조용히 삭제**됩니다.
+
+### 권장 순서
+
+```bash
+cd <서버 저장소 경로>
+
+# 0) 현재 DB 지문 기록
+sha256sum data/product_facts.db
+#    기대: e0cdd3639cb4f0c5f9bc3f2d1f3c4caf020deca45b9144590614e4bc6f55a078
+
+# 1) 저장소 '밖'으로 백업  (저장소 안에 두면 pull이 지울 수 있음)
+cp data/product_facts.db ~/product_facts_keep.db
+sha256sum ~/product_facts_keep.db          # 위와 동일한지 확인
+
+# 2) tracked 파일의 로컬 수정을 되돌려 pull 차단을 해제
+git checkout -- data/product_facts.db
+#    이 시점 data/product_facts.db 는 '구버전'으로 되돌아갑니다. 정상입니다.
+
+# 3) pull  (Git이 data/product_facts.db 를 삭제합니다 — 예정된 동작)
+git pull origin main
+
+# 4) 디렉터리 보장 후 최종 DB 복원
+mkdir -p data
+cp ~/product_facts_keep.db data/product_facts.db
+
+# 5) 검증
+sha256sum data/product_facts.db
+#    e0cdd3639cb4f0c5f9bc3f2d1f3c4caf020deca45b9144590614e4bc6f55a078 이어야 함
+git status                                  # clean (DB는 ignored)
+git ls-files data/                          # 0건
+git log -1 --oneline                        # b70b4aa
+```
+
+3단계에서 Git이 **`data/` 디렉터리째 삭제**할 수 있습니다(추적/미추적 파일이 하나도 남지 않을 때).
+서버의 `data/`에는 운영 DB 등 다른 파일이 있어 남을 가능성이 높지만,
+4단계의 `mkdir -p data`가 어느 쪽이든 안전하게 만듭니다.
+
+### 주의
+
+- `git reset --hard` / `git clean` **금지** — 백업 전 실행하면 DB를 잃습니다
+- 2단계를 건너뛰면 pull이 실패하며 멈춥니다(데이터 손실은 없음)
+- 이후부터는 `data/product_facts.db`가 ignored이므로, 다음 pull부터는 이 절차가 필요 없습니다
 
 ---
 
-## 18. 잔여 위험 / 최종 판정
+## 18. 잔여 위험
 
-(아래에서 갱신)
+**MEDIUM — 서버 최초 pull 1회에 수동 절차 필요**
+§17의 절차를 거치지 않으면 pull이 실패하거나(현 상태) DB가 삭제됩니다(미수정 상태).
+**이번 전환에서 한 번만** 필요하며, 이후 pull은 DB를 건드리지 않습니다.
+
+**MEDIUM — Git history에 남은 60 MiB blob**
+`4696d20`이 담은 구버전 DB는 history에 그대로 남습니다.
+clone 용량에 영향을 주지만 push는 정상 동작합니다(이미 원격에 존재).
+history rewrite는 이번 범위 밖이며, 필요하면 별도로 결정해야 합니다.
+
+**MEDIUM — artifact 배포가 수동 절차에 의존**
+DB가 Git 밖으로 나가면서 "어느 PC가 어느 버전을 쓰는지"를 사람이 관리하게 됩니다.
+완화 수단은 이미 있습니다 — `ProductFactRepository.identity(digest=True)`와
+단건 진단 export의 `knowledge_db` 지문으로 실행 중인 artifact를 확인할 수 있습니다.
+
+**LOW — `set_top_box_*` 필드와 R2 gate의 개념 불일치**
+구성품 고유 사실이 32개 상품에 있으나 `component_scope`가 `accessory_` 접두사만 인식합니다.
+현재 매핑돼 있지 않아 무해하지만, 매핑 전 설계가 필요합니다.
+
+**LOW — `CUSTOMER_INQUIRY` 1,110건의 `product_id` 부재**
+Naver 고객문의 API 응답에 상품 식별자가 없어 Product Facts 조회가 불가능한 구조적 한계입니다.
+
+---
+
+## 19. 최종 판정
+
+# PHASE 11-E READY — Product Facts DB Git 분리 및 코드 배포 완료
+
+§34의 실패 조건을 하나씩 대조합니다.
+
+| 실패 조건 | 결과 |
+|---|---|
+| Product Facts DB hash 변경 | 없음 — 3개 파일 모두 시작 시점과 동일 |
+| Final DB 손상 | 없음 — `integrity_check` 정상, SHA 일치 |
+| Product Facts safety regression | 없음 — 관련 18개 파일 735 passed |
+| 설명되지 않은 전체 테스트 실패 | 없음 — **3,526 passed / 0 failed / 0 skipped** |
+| 민감정보 포함 | 절대경로 5건 발견·제거, 재검사 잔여 0 |
+| 100 MB+ binary staged | 없음 — 최대 61,944 bytes |
+| 서버 pull DB 손실 위험에 보호절차 불명확 | 실험으로 3개 시나리오 재현, §17 절차 검증 완료 |
+| Phase 11과 무관한 사용자 변경 혼입 | 없음 — 시작 시점 G·H 분류가 비어 있었음 |
