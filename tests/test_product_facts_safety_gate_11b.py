@@ -422,14 +422,22 @@ def test_real_db_package_listing_does_not_lend_its_maker_to_the_set_top_box():
 
 
 @real_db
-def test_real_db_topic_map_only_requests_static_fields():
-    """Why the collection gate is defence in depth, not a live repair.
+def test_real_db_every_requestable_listing_scoped_field_is_gated():
+    """A listing-scoped field a question can reach must be gated, not merely
+    present.
 
-    Measured, not assumed: every field FIELD_TOPICS is willing to request is
-    STATIC_PRODUCT_FACT in the shipped database. Nothing a customer question
-    can reach today is listing-scoped, so the gate below it never fires. It
-    becomes load-bearing the moment someone adds a delivery, price or policy
-    topic to the map -- and this test will then start reporting which one.
+    This replaces an assertion that FIELD_TOPICS requested only
+    STATIC_PRODUCT_FACT fields. That was true of the map as first written, and
+    it was recorded with a note saying the collection gate "becomes
+    load-bearing the moment someone adds a delivery, price or policy topic --
+    and this test will then start reporting which one". It duly reported
+    ``installation_method``, added so that "설치는 어떻게 하나요?" can be
+    answered.
+
+    So the check moves onto the contract the gate actually owes: for every
+    requestable field that describes the listing rather than the hardware,
+    a listing that no longer collects must refuse it. That is stricter than
+    the old assertion, which only described what the map happened to contain.
     """
 
     from services.product_knowledge_service import FIELD_TOPICS
@@ -440,6 +448,7 @@ def test_real_db_topic_map_only_requests_static_fields():
         requested.update(accessory_fields)
 
     repository = ProductFactRepository(REAL_DB)
+    service = ProductKnowledgeService(repository)
     with repository.connection() as connection:
         volatility = {
             row[0]: row[1] for row in connection.execute(
@@ -447,12 +456,67 @@ def test_real_db_topic_map_only_requests_static_fields():
                 "WHERE lifecycle_status = 'ACTIVE'"
             )
         }
+        uncollected = [
+            row["product_id"] for row in connection.execute(
+                "SELECT product_id FROM listings "
+                "WHERE collection_status IS NULL "
+                "   OR collection_status <> 'COLLECTION_SUCCESS'"
+            )
+        ]
+
     listing_scoped = {
-        field: volatility[field] for field in requested
-        if field in volatility
-        and volatility[field] != "STATIC_PRODUCT_FACT"
+        field for field in requested
+        if volatility.get(field) not in (None, "STATIC_PRODUCT_FACT")
     }
-    assert listing_scoped == {}, listing_scoped
+
+    for product_id in uncollected:
+        listing = repository.listing_for_product(product_id)
+        rows = [row for row in repository.facts_for_product(product_id)
+                if row["field"] in listing_scoped]
+        provenance = service._provenance_for(rows)
+        for row in rows:
+            fact = service._judge(
+                row, provenance, expected_model=None,
+                collection_status=listing["collection_status"],
+            )
+            assert not fact.safe_for_answer, (product_id, row["field"])
+            assert fact.exclusion_reason in {
+                "COLLECTION_STATUS_NOT_CURRENT", "VOLATILE_LISTING_FACT",
+            }, (product_id, row["field"], fact.exclusion_reason)
+
+
+@real_db
+def test_real_db_uncollected_listing_refuses_the_installation_method_question():
+    """The first customer question that reaches the collection gate.
+
+    ``installation_method`` is SEMI_STATIC_POLICY_FACT: it describes how this
+    listing is installed, not what the panel is. On the delisted listing it
+    must be withheld even though it is VERIFIED, while that listing's static
+    specifications keep answering.
+    """
+
+    repository = ProductFactRepository(REAL_DB)
+    service = ProductKnowledgeService(repository)
+    with repository.connection() as connection:
+        uncollected = [
+            row["product_id"] for row in connection.execute(
+                "SELECT product_id FROM listings "
+                "WHERE collection_status <> 'COLLECTION_SUCCESS'"
+            )
+        ]
+
+    for product_id in uncollected:
+        result = service.facts_for_inquiry(
+            product_id=product_id, question="설치는 어떻게 하나요?")
+        assert "installation_method" not in result.safe_field_keys()
+        held = {item.field_key: item.exclusion_reason
+                for item in result.excluded_facts}
+        if "installation_method" in held:
+            assert held["installation_method"] == "COLLECTION_STATUS_NOT_CURRENT"
+        # the same listing still answers a hardware question
+        hardware = service.facts_for_inquiry(
+            product_id=product_id, question="화면 몇 인치예요?")
+        assert hardware.safe_field_keys(), product_id
 
 
 @real_db

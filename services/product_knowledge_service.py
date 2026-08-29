@@ -59,10 +59,15 @@ STALE_WHEN_NOT_CURRENT = frozenset({
     "DYNAMIC_LISTING_FACT", "SEMI_STATIC_POLICY_FACT",
 })
 
-# Who made it, who brands it, where it was made. These three answer questions
-# about identity, and identity is the one thing a package listing cannot lend
-# to the things bundled inside it.
-IDENTITY_FIELDS = frozenset({"brand", "manufacturer", "country_of_origin"})
+# Who made it, who brands it, where it was made, and what it is called. These
+# answer questions about identity, and identity is the one thing a package
+# listing cannot lend to the things bundled inside it. The model fields joined
+# the set once "리모컨 모델명이 뭐예요?" was seen returning the television's
+# model_name -- the right field for the wrong subject.
+IDENTITY_FIELDS = frozenset({
+    "brand", "manufacturer", "country_of_origin",
+    "model_name", "model_code", "part_number",
+})
 
 # Words that name something bundled with the display rather than the display.
 # Deliberately short and literal: this list only decides whether to *withhold*
@@ -70,6 +75,7 @@ IDENTITY_FIELDS = frozenset({"brand", "manufacturer", "country_of_origin"})
 COMPONENT_TERMS = (
     "셋톱박스", "셋탑박스", "set-top", "stb", "스탠드", "거치대", "받침대",
     "모니터암", "브라켓", "브래킷", "액세서리", "악세서리", "부속품", "구성품",
+    "리모컨", "리모콘",
 )
 
 # The customer pointing at the listing itself ("이 스탠드", "본 상품"). A
@@ -135,8 +141,52 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
     (("색재현", "색영역", "ntsc", "srgb", "색상표현"),
      ("color_gamut_ntsc_percent",), ()),
     (("hdr",), ("hdr_standard", "hdr10_plus"), ()),
-    (("소비전력", "전력", "전기세", "소비 전력"),
+    # "전기 얼마나 먹나요" is the same question as "소비전력이 얼마인가요"; the
+    # phrasing is kept whole rather than keyed on "전기" alone, which would also
+    # catch 전기 케이블 and 전기 코드. power_consumption_dpms_w (standby) stays
+    # out: it answers a different question than typical/max draw.
+    (("소비전력", "전력", "전기세", "소비 전력", "전기 얼마나", "전기 많이",
+      "전기 요금", "전기요금"),
      ("power_consumption_typical_w", "power_consumption_max_w"), ()),
+    # Which cable is in the box is not how much electricity the panel uses.
+    (("전원 케이블", "전원케이블", "파워 케이블", "전원선"),
+     ("power_cable_included", "power_cable_length_m"), ()),
+    (("hdmi 케이블", "hdmi케이블"), ("hdmi_cable_included",), ()),
+    # "리모컨 포함인가요" is answerable; "리모컨이 안 왔어요" is a missing-item
+    # report and is refused upstream. Only the inclusion phrasings are keyed,
+    # never the bare word, so the two never share a route.
+    (("리모컨 포함", "리모콘 포함", "리모컨 들어", "리모콘 들어",
+      "리모컨 동봉", "리모콘 동봉", "리모컨도 주", "리모컨도 오",
+      "리모컨도 같이", "리모콘도 같이", "리모컨도 배송", "리모컨 같이 오"),
+     ("remote_control_included",), ()),
+    # "휴대폰이랑 연결돼요?" does not name a method. Bluetooth, mirroring and
+    # wireless display are all legitimate readings, so every connection fact
+    # the product actually has is offered rather than one guessed for it.
+    (("휴대폰 연결", "휴대폰이랑 연결", "휴대폰과 연결", "핸드폰 연결",
+      "스마트폰 연결", "폰 연결", "휴대폰 연동", "핸드폰 연동"),
+     ("bluetooth_present", "bluetooth_version", "screen_mirroring",
+      "wireless_display", "mobile_wireless_connection"), ()),
+    (("폰 화면", "휴대폰 화면", "핸드폰 화면", "스마트폰 화면"),
+     ("screen_mirroring", "mirroring_without_wifi", "wireless_display"), ()),
+    # A named service and the category are different claims. "OTT 지원" must
+    # never be read as "YouTube 지원", so each keys only the field that can
+    # actually say so.
+    (("유튜브", "youtube"), ("youtube_supported",), ()),
+    (("넷플릭스", "넷플"), ("ott_supported_services",), ()),
+    (("ott", "오티티"), ("ott_supported", "ott_supported_services"), ()),
+    (("tv플러스", "tv 플러스", "티비플러스", "티비 플러스"), ("tv_plus",), ()),
+    # How the product is installed is a product fact. When it is installed is
+    # the customer's own order, which stays with DPS -- so the phrasings here
+    # all name the method, never a date or a visit.
+    # installation_method holds PROFESSIONAL_TECHNICIAN_REQUIRED for 35
+    # products, which is exactly what "기사님이 설치해주시나요?" asks. The
+    # phrasings name who installs or how -- never when, so "기사님 언제
+    # 오나요?" keeps going to DPS.
+    (("설치 방법", "설치방법", "어떻게 설치", "설치는 어떻게", "설치 방식",
+      "자가 설치", "자가설치", "설치 어떻게",
+      "기사님이 설치", "기사가 설치", "기사님이 해주", "기사님 설치해",
+      "기사님이 오셔서 설치", "설치기사", "설치 기사"),
+     ("installation_method", "package_professional_installation"), ()),
     (("에너지", "등급", "1등급"), ("energy_efficiency_grade",), ()),
     (("플리커", "깜빡"), ("flicker_free",), ()),
     (("눈부심", "아이세이버", "시력보호", "블루라이트"),
