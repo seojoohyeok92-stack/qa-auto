@@ -7,6 +7,12 @@ from typing import Any
 import streamlit as st
 
 from core.time_utils import format_datetime_kst, format_datetime_minute_kst, to_kst
+from answer.learning_feedback import (
+    CORRECTION_REASON_LABELS,
+    EXCLUSION_REASON_LABELS,
+    CorrectionReason,
+    ExclusionReason,
+)
 from answer.learning_signal import SIGNAL_KIND_LABELS
 from repositories.database import Database
 from repositories.learning_feedback_repository import LearningFeedbackRepository
@@ -37,6 +43,12 @@ SIGNAL_FILTER_LABELS = {
     "INTENT_CORRECTION": "의도 교정",
     "EXCLUDED": "학습 제외",
 }
+
+LEARNING_STATE_BADGES = (
+    ("Positive", "positive"),
+    ("Negative", "negative"),
+    ("학습 제외", "excluded"),
+)
 
 DEFAULT_COLUMNS = (
     "문의일시",
@@ -239,6 +251,21 @@ def _learning_answer(row: dict[str, Any]) -> str:
         or row.get("original_answer_masked")
         or ""
     )
+
+
+def _feedback_reason_summary(row: dict[str, Any]) -> str:
+    code = str(row.get("correction_reason") or "").strip()
+    signal = str(row.get("learning_signal_type") or "").upper()
+    label = code or "-"
+    try:
+        if signal == "EXCLUDED":
+            label = EXCLUSION_REASON_LABELS[ExclusionReason(code)]
+        else:
+            label = CORRECTION_REASON_LABELS[CorrectionReason(code)]
+    except ValueError:
+        pass
+    note = str(row.get("correction_note") or "").strip()
+    return f"{label} ({code})" + (f" · {note}" if note else "")
 
 
 def _display_row(row: dict[str, Any]) -> dict[str, str]:
@@ -451,6 +478,14 @@ def _render_details(
         )
         st.write(f"상품명: {row.get('inquiry_product_name') or row.get('product_name') or '-'}")
         st.write(f"문의유형: {_inquiry_type_label(row)}")
+        if row.get("learning_signal_type"):
+            st.markdown("**Feedback Reason**")
+            st.write(_feedback_reason_summary(row))
+            if not row.get("active"):
+                st.write(
+                    "취소 사유: "
+                    + str(metadata.get("revoke_reason") or "기록 없음")
+                )
         st.markdown("**질문 원문**")
         st.write(_question(row) or "-")
         st.markdown("**실제 답변**")
@@ -507,6 +542,12 @@ def _render_details(
                 "생성일": row.get("created_at") or "-",
                 "수정일": row.get("updated_at") or "-",
                 "revoke 여부": not bool(row.get("active")),
+                "Feedback Reason": (
+                    _feedback_reason_summary(row)
+                    if row.get("learning_signal_type") else "-"
+                ),
+                "revoke 사유": metadata.get("revoke_reason") or "-",
+                "revoke 처리자": metadata.get("revoked_by") or "-",
                 "운영 메모": row.get("validity_note") or "-",
                 "조건 metadata": row.get("condition_json") or {},
             },
@@ -737,6 +778,15 @@ def render_learning_manager(database: Database | None) -> None:
     st.caption(
         "Positive Learning과 Negative/의도 교정/학습 제외 상태를 실제 문의 접수시간 "
         "기준으로 조회하고 추적하는 운영 화면입니다."
+    )
+    st.markdown(
+        '<div class="learning-state-badges">'
+        + "".join(
+            f'<span class="learning-state-badge {tone}">{label}</span>'
+            for label, tone in LEARNING_STATE_BADGES
+        )
+        + "</div>",
+        unsafe_allow_html=True,
     )
     if database is None:
         st.warning("Learning Repository DB를 사용할 수 없습니다.")

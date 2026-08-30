@@ -3009,6 +3009,42 @@ input,
   color: #f3f7fb;
 }
 
+.learning-state-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 8px 0 12px;
+}
+
+.learning-state-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.learning-state-badge.positive {
+  color: #8ff0c9;
+  border-color: rgba(86, 219, 168, 0.45);
+  background: rgba(46, 160, 112, 0.16);
+}
+
+.learning-state-badge.negative {
+  color: #ff9c9c;
+  border-color: rgba(255, 105, 105, 0.48);
+  background: rgba(190, 55, 55, 0.17);
+}
+
+.learning-state-badge.excluded {
+  color: #c1ccd7;
+  border-color: rgba(147, 164, 183, 0.5);
+  background: rgba(113, 130, 148, 0.16);
+}
+
 .dashboard-build-footer {
   width: 100%;
   margin: 12px 0 2px;

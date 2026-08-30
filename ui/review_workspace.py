@@ -683,12 +683,20 @@ def _render_negative_learning_saved(
     reference_id = primary.get("original_answer_reference_id")
     note = str(primary.get("correction_note") or "-")
     corrected_intent = str(primary.get("corrected_intent") or "-")
+    metadata = primary.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    active = bool(primary.get("active"))
     saved_at = format_datetime_kst(
         primary.get("updated_at") or primary.get("created_at"), empty="-"
     )
+    revoke_details = (
+        f'<span>취소 사유 <b>{escape(str(metadata.get("revoke_reason") or "-"))}</b></span>'
+        f'<span>취소자 <b>{escape(str(metadata.get("revoked_by") or "-"))}</b></span>'
+        if not active else ""
+    )
     st.markdown(
         '<div class="negative-learning-saved-card">'
-        '<strong>Negative Learning 저장 완료</strong>'
+        f'<strong>{"Negative Learning 저장 완료" if active else "Negative 평가 취소됨"}</strong>'
         f'<span>Feedback ID <b>{escape(feedback_ids)}</b></span>'
         f'<span>Signal <b>{escape(signals)}</b></span>'
         f'<span>잘못된 이유 <b>{escape(reason_label)} ({escape(reason_code)})</b></span>'
@@ -697,6 +705,7 @@ def _render_negative_learning_saved(
         f'<span>Reference <b>{escape(str(reference_id))}</b></span>'
         f'<span>교정 Intent <b>{escape(corrected_intent)}</b></span>'
         f'<span>저장 시각 <b>{escape(saved_at)}</b></span>'
+        f'{revoke_details}'
         '<small>Learning Manager 검색 · '
         f'Inquiry {int(inquiry_id)} · Reference {escape(str(reference_id))} · '
         f'Feedback {escape(feedback_ids)}</small>'
@@ -705,7 +714,7 @@ def _render_negative_learning_saved(
     )
     st.caption(
         "Repository status: "
-        + ("ACTIVE" if primary.get("active") else "REVOKED")
+        + ("ACTIVE" if active else "REVOKED")
     )
 
 
@@ -1764,9 +1773,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 evaluation_reference_id = int(reference_value)
 
         negative_save = False
+        negative_revoke = False
         negative_reason = ""
         negative_note = ""
         negative_intent = ""
+        negative_revoke_reason = ""
         feedback_repository = LearningFeedbackRepository(database)
         active_identity_feedback = (
             feedback_repository.active_dashboard_feedback(
@@ -1816,7 +1827,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 for identity_source in approval_identity_sources
             )
         )
-        persisted_negative = (
+        active_negative = (
             feedback_repository.active_dashboard_evaluation(
                 inquiry_id=inquiry_id,
                 original_answer_source=evaluation_source,
@@ -1826,25 +1837,26 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             and evaluation_reference_id is not None
             else []
         )
+        display_negative = active_negative
         if (
-            not persisted_negative
+            not display_negative
             and evaluation_source is not None
             and evaluation_reference_id is not None
         ):
-            persisted_negative = feedback_repository.dashboard_feedback_history(
+            display_negative = feedback_repository.dashboard_feedback_history(
                 inquiry_id=inquiry_id,
                 original_answer_source=evaluation_source,
                 original_answer_reference_id=evaluation_reference_id,
                 signal_types=("NEGATIVE", "INTENT_CORRECTION"),
             )
-        if not persisted_negative:
-            persisted_negative = (
+        if not display_negative:
+            display_negative = (
                 feedback_repository.latest_active_dashboard_evaluation(
                     inquiry_id
                 )
             )
-        if not persisted_negative:
-            persisted_negative = [
+        if not display_negative:
+            display_negative = [
                 row
                 for row in reversed(feedback_repository.for_inquiry(inquiry_id))
                 if row.get("source") == "DASHBOARD_NEGATIVE_REVIEW"
@@ -1852,7 +1864,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 in {"NEGATIVE", "INTENT_CORRECTION"}
             ]
         _render_negative_learning_saved(
-            persisted_negative, inquiry_id=inquiry_id
+            display_negative, inquiry_id=inquiry_id
         )
         with st.expander("이 답변이 잘못됨", expanded=False):
             st.caption(
@@ -1867,55 +1879,75 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     else "현재 탭에 평가 가능한 답변 없음"
                 )
             )
-            negative_reason_label = st.selectbox(
-                "잘못된 이유",
-                ["선택하지 않음", *[
-                    CORRECTION_REASON_LABELS[reason]
-                    for reason in CorrectionReason
-                ]],
-                key=f"negative_reason_{inquiry_id}_{selected_view}",
-            )
-            selected_negative_reason = CORRECTION_REASON_BY_LABEL.get(
-                negative_reason_label
-            )
-            negative_reason = (
-                selected_negative_reason.value
-                if selected_negative_reason is not None
-                else ""
-            )
-            if selected_negative_reason is CorrectionReason.ROUTING_ERROR:
-                negative_intent_label = st.selectbox(
-                    "올바른 문의 유형",
-                    list(INTENT_OPTIONS.values()),
-                    key=f"negative_intent_{inquiry_id}_{selected_view}",
+            if active_negative:
+                negative_revoke_reason = st.text_input(
+                    "Negative 평가 취소 사유",
+                    key=f"negative_revoke_reason_{inquiry_id}_{selected_view}",
+                    max_chars=1_000,
                 )
-                negative_intent = next(
-                    code
-                    for code, label in INTENT_OPTIONS.items()
-                    if label == negative_intent_label
+                negative_revoke_confirmed = st.checkbox(
+                    "이 Negative 평가를 취소합니다.",
+                    key=f"negative_revoke_confirm_{inquiry_id}_{selected_view}",
                 )
-            negative_note = st.text_input(
-                "Negative 상세 메모 (선택)",
-                key=f"negative_note_{inquiry_id}_{selected_view}",
-            )
-            (
-                negative_signal_kind, negative_signal_content,
-                negative_fact_scope,
-            ) = _structured_signal_input(
-                key_prefix=f"negative_{inquiry_id}_{selected_view}",
-                allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
-            )
-            negative_save = st.button(
-                "Negative Learning 저장",
-                disabled=(
-                    evaluation_source is None
-                    or evaluation_reference_id is None
-                    or not negative_reason
-                    or evaluation_conflict_active
-                ),
-                key=f"negative_save_{inquiry_id}_{selected_view}",
-                width="stretch",
-            )
+                negative_revoke = st.button(
+                    "Negative 평가 취소",
+                    disabled=(
+                        not str(negative_revoke_reason or "").strip()
+                        or not negative_revoke_confirmed
+                    ),
+                    key=f"negative_revoke_{inquiry_id}_{selected_view}",
+                    width="stretch",
+                )
+            else:
+                negative_reason_label = st.selectbox(
+                    "잘못된 이유",
+                    ["선택하지 않음", *[
+                        CORRECTION_REASON_LABELS[reason]
+                        for reason in CorrectionReason
+                    ]],
+                    key=f"negative_reason_{inquiry_id}_{selected_view}",
+                )
+                selected_negative_reason = CORRECTION_REASON_BY_LABEL.get(
+                    negative_reason_label
+                )
+                negative_reason = (
+                    selected_negative_reason.value
+                    if selected_negative_reason is not None
+                    else ""
+                )
+                if selected_negative_reason is CorrectionReason.ROUTING_ERROR:
+                    negative_intent_label = st.selectbox(
+                        "올바른 문의 유형",
+                        list(INTENT_OPTIONS.values()),
+                        key=f"negative_intent_{inquiry_id}_{selected_view}",
+                    )
+                    negative_intent = next(
+                        code
+                        for code, label in INTENT_OPTIONS.items()
+                        if label == negative_intent_label
+                    )
+                negative_note = st.text_input(
+                    "Negative 상세 메모 (선택)",
+                    key=f"negative_note_{inquiry_id}_{selected_view}",
+                )
+                (
+                    negative_signal_kind, negative_signal_content,
+                    negative_fact_scope,
+                ) = _structured_signal_input(
+                    key_prefix=f"negative_{inquiry_id}_{selected_view}",
+                    allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
+                )
+                negative_save = st.button(
+                    "Negative Learning 저장",
+                    disabled=(
+                        evaluation_source is None
+                        or evaluation_reference_id is None
+                        or not negative_reason
+                        or evaluation_conflict_active
+                    ),
+                    key=f"negative_save_{inquiry_id}_{selected_view}",
+                    width="stretch",
+                )
 
         excluded_save = False
         excluded_revoke = False
@@ -2384,6 +2416,15 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 signal_kind=negative_signal_kind,
                 signal_content=negative_signal_content,
                 fact_scope=negative_fact_scope,
+            )
+            st.rerun()
+        if negative_revoke:
+            LearningFeedbackService(database).revoke_dashboard_negative(
+                inquiry_id=inquiry_id,
+                original_answer_source=str(evaluation_source),
+                original_answer_reference_id=int(evaluation_reference_id),
+                reason=negative_revoke_reason,
+                actor=actor,
             )
             st.rerun()
         if generate:

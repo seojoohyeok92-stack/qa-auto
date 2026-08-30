@@ -154,6 +154,23 @@ class LearningSignalRepository:
                 WHERE ls.active=1
                   AND ls.confirmation_status NOT IN ('REJECTED','SUPERSEDED')
                   AND (ls.store_code=? OR ls.store_code IS NULL OR ? IS NULL)
+                  AND (
+                      ls.generation_mode<>'MANUAL'
+                      OR (
+                          (ls.learning_feedback_id IS NULL OR EXISTS (
+                              SELECT 1 FROM learning_feedback lf
+                              WHERE lf.id=ls.learning_feedback_id AND lf.active=1
+                          ))
+                          AND (ls.learning_example_id IS NULL OR EXISTS (
+                              SELECT 1 FROM learning_examples le
+                              WHERE le.id=ls.learning_example_id AND le.active=1
+                          ))
+                          AND (ls.historical_case_id IS NULL OR EXISTS (
+                              SELECT 1 FROM historical_cases hc
+                              WHERE hc.id=ls.historical_case_id AND hc.active=1
+                          ))
+                      )
+                  )
                   {kind_clause}
                 ORDER BY ls.created_at DESC
                 LIMIT ?

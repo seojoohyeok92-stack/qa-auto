@@ -544,6 +544,53 @@ class LearningFeedbackService:
             feedback_id=int(feedback_id), reason=reason, actor=actor
         )
 
+    def revoke_dashboard_negative(
+        self,
+        *,
+        inquiry_id: int,
+        original_answer_source: str | AnswerProvenance,
+        original_answer_reference_id: int,
+        reason: str,
+        actor: str = "직원",
+    ) -> list[dict[str, Any]]:
+        """Soft-revoke the active Negative evaluation for one exact answer."""
+
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            raise ValueError("Negative 평가 취소 사유를 입력해 주세요.")
+        provenance = AnswerProvenance(str(original_answer_source))
+        reference_id = int(original_answer_reference_id)
+        active = self.repository.active_dashboard_evaluation(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=provenance.value,
+            original_answer_reference_id=reference_id,
+        )
+        if not active:
+            history = self.repository.dashboard_feedback_history(
+                inquiry_id=int(inquiry_id),
+                original_answer_source=provenance.value,
+                original_answer_reference_id=reference_id,
+                signal_types=("NEGATIVE", "INTENT_CORRECTION"),
+            )
+            if history:
+                raise ValueError("이미 취소된 Negative 평가입니다.")
+            raise LookupError("취소할 활성 Negative 평가를 찾을 수 없습니다.")
+        changed = self.repository.deactivate_dashboard_evaluation(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=provenance.value,
+            original_answer_reference_id=reference_id,
+            reason=clean_reason,
+            actor=actor,
+        )
+        if changed != len(active):
+            raise RuntimeError("Negative 평가 상태가 이미 변경되었습니다. 화면을 새로고침해 주세요.")
+        return self.repository.dashboard_feedback_history(
+            inquiry_id=int(inquiry_id),
+            original_answer_source=provenance.value,
+            original_answer_reference_id=reference_id,
+            signal_types=("NEGATIVE", "INTENT_CORRECTION"),
+        )
+
     def capture_historical_review(
         self,
         *,

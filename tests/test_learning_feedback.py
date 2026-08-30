@@ -7,14 +7,19 @@ from answer.answer_provenance import AnswerProvenance
 from answer.models import AnswerResult, AnswerStatus
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
+from repositories.feedback_signal_provenance_repository import (
+    FeedbackSignalProvenanceRepository,
+)
 from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
+from repositories.learning_signal_repository import LearningSignalRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.approval_service import ApprovalService
 from services.historical_case_service import HistoricalCaseService
 from services.learning_feedback_service import LearningFeedbackService
+from services.learning_signal_service import LearningSignalService
 
 
 def make_context(tmp_path):
@@ -302,6 +307,107 @@ def test_dashboard_negative_duplicate_click_reuses_persisted_feedback(
     assert persisted[0]["correction_note"] == "최종 메모"
 
 
+def test_dashboard_negative_revoke_removes_runtime_influence_and_keeps_history(
+    tmp_path,
+) -> None:
+    import pytest
+
+    database, inquiry_id, draft = make_context(tmp_path)
+    service = LearningFeedbackService(database)
+    saved = service.capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=AnswerProvenance.PROGRAM_GENERATED,
+        original_answer_reference_id=draft["id"],
+        correction_reason=CorrectionReason.DELIVERY_INSTALLATION_ERROR,
+        correction_note="설치일 확인 없이 단정함",
+        actor="staff-negative",
+        signal_kind="BAD_PATTERN",
+        signal_content="설치일을 확인하지 않고 특정 날짜로 단정하지 말 것.",
+    )
+    signal_repository = LearningSignalRepository(database)
+    signal = signal_repository.for_inquiry(inquiry_id)[0]
+    signal_repository.record_confirmation(
+        learning_signal_id=int(signal["id"]),
+        inquiry_id=inquiry_id,
+        learning_feedback_id=int(saved[0]["id"]),
+        source_authority="STAFF_NEGATIVE_REVIEW",
+    )
+    signals = LearningSignalService(database)
+    related = signals.retrieve(
+        "설치일은 언제인가요?",
+        store_code="OJE_PLUS",
+        product_name="삼성 TV",
+    )
+    unrelated = signals.retrieve(
+        "리모컨 건전지는 무엇인가요?",
+        store_code="OJE_PLUS",
+        product_name="삼성 TV",
+    )
+    assert [row["id"] for row in related["bad_patterns"]] == [signal["id"]]
+    assert unrelated["bad_patterns"] == []
+
+    FeedbackSignalProvenanceRepository(database).record_context(
+        inquiry_id=inquiry_id,
+        context_run_id="negative-before-revoke",
+        signals=[
+            {
+                "signal_id": signal["id"],
+                "signal_kind": "BAD_PATTERN",
+                "source_label": "BAD_PATTERN",
+                "matched_subquestion": "설치일은 언제인가요?",
+            }
+        ],
+    )
+    revoked = service.revoke_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=AnswerProvenance.PROGRAM_GENERATED,
+        original_answer_reference_id=draft["id"],
+        reason="평가 대상을 잘못 선택함",
+        actor="staff-revoke",
+    )
+    assert revoked and all(row["active"] is False for row in revoked)
+    assert {row["metadata_json"]["status"] for row in revoked} == {"REVOKED"}
+    assert {row["metadata_json"]["revoke_reason"] for row in revoked} == {
+        "평가 대상을 잘못 선택함"
+    }
+    assert signals.retrieve(
+        "설치일은 언제인가요?",
+        store_code="OJE_PLUS",
+        product_name="삼성 TV",
+    )["bad_patterns"] == []
+    with database.connection() as connection:
+        confirmation_active = connection.execute(
+            "SELECT active FROM learning_signal_confirmations "
+            "WHERE learning_signal_id=?",
+            (int(signal["id"]),),
+        ).fetchone()[0]
+        provenance_count = connection.execute(
+            "SELECT COUNT(*) FROM answer_feedback_signal_provenance "
+            "WHERE context_run_id='negative-before-revoke'",
+        ).fetchone()[0]
+    assert confirmation_active == 0
+    assert provenance_count == 1
+
+    with pytest.raises(ValueError, match="이미 취소된"):
+        service.revoke_dashboard_negative(
+            inquiry_id=inquiry_id,
+            original_answer_source=AnswerProvenance.PROGRAM_GENERATED,
+            original_answer_reference_id=draft["id"],
+            reason="연속 클릭",
+        )
+    assert len(LearningFeedbackRepository(database).for_inquiry(inquiry_id)) == 1
+
+    ApprovalService(database).approve(
+        inquiry_id=inquiry_id, draft_id=draft["id"], actor="staff-positive"
+    )
+    assert LearningRepository(database).candidates(store_code="OJE_PLUS")
+
+    historical = make_historical_case(database)
+    assert HistoricalCaseRepository(database).candidates(
+        store_code="OJE_PLUS"
+    )[0]["id"] == historical["id"]
+
+
 def test_dashboard_routing_negative_creates_intent_correction(tmp_path) -> None:
     database, inquiry_id, draft = make_context(tmp_path)
     saved = LearningFeedbackService(database).capture_dashboard_negative(
@@ -415,6 +521,37 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     assert "Negative Learning 저장 완료" in fresh_rendered
     assert f"Feedback ID <b>{feedback[0]['id']}</b>" in fresh_rendered
     assert "확인되지 않은 배송일을 단정함" in fresh_rendered
+
+    fresh_app.segmented_control[0].set_value("Program Answer")
+    fresh_app.run(timeout=40)
+    revoke_reason = next(
+        item for item in fresh_app.text_input
+        if item.label == "Negative 평가 취소 사유"
+    )
+    revoke_reason.set_value("평가 대상을 잘못 선택함")
+    confirmation = next(
+        item for item in fresh_app.checkbox
+        if item.label == "이 Negative 평가를 취소합니다."
+    )
+    confirmation.check()
+    fresh_app.run(timeout=40)
+    revoke = next(
+        button for button in fresh_app.button
+        if button.label == "Negative 평가 취소"
+    )
+    assert revoke.disabled is False
+    revoke.click()
+    fresh_app.run(timeout=40)
+    assert not fresh_app.exception
+    revoked = LearningFeedbackRepository(database).for_inquiry(inquiry_id)
+    assert revoked[0]["active"] is False
+    assert revoked[0]["metadata_json"]["revoke_reason"] == "평가 대상을 잘못 선택함"
+    revoked_rendered = "\n".join(item.value for item in fresh_app.markdown)
+    assert "Negative 평가 취소됨" in revoked_rendered
+    assert "평가 대상을 잘못 선택함" in revoked_rendered
+    assert not any(
+        button.label == "Negative 평가 취소" for button in fresh_app.button
+    )
 
 
 def test_feedback_migration_is_idempotent_and_legacy_rows_remain_positive(

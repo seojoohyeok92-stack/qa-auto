@@ -573,11 +573,24 @@ class LearningFeedbackRepository:
         inquiry_id: int,
         original_answer_source: str,
         original_answer_reference_id: int,
+        reason: str,
+        actor: str,
     ) -> int:
+        """Soft-revoke one exact dashboard Negative evaluation group.
+
+        A routing correction can create both NEGATIVE and INTENT_CORRECTION
+        rows for the same evaluated answer.  They are one operator action, so
+        revoke them atomically and revoke only their signal confirmations.
+        """
+
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            raise ValueError("Negative 평가 취소 사유를 입력해 주세요.")
+        clean_actor = str(actor or "직원").strip() or "직원"
         with self.database.transaction() as connection:
             affected = connection.execute(
                 """
-                SELECT id FROM learning_feedback
+                SELECT id, metadata_json FROM learning_feedback
                 WHERE inquiry_id=? AND source='DASHBOARD_NEGATIVE_REVIEW'
                   AND original_answer_source=?
                   AND original_answer_reference_id=? AND active=1
@@ -588,35 +601,43 @@ class LearningFeedbackRepository:
                     int(original_answer_reference_id),
                 ),
             ).fetchall()
-            cursor = connection.execute(
-                """
-                UPDATE learning_feedback
-                SET active=0,
-                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE inquiry_id=? AND source='DASHBOARD_NEGATIVE_REVIEW'
-                  AND original_answer_source=?
-                  AND original_answer_reference_id=? AND active=1
-                """,
-                (
-                    int(inquiry_id),
-                    str(original_answer_source),
-                    int(original_answer_reference_id),
-                ),
-            )
-            # Mirror LearningRepository.revoke_human_verified: scope any
-            # Structured Signal confirmation revoke to exactly the feedback
-            # rows this undo affects (4th-phase requirement).
+            changed = 0
             for row in affected:
+                metadata = deserialize_json(row["metadata_json"])
+                metadata.update(
+                    {
+                        "status": "REVOKED",
+                        "revoke_reason": clean_reason[:1_000],
+                        "revoked_by": clean_actor,
+                    }
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE learning_feedback
+                    SET active=0, metadata_json=json_set(
+                            ?, '$.revoked_at',
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        ),
+                        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id=? AND active=1
+                    """,
+                    (serialize_json(metadata), int(row["id"])),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                changed += 1
+                # Preserve the signal and its old answer provenance while
+                # removing this feedback's current confirmation authority.
                 connection.execute(
                     """
                     UPDATE learning_signal_confirmations
-                    SET active=0, revoked_reason='NEGATIVE_EVALUATION_UNDONE',
+                    SET active=0, revoked_reason=?,
                         revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                     WHERE learning_feedback_id=? AND active=1
                     """,
-                    (int(row["id"]),),
+                    (f"NEGATIVE_EVALUATION_REVOKED: {clean_reason}"[:1_000], int(row["id"])),
                 )
-        return int(cursor.rowcount)
+        return changed
 
     def revoke_dashboard_exclusion(
         self, *, feedback_id: int, reason: str, actor: str

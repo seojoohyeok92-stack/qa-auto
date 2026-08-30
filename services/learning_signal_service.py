@@ -80,7 +80,9 @@ class LearningSignalService:
         if item.get("signal_kind") in {
             SignalKind.GOOD_PATTERN.value, SignalKind.BAD_PATTERN.value,
         }:
-            return True  # Non-factual guidance: low risk, eligible once active.
+            # Non-factual guidance goes live after its first confirmation, but
+            # revoking the last live source must remove its runtime influence.
+            return int(item.get("live_confirmation_count") or 0) > 0
         return (
             settings.auto_verified_promotion_enabled
             and int(item.get("live_confirmation_count") or 0)

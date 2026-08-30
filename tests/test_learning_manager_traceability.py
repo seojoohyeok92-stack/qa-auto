@@ -14,7 +14,9 @@ from services.approval_service import ApprovalService
 from services.learning_feedback_service import LearningFeedbackService
 from ui.learning_manager import (
     DEFAULT_COLUMNS,
+    LEARNING_STATE_BADGES,
     _display_row,
+    _feedback_reason_summary,
     _filter_rows,
     _inquiry_type_label,
     _learning_status_label,
@@ -270,6 +272,24 @@ def test_operator_labels_cover_status_type_number_and_kst() -> None:
     assert _inquiry_type_label({"inquiry_source_type": "PRODUCT_INQUIRY"}) == "상품문의"
     assert _inquiry_type_label({"inquiry_source_type": "CUSTOMER_INQUIRY"}) == "고객문의"
     assert _inquiry_type_label({"inquiry_source_type": "PARTNER_QNA"}) == "PARTNER_QNA"
+    assert LEARNING_STATE_BADGES == (
+        ("Positive", "positive"),
+        ("Negative", "negative"),
+        ("학습 제외", "excluded"),
+    )
+    assert _feedback_reason_summary(
+        {
+            "learning_signal_type": "NEGATIVE",
+            "correction_reason": "FACT_ERROR",
+            "correction_note": "잘못된 사실",
+        }
+    ) == "사실 오류 (FACT_ERROR) · 잘못된 사실"
+    assert _feedback_reason_summary(
+        {
+            "learning_signal_type": "EXCLUDED",
+            "correction_reason": "NOT_REUSABLE",
+        }
+    ) == "향후 재사용 부적절 (NOT_REUSABLE)"
 
     display = _display_row(
         {
@@ -328,6 +348,10 @@ render_learning_manager(db)
     )
     assert "Learning Manager" in rendered
     assert "조회하고" in rendered and "추적" in rendered
+    badge_markup = "\n".join(item.value for item in app.markdown)
+    assert 'learning-state-badge positive">Positive' in badge_markup
+    assert 'learning-state-badge negative">Negative' in badge_markup
+    assert 'learning-state-badge excluded">학습 제외' in badge_markup
     labels = {metric.label for metric in app.metric}
     assert {
         "저장된 Positive",
