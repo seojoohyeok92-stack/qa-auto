@@ -96,6 +96,29 @@ PRODUCT_LINE_TERMS = (
 # exactly the contamination this scope split exists to prevent.
 ACCESSORY_FIELD_PREFIX = "accessory_"
 
+# A reference to an installer can describe either the installation method or
+# the customer's appointment.  Date/time wording belongs to DPS/order routing
+# and must not request a static installation-method fact.
+INSTALLATION_SCHEDULE_MARKERS = (
+    "언제", "몇 시", "몇시", "날짜", "예정일", "내일", "오늘",
+    "방문 시간", "방문시간",
+)
+
+# The quantities a package listing measures twice, once per subject: the
+# display has a weight and a VESA pattern, and so does the stand bundled with
+# it. The field names keep them apart, but the customer's wording is what
+# decides which subject was asked about, so these fields may only be offered
+# when the question's subject matches the field's scope. "거치대가 몇 kg까지
+# 버티나요?" answered with the television's 5.5 kg is the failure this
+# prevents -- and the reverse, a plain "무게 알려주세요" answered with the
+# stand's load rating, is the same mistake pointing the other way.
+SUBJECT_SENSITIVE_FIELDS = frozenset({
+    "vesa_mm", "weight_with_stand_kg", "weight_without_stand_kg",
+    "package_weight_kg",
+    "accessory_vesa_mm", "accessory_weight_kg",
+    "accessory_package_weight_kg", "accessory_max_load_kg",
+})
+
 BASE_DEVICE_SCOPE = "BASE_DEVICE"
 ACCESSORY_SCOPE = "ACCESSORY"
 
@@ -183,7 +206,8 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
     # phrasings name who installs or how -- never when, so "기사님 언제
     # 오나요?" keeps going to DPS.
     (("설치 방법", "설치방법", "어떻게 설치", "설치는 어떻게", "설치 방식",
-      "자가 설치", "자가설치", "설치 어떻게",
+      "자가 설치", "자가설치", "직접 설치", "혼자 설치", "혼자서 설치",
+      "설치 어떻게",
       "기사님이 설치", "기사가 설치", "기사님이 해주", "기사님 설치해",
       "기사님이 오셔서 설치", "설치기사", "설치 기사"),
      ("installation_method", "package_professional_installation"), ()),
@@ -440,6 +464,11 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
     for keywords, base_fields, accessory_fields in FIELD_TOPICS:
         if not any(keyword in text for keyword in keywords):
             continue
+        if (
+            "installation_method" in base_fields
+            and any(marker in text for marker in INSTALLATION_SCHEDULE_MARKERS)
+        ):
+            continue
         topics.append(keywords[0])
         fields.extend(base_fields)
         # A bare "this product's VESA holes" means the base display even when
@@ -452,6 +481,24 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
             continue
         fields.extend(accessory_fields)
     return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(topics))
+
+
+# Wording that names a component in order to take it *out* of the question:
+# "스탠드 제외하고 본체 무게가 몇 kg인가요?" is asked about the display, and
+# the word 스탠드 appears only to say which part is not being weighed.
+EXCLUSION_MARKERS = ("제외", "빼고", "빼면", "없이", "미포함", "제거")
+
+
+def _is_excluded_mention(text: str, term: str) -> bool:
+    """Whether every mention of ``term`` is one the customer excluded."""
+
+    start = 0
+    while (index := text.find(term, start)) != -1:
+        tail = text[index + len(term):index + len(term) + 6]
+        if not any(marker in tail for marker in EXCLUSION_MARKERS):
+            return False
+        start = index + len(term)
+    return True
 
 
 def asks_about_a_bundled_component(question: object) -> bool:
@@ -475,7 +522,8 @@ def asks_about_a_bundled_component(question: object) -> bool:
     text = " ".join(str(question or "").lower().split())
     if not text:
         return False
-    mentioned = [term for term in COMPONENT_TERMS if term in text]
+    mentioned = [term for term in COMPONENT_TERMS
+                 if term in text and not _is_excluded_mention(text, term)]
     if not mentioned:
         return False
     for term in mentioned:
@@ -826,9 +874,19 @@ class ProductKnowledgeService:
         if (
             component_subject
             and component_scope == BASE_DEVICE_SCOPE
-            and field_key in IDENTITY_FIELDS
+            and field_key in IDENTITY_FIELDS | SUBJECT_SENSITIVE_FIELDS
         ):
             return "COMPONENT_SUBJECT_UNRESOLVED"
+        # And the same boundary from the other side. Nothing here was asked
+        # about the stand, so the stand's own weight -- or the load it is rated
+        # to carry, which is not a weight at all -- may not stand in for the
+        # display's. Withheld, never denied.
+        if (
+            not component_subject
+            and component_scope == ACCESSORY_SCOPE
+            and field_key in SUBJECT_SENSITIVE_FIELDS
+        ):
+            return "ACCESSORY_SUBJECT_NOT_ASKED"
         # A product-line question may only be grounded by a stored value that
         # actually spells the line out. Absence stays unknown and never becomes
         # "this is not an 오디세이".
