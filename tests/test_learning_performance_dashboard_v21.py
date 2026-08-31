@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from answer.models import AnswerResult, AnswerStatus
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_provenance_repository import LearningProvenanceRepository
 from repositories.learning_repository import LearningRepository
+from repositories.log_repository import LogRepository
 from repositories.post_review_repository import PostReviewRepository
 from services.learning_performance_service import LearningPerformanceService
 from services.learning_service import LearningService
@@ -139,6 +142,176 @@ def test_empty_performance_never_invents_rates(tmp_path: Path) -> None:
     assert data["current_30"]["correction_rate"] is None
     assert data["provenance"]["used"]["unchanged_rate"] is None
     assert data["trend"] == []
+    assert data["quality"]["current"]["generation_rate"] is None
+    assert data["quality"]["current"]["correction_rate"] is None
+    for days in (7, 30, 90):
+        quality = LearningPerformanceService(database).snapshot(
+            period_days=days
+        )["quality"]
+        assert quality["period_days"] == days
+        assert quality["current"]["processed"] == 0
+        assert quality["previous"]["generation_rate"] is None
+
+
+@pytest.mark.parametrize(
+    ("current", "previous", "higher_is_better", "expected", "color"),
+    [
+        (90.0, 80.0, True, "+10.0%p · 개선", "normal"),
+        (70.0, 80.0, True, "-10.0%p · 악화", "normal"),
+        (5.0, 10.0, False, "-5.0%p · 개선", "inverse"),
+        (12.0, 10.0, False, "+2.0%p · 악화", "inverse"),
+        (10.0, 10.0, False, "변화 없음", "off"),
+        (None, 10.0, False, "이전 기간 데이터 부족", "off"),
+    ],
+)
+def test_quality_metric_delta_direction(
+    current, previous, higher_is_better, expected, color
+) -> None:
+    from ui.learning_performance import _metric_delta
+
+    assert _metric_delta(
+        current, previous, higher_is_better=higher_is_better
+    ) == (expected, color)
+
+
+def _event(
+    database: Database, inquiry_id: int, code: str, *, days_ago: int = 0
+) -> None:
+    event_id = LogRepository(database).record_inquiry(
+        inquiry_id, code, "quality fixture"
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE activity_logs SET created_at=datetime('now', ?) WHERE id=?",
+            (f"-{days_ago} days", event_id),
+        )
+
+
+def _auto_post_attempt(
+    database: Database,
+    *,
+    inquiry_id: int,
+    draft_id: int,
+    key: str,
+    days_ago: int = 0,
+) -> None:
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO naver_post_attempts(
+              inquiry_id, answer_draft_id, idempotency_key, external_id,
+              store_code, source_type, method, endpoint_kind, status,
+              final_answer_hash, payload_hash, actor, started_at,
+              completed_at, auto_post_run_id
+            ) VALUES (?, ?, ?, ?, 'OJE_PLUS', 'PRODUCT_INQUIRY', 'POST',
+                      'PRODUCT_INQUIRY', 'POSTED', 'answer-hash',
+                      'payload-hash', 'SYSTEM_AUTO_POST', datetime('now', ?),
+                      datetime('now', ?), ?)
+            """,
+            (
+                inquiry_id, draft_id, f"attempt-{key}", key,
+                f"-{days_ago} days", f"-{days_ago} days", f"run-{key}",
+            ),
+        )
+
+
+def test_operator_quality_kpis_use_durable_period_sources(tmp_path: Path) -> None:
+    database = Database(tmp_path / "quality-kpi.db")
+    database.initialize()
+
+    current_posted, current_draft, current_version = _post(database, "current-posted")
+    PostReviewService(database).complete_without_change(
+        inquiry_id=current_posted, actor="tester"
+    )
+    _event(database, current_posted, "AUTO_ANSWER_STARTED")
+    _event(database, current_posted, "AUTO_ANSWER_SUCCEEDED")
+    _auto_post_attempt(
+        database, inquiry_id=current_posted, draft_id=current_draft,
+        key="current-posted",
+    )
+
+    current_corrected, _, current_corrected_version = _post(
+        database, "current-corrected"
+    )
+    PostReviewRepository(database).capture_remote_naver_edit(
+        inquiry_id=current_corrected,
+        answer_body="직원이 수정한 현재 기간 답변입니다.",
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE answer_versions SET posted_at=datetime('now','-1 day') WHERE id=?",
+            (current_corrected_version,),
+        )
+
+    current_success = _inquiry(database, "current-success")
+    current_review = _inquiry(database, "current-review")
+    current_failed = _inquiry(database, "current-failed")
+    current_policy = _inquiry(database, "current-policy")
+    for inquiry_id in (
+        current_success, current_review, current_failed, current_policy
+    ):
+        _event(database, inquiry_id, "AUTO_ANSWER_STARTED")
+    _event(database, current_success, "AUTO_ANSWER_SUCCEEDED")
+    _event(database, current_review, "AUTO_PROCESSING_REVIEW_REQUIRED")
+    _event(database, current_failed, "AUTO_ANSWER_FAILED")
+    _event(database, current_policy, "AUTO_POST_SKIPPED_POLICY_BLOCKED")
+
+    previous_one, previous_one_draft, previous_one_version = _post(
+        database, "previous-one"
+    )
+    previous_two, previous_two_draft, previous_two_version = _post(
+        database, "previous-two"
+    )
+    PostReviewService(database).complete_without_change(
+        inquiry_id=previous_one, actor="tester"
+    )
+    PostReviewRepository(database).capture_remote_naver_edit(
+        inquiry_id=previous_two,
+        answer_body="직원이 수정한 이전 기간 답변입니다.",
+    )
+    previous_success = _inquiry(database, "previous-success")
+    previous_review = _inquiry(database, "previous-review")
+    for inquiry_id in (
+        previous_one, previous_two, previous_success, previous_review
+    ):
+        _event(database, inquiry_id, "AUTO_ANSWER_STARTED", days_ago=10)
+    for inquiry_id in (previous_one, previous_two, previous_success):
+        _event(database, inquiry_id, "AUTO_ANSWER_SUCCEEDED", days_ago=10)
+    _event(
+        database, previous_review, "AUTO_PROCESSING_REVIEW_REQUIRED",
+        days_ago=10,
+    )
+    _auto_post_attempt(
+        database, inquiry_id=previous_one, draft_id=previous_one_draft,
+        key="previous-one", days_ago=10,
+    )
+    _auto_post_attempt(
+        database, inquiry_id=previous_two, draft_id=previous_two_draft,
+        key="previous-two", days_ago=10,
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE answer_versions SET posted_at=datetime('now','-10 days') "
+            "WHERE id IN (?, ?)",
+            (previous_one_version, previous_two_version),
+        )
+
+    data = LearningPerformanceService(database).snapshot(period_days=7)
+    current = data["quality"]["current"]
+    previous = data["quality"]["previous"]
+    assert (current["processed"], current["generated"]) == (5, 2)
+    assert (current["auto_posted"], current["review_required"]) == (1, 2)
+    assert current["generation_rate"] == 40.0
+    assert current["auto_post_rate"] == 20.0
+    assert current["review_required_rate"] == 40.0
+    assert current["correction_known"] == 2
+    assert current["corrected"] == 1
+    assert current["correction_rate"] == 50.0
+    assert (previous["processed"], previous["generated"]) == (4, 3)
+    assert previous["auto_post_rate"] == 50.0
+    assert previous["review_required_rate"] == 25.0
+    assert previous["correction_rate"] == 50.0
+    assert len(data["quality"]["correction_trend"]) == 2
 
 
 def test_generation_context_is_attached_only_to_actual_draft(tmp_path: Path) -> None:
@@ -201,4 +374,10 @@ render_learning_performance(db)
     assert app.session_state["learning_performance_period"] == "최근 30일"
     rendered = "\n".join(item.value for item in [*app.markdown, *app.caption, *app.info])
     assert "Learning 성과" in rendered
+    assert {metric.label for metric in app.metric[:4]} == {
+        "자동 답변 생성률", "자동 등록률", "직원 수정률", "직원 검토 필요율",
+    }
+    selector = next(item for item in app.selectbox if item.label == "품질 기간")
+    assert selector.options == ["최근 7일", "최근 30일", "최근 90일"]
+    assert any(item.label == "상세 분석" for item in app.expander)
     assert any(metric.value == "측정 데이터 부족" for metric in app.metric)

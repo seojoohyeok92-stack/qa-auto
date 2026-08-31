@@ -41,6 +41,114 @@ class LearningPerformanceRepository:
         total = int(unchanged) + int(corrected)
         return round(int(unchanged) * 100 / total, 1) if total else None
 
+    @staticmethod
+    def _percentage(numerator: int, denominator: int) -> float | None:
+        return (
+            round(int(numerator) * 100 / int(denominator), 1)
+            if int(denominator)
+            else None
+        )
+
+    def quality_period(
+        self, *, start_days: int, end_days: int = 0
+    ) -> dict[str, Any]:
+        """Aggregate operator quality KPIs without loading inquiry rows.
+
+        ``AUTO_ANSWER_STARTED`` defines a genuinely attempted automatic
+        processing cohort. Durable success, review and Naver POST records are
+        then projected onto that cohort. Staff correction uses the narrower
+        observed post-review cohort because an unobserved answer is unknown,
+        not an unchanged answer.
+        """
+
+        start = f"-{int(start_days)} days"
+        end = f"-{int(end_days)} days"
+        range_sql = (
+            "julianday({column})>=julianday('now', ?) "
+            "AND (?=0 OR julianday({column})<julianday('now', ?))"
+        )
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                WITH processed AS (
+                  SELECT DISTINCT inquiry_id
+                  FROM activity_logs
+                  WHERE inquiry_id IS NOT NULL
+                    AND event_code='AUTO_ANSWER_STARTED'
+                    AND """
+                + range_sql.format(column="created_at")
+                + """
+                ), generated AS (
+                  SELECT DISTINCT inquiry_id
+                  FROM activity_logs
+                  WHERE event_code='AUTO_ANSWER_SUCCEEDED'
+                    AND """
+                + range_sql.format(column="created_at")
+                + """
+                ), review_required AS (
+                  SELECT DISTINCT inquiry_id
+                  FROM activity_logs
+                  WHERE event_code IN (
+                    'AUTO_PROCESSING_REVIEW_REQUIRED',
+                    'AUTO_PROCESSING_BLOCKED',
+                    'AUTO_POST_BLOCKED_DPS_SESSION',
+                    'AUTO_POST_SKIPPED_POLICY_BLOCKED'
+                  ) AND """
+                + range_sql.format(column="created_at")
+                + """
+                ), posted AS (
+                  SELECT DISTINCT inquiry_id
+                  FROM naver_post_attempts
+                  WHERE status='POSTED' AND auto_post_run_id IS NOT NULL
+                    AND """
+                + range_sql.format(column="completed_at")
+                + """
+                )
+                SELECT COUNT(*) processed,
+                       SUM(EXISTS(
+                         SELECT 1 FROM generated g
+                         WHERE g.inquiry_id=p.inquiry_id
+                       )) generated,
+                       SUM(EXISTS(
+                         SELECT 1 FROM posted a
+                         WHERE a.inquiry_id=p.inquiry_id
+                       )) auto_posted,
+                       SUM(EXISTS(
+                         SELECT 1 FROM review_required r
+                         WHERE r.inquiry_id=p.inquiry_id
+                       )) review_required
+                FROM processed p
+                """,
+                (
+                    start, int(end_days), end,
+                    start, int(end_days), end,
+                    start, int(end_days), end,
+                    start, int(end_days), end,
+                ),
+            ).fetchone()
+        outcome = self.outcome_period(
+            start_days=start_days, end_days=end_days
+        )
+        processed = int(row["processed"] or 0)
+        generated = int(row["generated"] or 0)
+        auto_posted = int(row["auto_posted"] or 0)
+        review_required = int(row["review_required"] or 0)
+        return {
+            "processed": processed,
+            "generated": generated,
+            "auto_posted": auto_posted,
+            "review_required": review_required,
+            "generation_rate": self._percentage(generated, processed),
+            "auto_post_rate": self._percentage(auto_posted, processed),
+            "review_required_rate": self._percentage(
+                review_required, processed
+            ),
+            "correction_rate": outcome["correction_rate"],
+            "correction_known": outcome["known"],
+            "corrected": outcome["corrected"],
+            "correction_pending": outcome["pending"],
+        }
+
     def learning_counts(self) -> dict[str, int]:
         with self.database.connection() as connection:
             row = connection.execute(
@@ -252,6 +360,42 @@ class LearningPerformanceRepository:
             "unchanged_rate": self._rate(int(row["unchanged"] or 0), int(row["corrected"] or 0)),
             "sample": int(row["unchanged"] or 0) + int(row["corrected"] or 0),
         } for row in rows]
+
+    def correction_trend(self, *, days: int) -> list[dict[str, Any]]:
+        """Return daily/weekly correction rates for the selected period."""
+
+        days = int(days)
+        period_sql = (
+            "date(posted_at, '+9 hours')"
+            if days <= 30
+            else "strftime('%Y-%W', posted_at, '+9 hours')"
+        )
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                OUTCOMES_CTE
+                + f"""
+                SELECT {period_sql} period,
+                       SUM(outcome='UNCHANGED') unchanged,
+                       SUM(outcome='CORRECTED') corrected
+                FROM outcomes
+                WHERE outcome IN ('UNCHANGED','CORRECTED')
+                  AND julianday(posted_at)>=julianday('now', ?)
+                GROUP BY {period_sql} ORDER BY period
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+        return [
+            {
+                "period": str(row["period"]),
+                "correction_rate": self._rate(
+                    int(row["corrected"] or 0),
+                    int(row["unchanged"] or 0),
+                ),
+                "sample": int(row["unchanged"] or 0)
+                + int(row["corrected"] or 0),
+            }
+            for row in rows
+        ]
 
     def positive_observation(self, observation_days: int) -> dict[str, Any]:
         modifier = f"-{int(observation_days)} days"

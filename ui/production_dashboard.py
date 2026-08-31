@@ -85,7 +85,24 @@ def _confirm_auto_post_start(database_path: str) -> None:
         st.rerun()
 
 
-def _render_admin_mode(database: Database) -> None:
+def _render_toggle_style(key: str, color: str) -> None:
+    """Apply a restrained ON-state color to one keyed Streamlit button."""
+
+    st.markdown(
+        f"""
+        <style>
+        .st-key-{key} button {{
+            background: {color} !important;
+            border-color: {color} !important;
+            color: #f8fafc !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_admin_mode(database: Database) -> bool:
     identity = current_identity()
     username = str(identity.get("username") or "local-admin")
     can_admin = str(identity.get("role") or "").upper() == "ADMIN"
@@ -96,29 +113,26 @@ def _render_admin_mode(database: Database) -> None:
         st.session_state[loaded_key] = username
     admin_enabled = bool(st.session_state.get("production_admin_mode", False))
     st.caption("관리자 모드: **ON**" if admin_enabled else "관리자 모드: **OFF**")
-    start_col, stop_col = st.columns(2, gap="small")
-    start_clicked = start_col.button(
-        "관리자 모드 시작",
+    if admin_enabled:
+        _render_toggle_style("production_admin_mode_toggle", "#5b4bb7")
+    clicked = st.button(
+        "● 관리자 모드" if admin_enabled else "관리자 모드",
         width="stretch",
-        key="production_admin_mode_start",
-        disabled=not can_admin or admin_enabled,
-        help="관리자 상세와 내부 운영 도구를 표시합니다. Auto Sync/자동처리와 무관합니다.",
+        key="production_admin_mode_toggle",
+        disabled=not can_admin,
+        type="primary" if admin_enabled else "secondary",
+        help=(
+            "관리자 상세와 내부 운영 도구를 숨깁니다."
+            if admin_enabled
+            else "관리자 상세와 내부 운영 도구를 표시합니다."
+        ) + " Auto Sync/자동처리와 무관합니다.",
     )
-    stop_clicked = stop_col.button(
-        "관리자 모드 종료",
-        width="stretch",
-        key="production_admin_mode_stop",
-        disabled=not can_admin or not admin_enabled,
-        help="관리자 상세와 내부 운영 도구를 숨깁니다. Auto Sync/자동처리와 무관합니다.",
-    )
-    if start_clicked:
-        st.session_state["production_admin_mode"] = True
-        repository.save_admin_mode(username, True)
+    if clicked:
+        next_enabled = not admin_enabled
+        st.session_state["production_admin_mode"] = next_enabled
+        repository.save_admin_mode(username, next_enabled)
         st.rerun()
-    if stop_clicked:
-        st.session_state["production_admin_mode"] = False
-        repository.save_admin_mode(username, False)
-        st.rerun()
+    return admin_enabled
 
 
 def dashboard_database_revision(database: Database) -> tuple[int, str, str, str]:
@@ -186,9 +200,65 @@ def render_realtime_operations(
         state=post_state,
     )
 
-    # The compact status strip and the emergency ON/OFF control always remain
-    # visible.  Everything else belongs to the native expander below so it
-    # consumes no vertical workspace while collapsed.
+    control, admin, explanation = st.columns(
+        [1.5, 1.4, 5.1], gap="medium", vertical_alignment="center"
+    )
+    missing_env_flags = [
+        name
+        for name, ready in (
+            ("NAVER_POST_ENABLED", post_env.enabled),
+            ("NAVER_AUTO_POST_ENABLED", auto_env.enabled),
+        )
+        if not ready
+    ]
+    with control:
+        control.caption(
+            "자동처리: **ON**" if persisted_runtime_enabled else "자동처리: **OFF**"
+        )
+        start_help = "DB에 저장되는 서버 공용 스위치를 ON으로 전환합니다."
+        if missing_env_flags:
+            start_help = (
+                "다음 환경변수가 true가 아니어서 시작할 수 없습니다: "
+                + ", ".join(missing_env_flags)
+            )
+        if persisted_runtime_enabled:
+            _render_toggle_style(
+                "production_auto_processing_toggle", "#26734d"
+            )
+        toggle_clicked = st.button(
+            "● 자동처리" if persisted_runtime_enabled else "자동처리",
+            width="stretch",
+            key="production_auto_processing_toggle",
+            disabled=not persisted_runtime_enabled and not environment_ready,
+            type="primary" if persisted_runtime_enabled else "secondary",
+            help=start_help,
+        )
+    with admin:
+        admin_enabled = _render_admin_mode(database)
+    if toggle_clicked:
+        if persisted_runtime_enabled:
+            result = AutoPostRuntimeService(database).disable()
+            st.session_state["auto_post_runtime_result"] = result["status"]
+            st.rerun()
+        else:
+            _confirm_auto_post_start(str(database.path))
+    changed = st.session_state.pop("auto_post_runtime_result", None)
+    if changed:
+        st.toast(f"자동처리 Runtime 상태: {changed}")
+    explanation.caption(
+        "OFF에서는 Auto Sync와 문의 저장만 계속됩니다. 자동 답변·GPT·DPS·POST는 새로 시작하지 않으며, "
+        "진행 중 POST는 안전하게 완료됩니다."
+    )
+    if not environment_ready:
+        explanation.warning(
+            "운영 환경 잠금 상태로 자동처리를 시작할 수 없습니다. "
+            "다음 환경변수가 true로 설정되어 있지 않습니다: "
+            + ", ".join(missing_env_flags)
+        )
+
+    if not admin_enabled:
+        return data
+
     status_columns = st.columns(9, gap="small")
     values = (
         ("Auto Sync", _status(sync_state.get("status"), enabled=sync_enabled)),
@@ -209,64 +279,6 @@ def render_realtime_operations(
     )
     for column, (label, value) in zip(status_columns, values):
         column.metric(label, value)
-
-    control, admin, explanation = st.columns(
-        [1.5, 1.4, 5.1], gap="medium", vertical_alignment="center"
-    )
-    missing_env_flags = [
-        name
-        for name, ready in (
-            ("NAVER_POST_ENABLED", post_env.enabled),
-            ("NAVER_AUTO_POST_ENABLED", auto_env.enabled),
-        )
-        if not ready
-    ]
-    with control:
-        control.caption(
-            "자동처리: **ON**" if persisted_runtime_enabled else "자동처리: **OFF**"
-        )
-        start_col, stop_col = st.columns(2, gap="small")
-        start_help = "DB에 저장되는 서버 공용 스위치를 ON으로 전환합니다."
-        if missing_env_flags:
-            start_help = (
-                "다음 환경변수가 true가 아니어서 시작할 수 없습니다: "
-                + ", ".join(missing_env_flags)
-            )
-        start_clicked = start_col.button(
-            "자동처리 시작",
-            width="stretch",
-            key="production_auto_processing_start",
-            disabled=persisted_runtime_enabled or not environment_ready,
-            help=start_help,
-        )
-        stop_clicked = stop_col.button(
-            "자동처리 중지",
-            width="stretch",
-            key="production_auto_processing_stop",
-            disabled=not persisted_runtime_enabled,
-            help="DB에 저장되는 서버 공용 스위치를 OFF로 전환합니다. Auto Sync와 수동 기능은 유지됩니다.",
-        )
-    with admin:
-        _render_admin_mode(database)
-    if start_clicked:
-        _confirm_auto_post_start(str(database.path))
-    if stop_clicked:
-        result = AutoPostRuntimeService(database).disable()
-        st.session_state["auto_post_runtime_result"] = result["status"]
-        st.rerun()
-    changed = st.session_state.pop("auto_post_runtime_result", None)
-    if changed:
-        st.toast(f"자동처리 Runtime 상태: {changed}")
-    explanation.caption(
-        "OFF에서는 Auto Sync와 문의 저장만 계속됩니다. 자동 답변·GPT·DPS·POST는 새로 시작하지 않으며, "
-        "진행 중 POST는 안전하게 완료됩니다."
-    )
-    if not environment_ready:
-        explanation.warning(
-            "운영 환경 잠금 상태로 자동처리를 시작할 수 없습니다. "
-            "다음 환경변수가 true로 설정되어 있지 않습니다: "
-            + ", ".join(missing_env_flags)
-        )
 
     summary = (
         "실시간 운영 상태 · "

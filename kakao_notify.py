@@ -362,12 +362,10 @@ def format_qna_message(
 ) -> str:
     """The message an operator reads.
 
-    A held inquiry answers a different question from a posted one. "How
-    was this answer written" is what the pipeline finds interesting; the
-    operator needs "why is this not on Naver, and is it waiting for me".
-    So a hold leads with the blocking reason, says plainly whether an
-    answer was even composed, and only then shows the draft as reference
-    -- while a successful post keeps exactly the message it always had.
+    Only ``action='posted'`` is proof that the answer reached Naver. Drafts,
+    holds, dry-runs and failed/API-error attempts therefore render ``답변: -``;
+    a successful post keeps the registered answer text. Outbox routing and
+    diagnostic reasons are deliberately independent of this display rule.
     """
 
     lines = [
@@ -405,20 +403,17 @@ def format_qna_message(
         lines.extend(
             [
                 "",
+                "답변: -",
+                "",
                 f"답변 생성: {'생략됨' if generation_skipped else '완료'}",
                 "네이버 등록: 안 됨",
             ]
         )
-        # A skipped generation has no answer worth showing: the draft is
-        # the fixed "직원이 확인하겠습니다" holding reply, and printing it
-        # under "답변:" reads as though that is what will be posted.
-        if not generation_skipped:
-            lines.extend(["", f"생성 답변(참고): {answer or '-'}"])
     else:
         lines.extend(
             [
                 "",
-                f"답변: {answer or '-'}",
+                f"답변: {answer or '-'}" if action == "posted" else "답변: -",
             ]
         )
 

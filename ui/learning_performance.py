@@ -57,38 +57,94 @@ def _sample_caption(sample: int) -> str:
     return f"표본 {sample}건" + (" · 참고용" if sample < 10 else "")
 
 
-def render_learning_performance(database: Database) -> None:
-    data = LearningPerformanceService(database).snapshot()
-    period = st.session_state.setdefault("learning_performance_period", "최근 30일")
-    period_key = "current_7" if period == "최근 7일" else "current_30"
-    selected = data[period_key]
-    delta = data["unchanged_delta_30"] if period_key == "current_30" else None
+def _metric_delta(
+    current: float | None,
+    previous: float | None,
+    *,
+    higher_is_better: bool,
+) -> tuple[str | None, str]:
+    if current is None or previous is None:
+        return "이전 기간 데이터 부족", "off"
+    difference = round(current - previous, 1)
+    if difference == 0:
+        return "변화 없음", "off"
+    improved = difference > 0 if higher_is_better else difference < 0
+    label = "개선" if improved else "악화"
+    return f"{difference:+.1f}%p · {label}", (
+        "normal" if higher_is_better else "inverse"
+    )
 
+
+def _correction_summary(
+    current: float | None, previous: float | None
+) -> str:
+    if current is None:
+        return "현재 측정 데이터 부족"
+    if previous is None:
+        return f"현재 {current:.1f}% · 이전 기간 측정 데이터 부족"
+    difference = round(current - previous, 1)
+    if difference == 0:
+        comparison = "변화 없음"
+    else:
+        comparison = f"{abs(difference):.1f}%p " + (
+            "개선" if difference < 0 else "악화"
+        )
+    return f"현재 {current:.1f}% · 이전 기간 {previous:.1f}% · {comparison}"
+
+
+def render_learning_performance(database: Database) -> None:
+    period = st.session_state.setdefault("learning_performance_period", "최근 30일")
     st.markdown('<div class="learning-performance-anchor"></div>', unsafe_allow_html=True)
     header, selector = st.columns([5, 1.2], vertical_alignment="bottom")
     header.markdown("### Learning 성과 · 답변 품질")
-    selector.selectbox(
-        "품질 기간", ["최근 7일", "최근 30일"],
+    period = selector.selectbox(
+        "품질 기간", ["최근 7일", "최근 30일", "최근 90일"],
         key="learning_performance_period", label_visibility="collapsed",
     )
-    cards = st.columns([1.35, 1.05, 1, 1, 1.15], gap="small")
-    cards[0].metric(
-        "자동답변 무수정률", _percent(selected["unchanged_rate"]),
-        None if delta is None else f"{delta:+.1f}%p · 이전 30일 대비",
+    period_days = {"최근 7일": 7, "최근 30일": 30, "최근 90일": 90}[period]
+    data = LearningPerformanceService(database).snapshot(
+        period_days=period_days
     )
-    cards[1].metric("직원 수정률", _percent(selected["correction_rate"]))
-    cards[2].metric("활성 Learning", data["learning"]["active"])
-    cards[3].metric("최근 30일 신규", data["learning"]["new_30"])
-    cards[4].metric(
-        "Learning 참고 답변", data["provenance"]["generated_with_learning"],
-        f"Historical Verified Learning {data['provenance']['generated_with_historical']}건",
+    current = data["quality"]["current"]
+    previous = data["quality"]["previous"]
+    card_specs = (
+        ("자동 답변 생성률", "generation_rate", True),
+        ("자동 등록률", "auto_post_rate", True),
+        ("직원 수정률", "correction_rate", False),
+        ("직원 검토 필요율", "review_required_rate", False),
     )
-    st.caption(
-        "무수정률은 관찰 또는 직원 확인이 끝난 자동등록 답변 중 수정 없이 사용된 비율입니다. "
-        + _sample_caption(selected["known"])
-    )
+    cards = st.columns(4, gap="small")
+    for card, (label, key, higher_is_better) in zip(cards, card_specs):
+        delta, delta_color = _metric_delta(
+            current[key], previous[key],
+            higher_is_better=higher_is_better,
+        )
+        card.metric(
+            label,
+            _percent(current[key]),
+            delta,
+            delta_color=delta_color,
+        )
 
-    with st.expander("Learning 성과 상세", expanded=False):
+    st.markdown("#### 직원 수정률 추이")
+    correction_trend = [
+        row for row in data["quality"]["correction_trend"]
+        if row["correction_rate"] is not None
+    ]
+    if len(correction_trend) >= 2:
+        st.line_chart(
+            pd.DataFrame(correction_trend).set_index("period")[["correction_rate"]],
+            y_label="직원 수정률(%)",
+        )
+        st.caption(
+            _correction_summary(
+                current["correction_rate"], previous["correction_rate"]
+            )
+        )
+    else:
+        st.info("직원 수정률 추이를 측정할 수 있는 데이터가 아직 부족합니다.")
+
+    with st.expander("상세 분석", expanded=False):
         st.markdown("#### 기간 비교")
         st.dataframe([
             {
@@ -104,15 +160,6 @@ def render_learning_performance(database: Database) -> None:
                 ("이전 30일", "previous_30"),
             )
         ], hide_index=True, width="stretch")
-
-        trend = [row for row in data["trend"] if row["unchanged_rate"] is not None]
-        if len(trend) >= 2:
-            st.line_chart(
-                pd.DataFrame(trend).set_index("period")[["unchanged_rate"]],
-                y_label="무수정률(%)",
-            )
-        else:
-            st.info("기간별 추세를 그리기 위한 판정 완료 데이터가 아직 부족합니다.")
 
         st.markdown("#### Learning 참고 효과")
         used, unused = data["provenance"]["used"], data["provenance"]["not_used"]

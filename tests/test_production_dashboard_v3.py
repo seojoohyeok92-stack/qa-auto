@@ -102,15 +102,12 @@ render_realtime_operations(db)
 """
     )
     assert not app.exception
+    # 관리자 OFF에서는 상단 action만 남고 실시간 운영 상세는 숨겨진다.
     labels = {metric.label for metric in app.metric}
-    assert {
-        "Auto Sync", "Auto Processing", "Auto Post", "DPS Agent",
-        "DPS Keepalive", "최근 Sync", "최근 Auto Process",
-        "최근 Auto Post", "직원 검토 필요",
-    } <= labels
+    assert "Auto Processing" not in labels
     buttons = {button.label: button for button in app.button}
-    assert buttons["자동처리 시작"].disabled
-    assert buttons["자동처리 중지"].disabled
+    assert buttons["자동처리"].disabled
+    assert "관리자 모드" in buttons
     assert app.warning
     warning_text = " ".join(str(w.value) for w in app.warning)
     assert "NAVER_POST_ENABLED" in warning_text
@@ -145,11 +142,10 @@ render_realtime_operations(db)
     app = run(script)
     assert not app.exception
     buttons = {button.label: button for button in app.button}
-    assert not buttons["자동처리 시작"].disabled
-    assert buttons["자동처리 중지"].disabled
+    assert not buttons["자동처리"].disabled
     assert not app.warning
 
-    app.button(key="production_auto_processing_start").click().run(timeout=40)
+    app.button(key="production_auto_processing_toggle").click().run(timeout=40)
     assert not app.exception
     dialog_buttons = {button.label: button for button in app.button}
     assert "자동등록 시작" in dialog_buttons
@@ -160,20 +156,19 @@ render_realtime_operations(db)
     app.run(timeout=40)
     assert not app.exception
     buttons = {button.label: button for button in app.button}
-    assert buttons["자동처리 시작"].disabled
-    assert not buttons["자동처리 중지"].disabled
+    assert not buttons["● 자동처리"].disabled
+    rendered = "\n".join(item.value for item in app.markdown)
+    assert "#26734d" in rendered
 
     app.run(timeout=40)
     buttons = {button.label: button for button in app.button}
-    assert buttons["자동처리 시작"].disabled
-    assert not buttons["자동처리 중지"].disabled
+    assert not buttons["● 자동처리"].disabled
 
-    app.button(key="production_auto_processing_stop").click().run(timeout=40)
+    app.button(key="production_auto_processing_toggle").click().run(timeout=40)
     assert not app.exception
     assert AutoPostRepository(database).settings()["enabled"] is False
     buttons = {button.label: button for button in app.button}
-    assert not buttons["자동처리 시작"].disabled
-    assert buttons["자동처리 중지"].disabled
+    assert not buttons["자동처리"].disabled
 
 
 def test_dashboard_bottom_sections_show_operations_and_learning(
@@ -242,7 +237,7 @@ def test_workspace_prioritizes_detail_and_answer_without_progress_card() -> None
     assert css.rstrip().endswith("}")
 
 
-def test_full_dashboard_apptest_renders_collapsed_operations_and_hides_admin(
+def test_full_dashboard_apptest_hides_admin_sections_but_keeps_naver_sync(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "full-dashboard.db"
@@ -259,13 +254,39 @@ app.main()
 '''
     )
     assert not app.exception
-    expanders = {item.label: item for item in app.expander}
-    assert {"오늘 운영 통계", "Learning Repository"} <= set(
-        expanders
+    labels = {item.label for item in app.expander}
+    assert any(label.startswith("네이버 문의 동기화") for label in labels)
+    assert "오늘 운영 통계" not in labels
+    assert "Learning Repository" not in labels
+    assert "관리자 Scheduler · 상세 설정" not in labels
+    assert "관리자 상세" not in labels
+    assert not any(label.startswith("실시간 운영 상태") for label in labels)
+
+
+def test_admin_toggle_reveals_all_management_sections(tmp_path: Path) -> None:
+    path = tmp_path / "admin-dashboard.db"
+    Database(path).initialize()
+    app = run(
+        f'''
+import os
+os.environ["OJE_AUTOMATION_DB_PATH"] = r"{path}"
+os.environ["NAVER_POST_ENABLED"] = "false"
+os.environ["NAVER_AUTO_POST_ENABLED"] = "false"
+os.environ["NAVER_AUTO_SYNC_ENABLED"] = "false"
+import app
+app.main()
+'''
     )
-    assert all(
-        not expanders[label].proto.expanded
-        for label in ("오늘 운영 통계", "Learning Repository")
-    )
-    assert any("DPS" in label for label in expanders)
-    assert "관리자 상세" not in expanders
+    assert not app.exception
+    app.button(key="production_admin_mode_toggle").click().run(timeout=40)
+    assert not app.exception
+    labels = {item.label for item in app.expander}
+    assert any(label.startswith("실시간 운영 상태") for label in labels)
+    assert "관리자 Scheduler · 상세 설정" in labels
+    assert any(label.startswith("네이버 문의 동기화") for label in labels)
+    assert "오늘 운영 통계" in labels
+    assert "Learning Repository" in labels
+    assert "관리자 상세" in labels
+    assert any(button.label == "● 관리자 모드" for button in app.button)
+    rendered = "\n".join(item.value for item in app.markdown)
+    assert "#5b4bb7" in rendered

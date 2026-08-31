@@ -42,5 +42,6 @@ def test_notify_writes_common_dispatcher_event(
     assert event["title"] == "[네이버 Q&A 답변 생성 완료]"
     assert event["recipient"] == "오제 네이버 자동답변 확인방"
     assert "질문: 테스트 질문" in event["message"]
-    assert "답변: 테스트 답변" in event["message"]
+    assert "답변: -" in event["message"]
+    assert "테스트 답변" not in event["message"]
     assert event["source"] == "qa_auto"

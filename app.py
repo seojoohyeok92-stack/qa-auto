@@ -885,7 +885,10 @@ def render_dashboard_page(
         operations = render_dashboard_actions(
             database, configured_stores, work_items
         )
-        if operations is not None:
+        if (
+            operations is not None
+            and st.session_state.get("production_admin_mode", False)
+        ):
             render_operations_statistics(operations)
             render_learning_status(operations)
             _render_admin_details(database, operations)

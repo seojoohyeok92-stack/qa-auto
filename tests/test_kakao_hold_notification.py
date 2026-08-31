@@ -89,14 +89,15 @@ def test_a_skipped_generation_does_not_show_the_holding_reply_as_the_answer():
     assert "정확한 정보 확인이 필요합니다." not in message
 
 
-def test_a_generated_but_blocked_answer_is_shown_for_reference():
+def test_a_generated_but_blocked_answer_is_not_shown_as_registered():
     message = hold(
         generation_skipped=False,
         answer="HDMI 포트는 3개입니다.",
         hold_reason=describe_reason("VALIDATOR_NOT_PASS"),
         hold_codes=("VALIDATOR_NOT_PASS",),
     )
-    assert "생성 답변(참고): HDMI 포트는 3개입니다." in message
+    assert "답변: -" in message
+    assert "HDMI 포트는 3개입니다." not in message
     assert "Validator 안전 검증을 통과하지 못했습니다." in message
 
 
@@ -153,8 +154,27 @@ def test_a_generation_notice_without_a_hold_is_unchanged():
         reason="Rule 기반 답변", action="generated",
     )
     assert "판단 사유: Rule 기반 답변" in message
-    assert "답변: a" in message
+    assert "답변: -" in message
+    assert "답변: a" not in message
     assert "미등록 사유" not in message
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["needs_review", "validator_blocked", "auto_post_blocked", "generated",
+     "post_failed", "api_error", "dry_run"],
+)
+def test_every_unregistered_action_hides_the_draft(action: str):
+    message = format_qna_message(
+        product=PRODUCT,
+        option_name="",
+        question="문의",
+        answer="플랫폼에 등록되지 않은 초안",
+        reason="미등록",
+        action=action,
+    )
+    assert "답변: -" in message
+    assert "플랫폼에 등록되지 않은 초안" not in message
 
 
 # ------------------------------------------------- reason vocabulary is shared
