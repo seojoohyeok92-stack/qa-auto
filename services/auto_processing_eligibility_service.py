@@ -327,8 +327,12 @@ class AutoProcessingEligibilityService:
             reasons.append("VALIDATOR_NOT_PASS")
         elif "REVIEW" in validation_status:
             reasons.append("VALIDATOR_REVIEW_REQUIRED")
-        if validator and validator.get("passed") is False:
-            reasons.append("VALIDATOR_NOT_PASS")
+        if validator:
+            if validator.get("passed") is False:
+                reasons.append("VALIDATOR_NOT_PASS")
+            validator_status = str(validator.get("status") or "").upper()
+            if "REVIEW" in validator_status or validator.get("review_signals"):
+                reasons.append("VALIDATOR_REVIEW_REQUIRED")
         if normalized_route not in AUTO_POSTABLE_ROUTES:
             reasons.append("INTENT_NOT_AUTO_POSTABLE")
         if normalized_route in REVIEW_ROUTES or any(

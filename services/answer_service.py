@@ -228,7 +228,9 @@ def _template_unavailable_reason(
         return "IRRELEVANT"
     if not _template_may_answer(metadata):
         return "NOT_EXACT_MATCH"
-    validation = validator.validate_template_text(result.answer)
+    validation = validator.validate_template_text(
+        result.answer, question=request.question
+    )
     if not validation.passed:
         return "VALIDATION_FAILED"
     return None
@@ -2345,6 +2347,7 @@ class AnswerService:
                         else self.validator.validate_route(
                             result.answer,
                             route="TEMPLATE",
+                            question=request.question,
                         )
                     )
                     result.metadata["hybrid"] = {

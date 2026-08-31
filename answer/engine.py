@@ -24,9 +24,11 @@ from .text_utils import (
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
     NOTICE_SUBJECT_QUERY,
     compact,
+    has_explicit_delivery_context,
     is_delivery_deadline_question,
     is_delivery_notice_question,
     is_general_delivery_policy_question,
+    is_non_delivery_service_question,
     is_package_contents_question,
     is_seller_identity_question,
     is_weekend_delivery_policy_question,
@@ -572,6 +574,11 @@ class AnswerEngine:
     def _shipping(self, product: str, question: str) -> AnswerResult | None:
         q = compact(question)
         if not any(k in q for k in self.config.shipping["shipping_keywords"]):
+            return None
+        if (
+            is_non_delivery_service_question(question)
+            and not has_explicit_delivery_context(question)
+        ):
             return None
 
         # The keyword gate above is deliberately broad -- "배송", "언제",

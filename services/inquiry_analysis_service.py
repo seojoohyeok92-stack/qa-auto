@@ -14,7 +14,10 @@ from answer.text_utils import (
     is_missing_item_report,
     CURRENT_DELIVERY_SCHEDULE_QUERY,
     CURRENT_INSTALLATION_SCHEDULE_QUERY,
+    has_explicit_delivery_context,
+    is_after_sales_question,
     is_general_delivery_policy_question,
+    is_non_delivery_service_question,
     is_operational_schedule_request,
     is_package_contents_question,
     is_product_concept_question,
@@ -550,6 +553,11 @@ class InquiryAnalysisService:
     @staticmethod
     def _intent(question: str) -> str | None:
         compact = re.sub(r"[\s\W_]+", "", question).lower()
+        if (
+            is_non_delivery_service_question(question)
+            and not has_explicit_delivery_context(question)
+        ):
+            return None
         # Existing-order delivery coordination is an evidence-retrieval intent,
         # not an information-insufficient terminal state.  Keep method/policy
         # questions out by requiring a contact/scheduling signal as well as a
@@ -757,6 +765,11 @@ class InquiryAnalysisService:
         """Separate policy/availability questions from an existing order lookup."""
 
         if has_order_evidence:
+            return False
+        if (
+            is_non_delivery_service_question(question)
+            and not has_explicit_delivery_context(question)
+        ):
             return False
         compact = re.sub(r"[\s\W_]+", "", str(question or "")).lower()
         if any(word in compact for word in POST_PURCHASE_DELIVERY_WORDS):
@@ -1276,6 +1289,7 @@ class InquiryAnalysisService:
             )
         elif (
             any(word in question for word in PRODUCT_GENERAL_WORDS)
+            or is_after_sales_question(question)
             or is_package_contents_question(question)
             # A question about what the product *is*, rather than about a
             # property it has. The word list above enumerates attributes and

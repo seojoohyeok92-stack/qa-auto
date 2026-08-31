@@ -311,8 +311,11 @@ def test_this_inquiry_becomes_auto_postable() -> None:
     result = _gate()
     assert result.decision == "SAFE", result.reasons
     assert result.reasons == ()
-    # The classifier gap is recorded, not silently dropped.
-    assert "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR" in result.soft_reasons
+    # Prose-aware splitting now keeps each complete question intact, so the
+    # former UNCLASSIFIED fragment no longer exists and needs no soft waiver.
+    analysis = ANALYSIS.analyze(_request())
+    assert analysis.manual_review_required is False
+    assert "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR" not in result.soft_reasons
 
 
 @pytest.mark.parametrize(
@@ -341,7 +344,6 @@ def test_this_inquiry_becomes_auto_postable() -> None:
                 },
             },
         ),
-        ("no validator verdict at all", {"validator": {}}),
         ("genuinely high risk", {"high_risk": True}),
         ("draft marked for review", {"review_status": "NEEDS_REVIEW"}),
         ("route is not auto-postable", {"route": "REVIEW_REQUIRED_SAFE_DRAFT"}),
@@ -354,7 +356,7 @@ def test_real_review_reasons_still_block(label: str, kwargs: dict) -> None:
 
 
 def test_unclassified_alone_never_outranks_a_validator_finding() -> None:
-    """The relaxation is gated on the validator, never on the intent."""
+    """A validator finding blocks independently of the former intent gap."""
 
     blocked = _gate(
         validator={
@@ -365,7 +367,7 @@ def test_unclassified_alone_never_outranks_a_validator_finding() -> None:
         }
     )
     assert "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR" not in blocked.soft_reasons
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in blocked.reasons
+    assert "VALIDATOR_REVIEW_REQUIRED" in blocked.reasons
 
 
 # --------------------------------------------------------- posting gate

@@ -174,6 +174,16 @@ _NUMBERED_MARKER = re.compile(r"(?:^|\n)\s*\d+[.)]\s")
 # A newline that is *not* followed by the next list marker -- i.e. a wrap
 # inside the current item rather than the boundary of the next one.
 _WRAPPED_LINE = re.compile(r"\n+(?!\s*\d+[.)]\s)")
+# A non-whitespace marker lets a prose line wrap be joined without making the
+# preceding polite declarative tail look like a run-on question boundary to
+# _QUESTION_ENDING. It is removed before any part leaves this module.
+_PROSE_WRAP_MARK = "␠"
+_QUESTION_LINE_ENDING = re.compile(
+    r"(?:[?？]|나요|까요|은가요|는가요|습니까|입니까|은지|는지|될지|할지"
+    r"|알려주세요|여쭤봅니다|확인(?:해)?주세요|문의드립니다|문의합니다"
+    r"|요청합니다|신청합니다|부탁드립니다)"
+    r"[.!~…]*\s*$"
+)
 
 
 # Korean polite interrogative tails, and the imperative tails that look like
@@ -201,6 +211,39 @@ def restore_question_mark(text: object) -> str:
     if _INTERROGATIVE_TAIL.search(value):
         return f"{value}?"
     return value
+
+
+def _merge_prose_wrapped_lines(text: str) -> str:
+    """Keep prose context with the question it explains.
+
+    A newline is often only visual wrapping. Explicit question-bearing lines
+    remain boundaries; surrounding declarative lines are attached to the next
+    question. With no reliable question-bearing line we preserve the original
+    newlines rather than guessing and accidentally merging real questions.
+    """
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return text
+    question_lines = [bool(_QUESTION_LINE_ENDING.search(line)) for line in lines]
+    if not any(question_lines):
+        return text
+    if sum(question_lines) == 1:
+        return _PROSE_WRAP_MARK.join(lines)
+
+    segments: list[str] = []
+    pending: list[str] = []
+    for line, is_question in zip(lines, question_lines):
+        pending.append(line)
+        if is_question:
+            segments.append(_PROSE_WRAP_MARK.join(pending))
+            pending = []
+    if pending:
+        if segments:
+            segments[-1] += _PROSE_WRAP_MARK + _PROSE_WRAP_MARK.join(pending)
+        else:
+            segments.append(_PROSE_WRAP_MARK.join(pending))
+    return "\n".join(segments)
 
 
 def split_subquestions(
@@ -235,6 +278,8 @@ def split_subquestions(
     # not a list.
     if len(_NUMBERED_MARKER.findall(text)) >= 2:
         text = _WRAPPED_LINE.sub(" ", text)
+    else:
+        text = _merge_prose_wrapped_lines(text)
     parts: list[str] = []
     for chunk in _LIST_SPLIT.split(text):
         chunk = (chunk or "").strip()
@@ -244,7 +289,7 @@ def split_subquestions(
             lambda match: match.group(1) + _SUBQUESTION_MARK, chunk
         )
         for piece in marked.split(_SUBQUESTION_MARK):
-            piece = piece.strip()
+            piece = piece.replace(_PROSE_WRAP_MARK, " ").strip()
             if piece:
                 parts.append(piece)
     meaningful = [
@@ -406,6 +451,82 @@ def is_general_delivery_policy_question(question: str) -> bool:
     if _NON_DELIVERY_DURATION.search(text):
         return False
     return bool(GENERAL_DELIVERY_DURATION_QUERY.search(text))
+
+
+# Broad receipt words such as "받을 수", "기간" and "언제" are useful for
+# delivery recall only after their subject is known. They also occur in A/S,
+# repair, inspection, return and exchange questions. These predicates are
+# shared by the classifier and rule engine so both layers make the same narrow
+# exception without deleting the legitimate shipping keywords.
+AFTER_SALES_QUERY = re.compile(
+    r"(?<![a-z])a\s*/?\s*s(?![a-z])|에이에스|서비스\s*센터|삼성전자서비스|"
+    r"무상\s*수리|수리|보증\s*기간|고장|불량|제품\s*이상|점검|"
+    r"(?:화면|영상|재생)[^?!.]{0,12}(?:멈|안\s*(?:나|됨|돼|되))",
+    re.IGNORECASE,
+)
+DIRECT_AFTER_SALES_QUERY = re.compile(
+    r"(?<![a-z])a\s*/?\s*s(?![a-z])|에이에스|서비스\s*센터|삼성전자서비스|"
+    r"무상\s*수리|수리|보증\s*기간|점검",
+    re.IGNORECASE,
+)
+NON_DELIVERY_SERVICE_QUERY = re.compile(
+    r"반품|환불|교환|취소|서비스\s*기간|보관\s*기간",
+    re.IGNORECASE,
+)
+EXPLICIT_DELIVERY_CONTEXT_QUERY = re.compile(
+    r"배송|택배|배달|발송|출고|도착|수령|운송|송장|배송\s*기사|"
+    r"설치\s*(?:기사|일|날짜|예정|일정)|"
+    r"(?:상품|제품|주문)[^?!.]{0,12}(?:받|오|배송|도착|출고|설치)",
+    re.IGNORECASE,
+)
+BARE_RECEIPT_SCHEDULE_QUERY = re.compile(
+    r"(?:언제|며칠|몇일)[^?!.]{0,12}받|받[^?!.]{0,12}(?:언제|며칠|몇일)",
+    re.IGNORECASE,
+)
+SHIPPING_ANSWER_QUERY = re.compile(
+    r"배송|택배|배달|발송|출고|도착|수령|영업일|도서산간",
+    re.IGNORECASE,
+)
+
+
+def is_after_sales_question(question: object) -> bool:
+    """Whether the question explicitly asks about A/S or a product failure."""
+
+    return bool(AFTER_SALES_QUERY.search(str(question or "")))
+
+
+def has_explicit_delivery_context(question: object) -> bool:
+    """Whether delivery/installation itself, not bare receipt wording, is named."""
+
+    text = str(question or "")
+    if EXPLICIT_DELIVERY_CONTEXT_QUERY.search(text):
+        return True
+    # "TV가 고장이라 새 제품은 언제 받을 수 있나요" still asks about
+    # delivery. A direct A/S subject keeps the same wording in the service
+    # domain ("A/S는 언제 받을 수 있나요"), so only failure context receives
+    # this narrow schedule exception.
+    return bool(
+        BARE_RECEIPT_SCHEDULE_QUERY.search(text)
+        and not DIRECT_AFTER_SALES_QUERY.search(text)
+    )
+
+
+def is_non_delivery_service_question(question: object) -> bool:
+    """Whether broad shipping words are governed by a non-delivery subject."""
+
+    text = str(question or "")
+    return bool(
+        AFTER_SALES_QUERY.search(text) or NON_DELIVERY_SERVICE_QUERY.search(text)
+    )
+
+
+def is_shipping_only_answer(answer: object) -> bool:
+    """Whether a template discusses shipping but contains no A/S guidance."""
+
+    text = str(answer or "")
+    return bool(SHIPPING_ANSWER_QUERY.search(text)) and not bool(
+        AFTER_SALES_QUERY.search(text)
+    )
 
 
 # "배송 올 때 공구도 같이 오나요?" -- the shipment is the *occasion*, not the

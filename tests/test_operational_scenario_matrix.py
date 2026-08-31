@@ -184,7 +184,7 @@ SCENARIOS: tuple[Scenario, ...] = (
              "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("compound-no-punct",
              "AS 어디서 받아요 설치는 기사님이 해주시나요 기존 브라켓도 쓸 수 있는지 궁금해요",
-             3, True, False, False, True, False,
+             3, True, False, False, False, False,
              "PRODUCT_COMPATIBILITY_NOT_VERIFIED"),
     Scenario("six-part-686058300", SIX_PART,
              6, True, True, True, True, False,

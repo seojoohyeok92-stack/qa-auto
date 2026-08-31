@@ -530,6 +530,30 @@ def test_a_verified_seller_answer_is_used_when_one_exists(database) -> None:
     assert not any("8월 1일" in answer for answer in answers)
 
 
+def test_wrapped_festival_seller_question_retrieves_verified_learning(
+    database,
+) -> None:
+    """Prose wrapping must not break the seller-name retrieval query."""
+
+    from answer.text_utils import split_subquestions
+
+    add(
+        database,
+        question="삼성 페스티벌 신청 시 구매처명은 무엇으로 입력하나요?",
+        answer="구매처명은 오제앤에스로 입력해 주세요.",
+    )
+    wrapped = (
+        "구매 후 삼성 페스티벌 신청했는데\n"
+        "구매처명을 잘못 입력했다고 보완 요청이 왔습니다.\n"
+        "어떤 이름으로 입력해야 하나요?"
+    )
+    parts = split_subquestions(wrapped)
+    assert len(parts) == 1
+
+    answers = factual_answers(retrieve(database, parts[0]))
+    assert any("오제앤에스" in answer for answer in answers)
+
+
 @pytest.mark.parametrize(
     ("question", "stored_question", "stored_answer"),
     [

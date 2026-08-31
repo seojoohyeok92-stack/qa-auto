@@ -14,7 +14,11 @@ from answer.hybrid_models import (
     ValidationRuleResult,
 )
 from answer.inquiry_analysis import AnswerStrategy, InquiryAnalysis
-from answer.text_utils import contains_personal_phone
+from answer.text_utils import (
+    contains_personal_phone,
+    is_after_sales_question,
+    is_shipping_only_answer,
+)
 from services.auto_post_validation_service import INTERNAL_PLACEHOLDER
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
@@ -221,6 +225,7 @@ class AnswerValidator:
         installation_date: str | None = None,
         installation_time: str | None = None,
         product_name: str = "",
+        question: str = "",
         existing: ValidationResult | None = None,
     ) -> ValidationResult:
         """Single validator entry point selected only by the final route."""
@@ -229,7 +234,7 @@ class AnswerValidator:
         if existing is not None:
             result = existing
         elif normalized_route == "TEMPLATE":
-            result = self.validate_template_text(answer)
+            result = self.validate_template_text(answer, question=question)
         elif normalized_route == "ORDER_ID_REQUEST":
             result = self.validate_order_id_request(answer)
         elif normalized_route == "PRODUCT_DB":
@@ -257,7 +262,7 @@ class AnswerValidator:
             "SAFE_RULE",
             "REVIEW_REQUIRED_SAFE_DRAFT",
         }:
-            result = self.validate_template_text(answer)
+            result = self.validate_template_text(answer, question=question)
         else:
             return ValidationResult(
                 passed=False,
@@ -290,7 +295,9 @@ class AnswerValidator:
             rules=result.rules,
         )
 
-    def validate_template_text(self, answer: str) -> ValidationResult:
+    def validate_template_text(
+        self, answer: str, *, question: str = ""
+    ) -> ValidationResult:
         """Validate a rendered operational template before it can be saved."""
 
         text = str(answer or "").strip()
@@ -350,6 +357,14 @@ class AnswerValidator:
             "TEMPLATE_PERSONAL_DATA_BLOCK",
             not sensitive,
             "불필요한 개인정보 형태의 값이 포함되어 있습니다.",
+        )
+        semantic_mismatch = bool(
+            is_after_sales_question(question) and is_shipping_only_answer(text)
+        )
+        add(
+            "TEMPLATE_SEMANTIC_ALIGNMENT",
+            not semantic_mismatch,
+            "A/S·고장 문의에 배송 안내만 제공하는 답변은 사용할 수 없습니다.",
         )
         errors = tuple(
             rule.message for rule in rules if rule.status == "BLOCK"
