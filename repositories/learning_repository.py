@@ -11,6 +11,11 @@ from repositories.inquiry_repository import (
     deserialize_json,
     serialize_json,
 )
+from repositories.learning_manager_query import (
+    LearningManagerPage,
+    manager_page_bounds,
+    manager_search_sql,
+)
 from services.learning_validity_service import (
     is_learning_usable,
     normalize_validity_update,
@@ -800,46 +805,88 @@ class LearningRepository:
             )
         return int(cursor.rowcount)
 
-    def manager_rows(self, *, limit: int = 500) -> list[dict[str, Any]]:
-        with self.database.connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT le.id, le.source_key, le.inquiry_id,
-                       le.answer_draft_id, le.approval_history_id,
-                       le.question_original_masked, le.gpt_draft, le.seller_answer,
-                       le.edited_answer, le.final_answer, le.learning_source,
-                       le.inquiry_type, le.product_name, le.validator_result,
-                       le.validity_type, le.event_name, le.valid_from,
-                       le.valid_until, le.validity_active, le.expired_at,
-                       le.validity_note, le.condition_json,
-                       le.rating, le.quality_score, le.usage_count,
-                       le.last_used_at, le.active, le.metadata_json,
-                       le.created_at, le.updated_at,
-                       i.source_question_id, i.external_inquiry_id,
-                       i.source_created_at, i.registered_at,
-                       i.source_type AS inquiry_source_type,
-                       i.inquiry_type AS source_inquiry_type,
-                       i.product_name AS inquiry_product_name,
-                       i.title AS inquiry_title,
-                       i.content AS inquiry_content,
-                       COALESCE(
-                           i.source_created_at,
-                           i.registered_at,
-                           le.created_at,
-                           le.updated_at
-                       ) AS inquiry_occurred_at
-                FROM learning_examples AS le
-                LEFT JOIN inquiries AS i ON i.id=le.inquiry_id
-                ORDER BY COALESCE(
-                             i.source_created_at,
-                             i.registered_at,
-                             le.created_at
-                         ) DESC,
-                         le.id DESC
-                LIMIT ?
-                """,
-                (max(1, min(int(limit), 2000)),),
-            ).fetchall()
+    _MANAGER_SELECT = """
+        SELECT le.id, le.source_key, le.inquiry_id,
+               le.answer_draft_id, le.approval_history_id,
+               le.question_original_masked, le.gpt_draft, le.seller_answer,
+               le.edited_answer, le.final_answer, le.learning_source,
+               le.inquiry_type, le.product_name, le.validator_result,
+               le.validity_type, le.event_name, le.valid_from,
+               le.valid_until, le.validity_active, le.expired_at,
+               le.validity_note, le.condition_json,
+               le.rating, le.quality_score, le.usage_count,
+               le.last_used_at, le.active, le.metadata_json,
+               le.created_at, le.updated_at,
+               i.source_question_id, i.external_inquiry_id,
+               i.source_created_at, i.registered_at,
+               i.source_type AS inquiry_source_type,
+               i.inquiry_type AS source_inquiry_type,
+               i.product_name AS inquiry_product_name,
+               i.title AS inquiry_title,
+               i.content AS inquiry_content,
+               COALESCE(
+                   i.source_created_at,
+                   i.registered_at,
+                   le.created_at,
+                   le.updated_at
+               ) AS inquiry_occurred_at
+        FROM learning_examples AS le
+        LEFT JOIN inquiries AS i ON i.id=le.inquiry_id
+    """
+    _MANAGER_ORDER = """
+        ORDER BY COALESCE(
+                     i.source_created_at,
+                     i.registered_at,
+                     le.created_at
+                 ) DESC,
+                 le.id DESC
+    """
+    _MANAGER_SEARCH = " || ' ' || ".join(
+        f"COALESCE(CAST({field} AS TEXT), '')"
+        for field in (
+            "le.id", "le.source_key", "le.inquiry_id", "le.answer_draft_id",
+            "i.source_question_id", "i.external_inquiry_id",
+            "le.question_original_masked", "i.title", "i.content",
+            "le.product_name", "i.product_name", "le.final_answer",
+            "le.seller_answer", "le.edited_answer", "le.gpt_draft",
+            "le.learning_source", "le.event_name", "le.validity_note",
+            "le.valid_from", "le.valid_until", "le.condition_json",
+            "json_extract(le.metadata_json, '$.answer_provenance')",
+            "json_extract(le.metadata_json, '$.answer_reference_id')",
+            "json_extract(le.metadata_json, '$.verified_by')",
+            "json_extract(le.metadata_json, '$.positive_reason')",
+            "json_extract(le.metadata_json, '$.positive_note')",
+            "json_extract(le.metadata_json, '$.learning_status')",
+            "json_extract(le.metadata_json, '$.revoke_reason')",
+            "json_extract(le.metadata_json, '$.revoked_by')",
+        )
+    )
+
+    @staticmethod
+    def _manager_validity_status_sql() -> str:
+        start = (
+            "CASE WHEN length(le.valid_from)=10 "
+            "THEN datetime(le.valid_from || 'T00:00:00+09:00') "
+            "ELSE datetime(le.valid_from) END"
+        )
+        end = (
+            "CASE WHEN length(le.valid_until)=10 "
+            "THEN datetime(le.valid_until || 'T23:59:59+09:00') "
+            "ELSE datetime(le.valid_until) END"
+        )
+        return (
+            "CASE "
+            "WHEN le.active=0 OR le.validity_active=0 THEN 'DISABLED' "
+            "WHEN upper(COALESCE(le.validity_type, 'PERMANENT'))='PERMANENT' "
+            "THEN 'ACTIVE' "
+            f"WHEN {start} IS NULL OR {end} IS NULL OR {end} < {start} "
+            "THEN 'DISABLED' "
+            f"WHEN datetime('now') < {start} THEN 'SCHEDULED' "
+            f"WHEN datetime('now') > {end} THEN 'EXPIRED' "
+            "ELSE 'ACTIVE' END"
+        )
+
+    def _manager_results(self, rows: Any) -> list[dict[str, Any]]:
         results = [dict(row) for row in rows]
         states = InquiryRepository(self.database).learning_states([
             int(row["inquiry_id"])
@@ -853,9 +900,7 @@ class LearningRepository:
             metadata = row["metadata_json"]
             row["provenance"] = metadata.get("answer_provenance")
             row["human_verified"] = bool(metadata.get("human_verified"))
-            row["signal_type"] = metadata.get(
-                "learning_signal_type", "POSITIVE"
-            )
+            row["signal_type"] = metadata.get("learning_signal_type", "POSITIVE")
             row["validity_status"] = validity_status(row)
             state = states.get(int(row["inquiry_id"])) if row.get("inquiry_id") else None
             row["effective_learning_status"] = (
@@ -865,6 +910,102 @@ class LearningRepository:
                 (state or {}).get("learning_tooltip") or "Learning 이력 없음"
             )
         return results
+
+    def manager_rows(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                self._MANAGER_SELECT + self._MANAGER_ORDER + " LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return self._manager_results(rows)
+
+    def manager_filter_options(self) -> dict[str, list[str]]:
+        positive = (
+            "COALESCE(json_extract(le.metadata_json, '$.learning_signal_type'), "
+            "'POSITIVE')='POSITIVE'"
+        )
+        with self.database.connection() as connection:
+            sources = connection.execute(
+                "SELECT DISTINCT le.learning_source AS value "
+                "FROM learning_examples AS le WHERE " + positive
+                + " AND trim(COALESCE(le.learning_source, ''))<>'' ORDER BY value"
+            ).fetchall()
+            provenance = connection.execute(
+                "SELECT DISTINCT COALESCE(json_extract(le.metadata_json, "
+                "'$.answer_provenance'), 'UNKNOWN') AS value "
+                "FROM learning_examples AS le WHERE " + positive + " ORDER BY value"
+            ).fetchall()
+        return {
+            "sources": [str(row["value"]) for row in sources],
+            "provenance": [str(row["value"]) for row in provenance],
+        }
+
+    def manager_page(
+        self,
+        *,
+        query: str = "",
+        source: str = "ALL",
+        provenance: str = "ALL",
+        human_verified: str = "ALL",
+        validity_type: str = "ALL",
+        validity_state: str = "ALL",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> LearningManagerPage:
+        clauses = [
+            "COALESCE(json_extract(le.metadata_json, '$.learning_signal_type'), "
+            "'POSITIVE')='POSITIVE'"
+        ]
+        parameters: list[Any] = []
+        search_clause, search_parameters = manager_search_sql(
+            self._MANAGER_SEARCH, query
+        )
+        if search_clause:
+            clauses.append(search_clause)
+            parameters.extend(search_parameters)
+        if source != "ALL":
+            clauses.append("le.learning_source=?")
+            parameters.append(source)
+        if provenance != "ALL":
+            clauses.append(
+                "COALESCE(json_extract(le.metadata_json, '$.answer_provenance'), "
+                "'UNKNOWN')=?"
+            )
+            parameters.append(provenance)
+        verified = (
+            "(COALESCE(json_extract(le.metadata_json, '$.human_verified'), 0)=1 "
+            "OR upper(COALESCE(le.validator_result, ''))="
+            "'HUMAN_VERIFIED_NAVER_POSTED')"
+        )
+        if human_verified == "YES":
+            clauses.append(verified)
+        elif human_verified == "NO":
+            clauses.append("NOT " + verified)
+        if validity_type != "ALL":
+            clauses.append("upper(COALESCE(le.validity_type, 'PERMANENT'))=?")
+            parameters.append(validity_type)
+        if validity_state != "ALL":
+            clauses.append(self._manager_validity_status_sql() + "=?")
+            parameters.append(validity_state)
+        where_sql = " WHERE " + " AND ".join(clauses)
+        with self.database.connection() as connection:
+            total = int(connection.execute(
+                "SELECT COUNT(*) FROM learning_examples AS le "
+                "LEFT JOIN inquiries AS i ON i.id=le.inquiry_id" + where_sql,
+                tuple(parameters),
+            ).fetchone()[0])
+            safe_page, safe_size, offset = manager_page_bounds(
+                total=total, page=page, page_size=page_size
+            )
+            rows = connection.execute(
+                self._MANAGER_SELECT + where_sql + self._MANAGER_ORDER
+                + " LIMIT ? OFFSET ?",
+                (*parameters, safe_size, offset),
+            ).fetchall()
+        return LearningManagerPage(
+            rows=self._manager_results(rows), total=total,
+            page=safe_page, page_size=safe_size,
+        )
 
     def deactivate_draft(self, draft_id: int) -> int:
         with self.database.transaction() as connection:

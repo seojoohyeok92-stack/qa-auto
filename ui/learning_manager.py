@@ -16,6 +16,10 @@ from answer.learning_feedback import (
 from answer.learning_signal import SIGNAL_KIND_LABELS
 from repositories.database import Database
 from repositories.learning_feedback_repository import LearningFeedbackRepository
+from repositories.learning_manager_query import (
+    LearningManagerPage,
+    manager_search_matches,
+)
 from repositories.learning_repository import LearningRepository
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_validity_service import validity_summary
@@ -88,6 +92,9 @@ def _search_blob(row: dict[str, Any]) -> str:
             row.get("final_answer"),
             row.get("corrected_answer_masked"),
             row.get("original_answer_masked"),
+            row.get("seller_answer"),
+            row.get("edited_answer"),
+            row.get("gpt_draft"),
             row.get("learning_source"),
             row.get("source"),
             row.get("provenance"),
@@ -98,6 +105,9 @@ def _search_blob(row: dict[str, Any]) -> str:
             row.get("correction_note"),
             row.get("event_name"),
             row.get("validity_note"),
+            row.get("valid_from"),
+            row.get("valid_until"),
+            row.get("condition_json"),
             metadata.get("answer_provenance"),
             metadata.get("answer_reference_id"),
             metadata.get("verified_by"),
@@ -139,7 +149,7 @@ def _filter_rows(
             or ("POSITIVE" if row.get("learning_source") else "")
         )
         verified = _is_human_verified(row)
-        if needle and needle not in _search_blob(row):
+        if needle and not manager_search_matches(needle, _search_blob(row)):
             continue
         if source != "ALL" and row_source != source:
             continue
@@ -556,22 +566,20 @@ def _render_details(
 
 
 def _render_section(
-    rows: list[dict[str, Any]], *, page_size: int, key_prefix: str,
+    page: LearningManagerPage, *, key_prefix: str,
     repository: LearningRepository | None = None,
 ) -> None:
     page_key = f"{key_prefix}_page"
-    page_rows, current_page, total_pages = _paginate_rows(
-        rows, int(st.session_state.get(page_key, 1)), page_size
-    )
-    st.session_state[page_key] = current_page
-    _render_default_table(page_rows)
+    total_pages = max(1, (page.total + page.page_size - 1) // page.page_size)
+    st.session_state[page_key] = page.page
+    _render_default_table(page.rows)
     _render_pagination(
-        total=len(rows),
-        current_page=current_page,
+        total=page.total,
+        current_page=page.page,
         total_pages=total_pages,
         key_prefix=key_prefix,
     )
-    _render_details(page_rows, key_prefix=key_prefix, repository=repository)
+    _render_details(page.rows, key_prefix=key_prefix, repository=repository)
 
 
 def _structured_signal_external_number(row: dict[str, Any]) -> str:
@@ -813,26 +821,13 @@ def render_learning_manager(database: Database | None) -> None:
         + " · 목록은 Learning 갱신시각이 아닌 실제 문의 접수시각으로 정렬됩니다."
     )
 
-    positive_rows = repository.manager_rows(limit=2_000)
-    feedback_rows = feedback_repository.manager_rows(limit=2_000)
-    all_rows = [*positive_rows, *feedback_rows]
+    positive_options = repository.manager_filter_options()
+    feedback_options = feedback_repository.manager_filter_options()
     source_options = sorted(
-        {
-            str(row.get("learning_source") or row.get("source"))
-            for row in all_rows
-            if row.get("learning_source") or row.get("source")
-        }
+        {*positive_options["sources"], *feedback_options["sources"]}
     )
     provenance_options = sorted(
-        {
-            str(
-                row.get("provenance")
-                or row.get("original_answer_source")
-                or _metadata(row).get("answer_provenance")
-                or "UNKNOWN"
-            )
-            for row in all_rows
-        }
+        {*positive_options["provenance"], *feedback_options["provenance"]}
     )
     filters = st.columns([2.4, 1.15, 1.15, 1.0, 0.85], gap="small")
     query = filters[0].text_input(
@@ -886,27 +881,27 @@ def render_learning_manager(database: Database | None) -> None:
         on_change=_learning_filter_changed,
     )
 
-    positive = _filter_rows(
-        positive_rows,
+    positive = repository.manager_page(
         query=query,
         source=selected_source,
         provenance=selected_provenance,
         human_verified=selected_verified,
-        signal_type="POSITIVE",
         validity_type=selected_validity,
         validity_state=selected_validity_state,
+        page=int(st.session_state.get("learning_manager_positive_page", 1)),
+        page_size=int(page_size),
     )
+    st.session_state["learning_manager_positive_page"] = positive.page
     st.subheader("Positive Learning")
     st.caption(
         "Positive 자동/승인 이력과 현재 effective lifecycle을 분리해 표시합니다. "
         "soft revoke 이력은 삭제하지 않습니다."
     )
-    if not positive:
+    if not positive.rows:
         st.info("조건에 맞는 Positive Learning이 없습니다.")
     else:
         _render_section(
             positive,
-            page_size=int(page_size),
             key_prefix="learning_manager_positive",
             repository=repository,
         )
@@ -918,22 +913,23 @@ def render_learning_manager(database: Database | None) -> None:
         key="learning_manager_signal",
         on_change=_learning_filter_changed,
     )
-    feedback = _filter_rows(
-        feedback_rows,
+    feedback = feedback_repository.manager_page(
         query=query,
         source=selected_source,
         provenance=selected_provenance,
         human_verified=selected_verified,
         signal_type=selected_signal,
+        page=int(st.session_state.get("learning_manager_feedback_page", 1)),
+        page_size=int(page_size),
     )
+    st.session_state["learning_manager_feedback_page"] = feedback.page
     st.subheader("Negative / 의도 교정 / 학습 제외")
     st.caption("평가와 soft revoke 이력을 실제 문의시각 최신순으로 표시합니다.")
-    if not feedback:
+    if not feedback.rows:
         st.info("조건에 맞는 Feedback이 없습니다.")
     else:
         _render_section(
             feedback,
-            page_size=int(page_size),
             key_prefix="learning_manager_feedback",
         )
 

@@ -10,6 +10,11 @@ from repositories.inquiry_repository import (
     deserialize_json,
     serialize_json,
 )
+from repositories.learning_manager_query import (
+    LearningManagerPage,
+    manager_page_bounds,
+    manager_search_sql,
+)
 from services.learning_privacy_service import LearningPrivacyService
 
 
@@ -510,36 +515,52 @@ class LearningFeedbackRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
-    def manager_rows(self, *, limit: int = 500) -> list[dict[str, Any]]:
-        with self.database.connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT lf.*,
-                       i.source_question_id, i.external_inquiry_id,
-                       i.source_created_at, i.registered_at,
-                       i.source_type AS inquiry_source_type,
-                       i.inquiry_type AS source_inquiry_type,
-                       i.product_name AS inquiry_product_name,
-                       i.title AS inquiry_title,
-                       i.content AS inquiry_content,
-                       COALESCE(
-                           i.source_created_at,
-                           i.registered_at,
-                           lf.created_at,
-                           lf.updated_at
-                       ) AS inquiry_occurred_at
-                FROM learning_feedback AS lf
-                LEFT JOIN inquiries AS i ON i.id=lf.inquiry_id
-                ORDER BY COALESCE(
-                             i.source_created_at,
-                             i.registered_at,
-                             lf.created_at
-                         ) DESC,
-                         lf.id DESC
-                LIMIT ?
-                """,
-                (max(1, min(int(limit), 2_000)),),
-            ).fetchall()
+    _MANAGER_SELECT = """
+        SELECT lf.*,
+               i.source_question_id, i.external_inquiry_id,
+               i.source_created_at, i.registered_at,
+               i.source_type AS inquiry_source_type,
+               i.inquiry_type AS source_inquiry_type,
+               i.product_name AS inquiry_product_name,
+               i.title AS inquiry_title,
+               i.content AS inquiry_content,
+               COALESCE(
+                   i.source_created_at,
+                   i.registered_at,
+                   lf.created_at,
+                   lf.updated_at
+               ) AS inquiry_occurred_at
+        FROM learning_feedback AS lf
+        LEFT JOIN inquiries AS i ON i.id=lf.inquiry_id
+    """
+    _MANAGER_ORDER = """
+        ORDER BY COALESCE(
+                     i.source_created_at,
+                     i.registered_at,
+                     lf.created_at
+                 ) DESC,
+                 lf.id DESC
+    """
+    _MANAGER_SEARCH = " || ' ' || ".join(
+        f"COALESCE(CAST({field} AS TEXT), '')"
+        for field in (
+            "lf.id", "lf.source_key", "lf.inquiry_id", "lf.answer_draft_id",
+            "lf.original_answer_reference_id", "i.source_question_id",
+            "i.external_inquiry_id", "lf.question_masked", "i.title",
+            "i.content", "i.product_name", "lf.corrected_answer_masked",
+            "lf.original_answer_masked", "lf.source",
+            "lf.original_answer_source", "lf.learning_signal_type",
+            "lf.correction_reason", "lf.correction_note",
+            "json_extract(lf.metadata_json, '$.answer_provenance')",
+            "json_extract(lf.metadata_json, '$.answer_reference_id')",
+            "json_extract(lf.metadata_json, '$.verified_by')",
+            "json_extract(lf.metadata_json, '$.learning_status')",
+            "json_extract(lf.metadata_json, '$.revoke_reason')",
+            "json_extract(lf.metadata_json, '$.revoked_by')",
+        )
+    )
+
+    def _manager_results(self, rows: Any) -> list[dict[str, Any]]:
         results = [self._row(row) for row in rows if row is not None]
         values = [row for row in results if row is not None]
         states = InquiryRepository(self.database).learning_states([
@@ -555,6 +576,89 @@ class LearningFeedbackRepository:
                 (state or {}).get("learning_tooltip") or "Learning 이력 없음"
             )
         return values
+
+    def manager_rows(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                self._MANAGER_SELECT + self._MANAGER_ORDER + " LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return self._manager_results(rows)
+
+    def manager_filter_options(self) -> dict[str, list[str]]:
+        provenance_sql = (
+            "COALESCE(lf.original_answer_source, "
+            "json_extract(lf.metadata_json, '$.answer_provenance'), 'UNKNOWN')"
+        )
+        with self.database.connection() as connection:
+            sources = connection.execute(
+                "SELECT DISTINCT lf.source AS value FROM learning_feedback AS lf "
+                "WHERE trim(COALESCE(lf.source, ''))<>'' ORDER BY value"
+            ).fetchall()
+            provenance = connection.execute(
+                f"SELECT DISTINCT {provenance_sql} AS value "
+                "FROM learning_feedback AS lf ORDER BY value"
+            ).fetchall()
+        return {
+            "sources": [str(row["value"]) for row in sources],
+            "provenance": [str(row["value"]) for row in provenance],
+        }
+
+    def manager_page(
+        self,
+        *,
+        query: str = "",
+        source: str = "ALL",
+        provenance: str = "ALL",
+        human_verified: str = "ALL",
+        signal_type: str = "ALL",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> LearningManagerPage:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        search_clause, search_parameters = manager_search_sql(
+            self._MANAGER_SEARCH, query
+        )
+        if search_clause:
+            clauses.append(search_clause)
+            parameters.extend(search_parameters)
+        if source != "ALL":
+            clauses.append("lf.source=?")
+            parameters.append(source)
+        if provenance != "ALL":
+            clauses.append(
+                "COALESCE(lf.original_answer_source, "
+                "json_extract(lf.metadata_json, '$.answer_provenance'), 'UNKNOWN')=?"
+            )
+            parameters.append(provenance)
+        verified = "COALESCE(json_extract(lf.metadata_json, '$.human_verified'), 0)=1"
+        if human_verified == "YES":
+            clauses.append(verified)
+        elif human_verified == "NO":
+            clauses.append("NOT (" + verified + ")")
+        if signal_type != "ALL":
+            clauses.append("lf.learning_signal_type=?")
+            parameters.append(signal_type)
+        where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.database.connection() as connection:
+            total = int(connection.execute(
+                "SELECT COUNT(*) FROM learning_feedback AS lf "
+                "LEFT JOIN inquiries AS i ON i.id=lf.inquiry_id" + where_sql,
+                tuple(parameters),
+            ).fetchone()[0])
+            safe_page, safe_size, offset = manager_page_bounds(
+                total=total, page=page, page_size=page_size
+            )
+            rows = connection.execute(
+                self._MANAGER_SELECT + where_sql + self._MANAGER_ORDER
+                + " LIMIT ? OFFSET ?",
+                (*parameters, safe_size, offset),
+            ).fetchall()
+        return LearningManagerPage(
+            rows=self._manager_results(rows), total=total,
+            page=safe_page, page_size=safe_size,
+        )
 
     def manager_summary(self) -> dict[str, int]:
         with self.database.connection() as connection:
