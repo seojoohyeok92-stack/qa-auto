@@ -1361,7 +1361,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     )
     top_actions[3].markdown(
         '<div class="workspace-lock-note">승인은 Final Answer만 생성합니다.'
-        " <b>네이버 등록 잠금</b></div>",
+        " <b>승인과 네이버 등록은 별도 작업입니다.</b></div>",
         unsafe_allow_html=True,
     )
 
@@ -1998,7 +1998,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         )
         with st.expander("학습 제외", expanded=False):
             st.caption(
-                "좋고 나쁨을 평가하지 않고, 선택한 답변을 향후 Learning과 자동 승격에서 제외합니다. 원본 답변은 삭제하지 않습니다."
+                "좋고 나쁨을 평가하지 않고, 선택한 답변을 향후 Learning 반영 대상에서 제외합니다. 원본 답변은 삭제하지 않습니다."
             )
             st.caption(
                 "평가 대상 · "
@@ -2652,7 +2652,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
                 "success",
-                "승인 완료했습니다. 네이버 등록은 잠금 상태입니다.",
+                "승인 완료했습니다. 아래에서 네이버 답변 등록을 별도로 진행할 수 있습니다.",
             )
             st.rerun()
         if cancel:
@@ -3610,7 +3610,10 @@ def _render_auto_post_review(
     result = st.session_state.get(f"auto_post_correction_result_{inquiry_id}")
     if isinstance(result, dict):
         if result.get("status") == "CORRECTED_AND_REPOSTED":
-            st.success("직원 수정본을 네이버에 반영하고 Learning에 저장했습니다.")
+            st.success(
+                "직원 수정본을 네이버에 반영하고 수정 이력을 기록했습니다. "
+                "Learning은 별도 관리자 판단으로만 반영됩니다."
+            )
         elif result.get("status") == "POST_UNKNOWN":
             st.error("수정 도달 여부가 불명확합니다. 자동 재시도하지 않습니다.")
         else:
@@ -3674,7 +3677,7 @@ def _render_naver_post_prepare(
     confirm_key = f"naver_post_confirm_{inquiry_id}"
     settings = NaverPostSettings.from_environment()
     _render_auto_post_review(database, inquiry, settings=settings)
-    st.markdown("### 네이버 등록 준비")
+    st.markdown("### 네이버 답변 등록")
     approval = ApprovalRepository(database).get_inquiry_approval(inquiry_id)
     draft = (
         AnswerRepository(database).active_for_inquiry(inquiry_id)
@@ -3703,7 +3706,7 @@ def _render_naver_post_prepare(
     }
     actions = st.columns([1.2, 4.6], gap="small")
     actual = actions[0].button(
-        "네이버 실제 등록",
+        "네이버 답변 등록",
         key=f"naver_post_actual_{inquiry_id}",
         disabled=(
             not settings.enabled
@@ -3714,7 +3717,7 @@ def _render_naver_post_prepare(
     )
     if settings.enabled:
         actions[1].caption(
-            "수동 등록 모드 · 내부 preflight 통과 후 명시적 확인이 필요합니다."
+            "수동 등록 모드 · 현재 Final Answer의 안전조건 확인 후 명시적 확인이 필요합니다."
         )
     else:
         actions[1].caption(
@@ -3883,6 +3886,8 @@ def render_review_workspace(
             border=True, height=760, key="official_answer_panel"
         ):
             _render_answer_panel(database, inquiry)
+        with st.container(border=True, key="official_naver_post_panel"):
+            _render_naver_post_prepare(database, inquiry)
     with dps_column:
         with st.container(
             border=True, height=760, key="official_dps_panel"

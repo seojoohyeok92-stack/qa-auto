@@ -3,14 +3,12 @@ from __future__ import annotations
 from repositories.database import Database
 from repositories.log_repository import LogRepository
 from repositories.post_review_repository import PostReviewRepository
-from services.learning_service import LearningService
 
 
 class PostReviewService:
     def __init__(self, database: Database) -> None:
         self.database = database
         self.reviews = PostReviewRepository(database)
-        self.learning = LearningService(database)
         self.logs = LogRepository(database)
 
     def complete_without_change(
@@ -19,20 +17,14 @@ class PostReviewService:
         version = self.reviews.reviewed_no_change(
             inquiry_id=int(inquiry_id), actor=actor
         )
-        saved = self.learning.capture_auto_post_version(
-            inquiry_id=int(inquiry_id),
-            version_id=int(version["id"]),
-            source="AUTO_POST_REVIEWED_NO_CHANGE",
-        )
-        if saved is not None:
-            self.reviews.mark_learning_saved(int(version["id"]))
         self.logs.record_inquiry(
             int(inquiry_id), "POST_REVIEW_COMPLETED",
             "자동등록 답변을 수정 없음으로 사후검토 완료했습니다.",
             details={
                 "actor": actor,
                 "version_id": version["id"],
-                "learning_saved": saved is not None,
+                "learning_saved": False,
+                "learning_policy": "MANUAL_DECISION_ONLY",
             },
         )
         return version

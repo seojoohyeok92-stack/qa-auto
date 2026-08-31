@@ -963,18 +963,7 @@ def render_dashboard_page(
         )
     with profile_stage("dashboard_kpi_counts"):
         kpi_counts = (
-            InquiryRepository(database).dashboard_kpi_counts(
-                store_codes=filters["stores"],
-                source=filters["source"],
-                queues=filters["queues"],
-                priorities=filters["priorities"],
-                answer_status=filters["answer_status"],
-                delivery_only=filters["delivery_only"],
-                search_query=filters["search_query"],
-                start_date=start_date.isoformat(),
-                end_date=end_date.isoformat(),
-                learning_status=learning_filter,
-            )
+            InquiryRepository(database).dashboard_operational_card_counts()
             if database is not None
             else {}
         )

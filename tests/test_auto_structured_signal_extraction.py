@@ -162,7 +162,7 @@ def test_no_edit_at_all_produces_no_signal(tmp_path) -> None:
     assert saved == []
 
 
-def test_repeated_independent_confirmation_promotes_to_eligible(tmp_path) -> None:
+def test_repeated_confirmation_requires_explicit_manual_promotion(tmp_path) -> None:
     database = Database(tmp_path / "auto.db")
     database.initialize()
     service = LearningSignalService(database)
@@ -221,9 +221,13 @@ def test_repeated_independent_confirmation_promotes_to_eligible(tmp_path) -> Non
         "제주도도 배송설치 가능한가요?", store_code=STORE_CODE,
         product_id="TV-4", product_name="삼성 TV",
     )
-    assert result2["verified_facts"] or result2["corrections"], (
-        "2 independent confirmations with promotion enabled must become eligible"
+    assert result2["verified_facts"] == [] and result2["corrections"] == []
+    LearningSignalRepository(database).promote(signal_id, actor="관리자")
+    promoted = service.retrieve(
+        "제주도도 배송설치 가능한가요?", store_code=STORE_CODE,
+        product_id="TV-4", product_name="삼성 TV",
     )
+    assert promoted["verified_facts"] or promoted["corrections"]
 
 
 def test_promotion_disabled_keeps_signal_shadow_forever(tmp_path, monkeypatch) -> None:

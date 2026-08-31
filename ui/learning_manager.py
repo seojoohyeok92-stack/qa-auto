@@ -598,7 +598,7 @@ def _render_structured_signal_manager(database: Database) -> None:
             "자동 추출: "
             + ("ON" if settings.enabled else "OFF")
             + " · 자동 VERIFIED_FACT/CORRECTION 승격: "
-            + ("ON" if settings.auto_verified_promotion_enabled else "OFF (SHADOW)")
+            + "OFF (관리자 수동 승격 전용)"
             + f" · 승격 임계 확인횟수: {settings.min_confirmations_for_promotion}"
         ),
         help=(

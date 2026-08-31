@@ -268,7 +268,7 @@ def render_kpi_cards(
     database: Database | None = None,
     *,
     states: list[dict[str, Any]] | None = None,
-    value_counts: dict[str, int] | None = None,
+    value_counts: dict[str, int | dict[str, Any]] | None = None,
 ) -> str | None:
     states = states if states is not None else (
         ApprovalRepository(database).dashboard_states()
@@ -288,23 +288,36 @@ def render_kpi_cards(
     for column, (code, title, subtitle, tone) in zip(
         columns, definitions
     ):
+        card_count = value_counts.get(code, 0) if value_counts is not None else 0
         value = (
-            int(value_counts.get(code, 0))
+            int(card_count.get("value", 0))
+            if isinstance(card_count, dict)
+            else int(card_count)
             if value_counts is not None
             else sum(_state_matches_filter(state, code) for state in states)
             if states
             else 0
         )
-        today_value = sum(
-            1
-            for item in items
-            if _is_today(item)
-            and (
-                (state := state_by_key.get(_work_item_state_key(item)))
-                is not None
+        if isinstance(card_count, dict):
+            if card_count.get("kind") == "STOCK":
+                footer = f"현재 {int(card_count.get('current', value)):,}건"
+            else:
+                footer = (
+                    f"오늘 {int(card_count.get('today', 0)):,}건 · "
+                    f"전체 {int(card_count.get('total', value)):,}건"
+                )
+        else:
+            today_value = sum(
+                1
+                for item in items
+                if _is_today(item)
+                and (
+                    (state := state_by_key.get(_work_item_state_key(item)))
+                    is not None
+                )
+                and _state_matches_filter(state, code)
             )
-            and _state_matches_filter(state, code)
-        )
+            footer = f"오늘 {today_value:,}건 · 전체 {value:,}건"
         with column:
             with st.container(
                 key=f"kpi_filter_card_{code.lower()}_{tone}"
@@ -315,7 +328,7 @@ def render_kpi_cards(
                     f'<div class="operations-kpi-icon">{_kpi_icon_svg(code)}</div>'
                     '<div class="operations-kpi-copy">'
                     f'<span>{escape(title)}</span><strong>{value}<small>건</small></strong>'
-                    f'<p>오늘 {today_value}건 · 전체 {value}건</p>'
+                    f'<p>{escape(footer)}</p>'
                     f'<small>{escape(subtitle)}</small></div>'
                     f'<div class="operations-kpi-trend">{_sparkline_svg(trend)}</div>'
                     "</div>",

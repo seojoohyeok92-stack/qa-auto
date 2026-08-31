@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import itertools
 
-import pytest
-
 from answer.facts import AnswerFacts
-from answer.hybrid_models import DraftResult, Emotion, IntentResult, SelfReviewResult
-from answer.answer_validator import AnswerValidator
+from answer.hybrid_models import Emotion, IntentResult
 from repositories.answer_repository import AnswerRepository
 from repositories.inquiry_repository import InquiryRepository
+from repositories.learning_repository import LearningRepository
 from repositories.workflow_repository import WorkflowRepository
 from answer.models import AnswerResult, AnswerStatus
 from services.approval_service import ApprovalService
@@ -17,14 +15,6 @@ from services.learning_context_service import LearningContextService
 
 STORE_CODE = "OJE_PLUS"
 _ids = itertools.count(1)
-
-
-@pytest.fixture(autouse=True)
-def _auto_learning_env(monkeypatch):
-    monkeypatch.setenv("AUTO_STRUCTURED_LEARNING_ENABLED", "true")
-    monkeypatch.setenv("AUTO_VERIFIED_FACT_PROMOTION_ENABLED", "true")
-    monkeypatch.setenv("AUTO_VERIFIED_FACT_MIN_CONFIRMATIONS", "2")
-    yield
 
 
 def _approve_inquiry(database, *, program_answer: str, final_answer: str):
@@ -58,13 +48,14 @@ def _approve_inquiry(database, *, program_answer: str, final_answer: str):
     return inquiry_id
 
 
-def test_full_pipeline_from_two_staff_edits_to_next_inquiry_answer_generation(
-    tmp_path,
+def test_two_explicit_approvals_create_positive_learning_without_auto_signal_promotion(
+    tmp_path, monkeypatch,
 ) -> None:
-    """문의 -> Program Answer -> Staff Edit -> Final Answer -> Approval ->
-    Positive Learning -> Structured Signal extraction -> (2회 반복 확인) ->
-    승격 -> 다음 문의의 Retrieval/Evidence/Validator까지 실제로 연결되는지
-    검증한다 (4th-phase section 22)."""
+    """명시적 승인은 Positive Learning을 만들지만 반복 확인만으로
+    structured signal을 runtime evidence로 자동 승격하지 않는다."""
+    monkeypatch.setenv("AUTO_STRUCTURED_LEARNING_ENABLED", "true")
+    monkeypatch.setenv("AUTO_VERIFIED_FACT_PROMOTION_ENABLED", "true")
+    monkeypatch.setenv("AUTO_VERIFIED_FACT_MIN_CONFIRMATIONS", "2")
 
     from repositories.database import Database
 
@@ -112,26 +103,9 @@ def test_full_pipeline_from_two_staff_edits_to_next_inquiry_answer_generation(
     )
     context = LearningContextService(database).build(facts, intent)
 
-    assert context["feedback_signals"]["verified_facts"] or context["feedback_signals"]["corrections"], (
-        "the twice-confirmed, now-promoted fact must be retrieved for a "
-        "differently-phrased follow-up inquiry"
-    )
-    evidence = context["subquestion_evidence"][0]
-    assert evidence["status"] == "ANSWERABLE"
-    assert evidence["source"] == "VERIFIED_FEEDBACK_SIGNAL"
-    assert evidence["feedback_signal_ids"]
-
-    # The evidence must also survive AnswerValidator unharmed (no spurious
-    # conflict/BLOCK) when GPT actually answers from it.
-    validator = AnswerValidator()
-    validation = validator.validate(
-        facts, intent,
-        DraftResult(answer="제주도 배송 및 설치가 가능합니다.", confidence=0.9),
-        SelfReviewResult(
-            passed=True, answered_all_questions=True, has_speculation=False,
-            facts_consistent=True, requires_review=False, reason="ok", warnings=(),
-        ),
-        subquestion_evidence=context["subquestion_evidence"],
-    )
-    assert validation.passed
-    assert not any(rule.code == "VERIFIED_FACT_CONFLICT" for rule in validation.rules)
+    positives = LearningRepository(database).candidates(store_code=STORE_CODE)
+    assert len(positives) == 2
+    assert all(row["metadata_json"].get("human_verified") for row in positives)
+    assert context["feedback_signals"]["verified_facts"] == []
+    assert context["feedback_signals"]["corrections"] == []
+    assert context["subquestion_evidence"][0]["source"] != "VERIFIED_FEEDBACK_SIGNAL"

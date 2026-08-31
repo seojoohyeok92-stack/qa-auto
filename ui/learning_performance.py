@@ -204,13 +204,16 @@ def render_learning_performance(database: Database) -> None:
         ], hide_index=True, width="stretch")
 
         positive = data["positive"]
-        st.markdown("#### Positive Learning 관찰 현황")
-        st.caption(f"현재 관찰기간: {positive['observation_days']}일")
+        st.markdown("#### Positive Learning 수동 판단 현황")
+        st.caption(
+            f"기존 관찰기간 기록: {positive['observation_days']}일 · "
+            "관찰기간이 지나도 자동 전환하지 않으며 관리자 명시 판단만 반영합니다."
+        )
         positive_columns = st.columns(4, gap="small")
         for column, (label, value) in zip(positive_columns, (
-            ("관찰 중", positive["observing"]),
-            ("판정 시점 도달", positive["due"]),
-            ("자동 Learning 전환", positive["converted"]),
+            ("관찰 이력", positive["observing"]),
+            ("판정 시점 도달 · 자동전환 없음", positive["due"]),
+            ("과거 자동 Learning 이력", positive["converted"]),
             ("확인 보류/제외", positive["corrected"] + positive["unknown"] + positive["validator"] + positive["unconfirmed_or_other"]),
         )):
             column.metric(label, value)

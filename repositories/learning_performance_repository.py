@@ -10,19 +10,11 @@ WITH outcomes AS (
   SELECT pr.inquiry_id, pr.answer_draft_id, i.inquiry_type,
          av.posted_at,
          CASE WHEN EXISTS (
-           SELECT 1 FROM learning_examples le
-           WHERE le.inquiry_id=pr.inquiry_id
-             AND le.learning_source='AUTO_POST_CORRECTED'
-         ) OR EXISTS (
            SELECT 1 FROM answer_versions cv
            WHERE cv.inquiry_id=pr.inquiry_id
              AND cv.version_kind='NAVER_CORRECTION_APPLIED'
          ) THEN 'CORRECTED'
-         WHEN EXISTS (
-           SELECT 1 FROM learning_examples le
-           WHERE le.inquiry_id=pr.inquiry_id AND le.active=1
-             AND le.learning_source='AUTO_POST_REVIEWED_NO_CHANGE'
-         ) THEN 'UNCHANGED'
+         WHEN pr.status='REVIEWED_NO_CHANGE' THEN 'UNCHANGED'
          ELSE 'PENDING' END AS outcome
   FROM post_reviews pr
   JOIN inquiries i ON i.id=pr.inquiry_id

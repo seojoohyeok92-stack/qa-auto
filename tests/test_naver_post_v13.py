@@ -17,7 +17,12 @@ from config import NaverPostSettings, StoreConfig
 from repositories.answer_repository import AnswerRepository
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
-from repositories.inquiry_repository import InquiryRepository
+from repositories.inquiry_repository import (
+    InquiryRepository,
+    deserialize_json,
+    serialize_json,
+)
+from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_post_repository import NaverPostRepository
 from services.approval_service import ApprovalService
@@ -235,6 +240,122 @@ def test_store_credential_mapping_mismatch_is_blocked_before_network(
     assert result.status == "BLOCKED"
     assert result.error_code == "STORE_CREDENTIAL_MISMATCH"
     assert client.requests == []
+
+
+def test_manual_post_rechecks_current_final_answer_validator(
+    database: Database,
+) -> None:
+    inquiry_id = _approved(database)
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE answer_drafts SET final_answer=? WHERE id=?",
+            ("<masked-phone>로 연락해 주세요.", int(draft["id"])),
+        )
+    client = RecordingClient()
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True
+    )
+    assert result.status == "BLOCKED"
+    assert "INTERNAL_PLACEHOLDER_EXPOSURE" in result.message
+    assert client.requests == []
+
+
+def test_manual_post_cannot_bypass_required_dps(
+    database: Database,
+) -> None:
+    inquiry_id = _approved(database)
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    metadata = deserialize_json(draft.get("metadata_json")) or {}
+    metadata.update(
+        {
+            "selected_answer_route": "GPT_DIRECT",
+            "processing_plan": {
+                "requires_dps_lookup": True,
+                "dps_lookup_status": "FAILED",
+                "valid_dps_snapshot_available": False,
+                "analysis": {},
+            },
+        }
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE answer_drafts
+            SET metadata_json=?, validation_status='PASS'
+            WHERE id=?
+            """,
+            (serialize_json(metadata), int(draft["id"])),
+        )
+    client = RecordingClient()
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True
+    )
+    assert result.status == "BLOCKED"
+    assert "DPS_RESULT_NOT_TRUSTED" in result.message
+    assert client.requests == []
+
+
+def test_manual_post_cannot_bypass_missing_item_review_route(
+    database: Database,
+) -> None:
+    inquiry_id = _approved(database)
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    metadata = deserialize_json(draft.get("metadata_json")) or {}
+    metadata.update(
+        {
+            "selected_answer_route": "BLOCKED_REVIEW_REQUIRED",
+            "requires_manual_review": True,
+            "processing_plan": {
+                "needs_staff_review": True,
+                "analysis": {
+                    "detected_intent": "MISSING_ITEM_REPORT",
+                    "manual_review_required": True,
+                },
+            },
+        }
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE answer_drafts SET metadata_json=? WHERE id=?",
+            (serialize_json(metadata), int(draft["id"])),
+        )
+    client = RecordingClient()
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True
+    )
+    assert result.status == "BLOCKED"
+    assert "ROUTE_BLOCKED_REVIEW_REQUIRED" in result.message
+    assert client.requests == []
+
+
+def test_past_review_queue_does_not_permanently_block_current_safe_answer(
+    database: Database,
+) -> None:
+    inquiry_id = _approved(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET workflow_status='REVIEW_PENDING' WHERE id=?",
+            (inquiry_id,),
+        )
+    client = RecordingClient()
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True
+    )
+    assert result.status == "POSTED"
+    assert len(client.requests) == 1
+
+
+def test_manual_post_success_does_not_create_additional_learning(
+    database: Database,
+) -> None:
+    inquiry_id = _approved(database)
+    before = LearningRepository(database).count()
+    result = _service(database, RecordingClient(), enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True
+    )
+    assert result.status == "POSTED"
+    assert LearningRepository(database).count() == before
 
 
 def test_post_unknown_and_success_cannot_be_retried(
@@ -463,6 +584,7 @@ from types import SimpleNamespace
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 import ui.review_workspace as workspace
+import streamlit as st
 
 class FakeDry:
     def __init__(self, database): pass
@@ -488,6 +610,7 @@ class FakeSettings:
 workspace.NaverPostDryRunService=FakeDry
 workspace.NaverPostService=FakePost
 workspace.NaverPostSettings=FakeSettings
+st.session_state["production_admin_mode"] = False
 db=Database(r"{database.path}")
 workspace._render_naver_post_prepare(
     db, InquiryRepository(db).get({inquiry_id})
@@ -498,7 +621,7 @@ workspace._render_naver_post_prepare(
     actual = next(
         button
         for button in app.button
-        if button.label == "\ub124\uc774\ubc84 \uc2e4\uc81c \ub4f1\ub85d"
+        if button.label == "\ub124\uc774\ubc84 \ub2f5\ubcc0 \ub4f1\ub85d"
     )
     assert actual.disabled is False
     actual.click()

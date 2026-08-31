@@ -12,7 +12,6 @@ from repositories.learning_repository import LearningRepository
 from repositories.post_review_repository import PostReviewRepository
 from services.copilot_correction_learning_service import CopilotCorrectionLearningService
 from services.historical_case_service import HistoricalCaseService
-from services.learning_service import LearningService
 from services.learning_feedback_service import LearningFeedbackService
 from services.positive_learning_service import PositiveLearningService
 from services.similar_answer_service import SimilarAnswerService
@@ -79,7 +78,7 @@ def _posted(database: Database, *, posted_at: str) -> tuple[int, int, str]:
     return inquiry_id, int(version["id"]), str(version["answer_body"])
 
 
-def test_positive_learning_waits_deduplicates_and_is_superseded(tmp_path) -> None:
+def test_positive_learning_observation_never_promotes(tmp_path) -> None:
     database = Database(tmp_path / "positive.db"); database.initialize()
     now = datetime(2026, 8, 7, tzinfo=UTC)
     inquiry_id, _, answer = _posted(
@@ -89,31 +88,21 @@ def test_positive_learning_waits_deduplicates_and_is_superseded(tmp_path) -> Non
         database, settings=SimpleNamespace(observation_days=7)
     )
     early = service.observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
-    assert early["reason"] == "OBSERVATION_PERIOD_NOT_ELAPSED"
+    assert early["reason"] == "MANUAL_APPROVAL_REQUIRED"
     assert LearningRepository(database).count() == 0
     accepted = service.observe(
         inquiry_id=inquiry_id, seller_answer=answer, observed_at=now + timedelta(days=1)
     )
-    assert accepted["saved"] is True, accepted
-    assert accepted["learning"]["metadata_json"]["acceptance_mode"] == "AUTO_OBSERVATION"
+    assert accepted == {
+        "saved": False,
+        "reason": "MANUAL_APPROVAL_REQUIRED",
+        "learning": None,
+    }
     again = service.observe(
         inquiry_id=inquiry_id, seller_answer=answer, observed_at=now + timedelta(days=3)
     )
-    assert again["saved"] is True
-    assert LearningRepository(database).count() == 1
-
-    reviews = PostReviewRepository(database)
-    changed, is_changed = reviews.capture_remote_naver_edit(
-        inquiry_id=inquiry_id, answer_body="직원이 수정한 최종 배송 안내입니다."
-    )
-    assert is_changed is True
-    corrected = LearningService(database).capture_auto_post_version(
-        inquiry_id=inquiry_id, version_id=int(changed["id"]), source="AUTO_POST_CORRECTED"
-    )
-    assert corrected is not None
-    rows = LearningRepository(database).manager_rows()
-    auto_positive = next(row for row in rows if row["learning_source"] == "AUTO_POST_REVIEWED_NO_CHANGE")
-    assert auto_positive["active"] is False
+    assert again["saved"] is False
+    assert LearningRepository(database).count() == 0
 
 
 class _FakeNaver:
@@ -204,7 +193,7 @@ def test_positive_learning_rejects_unknown_and_staff_review(tmp_path) -> None:
     result = PositiveLearningService(
         unknown_db, settings=SimpleNamespace(observation_days=7)
     ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
-    assert result["reason"] == "REMOTE_POST_NOT_CONFIRMED"
+    assert result["reason"] == "MANUAL_APPROVAL_REQUIRED"
 
     review_db = Database(tmp_path / "review.db"); review_db.initialize()
     inquiry_id, _, answer = _posted(
@@ -218,7 +207,7 @@ def test_positive_learning_rejects_unknown_and_staff_review(tmp_path) -> None:
     result = PositiveLearningService(
         review_db, settings=SimpleNamespace(observation_days=7)
     ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
-    assert result["reason"] == "STAFF_REVIEW_REQUIRED"
+    assert result["reason"] == "MANUAL_APPROVAL_REQUIRED"
 
 
 def test_positive_learning_rejects_pre_promotion_edit_and_negative(tmp_path) -> None:
@@ -233,7 +222,7 @@ def test_positive_learning_rejects_pre_promotion_edit_and_negative(tmp_path) -> 
     edited = PositiveLearningService(
         edited_db, settings=SimpleNamespace(observation_days=7)
     ).observe(inquiry_id=inquiry_id, seller_answer=original, observed_at=now)
-    assert edited["reason"] == "ANSWER_ALREADY_REVIEWED_OR_CORRECTED"
+    assert edited["reason"] == "MANUAL_APPROVAL_REQUIRED"
     assert LearningRepository(edited_db).count() == 0
 
     negative_db = Database(tmp_path / "negative-before-seven.db"); negative_db.initialize()
@@ -251,7 +240,7 @@ def test_positive_learning_rejects_pre_promotion_edit_and_negative(tmp_path) -> 
     negative = PositiveLearningService(
         negative_db, settings=SimpleNamespace(observation_days=7)
     ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
-    assert negative["reason"] == "NEGATIVE_FEEDBACK_EXISTS"
+    assert negative["reason"] == "MANUAL_APPROVAL_REQUIRED"
     assert LearningRepository(negative_db).count() == 0
 
 
@@ -275,7 +264,7 @@ def test_positive_learning_rejects_exact_excluded_answer_after_seven_days(
     excluded = PositiveLearningService(
         database, settings=SimpleNamespace(observation_days=7)
     ).observe(inquiry_id=inquiry_id, seller_answer=answer, observed_at=now)
-    assert excluded["reason"] == "EXCLUDED_FEEDBACK_EXISTS"
+    assert excluded["reason"] == "MANUAL_APPROVAL_REQUIRED"
     assert LearningRepository(database).count() == 0
 
 

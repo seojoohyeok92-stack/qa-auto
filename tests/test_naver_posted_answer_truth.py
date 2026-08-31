@@ -173,7 +173,7 @@ def test_answered_inquiry_never_promotes_existing_program_draft(tmp_path) -> Non
     )["original_answer"]
 
 
-def test_posted_answer_staff_correction_has_precise_learning_provenance(
+def test_posted_answer_staff_correction_records_feedback_without_auto_positive(
     tmp_path,
 ) -> None:
     database, inquiry_id, draft = _answered_with_existing_draft(tmp_path)
@@ -193,20 +193,8 @@ def test_posted_answer_staff_correction_has_precise_learning_provenance(
         "NAVER_POSTED"
     )
     positive = LearningRepository(database).candidates(store_code="STORE")
-    assert len(positive) == 1
-    correction = positive[0]
-    assert correction["metadata_json"].get("answer_provenance") == "STAFF_EDITED"
-    assert correction["posted"] is False
-    assert correction["metadata_json"]["customer_truth_remains_naver_posted"]
-    history = LearningRepository(database).manager_rows()
-    assert len(history) == 2
-    seller = next(
-        item
-        for item in history
-        if item["metadata_json"].get("answer_provenance") == "NAVER_POSTED"
-    )
-    assert seller["active"] is False
-    assert seller["metadata_json"]["effective_exclusion"] == "NEGATIVE"
+    assert positive == []
+    assert LearningRepository(database).manager_rows() == []
 
 
 def test_unanswered_staff_edit_keeps_program_generated_provenance(tmp_path) -> None:
@@ -311,9 +299,7 @@ def test_unedited_naver_answer_approval_promotes_only_posted_truth(
 ) -> None:
     database, inquiry_id, draft = _answered_with_existing_draft(tmp_path)
     before = LearningRepository(database).candidates(store_code="STORE")
-    assert len(before) == 1
-    assert before[0]["metadata_json"]["answer_provenance"] == "NAVER_POSTED"
-    assert not before[0]["metadata_json"].get("human_verified")
+    assert before == []
 
     app = AppTest.from_string(
         f'''
@@ -532,7 +518,13 @@ def test_human_verified_authority_wins_concurrent_source_answered_upsert(
 ) -> None:
     database, inquiry_id, _draft_row = _answered_with_existing_draft(tmp_path)
     repository = LearningRepository(database)
-    automatic = repository.for_inquiry(inquiry_id)[0]
+    # 과거 자동 생성 row와의 동시성/권한 우선순위 계약은 보존한다. 새 runtime
+    # sync가 이를 만들지는 않으므로 legacy fixture를 명시적으로 준비한다.
+    automatic = LearningService(database).capture_seller_answer(
+        inquiry_id=inquiry_id,
+        answer="네이버에 실제 등록된 답변입니다.",
+    )
+    assert automatic is not None
     posted = NaverPostedAnswerRepository(database).current(inquiry_id)
     assert posted is not None
     human = {

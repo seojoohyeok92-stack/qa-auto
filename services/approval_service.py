@@ -188,13 +188,6 @@ class ApprovalService:
                     signal_content=correction_signal_content,
                     fact_scope=correction_fact_scope,
                 )
-                if internal_posted_correction:
-                    LearningService(
-                        self.database
-                    ).capture_posted_staff_correction(
-                        inquiry_id=inquiry_id,
-                        draft_id=draft_id,
-                    )
             return draft
         updated = self.answers.save_edited_answer(
             draft_id,
@@ -254,13 +247,6 @@ class ApprovalService:
                 signal_content=correction_signal_content,
                 fact_scope=correction_fact_scope,
             )
-            if internal_posted_correction:
-                LearningService(
-                    self.database
-                ).capture_posted_staff_correction(
-                    inquiry_id=inquiry_id,
-                    draft_id=draft_id,
-                )
         return self.answers.get(draft_id) or updated
 
     def approve_posted_answer(

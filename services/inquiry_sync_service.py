@@ -307,7 +307,7 @@ class InquirySyncService:
                             "sync_provenance": "NAVER_API_RESPONSE"
                         },
                     )
-                failed_stage = "SELLER_ANSWER_LEARNING"
+                failed_stage = "SELLER_ANSWER_OBSERVATION"
                 seller_answer = str(work_item.get("seller_answer") or "").strip()
                 if seller_answer:
                     try:
@@ -319,37 +319,27 @@ class InquirySyncService:
                             )
                         )
                         if remote_changed and remote_version is not None:
-                            saved = self.learning.capture_auto_post_version(
-                                inquiry_id=upsert.inquiry_id,
-                                version_id=int(remote_version["id"]),
-                                source="AUTO_POST_CORRECTED",
-                            )
-                            if saved is not None:
-                                review_repository.mark_learning_saved(
-                                    int(remote_version["id"])
-                                )
                             self.logs.record_inquiry(
                                 upsert.inquiry_id,
-                                "NAVER_DIRECT_EDIT_LEARNING_SAVED",
-                                "네이버에서 직접 수정된 답변을 감지해 사후검토 Learning으로 저장했습니다.",
+                                "NAVER_DIRECT_EDIT_DETECTED",
+                                "네이버에서 직접 수정된 답변을 감지해 품질 측정 이력으로 기록했습니다.",
                                 details={
                                     "answer_version_id": int(remote_version["id"]),
-                                    "learning_saved": saved is not None,
-                                    "learning_source": "AUTO_POST_CORRECTED",
+                                    "learning_saved": False,
+                                    "learning_policy": "MANUAL_DECISION_ONLY",
                                 },
                             )
                         elif remote_version is None:
                             # Historical seller answers without a Q&A Auto post
                             # history remain style-only legacy Learning data.
-                            self.learning.capture_seller_answer(
-                                inquiry_id=upsert.inquiry_id,
-                                answer=seller_answer,
-                            )
-                        else:
-                            from services.positive_learning_service import PositiveLearningService
-                            PositiveLearningService(self.inquiries.database).observe(
-                                inquiry_id=upsert.inquiry_id,
-                                seller_answer=seller_answer,
+                            self.logs.record_inquiry(
+                                upsert.inquiry_id,
+                                "SELLER_ANSWER_OBSERVED",
+                                "판매자 답변을 동기화했으며 Learning 반영은 관리자 판단을 기다립니다.",
+                                details={
+                                    "learning_saved": False,
+                                    "learning_policy": "MANUAL_DECISION_ONLY",
+                                },
                             )
                     except Exception as learning_error:
                         self.logs.record_inquiry(

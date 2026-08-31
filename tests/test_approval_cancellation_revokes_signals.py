@@ -92,11 +92,10 @@ def _factual_signal_id(database, inquiry_id) -> int:
     return int(factual[0]["id"])
 
 
-def test_end_to_end_approval_cancellation_revokes_only_its_own_confirmation(
+def test_approval_confirmations_never_auto_promote_and_revoke_precisely(
     tmp_path,
 ) -> None:
-    """Approve -> auto-learn -> cancel approval -> retrieval must reflect
-    the revoke precisely (4th-phase mid-turn requirement)."""
+    """Confirmations remain auditable but never become runtime evidence."""
 
     database, inquiry_a, draft_a = make_context(tmp_path)
     ApprovalService(database).save_edited_answer(
@@ -115,9 +114,8 @@ def test_end_to_end_approval_cancellation_revokes_only_its_own_confirmation(
 
     service = LearningSignalService(database)
     result = service.retrieve("언제 설치되나요?", store_code="OJE_PLUS")
-    assert result["verified_facts"] or result["corrections"], (
-        "3 independent confirmations with promotion enabled must be eligible"
-    )
+    assert result["verified_facts"] == []
+    assert result["corrections"] == []
 
     # --- Cancel inquiry A's approval ---------------------------------
     positive_before = LearningRepository(database).for_inquiry(inquiry_a)
@@ -148,8 +146,8 @@ def test_end_to_end_approval_cancellation_revokes_only_its_own_confirmation(
     assert by_inquiry_a and by_inquiry_a[0]["active"] == 0
     assert by_inquiry_a[0]["revoked_reason"]
 
-    # With only 2 of the 3 confirmations left, promotion threshold (3) is no
-    # longer met -- the signal must drop out of usable evidence again.
+    # Revocation changes the live confirmation count without ever enabling
+    # runtime evidence; explicit manual promotion is still required.
     result_after_cancel = service.retrieve(
         "언제 설치되나요?", store_code="OJE_PLUS",
     )
@@ -177,7 +175,8 @@ def test_end_to_end_approval_cancellation_revokes_only_its_own_confirmation(
     result_after_reapproval = service.retrieve(
         "언제 설치되나요?", store_code="OJE_PLUS",
     )
-    assert result_after_reapproval["verified_facts"] or result_after_reapproval["corrections"]
+    assert result_after_reapproval["verified_facts"] == []
+    assert result_after_reapproval["corrections"] == []
 
 
 def test_manual_signal_unaffected_by_unrelated_approval_cancellation(tmp_path) -> None:

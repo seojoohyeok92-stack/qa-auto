@@ -329,7 +329,7 @@ def test_one_failure_does_not_stop_next_inquiry(tmp_path) -> None:
     assert InquiryRepository(database).get(second)["post_status"] == "POSTED"
 
 
-def test_staff_correction_creates_versions_and_highest_priority_learning(tmp_path) -> None:
+def test_staff_correction_creates_versions_without_automatic_learning(tmp_path) -> None:
     database = make_database(tmp_path)
     inquiry_id = make_inquiry(database)
     make_draft(database, inquiry_id, route="TEMPLATE")
@@ -348,9 +348,7 @@ def test_staff_correction_creates_versions_and_highest_priority_learning(tmp_pat
     assert [item["version_number"] for item in versions] == [1, 2, 3]
     assert versions[1]["naver_status"] == "CORRECTION_PENDING"
     assert versions[2]["naver_status"] == "POSTED"
-    learning = LearningRepository(database).candidates(store_code="OJE_PLUS")
-    assert learning[0]["learning_source"] == "AUTO_POST_CORRECTED"
-    assert learning[0]["rating"] == 5
+    assert LearningRepository(database).count() == 0
 
 
 def test_failed_staff_correction_preserves_original_and_is_not_learned(tmp_path) -> None:
@@ -499,7 +497,7 @@ def test_process_restart_recovers_stale_posting_as_unknown(tmp_path) -> None:
     assert AutoPostRepository(database).candidates(max_retries=10) == []
 
 
-def test_review_without_change_is_learned_but_unreviewed_is_not(tmp_path) -> None:
+def test_review_without_change_records_review_but_not_automatic_learning(tmp_path) -> None:
     database = make_database(tmp_path)
     inquiry_id = make_inquiry(database)
     make_draft(database, inquiry_id, route="TEMPLATE")
@@ -510,9 +508,8 @@ def test_review_without_change_is_learned_but_unreviewed_is_not(tmp_path) -> Non
     PostReviewService(database).complete_without_change(
         inquiry_id=inquiry_id, actor="직원A"
     )
-    item = LearningRepository(database).candidates(store_code="OJE_PLUS")[0]
-    assert item["learning_source"] == "AUTO_POST_REVIEWED_NO_CHANGE"
-    assert item["rating"] == 4
+    assert LearningRepository(database).count() == 0
+    assert PostReviewRepository(database).get(inquiry_id)["status"] == "REVIEWED_NO_CHANGE"
 
 
 def test_customer_correction_uses_update_endpoint_and_new_version(tmp_path) -> None:

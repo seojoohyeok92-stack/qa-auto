@@ -262,7 +262,7 @@ def test_learning_kpi_counts_creation_and_retrieval_not_naver_post(tmp_path: Pat
     assert used["auto_posted"] == 0
 
 
-def test_synced_seller_answer_is_style_only_not_human_verified(tmp_path: Path) -> None:
+def test_synced_seller_answer_is_observed_without_automatic_learning(tmp_path: Path) -> None:
     db = database(tmp_path)
     item = work_item("SELLER-STYLE-1")
     item.update({"source_answered": True, "seller_answer": "기존 판매자 답변입니다."})
@@ -271,11 +271,10 @@ def test_synced_seller_answer_is_style_only_not_human_verified(tmp_path: Path) -
     ).sync([item], correlation_id="SELLER-SYNC")
 
     rows = LearningRepository(db).candidates(store_code="OJE_PLUS")
-    assert len(rows) == 1
-    assert rows[0]["learning_source"] == "SELLER_ANSWER"
-    assert rows[0]["style_only"] is True
-    assert rows[0]["metadata_json"]["facts_authority"] == "STYLE_ONLY"
-    assert not rows[0]["metadata_json"].get("human_verified")
+    assert rows == []
+    inquiry_id = int(InquiryRepository(db).list()[0]["id"])
+    events = LogRepository(db).recent_for_inquiry(inquiry_id)
+    assert any(row["event_code"] == "SELLER_ANSWER_OBSERVED" for row in events)
 
 
 def test_streamlit_startup_starts_missing_dps_agent_exactly_once(

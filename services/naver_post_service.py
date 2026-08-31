@@ -191,6 +191,13 @@ class NaverPostService:
                 "네이버 실제 등록 기능이 잠겨 있습니다.",
             )
         preflight_inquiry = self.inquiries.get(inquiry_id) or {}
+        if bool(preflight_inquiry.get("source_answered")):
+            return self._blocked(
+                inquiry_id,
+                "ALREADY_ANSWERED",
+                "네이버에 이미 답변이 등록된 문의입니다.",
+                automatic=automatic,
+            )
         if (
             str(preflight_inquiry.get("post_status") or "").upper()
             == "POST_FAILED"
@@ -634,25 +641,16 @@ class NaverPostService:
                 "answer_hash": request.final_answer_hash,
             },
         )
-        try:
-            LearningService(self.database).capture_auto_post_version(
-                inquiry_id=inquiry_id,
-                version_id=int(applied["id"]),
-                source="AUTO_POST_CORRECTED",
-            )
-            self.reviews.mark_learning_saved(int(applied["id"]))
-            self.logs.record_inquiry(
-                inquiry_id,
-                "AUTO_POST_CORRECTION_LEARNED",
-                "네이버 반영이 확인된 직원 수정본을 Learning에 저장했습니다.",
-                details={"version_id": applied["id"]},
-            )
-        except Exception as error:
-            self.logs.record_inquiry(
-                inquiry_id, "LEARNING_SAVE_FAILED",
-                "수정본 Learning 저장에 실패했지만 네이버 수정 결과는 유지됩니다.",
-                level="WARNING", details={"error_type": error.__class__.__name__},
-            )
+        self.logs.record_inquiry(
+            inquiry_id,
+            "POST_CORRECTION_RECORDED",
+            "직원 수정 이력을 기록했습니다. Learning은 관리자 판단으로만 반영됩니다.",
+            details={
+                "version_id": applied["id"],
+                "learning_saved": False,
+                "learning_policy": "MANUAL_DECISION_ONLY",
+            },
+        )
         return NaverPostResult(
             "CORRECTED_AND_REPOSTED", inquiry_id, correction_id,
             response.http_status, None, "네이버 답변 수정 완료", 1,

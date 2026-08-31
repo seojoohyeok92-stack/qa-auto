@@ -303,7 +303,7 @@ _render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
     assert "<script>alert('xss')</script>" not in rendered
 
 
-def test_general_dashboard_does_not_render_naver_post_prepare_card(
+def test_general_dashboard_renders_naver_post_card_outside_admin_mode(
     tmp_path: Path,
 ) -> None:
     import inspect
@@ -311,7 +311,7 @@ def test_general_dashboard_does_not_render_naver_post_prepare_card(
     from ui.review_workspace import render_review_workspace
 
     source = inspect.getsource(render_review_workspace)
-    assert "_render_naver_post_prepare" not in source
+    assert "_render_naver_post_prepare" in source
     path = tmp_path / "without-post-card.db"
     database = Database(path)
     database.initialize()
@@ -331,7 +331,7 @@ render_review_workspace(items, len(items), db, page_size=10)
     rendered = "\n".join(
         item.value for item in [*at.markdown, *at.caption, *at.info]
     )
-    assert "네이버 등록 준비" not in rendered
+    assert "네이버 답변 등록" in rendered
 
 
 def test_workspace_css_stretches_detail_row_and_expands_question_body() -> None:
@@ -433,7 +433,8 @@ _render_answer_panel(db, InquiryRepository(db).get({inquiry_id}))
     assert "answer-flow-arrow" not in rendered
     assert "answer-stage-label" not in rendered
     assert any(button.label == "승인" for button in at.button)
-    assert "네이버 등록 잠금" in rendered
+    assert "승인과 네이버 등록은 별도 작업입니다." in rendered
+    assert "네이버 답변 등록" not in rendered
 
 
 def test_kpi_cards_have_svg_icons_tones_and_real_trend_fallback(

@@ -19,6 +19,10 @@ from services.naver_post_payload_builder import (
     NaverPostPayloadBuilder,
     NaverPostTargetError,
 )
+from services.auto_post_validation_service import AutoPostTechnicalValidator
+from services.auto_processing_eligibility_service import (
+    AutoProcessingEligibilityService,
+)
 
 
 NAVER_POST_LOCK = True
@@ -69,6 +73,19 @@ class NaverPostDryRunService:
         self.store_resolver = store_resolver
         self.settings = settings or NaverPostSettings.from_environment()
         self.payload_builder = payload_builder or NaverPostPayloadBuilder()
+        self.technical_validator = AutoPostTechnicalValidator()
+        self.eligibility = AutoProcessingEligibilityService()
+
+    @staticmethod
+    def _route(draft: dict[str, Any]) -> str:
+        metadata = draft.get("metadata_json")
+        data = metadata if isinstance(metadata, dict) else {}
+        selected = str(data.get("selected_answer_route") or "").upper()
+        if selected:
+            return selected
+        if str(data.get("answer_type") or "").lower() == "order_id_required":
+            return "ORDER_ID_REQUEST"
+        return str(data.get("generation_mode") or draft.get("source") or "").upper()
 
     def run(self, inquiry_id: int) -> NaverPostDryRunResult:
         inquiry = self.inquiries.get(int(inquiry_id))
@@ -122,6 +139,33 @@ class NaverPostDryRunService:
             0 < len(final_answer) <= MAX_COMMENT_LENGTH,
             "Validation 실패",
         )
+        technical = self.technical_validator.validate_answer(final_answer)
+        check(
+            "validator",
+            technical.passed,
+            technical.errors[0] if technical.errors else "VALIDATOR_NOT_PASS",
+        )
+        if draft is not None and final_answer:
+            current_draft = dict(draft)
+            current_draft["original_answer"] = final_answer
+            eligibility = self.eligibility.evaluate(
+                inquiry=inquiry,
+                draft=current_draft,
+                route=self._route(current_draft),
+            )
+            # Manual approval may override only the fact that a safe route was
+            # not configured for automatic posting. Every factual, Validator,
+            # Missing Item, order and DPS blocker remains mandatory.
+            manual_blockers = tuple(
+                reason
+                for reason in eligibility.reasons
+                if reason != "INTENT_NOT_AUTO_POSTABLE"
+            )
+            check(
+                "current_safety",
+                not manual_blockers,
+                manual_blockers[0] if manual_blockers else "CURRENT_SAFETY_BLOCKED",
+            )
 
         authorization = {
             "scheme": "Bearer",

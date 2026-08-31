@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from repositories.database import Database
 from workflow.models import InquiryStatus, validate_inquiry_status
@@ -769,6 +770,128 @@ class InquiryRepository:
                     ).fetchone()[0]
                 )
         return result
+
+    def dashboard_operational_card_counts(
+        self, *, today_kst: date | None = None
+    ) -> dict[str, dict[str, int | str]]:
+        """Return the five operator cards from their authoritative state.
+
+        FLOW timestamps are stored as UTC ISO strings, so the KST calendar
+        boundary is passed explicitly instead of depending on the process or
+        SQLite host timezone. STOCK cards intentionally have no date filter.
+        Every count is inquiry-distinct and is calculated in SQL.
+        """
+
+        day = today_kst or datetime.now(ZoneInfo("Asia/Seoul")).date()
+        day_text = day.isoformat()
+        usable_answer = (
+            "trim(coalesce(d.final_answer,d.edited_answer,"
+            "d.original_answer,''))<>''"
+        )
+        with self.database.connection() as connection:
+            total_inquiries = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT id) FROM inquiries"
+                ).fetchone()[0]
+            )
+            new_today = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT id) FROM inquiries
+                    WHERE date(created_at, '+9 hours')=?
+                    """,
+                    (day_text,),
+                ).fetchone()[0]
+            )
+            drafted_total = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT inquiry_id) FROM answer_drafts d
+                    WHERE {usable_answer}
+                    """
+                ).fetchone()[0]
+            )
+            drafted_today = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT inquiry_id) FROM answer_drafts d
+                    WHERE {usable_answer}
+                      AND date(d.created_at, '+9 hours')=?
+                    """,
+                    (day_text,),
+                ).fetchone()[0]
+            )
+            review_current = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT id) FROM inquiries
+                    WHERE approval_status='PENDING'
+                      AND post_status NOT IN ('POSTED','POSTING','POST_UNKNOWN')
+                      AND workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')
+                    """
+                ).fetchone()[0]
+            )
+            approved_total = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT id) FROM inquiries
+                    WHERE approval_status='APPROVED'
+                    """
+                ).fetchone()[0]
+            )
+            approved_today = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT id) FROM inquiries
+                    WHERE approval_status='APPROVED'
+                      AND date(approved_at, '+9 hours')=?
+                    """,
+                    (day_text,),
+                ).fetchone()[0]
+            )
+            attention_current = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT id) FROM inquiries
+                    WHERE approval_status='PENDING'
+                      AND post_status<>'POSTED'
+                      AND (
+                        workflow_status IN ('NEEDS_ATTENTION','FAILED')
+                        OR post_status IN ('POST_FAILED','POST_UNKNOWN')
+                      )
+                    """
+                ).fetchone()[0]
+            )
+        return {
+            "NEW": {
+                "value": total_inquiries,
+                "today": new_today,
+                "total": total_inquiries,
+                "kind": "FLOW",
+            },
+            "DRAFTED": {
+                "value": drafted_total,
+                "today": drafted_today,
+                "total": drafted_total,
+                "kind": "FLOW",
+            },
+            "REVIEW": {
+                "value": review_current,
+                "current": review_current,
+                "kind": "STOCK",
+            },
+            "APPROVED": {
+                "value": approved_total,
+                "today": approved_today,
+                "total": approved_total,
+                "kind": "FLOW",
+            },
+            "ATTENTION": {
+                "value": attention_current,
+                "current": attention_current,
+                "kind": "STOCK",
+            },
+        }
 
     @staticmethod
     def _empty_learning_state() -> dict[str, Any]:

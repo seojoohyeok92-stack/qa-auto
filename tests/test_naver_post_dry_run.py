@@ -225,5 +225,5 @@ _render_naver_post_prepare(db, inquiry)
     assert not app.exception
     labels = {button.label: button for button in app.button}
     assert "등록 Dry Run" not in labels
-    assert labels["네이버 실제 등록"].disabled is True
+    assert labels["네이버 답변 등록"].disabled is True
     assert any("내부 preflight" in item.value for item in app.info)

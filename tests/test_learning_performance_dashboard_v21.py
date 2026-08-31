@@ -61,15 +61,33 @@ def _post(database: Database, key: str, inquiry_type: str = "배송") -> tuple[i
     return inquiry_id, int(draft["id"]), int(version["id"])
 
 
+def _seed_legacy_unchanged_learning(
+    database: Database, inquiry_id: int,
+) -> dict:
+    version = next(
+        item
+        for item in PostReviewRepository(database).versions(inquiry_id)
+        if item["version_kind"] == "REVIEWED_NO_CHANGE"
+    )
+    saved = LearningService(database).capture_auto_post_version(
+        inquiry_id=inquiry_id,
+        version_id=int(version["id"]),
+        source="AUTO_POST_REVIEWED_NO_CHANGE",
+    )
+    assert saved is not None
+    return saved
+
+
 def test_learning_performance_rates_sources_and_real_provenance(tmp_path: Path) -> None:
     database = Database(tmp_path / "performance.db"); database.initialize()
     unchanged_id, unchanged_draft, _ = _post(database, "unchanged", "배송")
     PostReviewService(database).complete_without_change(
         inquiry_id=unchanged_id, actor="tester"
     )
-    unchanged_learning = next(
-        row for row in LearningRepository(database).candidates(store_code="OJE_PLUS")
-        if row["inquiry_id"] == unchanged_id
+    # Seed one preserved pre-policy row: this test verifies historical
+    # analytics/provenance, not the retired automatic creation path.
+    unchanged_learning = _seed_legacy_unchanged_learning(
+        database, unchanged_id
     )
     with database.transaction() as connection:
         connection.execute(
@@ -318,7 +336,7 @@ def test_generation_context_is_attached_only_to_actual_draft(tmp_path: Path) -> 
     database = Database(tmp_path / "provenance.db"); database.initialize()
     source_id, _, _ = _post(database, "source")
     PostReviewService(database).complete_without_change(inquiry_id=source_id, actor="tester")
-    learning = next(row for row in LearningRepository(database).candidates(store_code="OJE_PLUS"))
+    learning = _seed_legacy_unchanged_learning(database, source_id)
     target_id = _inquiry(database, "target")
     repository = LearningProvenanceRepository(database)
     repository.record_context(
