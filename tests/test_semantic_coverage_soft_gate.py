@@ -339,7 +339,7 @@ def test_result_serialises_the_fields_telemetry_needs() -> None:
         "subquestions", "phase",
     ):
         assert key in payload
-    assert payload["phase"] == "SOFT_OBSERVATION_ONLY"
+    assert payload["phase"] == "DETERMINISTIC_COVERAGE_GATE"
     assert json.dumps(payload, ensure_ascii=False)
     assert [item["status"] for item in payload["subquestions"]]
 
@@ -482,7 +482,7 @@ def _run(tmp_path, label: str, question: str, order_id: str | None):
 
 
 @pytest.mark.parametrize(("label", "question", "order_id"), INVARIANT_CASES)
-def test_soft_gate_changes_no_production_decision(
+def test_coverage_gate_blocks_only_clear_production_mismatches(
     tmp_path, monkeypatch, label: str, question: str, order_id: str | None
 ) -> None:
     """The Phase 1 invariant, proven per case rather than asserted."""
@@ -499,18 +499,20 @@ def test_soft_gate_changes_no_production_decision(
         tmp_path / "on", label, question, order_id
     )
 
-    assert off_decisions == on_decisions, (
-        f"{label}: semantic coverage altered a production decision"
-    )
     assert off_coverage is None, f"{label}: telemetry written while disabled"
     if on_decisions.get("draft") is not None or on_decisions.get("answer"):
         assert on_coverage is not None, f"{label}: telemetry not recorded"
+    if on_coverage and on_coverage["status"] in {FAIL, PARTIAL}:
+        assert on_decisions["auto_post"] is False, label
+        assert on_decisions["review_status"] == "REVIEW_REQUIRED", label
+    else:
+        assert off_decisions == on_decisions, label
 
 
-def test_soft_gate_records_telemetry_without_touching_eligibility(
+def test_coverage_fail_requires_staff_review_before_eligibility(
     tmp_path, monkeypatch
 ) -> None:
-    """A coverage FAIL on an otherwise clean answer stays auto-postable."""
+    """A clear coverage failure requires review before eligibility."""
 
     monkeypatch.setenv(ENABLED_ENV, "1")
     decisions, coverage = _run(
@@ -518,24 +520,9 @@ def test_soft_gate_records_telemetry_without_touching_eligibility(
     )
 
     assert coverage is not None
-    assert coverage["phase"] == "SOFT_OBSERVATION_ONLY"
-    # Whatever the coverage verdict, it did not become a blocking reason.
-    for reason in decisions["eligibility_reasons"]:
-        assert "SEMANTIC" not in reason
-        assert "COVERAGE" not in reason
-
-
-def test_eligibility_never_reads_the_coverage_key() -> None:
-    """Structural guard: the gate must not learn to read this key by accident."""
-
-    import inspect
-
-    source = inspect.getsource(AutoProcessingEligibilityService)
-
-    assert "semantic_coverage" not in source
-    assert "SEMANTIC_COVERAGE" not in source
-
-
+    assert coverage["phase"] == "DETERMINISTIC_COVERAGE_GATE"
+    if coverage["status"] in {FAIL, PARTIAL}:
+        assert decisions["auto_post"] is False
 def test_no_external_call_is_made(monkeypatch) -> None:
     """The evaluator is deterministic: no provider, no network."""
 

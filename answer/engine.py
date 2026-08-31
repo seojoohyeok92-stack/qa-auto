@@ -450,6 +450,23 @@ class AnswerEngine:
         if any(k in q for k in structure_keywords) and any(k in q for k in supply_keywords):
             return self.no_answer("제품정보/구성품확인", "제품 구조/부품 용도/구성품 제공 여부는 해당 상품의 상세페이지, 설명서, 구성품 DB 등 확정 근거가 있을 때만 답변할 수 있습니다.")
 
+        # "The other item I bought" requires the customer's actual order
+        # composition.  A current-listing model, stand rule or catalog alias
+        # cannot identify it safely.
+        purchased_other_markers = [
+            "\ub2e4\ub978\uc81c\ud488", "\ub2e4\ub978\uc0c1\ud488", "\ub2e4\ub978\ud558\ub098",
+            "\ub098\uba38\uc9c0\uc0c1\ud488", "\uac19\uc774\uc8fc\ubb38\ud55c", "\uac19\uc774\uad6c\ub9e4\ud55c",
+        ]
+        purchase_markers = ["\uad6c\ub9e4", "\uc8fc\ubb38", "\uc0b0", "\ub0b4\uac00"]
+        if any(k in q for k in purchased_other_markers) and any(
+            k in q for k in purchase_markers
+        ):
+            return self.no_answer(
+                "\uc8fc\ubb38 \uc0c1\ud488 \uc2dd\ubcc4",
+                "\uace0\uac1d\ub2d8\uc758 \ub2e4\ub978 \uad6c\ub9e4\uc0c1\ud488\uc740 \uc2e4\uc81c \uc8fc\ubb38\ub0b4\uc5ed "
+                "\ud655\uc778 \uadfc\uac70 \uc5c6\uc774 \uc790\ub3d9\uc73c\ub85c \uc2dd\ubcc4\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4.",
+            )
+
         policy = self.config.answer_policy
         for rule in policy["hard_block_rules"]:
             if any(k in q for k in rule["keywords"]):
@@ -499,6 +516,21 @@ class AnswerEngine:
         ev = self.config.events["onnuri"]
         if not any(k in q for k in ev["keywords"]):
             return None
+
+        # An event name is context, not proof that the customer asks for the
+        # event introduction.  Order-number identification/repair has no
+        # generic event-rule evidence; fail closed instead of falling through
+        # to a rebate/application guide.
+        if any(k in q for k in [
+            "\uc8fc\ubb38\ubc88\ud638", "\uc0c1\ud488\uc8fc\ubb38\ubc88\ud638",
+            "\uc8fc\ubb38\ubc88\ud638\uac00\uc694", "sh\ub85c\uc2dc\uc791",
+        ]):
+            return self.no_answer(
+                "\ud589\uc0ac/\uc8fc\ubb38\ubc88\ud638 \ud655\uc778",
+                "\ud589\uc0ac \uc2e0\uccad\uc5d0 \ud544\uc694\ud55c \uc8fc\ubb38\ubc88\ud638\ub294 "
+                "\uc2e4\uc81c \uc8fc\ubb38 \ub0b4\uc5ed\uc744 \ud655\uc778\ud574\uc57c \ud558\ubbc0\ub85c "
+                "\uc77c\ubc18 \ud589\uc0ac \uc548\ub0b4\ub85c \uc790\ub3d9 \ub2f5\ubcc0\ud558\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4.",
+            )
 
         package_code = self._package_code_answer(product, question)
         if package_code:

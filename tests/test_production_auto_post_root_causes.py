@@ -209,7 +209,7 @@ def test_unmatched_product_contributes_no_evidence() -> None:
         ("스탠드 포함 무게가 어떻게 되나요?", {"weight_with_stand_kg"}),
         (
             "이 제품 무게가 몇 kg인가요?",
-            {"weight_with_stand_kg", "weight_without_stand_kg"},
+                {"weight_with_stand_kg", "weight_without_stand_kg", "weight_catalog"},
         ),
         ("해상도가 어떻게 되나요?", {"resolution", "resolution_class"}),
         ("몇 인치인가요?", {"screen_size", "display_size_cm"}),

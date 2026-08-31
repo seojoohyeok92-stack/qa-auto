@@ -108,12 +108,11 @@ def render_learning_performance(database: Database) -> None:
     current = data["quality"]["current"]
     previous = data["quality"]["previous"]
     card_specs = (
-        ("자동 답변 생성률", "generation_rate", True),
         ("자동 등록률", "auto_post_rate", True),
         ("직원 수정률", "correction_rate", False),
         ("직원 검토 필요율", "review_required_rate", False),
     )
-    cards = st.columns(4, gap="small")
+    cards = st.columns(3, gap="small")
     for card, (label, key, higher_is_better) in zip(cards, card_specs):
         delta, delta_color = _metric_delta(
             current[key], previous[key],
@@ -146,9 +145,15 @@ def render_learning_performance(database: Database) -> None:
 
     with st.expander("상세 분석", expanded=False):
         st.markdown("#### 기간 비교")
+        st.caption(
+            "자동 답변 생성률은 진단용 상세 지표이며, 메인 운영 KPI에는 표시하지 않습니다."
+        )
         st.dataframe([
             {
                 "기간": label,
+                "자동 답변 생성률": _percent(data["quality"]["current"]["generation_rate"])
+                if key == "current_30" else _percent(data["quality"]["previous"]["generation_rate"])
+                if key == "previous_30" else "-",
                 "무수정률": _percent(data[key]["unchanged_rate"]),
                 "직원 수정률": _percent(data[key]["correction_rate"]),
                 "판정 완료": data[key]["known"],

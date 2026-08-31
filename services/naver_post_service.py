@@ -34,6 +34,7 @@ from services.learning_service import LearningService
 from services.auto_post_validation_service import AutoPostTechnicalValidator
 from repositories.post_review_repository import PostReviewRepository
 from answer.answer_format import format_final_answer
+from kakao_notify import notify_qna_safely
 from workflow.models import StepCode, StepStatus
 
 
@@ -497,6 +498,42 @@ class NaverPostService:
                 inquiry_id,
                 "LEARNING_POST_STATUS_FAILED",
                 "등록 상태의 Learning 반영에 실패했지만 등록 결과는 유지됩니다.",
+                level="WARNING",
+                details={"exception_type": error.__class__.__name__},
+            )
+        # A draft-generation notification is deliberately not evidence that
+        # Naver accepted an answer.  Only this confirmed success path has the
+        # exact payload that was registered, so enqueue a separate, stable
+        # completion notification here.  The outbox key includes the immutable
+        # attempt id: retrying the same notification cannot duplicate it.
+        try:
+            notify_qna_safely(
+                title=(
+                    "[네이버 Q&A 자동등록 완료]"
+                    if automatic
+                    else "[네이버 Q&A 답변 등록 완료]"
+                ),
+                product=str(
+                    inquiry.get("product_name") or inquiry.get("product") or ""
+                ),
+                option_name=str(inquiry.get("option_name") or ""),
+                question=str(
+                    inquiry.get("content") or inquiry.get("question") or ""
+                ),
+                # request.final_answer is the technically validated, hashed
+                # payload just acknowledged by Naver.
+                answer=request.final_answer,
+                action="posted",
+                inquiry_id=str(inquiry_id),
+                notify_key=f"naver-posted:{inquiry_id}:{attempt_id}",
+            )
+        except Exception as error:
+            # Notification/outbox trouble must never roll back a confirmed
+            # Naver post; it is recorded for retry/operations diagnosis.
+            self.logs.record_inquiry(
+                inquiry_id,
+                "KAKAO_POSTED_NOTIFICATION_WARNING",
+                "네이버 등록 성공 알림을 대기열에 추가하지 못했습니다.",
                 level="WARNING",
                 details={"exception_type": error.__class__.__name__},
             )

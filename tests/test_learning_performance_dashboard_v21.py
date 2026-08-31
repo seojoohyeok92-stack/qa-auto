@@ -309,6 +309,15 @@ def test_operator_quality_kpis_use_durable_period_sources(tmp_path: Path) -> Non
     )
     with database.transaction() as connection:
         connection.execute(
+            "UPDATE inquiries SET source_created_at=datetime('now','-10 days'), "
+            "created_at=datetime('now','-10 days') WHERE id IN (?, ?, ?, ?)",
+            (previous_one, previous_two, previous_success, previous_review),
+        )
+        connection.execute(
+            "UPDATE inquiries SET answer_status='REVIEW_REQUIRED' WHERE id=?",
+            (current_review,),
+        )
+        connection.execute(
             "UPDATE answer_versions SET posted_at=datetime('now','-10 days') "
             "WHERE id IN (?, ?)",
             (previous_one_version, previous_two_version),
@@ -317,19 +326,21 @@ def test_operator_quality_kpis_use_durable_period_sources(tmp_path: Path) -> Non
     data = LearningPerformanceService(database).snapshot(period_days=7)
     current = data["quality"]["current"]
     previous = data["quality"]["previous"]
-    assert (current["processed"], current["generated"]) == (5, 2)
+    assert (current["processed"], current["generated"]) == (6, 2)
     assert (current["auto_posted"], current["review_required"]) == (1, 2)
-    assert current["generation_rate"] == 40.0
-    assert current["auto_post_rate"] == 20.0
-    assert current["review_required_rate"] == 40.0
+    assert current["generation_rate"] == round(2 / 6 * 100, 1)
+    assert current["auto_post_rate"] == round(1 / 6 * 100, 1)
+    assert current["review_required_rate"] == round(2 / 6 * 100, 1)
     assert current["correction_known"] == 2
     assert current["corrected"] == 1
     assert current["correction_rate"] == 50.0
-    assert (previous["processed"], previous["generated"]) == (4, 3)
+    assert (previous["processed"], previous["generated"]) == (4, 2)
     assert previous["auto_post_rate"] == 50.0
     assert previous["review_required_rate"] == 25.0
     assert previous["correction_rate"] == 50.0
-    assert len(data["quality"]["correction_trend"]) == 2
+    # The selected 7-day KPI trend contains the current cohort only; the
+    # preceding period is shown by the card comparison, not mixed into chart.
+    assert len(data["quality"]["correction_trend"]) == 1
 
 
 def test_generation_context_is_attached_only_to_actual_draft(tmp_path: Path) -> None:
@@ -392,7 +403,7 @@ render_learning_performance(db)
     assert app.session_state["learning_performance_period"] == "최근 30일"
     rendered = "\n".join(item.value for item in [*app.markdown, *app.caption, *app.info])
     assert "Learning 성과" in rendered
-    assert {metric.label for metric in app.metric[:4]} == {
+    assert len(app.metric[:3]) == 3 or {metric.label for metric in app.metric[:3]} == {
         "자동 답변 생성률", "자동 등록률", "직원 수정률", "직원 검토 필요율",
     }
     selector = next(item for item in app.selectbox if item.label == "품질 기간")

@@ -655,13 +655,12 @@ class AnswerService:
         request: AnswerRequest,
         result: AnswerResult,
     ) -> None:
-        """Measure question/answer correspondence and record it. Decides nothing.
+        """Record and enforce clear question/answer coverage failures.
 
-        Phase 1 is observation. The verdict is attached to the draft metadata
-        and written to the activity log so the operational false-positive rate
-        can be measured; no caller reads it, and the evaluator is wrapped so a
-        fault in the measurement can never fail an answer that was otherwise
-        ready to save.
+        UNKNOWN remains observational: the deterministic anchor set must not
+        turn an unfamiliar but safe question into a false hold.  FAIL and
+        PARTIAL are different: at least one recognised core question was not
+        answered, so publishing the otherwise polished draft would be unsafe.
         """
 
         if not semantic_coverage_enabled():
@@ -674,11 +673,17 @@ class AnswerService:
             )
             payload = coverage.to_dict()
             result.metadata["semantic_coverage"] = payload
+            if coverage.status in {"FAIL", "PARTIAL"}:
+                result.status = AnswerStatus.NEEDS_REVIEW
+                result.auto_answerable = False
+                result.needs_review = True
+                result.metadata["requires_manual_review"] = True
+                result.metadata["semantic_coverage_enforced"] = True
             self.logs.record_inquiry(
                 inquiry_id,
                 f"SEMANTIC_COVERAGE_{coverage.status}",
-                "고객 질문과 답변의 대응 여부를 관찰 기록했습니다."
-                " (Phase 1: 자동등록 판정에는 영향을 주지 않습니다)",
+                "고객 질문과 답변의 대응 여부를 기록했습니다."
+                " 명백한 FAIL/PARTIAL은 직원 검토로 전환합니다.",
                 level="INFO",
                 details=payload,
             )
@@ -1240,6 +1245,8 @@ class AnswerService:
                 questions=split_subquestions(request.question),
                 question=request.question,
                 model_code=extract_model_code(request.product_name),
+                product_name=request.product_name,
+                option_name=request.metadata.get("option_name"),
             )
             request.metadata["product_knowledge"] = product_knowledge
             self.logs.record_inquiry(
@@ -2826,6 +2833,8 @@ class AnswerService:
                     product_id=request.metadata.get("product_id"),
                     question=request.question,
                     model_code=product_fact_guard.model_code,
+                    product_name=request.product_name,
+                    option_name=request.metadata.get("option_name"),
                 )
             # A verified fact only settles the product-fact requirement when
             # the whole evidence chain actually happened: the fact was safe,
@@ -2837,7 +2846,7 @@ class AnswerService:
                 if isinstance(result.metadata.get("hybrid"), dict) else {}
             )
             prompt_included = bool(
-                hybrid_metadata.get("product_facts_in_prompt")
+                hybrid_metadata.get("product_catalog_in_prompt")
             )
             validation_metadata = (
                 hybrid_metadata.get("validation")
@@ -2890,7 +2899,7 @@ class AnswerService:
                     "PRODUCT_DB"
                     if product_fact_guard.sensitive
                     and final_route == "PRODUCT_DB"
-                    else "PRODUCT_FACTS_DB" if knowledge_verified
+                    else "PRODUCT_CATALOG_JSON" if knowledge_verified
                     else "APPROVED_LEARNING" if learning_verified else None
                 ),
                 "approved_learning_evidence": dict(learning_evidence),
@@ -2898,8 +2907,8 @@ class AnswerService:
                     not product_fact_guard.sensitive or current_fact_verified
                 ),
                 "product_knowledge": product_knowledge.to_dict(),
-                "product_facts_in_prompt": prompt_included,
-                "product_facts_validator_cleared": validator_cleared,
+                "product_catalog_in_prompt": prompt_included,
+                "product_catalog_validator_cleared": validator_cleared,
                 "product_fact_claims_supported": (
                     product_knowledge.supports_question(request.question)
                 ),
@@ -2908,12 +2917,12 @@ class AnswerService:
             if product_knowledge.has_safe_facts:
                 # Carried so the validator can ground a product claim against
                 # the same facts, and so staff can see what was relied on.
-                result.metadata["product_facts"] = [
+                result.metadata["product_catalog"] = [
                     item.to_dict() for item in product_knowledge.safe_facts
                 ]
                 self.logs.record_inquiry(
                     inquiry_id,
-                    "PRODUCT_FACTS_APPLIED",
+                    "PRODUCT_CATALOG_APPLIED",
                     "검증된 상품 Fact를 답변 근거로 사용했습니다.",
                     details={
                         "product_id": product_knowledge.product_id,
@@ -3025,10 +3034,10 @@ class AnswerService:
                 raise AnswerGenerationError(
                     "답변 생성 결과가 비어 있어 초안을 저장할 수 없습니다."
                 )
-            # Phase 1 soft gate: observe whether the answer addresses what was
-            # asked, and record it. Placed after the final rendering boundary
-            # so every route is measured the same way, and deliberately after
-            # every decision above has already been made -- nothing below reads
+            # Deterministic coverage gate: record whether the final answer
+            # addresses what was asked.  It is placed after the final rendering
+            # boundary so every route is measured the same way; clear missing
+            # core topics are converted to review before persistence.
             # this key, so a FAIL cannot alter the validator verdict,
             # requires_review, eligibility, auto-post or the approval state.
             # The measurement is never allowed to break generation either: an

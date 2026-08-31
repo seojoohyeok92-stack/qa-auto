@@ -8,10 +8,10 @@ and that gap was measured, not guessed. When the shipping block handed
 them "보증기간이 얼마나 되나요?", "캐시백 받을 수 있나요?" and "배송 중 깨진
 것 같은데 어떻게 하나요?" -- the validator passed **84 of 84**.
 
-This is the second line for that gap, and in Phase 1 it only observes. Nothing
-here may change the validator verdict, requires_review, eligibility, auto-post,
-or the approval state; the result is recorded as telemetry so the operational
-false-positive rate can be measured before any of it is allowed to block.
+This is the second line for that gap.  It records every result, and clear
+``FAIL``/``PARTIAL`` results also require staff review before eligibility can
+allow an automatic post.  ``UNKNOWN`` remains observation-only so incomplete
+anchors do not turn ordinary inquiries into false holds.
 
 How it decides
 --------------
@@ -56,9 +56,8 @@ PARTIAL = "PARTIAL"
 FAIL = "FAIL"
 UNKNOWN = "UNKNOWN"
 
-# Phase 1 is observation only. The flag exists so the soft-gate invariant can
-# be proven by running the same inquiry with the evaluator off and on and
-# comparing every production decision.
+# The flag still permits a controlled rollout, but a clear missing core topic
+# is a safety decision rather than telemetry: it cannot pass to auto-post.
 ENABLED_ENV = "OJE_SEMANTIC_COVERAGE_ENABLED"
 
 
@@ -170,6 +169,15 @@ TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
     ),
     "ORDER_IDENTIFICATION": (
         r"주문번호", r"주문내역", r"구매내역", r"주문확인",
+    ),
+    # A customer's other item is an order-history question.  It must never be
+    # answered by selecting a nearby catalog model or by a rule about the
+    # current listing.
+    "PURCHASED_OTHER_PRODUCT": (
+        r"(?:다른|나머지)\s*(?:제품|상품|하나|모델)",
+        r"같이\s*(?:주문|구매)한\s*(?:제품|상품|것)",
+        r"(?:두|2)\s*개\s*(?:구매|주문).{0,16}(?:다른|나머지|모델)",
+        r"(?:제가|내가)\s*(?:산|구매한|주문한).{0,16}(?:다른|나머지)",
     ),
     "PRODUCT_SPEC": (
         r"hdmi", r"단자", r"포트", r"인치", r"크기", r"사이즈", r"무게",
@@ -317,7 +325,7 @@ class SemanticCoverageResult:
             "score": self.score,
             "answer_topics": list(self.answer_topics),
             "subquestions": [item.to_dict() for item in self.subquestions],
-            "phase": "SOFT_OBSERVATION_ONLY",
+            "phase": "DETERMINISTIC_COVERAGE_GATE",
         }
 
 

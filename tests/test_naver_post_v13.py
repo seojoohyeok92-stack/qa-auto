@@ -26,6 +26,7 @@ from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_post_repository import NaverPostRepository
 from services.approval_service import ApprovalService
+import services.naver_post_service as naver_post_module
 from services.naver_post_service import NaverPostService
 
 
@@ -161,6 +162,30 @@ def test_manual_post_uses_official_method_and_raw_json_text(
     assert AnswerRepository(database).active_for_inquiry(inquiry_id)[
         "posted"
     ] == 1
+
+
+def test_confirmed_post_enqueues_verified_registered_answer_for_kakao(
+    database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inquiry_id = _approved(database)
+    captured: dict[str, object] = {}
+
+    def capture_notification(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(naver_post_module, "notify_qna_safely", capture_notification)
+    client = RecordingClient()
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True
+    )
+
+    assert result.status == "POSTED"
+    assert captured["action"] == "posted"
+    assert captured["answer"] == client.requests[0][0].final_answer
+    assert str(captured["notify_key"]).startswith(
+        f"naver-posted:{inquiry_id}:"
+    )
 
 
 @pytest.mark.parametrize(

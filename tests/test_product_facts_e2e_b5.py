@@ -86,12 +86,12 @@ def test_A_verified_fact_reaches_prompt_and_grounds_the_answer():
         "HDMI 단자가 몇 개인가요?", "HDMI 단자는 2개입니다."
     )
     assert "hdmi_port_count" in knowledge.safe_field_keys()
-    assert "PRODUCT_FACTS" in prompt
+    assert "PRODUCT_CATALOG_JSON" in prompt
     assert "hdmi_port_count" in prompt
     assert outcome.validation is not None
     assert outcome.validation.passed is True, list(outcome.validation.errors)
     hybrid = outcome.result.metadata.get("hybrid", {})
-    assert hybrid.get("product_facts_in_prompt") is True
+    assert hybrid.get("product_catalog_in_prompt") is True
     assert "hdmi_port_count" in hybrid.get("product_fact_fields", [])
 
 

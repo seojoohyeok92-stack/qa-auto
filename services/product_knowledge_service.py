@@ -30,6 +30,7 @@ from repositories.product_fact_repository import (
     ProductFactRepository,
     ProductFactsUnavailableError,
 )
+from repositories.product_catalog_repository import ProductCatalogRepository
 
 
 VERIFIED = "VERIFIED"
@@ -384,7 +385,7 @@ class ProductKnowledgeResult:
             return ""
         lines = "\n".join(item.as_prompt_line() for item in self.safe_facts)
         return (
-            "PRODUCT_FACTS (verified for this exact product):\n"
+            "PRODUCT_CATALOG_JSON (exact matched product catalog evidence):\n"
             f"{lines}\n"
             "RULES:\n"
             "- Only the fields listed above may be stated as product fact.\n"
@@ -480,6 +481,17 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
                 fields.extend(accessory_fields)
             continue
         fields.extend(accessory_fields)
+    # The JSON catalog has literal RF and stand-spacing descriptions even
+    # though the retired Product Facts ontology did not model them.
+    if any(word in text for word in ("rf", "coax", "antenna", "\ub3d9\ucd95", "\uc548\ud14c\ub098")):
+        fields.append("rf_terminal")
+        topics.append("rf")
+    if any(word in text for word in ("stand spacing", "leg spacing", "stand gap", "\ub2e4\ub9ac \uac04\uaca9", "\uc2a4\ud0e0\ub4dc \uac04\uaca9", "\ubc1b\uce68\ub300 \uac04\uaca9")):
+        fields.append("stand_spacing")
+        topics.append("stand_spacing")
+    if any(word in text for word in ("lan", "ethernet", "\uc720\uc120\ub79c")):
+        fields.append("ethernet_present")
+        topics.append("ethernet")
     return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(topics))
 
 
@@ -612,7 +624,7 @@ def required_fact_groups(question: object) -> tuple[frozenset[str], ...]:
             # Unqualified "무게": either set weight answers it, but the
             # accessory carton still does not.
             groups.append(
-                frozenset({"weight_with_stand_kg", "weight_without_stand_kg"})
+                frozenset({"weight_with_stand_kg", "weight_without_stand_kg", "weight_catalog"})
             )
     if any(word in text for word in ("해상도", "resolution", "fhd", "qhd", "uhd", "4k")):
         groups.append(frozenset({"resolution", "resolution_class"}))
@@ -648,14 +660,30 @@ def required_fact_groups(question: object) -> tuple[frozenset[str], ...]:
         groups.append(frozenset({"wifi_present", "wifi_standard"}))
     if any(word in text for word in ("주사율", "refresh")):
         groups.append(frozenset({"refresh_rate"}))
+    # English model/port spellings are also accepted by the Korean support
+    # flow.  The catalog only supplies literal matching JSON evidence.
+    if any(word in text for word in ("rf", "coax", "antenna")):
+        groups.append(frozenset({"rf_terminal"}))
+    if "lan" in text or "ethernet" in text:
+        groups.append(frozenset({"ethernet_port_count", "ethernet_present"}))
+    if any(word in text for word in ("stand spacing", "leg spacing", "stand gap")):
+        groups.append(frozenset({"stand_spacing"}))
     return tuple(dict.fromkeys(groups))
 
 
 class ProductKnowledgeService:
     """Turns stored canonical facts into evidence the pipeline may quote."""
 
-    def __init__(self, repository: ProductFactRepository | None = None) -> None:
-        self.repository = repository or ProductFactRepository()
+    def __init__(
+        self,
+        repository: ProductFactRepository | None = None,
+        catalog_repository: ProductCatalogRepository | None = None,
+    ) -> None:
+        # An explicitly supplied ProductFactRepository remains available for
+        # historical diagnostics/tests only.  The production default never
+        # constructs or reads product_facts.db.
+        self.repository = repository
+        self.catalog_repository = catalog_repository or ProductCatalogRepository()
 
     # ------------------------------------------------------------------
     def facts_for_inquiry(
@@ -665,6 +693,8 @@ class ProductKnowledgeService:
         questions: Sequence[object] | None = None,
         question: object = "",
         model_code: object = None,
+        product_name: object = "",
+        option_name: object = "",
     ) -> ProductKnowledgeResult:
         """Verified facts for the fields this inquiry actually asks about."""
 
@@ -674,6 +704,17 @@ class ProductKnowledgeService:
             texts.append(str(question))
         combined = " ".join(texts)
         fields, topics = fields_for_question(combined)
+
+        if self.repository is None:
+            return self._catalog_facts_for_inquiry(
+                product_id=key,
+                product_name=product_name,
+                option_name=option_name,
+                model_code=model_code,
+                fields=fields,
+                topics=topics,
+                combined=combined,
+            )
 
         if not key:
             return ProductKnowledgeResult(
@@ -739,6 +780,102 @@ class ProductKnowledgeService:
             collection_status=collection_status,
             component_subject=component_subject,
         )
+
+    def _catalog_facts_for_inquiry(
+        self,
+        *,
+        product_id: str,
+        product_name: object,
+        option_name: object,
+        model_code: object,
+        fields: tuple[str, ...],
+        topics: tuple[str, ...],
+        combined: str,
+    ) -> ProductKnowledgeResult:
+        if not fields:
+            return ProductKnowledgeResult(
+                product_id=product_id or None, listing_id=None, matched=False,
+                requested_fields=(), topics=(),
+                unavailable_reason="NO_PRODUCT_CATALOG_TOPIC",
+            )
+        match = self.catalog_repository.match(
+            product_name=product_name, option_name=option_name,
+            model_code=model_code,
+        )
+        if not match.record or not match.model_key:
+            return ProductKnowledgeResult(
+                product_id=product_id or None, listing_id=None, matched=False,
+                requested_fields=fields, topics=topics,
+                unavailable_reason=match.reason,
+            )
+        if asks_about_a_bundled_component(combined):
+            return ProductKnowledgeResult(
+                product_id=product_id or match.model_key, listing_id=match.model_key,
+                matched=True, requested_fields=fields, topics=topics,
+                collection_status="CATALOG_JSON", component_subject=True,
+                unavailable_reason="COMPONENT_SUBJECT_UNRESOLVED",
+            )
+        facts = self._catalog_facts(
+            product_id=product_id or match.model_key,
+            model_key=match.model_key, record=match.record, fields=fields,
+        )
+        return ProductKnowledgeResult(
+            product_id=product_id or match.model_key, listing_id=match.model_key,
+            matched=True, requested_fields=fields, topics=topics,
+            safe_facts=tuple(facts), collection_status="CATALOG_JSON",
+        )
+
+    @staticmethod
+    def _catalog_facts(
+        *, product_id: str, model_key: str, record: dict[str, Any],
+        fields: Sequence[str],
+    ) -> list[ProductFact]:
+        """Expose literal JSON values only; absent fields remain UNKNOWN."""
+        direct = {
+            "screen_size": record.get("size_inch"),
+            "resolution": record.get("resolution"),
+            "refresh_rate": record.get("hz"),
+            "vesa_mm": record.get("vesa"),
+            "speaker_present": record.get("speaker"),
+            "weight_catalog": record.get("weight"),
+            "brand": record.get("brand"),
+            "model_name": record.get("model"),
+            "color": record.get("color"),
+        }
+        spec = str(record.get("spec") or "")
+        token_fields = {
+            "hdmi_present": ("HDMI",), "usb_present": ("USB",),
+            "ethernet_present": ("LAN", "랜", "ETHERNET"),
+            "rf_terminal": ("RF", "동축", "안테나"),
+            "bluetooth_present": ("BLUETOOTH", "블루투스"),
+            "wifi_present": ("WI-FI", "WIFI", "와이파이", "무선랜"),
+            "stand_spacing": ("스탠드 간격", "다리 간격", "다리 사이", "받침대 간격"),
+        }
+        upper_spec = spec.upper()
+        for field_key, tokens in token_fields.items():
+            if any(token.upper() in upper_spec for token in tokens):
+                direct[field_key] = spec
+        requested = set(fields)
+        # Generic catalog weight is deliberately not used for explicit
+        # stand-included/excluded questions because its scope is not encoded.
+        if "weight_catalog" not in requested:
+            direct.pop("weight_catalog", None)
+        result: list[ProductFact] = []
+        for field_key in requested:
+            value = direct.get(field_key)
+            if _is_empty(value):
+                continue
+            result.append(ProductFact(
+                product_id=product_id, listing_id=model_key, model_code=model_key,
+                field_key=field_key, value=value, raw_value=value,
+                unit=_unit_for(field_key), scope="MODEL_CATALOG",
+                scope_key=model_key, component_scope=BASE_DEVICE_SCOPE,
+                volatility="STATIC_PRODUCT_FACT", verification_status="CATALOG_JSON",
+                resolution_status="CATALOG_JSON", lifecycle_status=ACTIVE,
+                canonical_fact_id=f"catalog:{model_key}:{field_key}", value_id=None,
+                provenance=(), safe_for_answer=True,
+            ))
+        return result
 
     # ------------------------------------------------------------------
     def _provenance_for(

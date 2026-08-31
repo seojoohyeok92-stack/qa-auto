@@ -44,39 +44,33 @@ class LearningPerformanceRepository:
     def quality_period(
         self, *, start_days: int, end_days: int = 0
     ) -> dict[str, Any]:
-        """Aggregate operator quality KPIs without loading inquiry rows.
+        """Aggregate operational KPIs from the actual inbound inquiry cohort.
 
-        ``AUTO_ANSWER_STARTED`` defines a genuinely attempted automatic
-        processing cohort. Durable success, review and Naver POST records are
-        then projected onto that cohort. Staff correction uses the narrower
-        observed post-review cohort because an unobserved answer is unknown,
-        not an unchanged answer.
+        Date boundaries are evaluated as KST calendar datetimes in SQLite.
+        An answer with no explicit no-change observation is deliberately not
+        counted as "unmodified"; it remains outside the correction cohort.
         """
 
         start = f"-{int(start_days)} days"
         end = f"-{int(end_days)} days"
         range_sql = (
-            "julianday({column})>=julianday('now', ?) "
-            "AND (?=0 OR julianday({column})<julianday('now', ?))"
+            "julianday({column})>=julianday('now', '+9 hours', ?) "
+            "AND (?=0 OR julianday({column})<julianday('now', '+9 hours', ?))"
         )
         with self.database.connection() as connection:
             row = connection.execute(
                 """
                 WITH processed AS (
-                  SELECT DISTINCT inquiry_id
-                  FROM activity_logs
-                  WHERE inquiry_id IS NOT NULL
-                    AND event_code='AUTO_ANSWER_STARTED'
-                    AND """
-                + range_sql.format(column="created_at")
+                  SELECT DISTINCT id inquiry_id
+                  FROM inquiries
+                  WHERE """
+                + range_sql.format(column="datetime(COALESCE(source_created_at, created_at), '+9 hours')")
                 + """
                 ), generated AS (
                   SELECT DISTINCT inquiry_id
-                  FROM activity_logs
-                  WHERE event_code='AUTO_ANSWER_SUCCEEDED'
-                    AND """
-                + range_sql.format(column="created_at")
-                + """
+                  FROM answer_drafts
+                  WHERE is_active=1
+                    AND TRIM(COALESCE(final_answer, edited_answer, original_answer, ''))<>''
                 ), review_required AS (
                   SELECT DISTINCT inquiry_id
                   FROM activity_logs
@@ -86,15 +80,12 @@ class LearningPerformanceRepository:
                     'AUTO_POST_BLOCKED_DPS_SESSION',
                     'AUTO_POST_SKIPPED_POLICY_BLOCKED'
                   ) AND """
-                + range_sql.format(column="created_at")
+                + range_sql.format(column="datetime(created_at, '+9 hours')")
                 + """
                 ), posted AS (
                   SELECT DISTINCT inquiry_id
                   FROM naver_post_attempts
                   WHERE status='POSTED' AND auto_post_run_id IS NOT NULL
-                    AND """
-                + range_sql.format(column="completed_at")
-                + """
                 )
                 SELECT COUNT(*) processed,
                        SUM(EXISTS(
@@ -114,11 +105,9 @@ class LearningPerformanceRepository:
                 (
                     start, int(end_days), end,
                     start, int(end_days), end,
-                    start, int(end_days), end,
-                    start, int(end_days), end,
                 ),
             ).fetchone()
-        outcome = self.outcome_period(
+        outcome = self.operator_correction_period(
             start_days=start_days, end_days=end_days
         )
         processed = int(row["processed"] or 0)
@@ -139,6 +128,57 @@ class LearningPerformanceRepository:
             "correction_known": outcome["known"],
             "corrected": outcome["corrected"],
             "correction_pending": outcome["pending"],
+        }
+
+    def operator_correction_period(
+        self, *, start_days: int, end_days: int = 0
+    ) -> dict[str, Any]:
+        """Measured employee modifications, including Naver sync corrections.
+
+        ``REVIEWED_NO_CHANGE`` is the only durable no-edit observation.  A
+        staff edit or ``NAVER_CORRECTION_APPLIED`` is a measured correction;
+        all other historical answers are intentionally unknown.
+        """
+        range_sql = (
+            "julianday(datetime(COALESCE(i.source_created_at,i.created_at), '+9 hours'))>=julianday('now', '+9 hours', ?) "
+            "AND (?=0 OR julianday(datetime(COALESCE(i.source_created_at,i.created_at), '+9 hours'))<julianday('now', '+9 hours', ?))"
+        )
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                WITH cohort AS (
+                  SELECT i.id FROM inquiries i WHERE """ + range_sql + """
+                ), corrected AS (
+                  SELECT DISTINCT av.inquiry_id
+                  FROM answer_versions av
+                  JOIN cohort c ON c.id=av.inquiry_id
+                  WHERE av.version_kind IN (
+                    'NAVER_CORRECTION_APPLIED', 'STAFF_CORRECTION_DRAFT'
+                  )
+                  UNION
+                  SELECT DISTINCT d.inquiry_id FROM answer_drafts d
+                  JOIN cohort c ON c.id=d.inquiry_id
+                  WHERE TRIM(COALESCE(d.edited_answer,''))<>''
+                    AND TRIM(COALESCE(d.edited_answer,''))<>TRIM(COALESCE(d.original_answer,''))
+                ), unchanged AS (
+                  SELECT DISTINCT pr.inquiry_id FROM post_reviews pr
+                  JOIN cohort c ON c.id=pr.inquiry_id
+                  WHERE pr.status='REVIEWED_NO_CHANGE'
+                    AND NOT EXISTS (SELECT 1 FROM corrected x WHERE x.inquiry_id=pr.inquiry_id)
+                )
+                SELECT (SELECT COUNT(*) FROM corrected) corrected,
+                       (SELECT COUNT(*) FROM unchanged) unchanged,
+                       (SELECT COUNT(*) FROM cohort) total
+                """,
+                (f"-{int(start_days)} days", int(end_days), f"-{int(end_days)} days"),
+            ).fetchone()
+        corrected, unchanged = int(row["corrected"] or 0), int(row["unchanged"] or 0)
+        return {
+            "corrected": corrected, "unchanged": unchanged,
+            "known": corrected + unchanged,
+            "pending": max(0, int(row["total"] or 0) - corrected - unchanged),
+            "correction_rate": self._rate(corrected, unchanged),
+            "unchanged_rate": self._rate(unchanged, corrected),
         }
 
     def learning_counts(self) -> dict[str, int]:
@@ -354,25 +394,53 @@ class LearningPerformanceRepository:
         } for row in rows]
 
     def correction_trend(self, *, days: int) -> list[dict[str, Any]]:
-        """Return daily/weekly correction rates for the selected period."""
+        """Return the measured-employee-correction trend for the inbound cohort.
+
+        This intentionally shares the same correction evidence contract as the
+        KPI card: internal staff edits and ``NAVER_CORRECTION_APPLIED`` count;
+        only ``REVIEWED_NO_CHANGE`` proves an unchanged answer.  Unknown
+        historical rows are omitted rather than silently treated as no-edit.
+        """
 
         days = int(days)
         period_sql = (
-            "date(posted_at, '+9 hours')"
+            "date(datetime(COALESCE(i.source_created_at,i.created_at), '+9 hours'))"
             if days <= 30
-            else "strftime('%Y-%W', posted_at, '+9 hours')"
+            else "strftime('%Y-%W', datetime(COALESCE(i.source_created_at,i.created_at), '+9 hours'))"
         )
         with self.database.connection() as connection:
             rows = connection.execute(
-                OUTCOMES_CTE
-                + f"""
-                SELECT {period_sql} period,
-                       SUM(outcome='UNCHANGED') unchanged,
-                       SUM(outcome='CORRECTED') corrected
-                FROM outcomes
-                WHERE outcome IN ('UNCHANGED','CORRECTED')
-                  AND julianday(posted_at)>=julianday('now', ?)
-                GROUP BY {period_sql} ORDER BY period
+                f"""
+                WITH cohort AS (
+                  SELECT i.id, {period_sql} AS period
+                  FROM inquiries i
+                  WHERE julianday(datetime(COALESCE(i.source_created_at,i.created_at), '+9 hours'))
+                        >= julianday('now', '+9 hours', ?)
+                ), corrected AS (
+                  SELECT DISTINCT av.inquiry_id
+                  FROM answer_versions av
+                  JOIN cohort c ON c.id=av.inquiry_id
+                  WHERE av.version_kind IN ('NAVER_CORRECTION_APPLIED','STAFF_CORRECTION_DRAFT')
+                  UNION
+                  SELECT DISTINCT d.inquiry_id
+                  FROM answer_drafts d
+                  JOIN cohort c ON c.id=d.inquiry_id
+                  WHERE TRIM(COALESCE(d.edited_answer,''))<>''
+                    AND TRIM(COALESCE(d.edited_answer,''))<>TRIM(COALESCE(d.original_answer,''))
+                ), unchanged AS (
+                  SELECT DISTINCT pr.inquiry_id
+                  FROM post_reviews pr
+                  JOIN cohort c ON c.id=pr.inquiry_id
+                  WHERE pr.status='REVIEWED_NO_CHANGE'
+                    AND NOT EXISTS (SELECT 1 FROM corrected x WHERE x.inquiry_id=pr.inquiry_id)
+                )
+                SELECT c.period,
+                       SUM(EXISTS(SELECT 1 FROM corrected x WHERE x.inquiry_id=c.id)) corrected,
+                       SUM(EXISTS(SELECT 1 FROM unchanged x WHERE x.inquiry_id=c.id)) unchanged
+                FROM cohort c
+                WHERE EXISTS(SELECT 1 FROM corrected x WHERE x.inquiry_id=c.id)
+                   OR EXISTS(SELECT 1 FROM unchanged x WHERE x.inquiry_id=c.id)
+                GROUP BY c.period ORDER BY c.period
                 """,
                 (f"-{days} days",),
             ).fetchall()

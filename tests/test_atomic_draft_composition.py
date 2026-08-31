@@ -28,6 +28,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from answer.models import AnswerStatus
 from answer.answer_format import korean_date
 
 # The DPS schedule these doubles report must not sit before the day the
@@ -593,13 +595,11 @@ def test_already_answered_inquiry_is_still_blocked(tmp_path) -> None:
     assert eligibility.stage == "IDEMPOTENCY"
 
 
-def test_semantic_coverage_remains_a_soft_gate(tmp_path) -> None:
-    """This stage did not let coverage decide anything."""
+def test_semantic_coverage_blocks_clear_partial_answer_before_auto_post(tmp_path) -> None:
+    """A core sub-question omission must become staff review."""
 
     result, _ = run_pipeline(tmp_path, "soft", CASE_PARTIAL)
     coverage = result["metadata"].get("semantic_coverage") or {}
 
-    assert coverage.get("phase") == "SOFT_OBSERVATION_ONLY"
-    for reason in result["reasons"]:
-        assert "SEMANTIC" not in reason
-        assert "COVERAGE" not in reason
+    assert coverage.get("phase") == "DETERMINISTIC_COVERAGE_GATE"
+    assert result["draft"]["program_status"] == AnswerStatus.NEEDS_REVIEW.value

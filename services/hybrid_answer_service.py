@@ -120,7 +120,7 @@ class HybridAnswerService:
         if not rendered:
             return {}
         return {
-            "product_facts": {
+            "product_catalog": {
                 "instructions": rendered,
                 "facts": [
                     item.to_dict() for item in knowledge.safe_facts
@@ -1046,7 +1046,7 @@ class HybridAnswerService:
                 # generation. The auto-post gate requires this to be true
                 # before a product fact may settle anything, so that a fact
                 # the model never read can never justify publishing.
-                "product_facts_in_prompt": bool(product_facts_context),
+                "product_catalog_in_prompt": bool(product_facts_context),
                 # The approved-Learning verdict from this same generation.
                 # Persisted rather than recomputed downstream so the gate can
                 # only ever judge the evidence the model was actually given.
@@ -1056,7 +1056,7 @@ class HybridAnswerService:
                 "product_fact_fields": sorted(
                     str(item.get("field_key") or "")
                     for item in (
-                        product_facts_context.get("product_facts", {})
+                        product_facts_context.get("product_catalog", {})
                         .get("facts", [])
                     )
                 ),

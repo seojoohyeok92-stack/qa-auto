@@ -12,6 +12,9 @@ from answer.exceptions import AnswerConfigError
 
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / "answer_data"
+DEFAULT_PRODUCT_CATALOG_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "model_data_with_color.json"
+)
 
 # Files whose content decides an answer. Their modification time is part of the
 # cache key so an operator editing a schedule or policy on the server does not
@@ -22,8 +25,18 @@ _CACHED_CONFIG_FILES = (
     ("configs", "event_config.json"),
     ("configs", "model_codes.json"),
     ("configs", "install_schedule_rules.json"),
-    ("learning", "model_data_with_color.json"),
 )
+
+
+def _product_catalog_path(root: Path) -> Path:
+    """Production uses the single deployable catalog in ``data``.
+
+    A caller supplying a test/fixture data_root still gets its colocated
+    fixture, which keeps configuration tests isolated from developer data.
+    """
+    if root.resolve() == DEFAULT_DATA_ROOT.resolve():
+        return DEFAULT_PRODUCT_CATALOG_PATH
+    return root / "learning" / "model_data_with_color.json"
 
 # Normalised validity metadata is attached under this key. The operator's own
 # row is never rewritten -- the original record is preserved verbatim so an
@@ -259,7 +272,6 @@ def _load_cached(
     del signature  # part of the cache key only
     root = Path(root_text)
     config_dir = root / "configs"
-    learning_dir = root / "learning"
 
     answer_policy = _read_json(config_dir / "answer_policy.json", dict)
     shipping = _read_json(config_dir / "shipping_config.json", dict)
@@ -270,7 +282,7 @@ def _load_cached(
         list,
     )
     model_data = _read_json(
-        learning_dir / "model_data_with_color.json",
+        _product_catalog_path(root),
         dict,
     )
 
@@ -331,6 +343,12 @@ def _config_signature(root: Path) -> tuple[tuple[str, int, int], ...]:
             signature.append((path.name, stat.st_mtime_ns, stat.st_size))
         except OSError:
             signature.append((path.name, -1, -1))
+    catalog_path = _product_catalog_path(root)
+    try:
+        stat = catalog_path.stat()
+        signature.append(("model_data_with_color.json", stat.st_mtime_ns, stat.st_size))
+    except OSError:
+        signature.append(("model_data_with_color.json", -1, -1))
     return tuple(signature)
 
 
