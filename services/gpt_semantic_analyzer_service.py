@@ -1,10 +1,9 @@
-"""Ask the model what the customer wants -- rarely, cheaply, and never blindly.
+"""Ask the model what the customer wants before routing, never blindly.
 
-Measured on the live store, 11.4% of inquiries reach a trigger; the other 88.6%
-are answered without this service existing. That ratio is the whole design. A
-semantic stage that ran on everything would add a network round trip to 2,400
-inquiries that the deterministic classifier already routes correctly, which is
-the opposite of what it is for.
+Semantic-first routing runs one bounded understanding call for each non-empty
+inquiry while its feature flag is enabled.  The result is reused for the plan,
+RULE compatibility and final coverage; retries and reruns use the small
+in-process cache rather than paying for a second interpretation.
 
 Merging this into an existing call was investigated and is not available.
 Instrumenting the pipeline showed exactly one GPT task is ever issued today --
@@ -69,6 +68,8 @@ The action is what the customer wants done, never a word describing an object:
 "고장난 TV 수거해주세요" is COLLECTION of a BROKEN TV, not REPAIR.
 Asking to be given a date is SCHEDULE_REQUEST; asking what the date already is
 is INSTALLATION_SCHEDULE or DELIVERY_STATUS.
+Campaigns are context. Order ID/other purchased item: ORDER_IDENTIFICATION;
+requires_order_context=true. Delivery schedule=current delivery/install only.
 Use OTHER if no ACTION fits. Never invent one.
 
 INQUIRY:

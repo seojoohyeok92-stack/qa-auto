@@ -42,6 +42,9 @@ class InquiryProcessingPlan:
     reason_code: str
     correlation_id: str
     analysis: InquiryAnalysis
+    # Runtime-only provenance of the semantic understanding that constrained
+    # this plan.  Kept in existing metadata JSON; no schema change.
+    semantic_routing: dict[str, Any] | None = None
 
     @property
     def delivery_question(self) -> bool:

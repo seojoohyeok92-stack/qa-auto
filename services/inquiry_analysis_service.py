@@ -24,6 +24,13 @@ from answer.text_utils import (
     is_weekend_delivery_policy_question,
     split_subquestions,
 )
+from services.semantic_analysis import (
+    DELIVERY_STATUS,
+    INSTALLATION_SCHEDULE,
+    NOTIFICATION_POLICY,
+    ORDER_IDENTIFICATION,
+    SemanticAnalysis,
+)
 
 
 GENERAL_ORDER_ID_PATTERN = re.compile(r"(?<!\d)\d{16}(?!\d)")
@@ -833,7 +840,12 @@ class InquiryAnalysisService:
     # question of its own.
     MIN_SEGMENT_LENGTH = 4
 
-    def analyze(self, request: AnswerRequest) -> InquiryAnalysis:
+    def analyze(
+        self,
+        request: AnswerRequest,
+        *,
+        semantic: SemanticAnalysis | None = None,
+    ) -> InquiryAnalysis:
         subquestions = split_subquestions(request.question)
         if len(subquestions) == 1 and _is_schedule_change_request(
             request.question
@@ -842,7 +854,7 @@ class InquiryAnalysisService:
             # and the connector refinement can then separate the schedule
             # target from its action.  Judge this indivisible operational
             # request on the full original text before attempting that split.
-            return self._analyze_single(request)
+            return self._with_semantic(self._analyze_single(request), semantic)
         if len(subquestions) == 1:
             # The deterministic splitter keys on sentence enders and list
             # punctuation, so a connector-joined compound arrives as one
@@ -854,8 +866,111 @@ class InquiryAnalysisService:
             if refined:
                 subquestions = refined
         if len(subquestions) > 1:
-            return self._analyze_compound(request, subquestions)
-        return self._analyze_single(request)
+            return self._with_semantic(
+                self._analyze_compound(request, subquestions), semantic,
+            )
+        return self._with_semantic(self._analyze_single(request), semantic)
+
+    @staticmethod
+    def _with_semantic(
+        deterministic: InquiryAnalysis,
+        semantic: SemanticAnalysis | None,
+    ) -> InquiryAnalysis:
+        """Apply usable semantic evidence requirements without weakening holds."""
+
+        if semantic is None or not semantic.usable:
+            return deterministic
+
+        actions = semantic.actions
+        requires_current_schedule = bool(
+            semantic.requires_delivery_schedule
+            or actions & {DELIVERY_STATUS, INSTALLATION_SCHEDULE}
+        )
+        requires_order_context = bool(semantic.requires_order_context)
+        is_context_or_policy = bool(
+            actions & {NOTIFICATION_POLICY, ORDER_IDENTIFICATION}
+        ) and not requires_current_schedule
+
+        requires_order = (
+            False if is_context_or_policy else deterministic.requires_order_lookup
+        )
+        requires_dps = (
+            False if is_context_or_policy else deterministic.requires_dps_lookup
+        )
+        detected_intent = deterministic.detected_intent
+        subtype = deterministic.inquiry_subtype
+        strategy = deterministic.answer_strategy
+        inquiry_type = deterministic.inquiry_type
+        manual = deterministic.manual_review_required
+        sources = list(deterministic.manual_review_sources)
+        reasons = list(deterministic.reasons)
+
+        if requires_current_schedule:
+            requires_order = True
+            requires_dps = True
+            detected_intent = (
+                "INSTALLATION_DATE"
+                if INSTALLATION_SCHEDULE in actions else "DELIVERY_STATUS"
+            )
+        elif is_context_or_policy:
+            # Event/review context plus "when" or "order number" is not a
+            # current delivery schedule solely because broad keywords match.
+            reasons.append("semantic routing suppressed keyword delivery/DPS route")
+
+        if requires_order_context:
+            requires_order = True
+            requires_dps = requires_current_schedule
+            if ORDER_IDENTIFICATION in actions:
+                inquiry_type = InquiryType.ORDER_INFO_REQUIRED
+                subtype = "SEMANTIC_ORDER_IDENTIFICATION"
+                strategy = AnswerStrategy.REQUEST_ORDER_ID
+                detected_intent = "ORDER_IDENTIFICATION"
+            if len(semantic.atomic_questions) > 1 or len(actions) > 1:
+                manual = True
+                sources.append("SEMANTIC_ORDER_EVIDENCE_COMPOUND")
+                reasons.append(
+                    "semantic routing requires order evidence for a core sub-question"
+                )
+
+        if semantic.atomic_questions:
+            subquestion_analyses = tuple({
+                "question": item.text,
+                "inquiry_subtype": "SEMANTIC_" + item.action,
+                "detected_intent": item.action,
+                "requires_order_lookup": bool(
+                    requires_order_context and item.action == ORDER_IDENTIFICATION
+                ),
+                "requires_dps_lookup": bool(
+                    requires_current_schedule and item.action in {
+                        DELIVERY_STATUS, INSTALLATION_SCHEDULE,
+                    }
+                ),
+                "manual_review_required": bool(
+                    manual and (
+                        len(semantic.atomic_questions) > 1
+                        or item.action == ORDER_IDENTIFICATION
+                    )
+                ),
+                "semantic_source": "GPT",
+            } for item in semantic.atomic_questions)
+        else:
+            subquestion_analyses = deterministic.subquestion_analyses
+
+        return dataclasses.replace(
+            deterministic,
+            inquiry_type=inquiry_type,
+            inquiry_subtype=subtype,
+            requires_order_lookup=requires_order,
+            requires_dps_lookup=requires_dps,
+            requires_order_id=requires_order,
+            answer_strategy=strategy,
+            detected_intent=detected_intent,
+            manual_review_required=manual,
+            auto_answerable=not manual,
+            reasons=tuple(dict.fromkeys(reasons)),
+            manual_review_sources=tuple(dict.fromkeys(sources)),
+            subquestion_analyses=subquestion_analyses,
+        )
 
     def _subtype_of(
         self, request: AnswerRequest, text: str

@@ -34,6 +34,7 @@ from services.auto_processing_eligibility_service import (
     AutoProcessingEligibilityService,
 )
 from services.semantic_action_support import REASON_CODE
+from services.inquiry_processing_plan_service import InquiryProcessingPlanService
 import services.answer_service as answer_service_module
 
 
@@ -201,18 +202,18 @@ def outcome(store, question, monkeypatch, provider, key="k"):
 
 
 # ==========================================================================
-# P0-2  A fast-path inquiry never reaches a provider, and decides identically
+# P0-2  Semantic-first understands every inquiry and keeps the same verdict
 # ==========================================================================
 
 
-def test_a_fast_path_inquiry_costs_no_provider_call(
+def test_a_fast_path_inquiry_is_understood_before_routing(
     store, semantic_on, monkeypatch,
 ) -> None:
     provider = SemanticProvider()
 
     result = outcome(store, FAST_QUESTION, monkeypatch, provider, key="fast")
 
-    assert provider.calls == []
+    assert len(provider.calls) == 1
     assert result["decision"] == "SAFE"
     assert REASON_CODE not in result["reasons"]
 
@@ -229,7 +230,7 @@ def test_off_and_on_agree_on_a_fast_path_inquiry(
         seen[mode] = outcome(
             database, FAST_QUESTION, monkeypatch, provider, key="fast",
         )
-        assert provider.calls == []
+        assert len(provider.calls) == (0 if mode == "0" else 1)
 
     for field in ("decision", "answer", "validation_status", "route"):
         assert seen["0"][field] == seen["1"][field], field
@@ -434,6 +435,27 @@ def test_a_repeat_run_does_not_call_twice_or_change_the_verdict(
     )
 
 
+def test_usable_semantics_rebuilds_a_precomputed_ui_plan(
+    store, semantic_on, monkeypatch,
+) -> None:
+    """A Dashboard preview must not bypass semantic-first routing on submit."""
+
+    provider = SemanticProvider()
+    install(monkeypatch, provider)
+    inquiry_id = ask(store, MISMATCH_QUESTION, key="precomputed-plan")
+    inquiry = InquiryRepository(store).get(inquiry_id)
+    deterministic_plan = InquiryProcessingPlanService(store).create(inquiry)
+
+    outcome = AnswerService(store, dps_enrichment=NoDps()).generate_for_inquiry(
+        inquiry_id, processing_plan=deterministic_plan,
+    )
+
+    processing_plan = outcome.result.metadata["processing_plan"]
+    assert processing_plan["semantic_routing"]["phase"] == "PRE_ROUTING"
+    assert len(provider.calls) == 1
+    assert MISMATCH_QUESTION in provider.calls[0]
+
+
 def test_no_inquiry_is_left_in_an_intermediate_state(
     store, semantic_on, monkeypatch,
 ) -> None:
@@ -505,7 +527,7 @@ def test_the_recorder_never_lets_its_own_fault_escape(
 # ==========================================================================
 
 
-def test_an_already_held_answer_costs_no_provider_call(
+def test_an_already_held_answer_is_still_understood_before_routing(
     store, semantic_on, monkeypatch,
 ) -> None:
     """The gate can only add a hold, so on a held answer it buys nothing."""
@@ -524,5 +546,8 @@ def test_an_already_held_answer_costs_no_provider_call(
     assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" in decision.reasons
     metadata = draft.get("metadata_json") or {}
     router = (metadata.get("semantic_analysis") or {}).get("router") or {}
-    assert "NO_DECISION_VALUE" in (router.get("reasons") or [])
-    assert provider.calls == []
+    # Semantic-first routing runs before the Plan is known to be held.  The
+    # result may constrain order/DPS selection, so the old post-answer
+    # "decision value" optimisation is intentionally no longer applicable.
+    assert "DEADLINE_CONSTRAINT" in (router.get("reasons") or [])
+    assert provider.calls

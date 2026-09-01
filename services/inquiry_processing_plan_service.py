@@ -11,6 +11,8 @@ from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.semantic_analysis import SemanticAnalysis
+from answer.inquiry_analysis import InquiryAnalysis
 from services.phase9_answer_policy import build_delivery_answer_context
 from workflow.models import StepCode
 
@@ -80,9 +82,18 @@ class InquiryProcessingPlanService:
         correlation_id: str | None = None,
         order_lookup_result: dict[str, Any] | None = None,
         dps_override: dict[str, Any] | None = None,
+        semantic_analysis: SemanticAnalysis | None = None,
+        semantic_routing: dict[str, Any] | None = None,
+        deterministic_analysis: InquiryAnalysis | None = None,
     ) -> InquiryProcessingPlan:
         request = answer_request_from_inquiry(inquiry)
-        analysis = self.analysis.analyze(request)
+        analysis = (
+            self.analysis._with_semantic(
+                deterministic_analysis, semantic_analysis,
+            )
+            if deterministic_analysis is not None
+            else self.analysis.analyze(request, semantic=semantic_analysis)
+        )
         inquiry_id = int(inquiry["id"])
         order_id = str(request.order_id or "").strip()
         product_order_id = str(request.product_order_id or "").strip()
@@ -280,13 +291,16 @@ class InquiryProcessingPlanService:
             installation_date_display=context.installation_date_display,
             selected_answer_route=route,
             can_generate_draft=can_generate,
-            needs_staff_review=route in {
-                "ORDER_ID_REQUEST",
-                "ORDER_LOOKUP_FAILED",
-                "DELIVERY_ORDER_NOT_FOUND",
-                "DPS_LOOKUP_FAILED",
-                "DELIVERY_DATE_UNCONFIRMED",
-            },
+            needs_staff_review=(
+                analysis.manual_review_required
+                or route in {
+                    "ORDER_ID_REQUEST",
+                    "ORDER_LOOKUP_FAILED",
+                    "DELIVERY_ORDER_NOT_FOUND",
+                    "DPS_LOOKUP_FAILED",
+                    "DELIVERY_DATE_UNCONFIRMED",
+                }
+            ),
             workflow_order_status=workflow_order_status,
             workflow_dps_status=workflow_dps_status,
             workflow_answer_status="READY" if can_generate else "BLOCKED",
@@ -296,4 +310,5 @@ class InquiryProcessingPlanService:
             reason_code=reason,
             correlation_id=correlation_id or str(uuid.uuid4()),
             analysis=analysis,
+            semantic_routing=(dict(semantic_routing) if semantic_routing else None),
         )

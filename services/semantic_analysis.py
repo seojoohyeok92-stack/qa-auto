@@ -349,6 +349,9 @@ TRIGGER_STATE_ACTION_CONFLICT = "STATE_AND_ACTION_COMPETE"
 TRIGGER_UNCLASSIFIED = "CLASSIFIER_HAS_NO_ACTION"
 TRIGGER_DEADLINE = "DEADLINE_CONSTRAINT"
 TRIGGER_ORDER_PROBLEM = "ORDER_PROBLEM_REPORTED"
+TRIGGER_CONTEXT_ACTION_CONFLICT = "CONTEXT_AND_QUESTION_COMPETE"
+TRIGGER_COMPOUND_EVIDENCE = "COMPOUND_EVIDENCE_REQUIREMENTS"
+TRIGGER_SEMANTIC_FIRST = "SEMANTIC_FIRST_ROUTING"
 
 # Recorded when the router would have called, and the answer was already
 # being held for some other reason. See AnswerService for why that makes
@@ -421,12 +424,41 @@ def route(
     ):
         reasons.append(TRIGGER_ORDER_PROBLEM)
 
-    # "manual_review_required is already set, so a person will see it" was
-    # tried here as a way to skip the call, and measurement rejected it: the
-    # collection request carries that flag and was auto-posted anyway.
-    # Eligibility downgrades a review flag to a soft reason when the classifier
-    # simply found no rule (INTENT_UNCLASSIFIED_VALIDATOR_CLEAR), so the
-    # inquiries most in need of an understanding are exactly the ones that flag
-    # does not hold back. There is no cheap skip to be had here.
+    # An event name frequently describes why the customer is contacting us,
+    # while the actual question is about an order identifier, a correction or
+    # where to find it.  A keyword-only event rule cannot distinguish those
+    # meanings.  Keep this deliberately structural rather than tied to one
+    # campaign name.
+    compact_text = re.sub(r"\s+", "", text).lower()
+    event_context = any(
+        token in compact_text
+        for token in ("이벤트", "행사", "페스티벌", "환급", "프로모션", "리뷰")
+    )
+    order_question = any(
+        token in compact_text
+        for token in ("주문번호", "상품주문번호", "sh로시작", "어디서확인", "잘못입력", "수정하")
+    )
+    if event_context and order_question:
+        reasons.append(TRIGGER_CONTEXT_ACTION_CONFLICT)
+
+    # A request for another item in the same purchase cannot be answered from
+    # the listing's model catalog.  It also commonly appears as the second
+    # clause of an otherwise answerable question, so classify its evidence
+    # requirement before a single stand/product rule claims the whole inquiry.
+    purchased_other = any(
+        token in compact_text
+        for token in ("다른제품", "다른상품", "다른하나", "나머지상품", "같이주문", "같이구매")
+    )
+    if purchased_other and any(token in compact_text for token in ("구매", "주문", "샀", "산")):
+        reasons.append(TRIGGER_COMPOUND_EVIDENCE)
+
+    # Semantic-first routing is intentionally not a shadow sampler.  When the
+    # feature is enabled, every non-empty inquiry earns one structured
+    # understanding before order/DPS/RULE decisions.  Specific reasons remain
+    # for observability; the common reason makes the precedence contract
+    # explicit and prevents a new keyword-only route from silently bypassing
+    # semantics later.
+    if text:
+        reasons.append(TRIGGER_SEMANTIC_FIRST)
     ordered = tuple(dict.fromkeys(reasons))
     return SemanticRouteDecision(use_semantic=bool(ordered), reasons=ordered)

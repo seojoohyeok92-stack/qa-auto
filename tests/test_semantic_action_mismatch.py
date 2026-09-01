@@ -125,7 +125,7 @@ def test_a_compound_request_is_held_when_its_main_action_is_dropped() -> None:
     )
 
     assert decision.status == MISMATCH
-    assert "PRIMARY_ACTION_UNADDRESSED_COLLECTION" == decision.reason
+    assert "COLLECTION_VS_DELIVERY_POLICY/INSTALLATION_SCHEDULE" == decision.reason
 
 
 def test_a_dps_schedule_answer_addresses_a_status_question() -> None:

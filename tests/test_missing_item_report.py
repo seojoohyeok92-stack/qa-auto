@@ -246,6 +246,7 @@ def test_the_trigger_only_decides_whether_to_look() -> None:
     assert set(decision.reasons) <= {
         TRIGGER_ORDER_PROBLEM, "CLASSIFIER_HAS_NO_ACTION",
         "STATE_AND_ACTION_COMPETE", "DEADLINE_CONSTRAINT",
+        "SEMANTIC_FIRST_ROUTING",
     }
     # Nothing in a routing decision resembles a verdict about publishing.
     assert not set(decision.to_dict()) & {

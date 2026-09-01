@@ -37,6 +37,7 @@ from services.semantic_analysis import (
     OBJECT_STATES,
     SemanticAnalysisError,
     TRIGGER_DEADLINE,
+    TRIGGER_SEMANTIC_FIRST,
     TRIGGER_STATE_ACTION_CONFLICT,
     TRIGGER_UNCLASSIFIED,
     parse,
@@ -229,13 +230,13 @@ def test_an_unclear_action_earns_a_semantic_call(question, expected_trigger):
     ("설치 일정은 어떻게 안내받나요?", None),
     ("A/S는 어디서 받나요?", None),
 ])
-def test_a_settled_inquiry_costs_no_semantic_call(question, order_id):
-    """CASE 12. The deterministic path keeps every inquiry it already handles."""
+def test_every_nonempty_inquiry_uses_semantic_first(question, order_id):
+    """Deterministic analysis is fallback, never a keyword-first bypass."""
 
     decision = route(question, analysis=analysis_for(question, order_id=order_id))
 
-    assert decision.use_semantic is False
-    assert decision.reasons == ()
+    assert decision.use_semantic is True
+    assert TRIGGER_SEMANTIC_FIRST in decision.reasons
 
 
 def test_an_unclassified_request_earns_a_call() -> None:
@@ -256,7 +257,7 @@ def test_the_router_never_calls_anything() -> None:
             raise AssertionError("route() must not reach a provider")
 
     GptSemanticAnalyzerService(Exploding())
-    assert route("배송은 보통 며칠 걸리나요?", analysis={}).use_semantic is False
+    assert route("배송은 보통 며칠 걸리나요?", analysis={}).use_semantic is True
 
 
 # ==========================================================================

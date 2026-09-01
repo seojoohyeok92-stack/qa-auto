@@ -61,6 +61,7 @@ from services.semantic_action_support import (
 )
 from services.semantic_analysis import (
     SKIP_NO_DECISION_VALUE,
+    SemanticAnalysis,
     SemanticRouteDecision,
     is_enabled as semantic_analyzer_enabled,
     route as semantic_route,
@@ -360,6 +361,7 @@ class AnswerService:
         processing_plans: InquiryProcessingPlanService | None = None,
         order_lookup_service: UatOrderService | None = None,
         product_knowledge: ProductKnowledgeService | None = None,
+        semantic_analyzer: GptSemanticAnalyzerService | None = None,
     ) -> None:
         self.database = database
         self._engine = engine
@@ -391,6 +393,7 @@ class AnswerService:
         self.validator = AnswerValidator()
         self.semantic_coverage = SemanticCoverageService()
         self.completeness = AtomicCompletenessService()
+        self._semantic_analyzer_instance = semantic_analyzer
 
     def _complete_atomic_answer(
         self,
@@ -522,6 +525,45 @@ class AnswerService:
         this measurement must never be the reason a customer goes unanswered.
         """
 
+        prepared = request.metadata.get("semantic_routing")
+        prepared_value = request.metadata.get("_semantic_routing_value")
+        if isinstance(prepared, dict):
+            payload = dict(prepared)
+            semantic = (
+                prepared_value
+                if isinstance(prepared_value, SemanticAnalysis)
+                else None
+            )
+            if semantic is not None:
+                existing_support = result.metadata.get(
+                    "semantic_action_support"
+                )
+                if isinstance(existing_support, dict) and str(
+                    existing_support.get("status") or ""
+                ).upper() == "MISMATCH":
+                    # The candidate was rejected before answer selection.  A
+                    # review-safe draft has no answer label of its own, so
+                    # recomputing against it would erase the actual reason
+                    # that publishing was blocked.
+                    payload["support"] = dict(existing_support)
+                else:
+                    support = evaluate_action_support(
+                        semantic,
+                        route=str(result.metadata.get("selected_answer_route") or ""),
+                        template_id=result.metadata.get("template_id"),
+                        match_kind=result.metadata.get("template_match_kind"),
+                    )
+                    result.metadata["semantic_action_support"] = support.to_dict()
+                    payload["support"] = support.to_dict()
+            result.metadata["semantic_analysis"] = payload
+            self.logs.record_inquiry(
+                inquiry_id,
+                "SEMANTIC_ROUTING_RECORDED",
+                "문의 의미 분석 결과를 처리 경로와 답변 검증에 반영했습니다.",
+                level="INFO",
+                details=payload,
+            )
+            return
         if not semantic_analyzer_enabled():
             return
         try:
@@ -576,6 +618,7 @@ class AnswerService:
                             result.metadata.get("selected_answer_route") or ""
                         ),
                         template_id=result.metadata.get("template_id"),
+                        match_kind=result.metadata.get("template_match_kind"),
                     )
                     result.metadata["semantic_action_support"] = (
                         support.to_dict()
@@ -648,6 +691,92 @@ class AnswerService:
         instance = GptSemanticAnalyzerService(provider)
         self._semantic_analyzer_instance = instance
         return instance
+
+    def _semantic_for_routing(
+        self,
+        request: AnswerRequest,
+        analysis: InquiryAnalysis,
+    ) -> tuple[SemanticAnalysis | None, dict[str, Any]]:
+        """Run the bounded semantic stage before any Plan/routing decision.
+
+        Provider failure deliberately returns an unusable value and leaves the
+        deterministic Plan intact.  The payload is later persisted with the
+        draft and reused by the action-support gate, so one inquiry never pays
+        for the same semantic understanding twice.
+        """
+
+        analysis_dict = analysis.to_dict()
+        decision = semantic_route(request.question, analysis=analysis_dict)
+        payload: dict[str, Any] = {
+            "phase": "PRE_ROUTING",
+            "router": decision.to_dict(),
+            "called": False,
+        }
+        if not semantic_analyzer_enabled() or not decision.use_semantic:
+            payload["fallback"] = "DETERMINISTIC"
+            return None, payload
+        analyzer = self._semantic_analyzer()
+        if analyzer is None:
+            payload["fallback"] = "DETERMINISTIC_PROVIDER_UNAVAILABLE"
+            return None, payload
+        semantic = analyzer.analyze(request.question)
+        payload.update({
+            "called": True,
+            "semantic": semantic.to_dict(),
+            "trace": dict(analyzer.last_trace),
+            "usable": semantic.usable,
+            "fallback": None if semantic.usable else "DETERMINISTIC_UNUSABLE",
+        })
+        return semantic, payload
+
+    @staticmethod
+    def _attach_semantic_routing(
+        request: AnswerRequest,
+        semantic: SemanticAnalysis | None,
+        payload: dict[str, Any],
+    ) -> None:
+        request.metadata["semantic_routing"] = dict(payload)
+        # In-memory only: never serialised directly, and used to prevent a
+        # second provider call after the answer has been rendered.
+        request.metadata["_semantic_routing_value"] = semantic
+
+    @staticmethod
+    def _exclude_semantic_rule_mismatch(
+        candidate: AnswerResult,
+        semantic: SemanticAnalysis | None,
+        request: AnswerRequest,
+    ) -> AnswerResult:
+        """Discard a known wrong fixed-rule candidate before it can win."""
+
+        if semantic is None or not semantic.usable or not candidate.auto_answerable:
+            return candidate
+        decision = evaluate_action_support(
+            semantic,
+            route="TEMPLATE",
+            template_id=candidate.category,
+            match_kind=(candidate.metadata or {}).get("template_match_kind"),
+        )
+        if not decision.mismatched:
+            return candidate
+        safe = _review_required_safe_result(
+            request,
+            template_preferred=True,
+            failure_code="SEMANTIC_RULE_MISMATCH",
+            questions=tuple(
+                item.text for item in semantic.atomic_questions
+            ) or split_subquestions(request.question),
+            generation_skipped=True,
+            skip_reasons=("SEMANTIC_RULE_MISMATCH",),
+        )
+        safe.metadata.update({
+            "semantic_rule_rejected": decision.to_dict(),
+            "semantic_action_support": decision.to_dict(),
+            "rejected_rule_category": candidate.category,
+            "rejected_template_match_kind": (
+                candidate.metadata or {}
+            ).get("template_match_kind"),
+        })
+        return safe
 
     def _record_semantic_coverage(
         self,
@@ -1211,7 +1340,14 @@ class AnswerService:
         try:
             self._start_generation_step(inquiry_id)
             step_started = True
-            if processing_plan is not None:
+            initial_request = answer_request_from_inquiry(inquiry)
+            deterministic_analysis = self.analysis.analyze(initial_request)
+            routing_semantic, semantic_routing = self._semantic_for_routing(
+                initial_request, deterministic_analysis,
+            )
+            if processing_plan is not None and (
+                routing_semantic is None or not routing_semantic.usable
+            ):
                 plan = processing_plan.for_execution(
                     correlation_id=(
                         correlation_id or processing_plan.correlation_id
@@ -1223,6 +1359,9 @@ class AnswerService:
                     inquiry,
                     template_preferred=prefer_template,
                     correlation_id=correlation_id,
+                    semantic_analysis=routing_semantic,
+                    semantic_routing=semantic_routing,
+                    deterministic_analysis=deterministic_analysis,
                 )
             if plan.inquiry_id != inquiry_id:
                 raise AnswerGenerationError(
@@ -1230,6 +1369,9 @@ class AnswerService:
                 )
             correlation_id = plan.correlation_id
             request = answer_request_from_inquiry(inquiry)
+            self._attach_semantic_routing(
+                request, routing_semantic, semantic_routing,
+            )
             phase9_analysis = plan.analysis
             analysis_data = phase9_analysis.to_dict()
             request.metadata["phase9_analysis"] = analysis_data
@@ -1619,9 +1761,15 @@ class AnswerService:
                         template_preferred=prefer_template,
                         correlation_id=correlation_id,
                         order_lookup_result=order_lookup_result,
+                        semantic_analysis=routing_semantic,
+                        semantic_routing=semantic_routing,
+                        deterministic_analysis=deterministic_analysis,
                     )
                     inquiry = refreshed
                     request = answer_request_from_inquiry(inquiry)
+                    self._attach_semantic_routing(
+                        request, routing_semantic, semantic_routing,
+                    )
                     request.metadata["phase9_analysis"] = analysis_data
                     request.metadata["processing_plan"] = plan.to_dict()
                     decision_details.update(
@@ -1800,6 +1948,9 @@ class AnswerService:
                 )
                 try:
                     base_rule_result = self.engine.generate(request)
+                    base_rule_result = self._exclude_semantic_rule_mismatch(
+                        base_rule_result, routing_semantic, request,
+                    )
                 except Exception as template_error:
                     self.logs.record_inquiry(
                         inquiry_id,
@@ -1955,6 +2106,9 @@ class AnswerService:
                         if isinstance(request.metadata.get("dps"), dict)
                         else dps_outcome.metadata
                     ),
+                    semantic_analysis=routing_semantic,
+                    semantic_routing=semantic_routing,
+                    deterministic_analysis=deterministic_analysis,
                 )
                 request.metadata["order_lookup_status"] = (
                     plan.order_lookup_status

@@ -37,6 +37,7 @@ from typing import Any, Mapping
 
 from services.semantic_analysis import (
     ACTIONS,
+    BENEFIT,
     COLLECTION,
     DELIVERY_POLICY,
     DELIVERY_STATUS,
@@ -110,6 +111,30 @@ ROUTE_ACTION_SUPPORT: dict[str, frozenset[str]] = {
     "PRODUCT_DB": frozenset({PRODUCT_SPEC, PRODUCT_CONCEPT}),
 }
 
+# ``template_id`` is a human-facing category and legacy templates do not all
+# have a stable identifier.  The rule engine does, however, stamp every fixed
+# candidate with an ASCII match kind.  This is deliberately a small allow-list:
+# it lets semantic routing reject a known wrong candidate without guessing what
+# an unlabelled rule means.
+MATCH_KIND_ACTION_SUPPORT: dict[str, frozenset[str]] = {
+    "FIXED_EVENT_ONNURI": frozenset({BENEFIT}),
+    "FIXED_EVENT_REVIEW": frozenset({BENEFIT, NOTIFICATION_POLICY}),
+    "FIXED_POLICY_SHIPPING": frozenset({
+        DELIVERY_POLICY, DELIVERY_STATUS, INSTALLATION_SCHEDULE,
+        SCHEDULE_REQUEST,
+    }),
+    "FIXED_POLICY_INSTALL": frozenset({
+        INSTALLATION_METHOD, PRODUCT_CONCEPT, REPAIR,
+    }),
+    "FIXED_POLICY_PICKUP": frozenset({COLLECTION}),
+    "FIXED_POLICY_STORE_PICKUP": frozenset({STORE_PICKUP}),
+    "FIXED_PRODUCT_ACCESSORY": frozenset({
+        PRODUCT_SPEC, PRODUCT_CONCEPT, PACKAGE_CONTENTS,
+    }),
+    "FIXED_PACKAGE_CODE": frozenset({PRODUCT_SPEC, PACKAGE_CONTENTS}),
+    "PRODUCT_DB_MODEL_CODE": frozenset({PRODUCT_SPEC}),
+}
+
 # An answer that asserts nothing about the customer's request cannot
 # contradict it. Asking for the order number is the pipeline's safe reply to a
 # missing order id, and blocking it would leave the customer with no reply.
@@ -144,7 +169,7 @@ class ActionSupportDecision:
 
 
 def answer_support(
-    *, route: object, template_id: object
+    *, route: object, template_id: object, match_kind: object = None,
 ) -> tuple[frozenset[str] | None, str | None]:
     """The actions the produced answer can address, if we can name it."""
 
@@ -154,6 +179,9 @@ def answer_support(
     label = str(template_id or "").strip()
     if label and label in ANSWER_ACTION_SUPPORT:
         return ANSWER_ACTION_SUPPORT[label], label
+    kind = str(match_kind or "").strip().upper()
+    if kind in MATCH_KIND_ACTION_SUPPORT:
+        return MATCH_KIND_ACTION_SUPPORT[kind], kind
     supported = ROUTE_ACTION_SUPPORT.get(normalized_route)
     if supported is not None:
         return supported, normalized_route
@@ -165,6 +193,7 @@ def evaluate(
     *,
     route: object,
     template_id: object,
+    match_kind: object = None,
 ) -> ActionSupportDecision:
     """Compare what was asked against what the answer can address.
 
@@ -184,7 +213,9 @@ def evaluate(
             UNDETERMINED, question_action=asked, reason="QUESTION_ACTION_UNKNOWN",
         )
 
-    supported, label = answer_support(route=route, template_id=template_id)
+    supported, label = answer_support(
+        route=route, template_id=template_id, match_kind=match_kind,
+    )
     if supported is None:
         return ActionSupportDecision(
             UNDETERMINED, question_action=asked, answer_label=label,
@@ -195,19 +226,24 @@ def evaluate(
     # covers one half of a compound request still leaves the other half
     # unanswered, and the pipeline should hear about that from a person.
     asked_actions = {asked, *semantic.secondary_actions}
-    covered = asked_actions & supported
-    if asked in supported:
+    unaddressed = asked_actions - supported
+    if not unaddressed:
         return ActionSupportDecision(
             COMPATIBLE, question_action=asked,
             answer_actions=tuple(sorted(supported)), answer_label=label,
-            reason="ANSWER_ADDRESSES_REQUESTED_ACTION",
+            reason="ANSWER_ADDRESSES_ALL_REQUESTED_ACTIONS",
         )
-    if covered:
-        # The primary action is unaddressed even though a secondary one is.
+    if asked in supported:
+        # The primary action is covered, but a compound inquiry still has an
+        # unaddressed core action.  A partial fixed rule must not be treated as
+        # an answer to the whole inquiry.
         return ActionSupportDecision(
             MISMATCH, question_action=asked,
             answer_actions=tuple(sorted(supported)), answer_label=label,
-            reason=f"PRIMARY_ACTION_UNADDRESSED_{asked}",
+            reason=(
+                "SECONDARY_ACTION_UNADDRESSED_"
+                + "/".join(sorted(unaddressed))
+            ),
         )
     return ActionSupportDecision(
         MISMATCH, question_action=asked,
