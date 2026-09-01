@@ -886,17 +886,34 @@ class InquiryAnalysisService:
             semantic.requires_delivery_schedule
             or actions & {DELIVERY_STATUS, INSTALLATION_SCHEDULE}
         )
+        # ``requires_order_context`` describes conversational relevance only:
+        # a customer may mention a purchase while asking a stable policy or
+        # collection question.  It is not authority to fetch their external
+        # order.  External lookup is reserved for an atomic question that
+        # actually asks to identify an order or obtain its current schedule.
         requires_order_context = bool(semantic.requires_order_context)
         is_context_or_policy = bool(
             actions & {NOTIFICATION_POLICY, ORDER_IDENTIFICATION}
         ) and not requires_current_schedule
 
-        requires_order = (
-            False if is_context_or_policy else deterministic.requires_order_lookup
+        explicit_external_order_evidence = bool(
+            requires_current_schedule
+            or ORDER_IDENTIFICATION in actions
         )
-        requires_dps = (
-            False if is_context_or_policy else deterministic.requires_dps_lookup
-        )
+        if semantic.atomic_questions:
+            # A usable semantic decomposition is the execution scope.  Do
+            # not let a broad deterministic keyword hold the whole inquiry
+            # when none of its atomic questions needs customer-specific
+            # external evidence.
+            requires_order = explicit_external_order_evidence
+            requires_dps = requires_current_schedule
+        else:
+            requires_order = (
+                False if is_context_or_policy else deterministic.requires_order_lookup
+            )
+            requires_dps = (
+                False if is_context_or_policy else deterministic.requires_dps_lookup
+            )
         detected_intent = deterministic.detected_intent
         subtype = deterministic.inquiry_subtype
         strategy = deterministic.answer_strategy
@@ -918,8 +935,6 @@ class InquiryAnalysisService:
             reasons.append("semantic routing suppressed keyword delivery/DPS route")
 
         if requires_order_context:
-            requires_order = True
-            requires_dps = requires_current_schedule
             if ORDER_IDENTIFICATION in actions:
                 inquiry_type = InquiryType.ORDER_INFO_REQUIRED
                 subtype = "SEMANTIC_ORDER_IDENTIFICATION"
@@ -938,7 +953,13 @@ class InquiryAnalysisService:
                 "inquiry_subtype": "SEMANTIC_" + item.action,
                 "detected_intent": item.action,
                 "requires_order_lookup": bool(
-                    requires_order_context and item.action == ORDER_IDENTIFICATION
+                    item.action == ORDER_IDENTIFICATION
+                    or (
+                        requires_current_schedule
+                        and item.action in {
+                            DELIVERY_STATUS, INSTALLATION_SCHEDULE,
+                        }
+                    )
                 ),
                 "requires_dps_lookup": bool(
                     requires_current_schedule and item.action in {

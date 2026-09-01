@@ -981,7 +981,11 @@ class AnswerService:
                     or inquiry_id
                 ),
                 notify_key=(
-                    f"answer_draft_created:{inquiry_id}:{draft['id']}"
+                    # Review is a terminal lifecycle outcome, not a draft
+                    # version.  The late Auto Post hold uses this same key so
+                    # a draft-stage hold and a later eligibility hold cannot
+                    # produce two operator messages.
+                    f"review-required:{inquiry_id}"
                 ),
                 hold_reason=hold_reason,
                 hold_codes=hold_codes,

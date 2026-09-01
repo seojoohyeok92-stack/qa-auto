@@ -621,6 +621,8 @@ class LearningContextService:
                     "learning_id": int(item["learning_example_id"]),
                     "matched_subquestion": item.get("matched_subquestion"),
                     "relevance": item.get("relevance"),
+                    "answer_support": item.get("answer_support"),
+                    "answer_support_reason": item.get("answer_support_reason"),
                     "why_selected": item.get("why_selected"),
                     "attached_to_prompt": True,
                     "answer_supported": None,

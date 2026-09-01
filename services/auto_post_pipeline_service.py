@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
+from kakao_notify import notify_qna_safely
 from repositories.answer_repository import AnswerRepository
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
@@ -113,6 +114,59 @@ class AutoPostPipelineService:
             level="WARNING",
             details=details,
         )
+        self._notify_review_terminal(
+            inquiry_id=inquiry_id,
+            reasons=tuple(str(item) for item in decision.reasons),
+        )
+
+    def _notify_review_terminal(
+        self,
+        *,
+        inquiry_id: int,
+        reasons: tuple[str, ...],
+    ) -> None:
+        """Own the late REVIEW_REQUIRED terminal notification exactly once."""
+
+        inquiry = self.inquiries.get(inquiry_id) or {}
+        draft = self.answers.active_for_inquiry(inquiry_id) or {}
+        try:
+            sent = notify_qna_safely(
+                title="[Q&A 미등록 / 직원 확인 필요]",
+                product=str(inquiry.get("product_name") or ""),
+                option_name=str(inquiry.get("option_name") or ""),
+                question=str(inquiry.get("content") or inquiry.get("title") or ""),
+                answer="-",
+                action="needs_review",
+                inquiry_id=str(
+                    inquiry.get("external_inquiry_id")
+                    or inquiry.get("source_question_id")
+                    or inquiry_id
+                ),
+                notify_key=f"review-required:{inquiry_id}",
+                hold_codes=reasons,
+                generation_skipped=not bool(
+                    str(draft.get("original_answer") or "").strip()
+                ),
+            )
+            if sent:
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "KAKAO_NOTIFICATION_ENQUEUED",
+                    "Final review lifecycle notification was queued.",
+                    details={
+                        "recipient": "staff_qna_room",
+                        "hold_reason_codes": list(reasons),
+                        "terminal_owner": "AUTO_POST_PIPELINE",
+                    },
+                )
+        except Exception as error:
+            self.logs.record_inquiry(
+                inquiry_id,
+                "KAKAO_NOTIFICATION_ENQUEUE_FAILED",
+                "Final review lifecycle notification could not be queued.",
+                level="WARNING",
+                details={"error_type": error.__class__.__name__},
+            )
 
     def _record_decision(
         self,
@@ -366,6 +420,19 @@ class AutoPostPipelineService:
                             ),
                         },
                     )
+                    if draft_outcome.status == "POLICY_BLOCKED":
+                        # A policy block is already a final staff-review
+                        # outcome even though no draft was created.  It uses
+                        # the same lifecycle key as every other review hold.
+                        self._notify_review_terminal(
+                            inquiry_id=inquiry_id,
+                            reasons=(
+                                str(
+                                    draft_outcome.error_code
+                                    or "AUTO_ANSWER_PROHIBITED"
+                                ),
+                            ),
+                        )
                     continue
                 draft = self.answers.active_for_inquiry(inquiry_id)
                 if draft is None or not str(draft.get("original_answer") or "").strip():
@@ -405,9 +472,6 @@ class AutoPostPipelineService:
                 dps_block = self._dps_session_block_reason(draft)
                 if dps_block:
                     counters["skipped_count"] += 1
-                    self.inquiries.update_status(
-                        inquiry_id, InquiryStatus.NEEDS_ATTENTION
-                    )
                     self.logs.record_inquiry(
                         inquiry_id,
                         "AUTO_POST_BLOCKED_DPS_SESSION",
@@ -418,6 +482,13 @@ class AutoPostPipelineService:
                             "safe_error_code": dps_block,
                             "dps_required": True,
                         },
+                    )
+                    self._hold_for_review(
+                        inquiry_id,
+                        AutoProcessingEligibility(
+                            "REVIEW_REQUIRED", "DPS_SESSION", (dps_block,)
+                        ),
+                        run_id=run_id,
                     )
                     continue
                 self.logs.record_inquiry(

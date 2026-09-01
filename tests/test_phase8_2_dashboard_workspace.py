@@ -303,7 +303,7 @@ _render_inquiry_detail(InquiryRepository(db).get({inquiry_id}), None)
     assert "<script>alert('xss')</script>" not in rendered
 
 
-def test_general_dashboard_renders_naver_post_card_outside_admin_mode(
+def test_general_dashboard_renders_naver_post_start_button_outside_admin_mode(
     tmp_path: Path,
 ) -> None:
     import inspect
@@ -328,10 +328,7 @@ render_review_workspace(items, len(items), db, page_size=10)
 '''
     )
     assert not at.exception
-    rendered = "\n".join(
-        item.value for item in [*at.markdown, *at.caption, *at.info]
-    )
-    assert "네이버 답변 등록" in rendered
+    assert any(button.label == "네이버 답변 등록" for button in at.button)
 
 
 def test_workspace_css_stretches_detail_row_and_expands_question_body() -> None:

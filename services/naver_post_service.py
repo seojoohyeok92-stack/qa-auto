@@ -225,7 +225,7 @@ class NaverPostService:
                 store_resolver=self.store_resolver,
                 settings=self.settings,
                 payload_builder=self.payload_builder,
-            ).run(inquiry_id)
+            ).run(inquiry_id, manual_confirmed=True)
             if not dry.eligible:
                 detailed_code = next(
                     (

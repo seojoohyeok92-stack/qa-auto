@@ -105,6 +105,12 @@ class InquiryProcessingPlanService:
             order_id_status = "AMBIGUOUS_PRODUCT_ORDER_ONLY"
         else:
             order_id_status = "MISSING"
+        # A preserved identifier is not an execution requirement.  When the
+        # semantic-aware plan says external order evidence is unnecessary,
+        # every order-state field must say the same thing so no downstream
+        # gate can reinterpret an unrelated blank as an order failure.
+        if not analysis.requires_order_lookup:
+            order_id_status = "NOT_REQUIRED"
 
         raw = self._raw(inquiry)
         snapshot = (

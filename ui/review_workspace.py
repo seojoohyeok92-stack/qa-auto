@@ -14,6 +14,7 @@ import streamlit.components.v1 as components
 
 from answer.answer_format import format_final_answer
 from answer.answer_provenance import AnswerProvenance
+from answer.inquiry_processing_plan import InquiryProcessingPlan
 from answer.learning_conflict import LearningConflictError
 from answer.learning_signal import PRODUCT_SCOPES, SIGNAL_KIND_LABELS, SignalKind
 from answer.learning_feedback import (
@@ -153,6 +154,26 @@ def _processing_plan_for_inquiry(
     *,
     template_preferred: bool = True,
 ):
+    # An active draft is an execution record.  Its semantic-aware plan is the
+    # same plan consumed by eligibility/Auto Post, so displaying a fresh
+    # semantic-less preview beside it would create a second source of truth.
+    if inquiry.get("id") is not None:
+        draft = AnswerRepository(database).active_for_inquiry(int(inquiry["id"]))
+        metadata = draft.get("metadata_json") if isinstance(draft, dict) else None
+        persisted = (
+            metadata.get("processing_plan")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if isinstance(persisted, dict):
+            try:
+                plan = InquiryProcessingPlan.from_dict(persisted)
+                if plan.inquiry_id == int(inquiry["id"]):
+                    return plan
+            except (KeyError, TypeError, ValueError):
+                # Historical drafts without a complete execution contract keep
+                # the existing preview behaviour; they are never rewritten.
+                pass
     return InquiryProcessingPlanService(database).create(
         inquiry,
         template_preferred=template_preferred,
@@ -1314,7 +1335,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             "현재 작성 중인 초안이 있습니다. 새 답변을 생성하면 기존 "
             "초안은 이력으로 보존되고 새 초안이 활성화됩니다."
         )
-    top_actions = st.columns([1.25, 0.8, 0.95, 3.7], gap="small")
+    top_actions = st.columns([1.25, 0.8, 0.95, 1.15, 2.55], gap="small")
     generate_label = (
         "주문번호 요청 답변 생성"
         if inquiry_analysis.delivery_question
@@ -1359,7 +1380,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         width="stretch",
         key=f"review_save_{inquiry_id}",
     )
-    top_actions[3].markdown(
+    registration_start = top_actions[3].button(
+        "네이버 답변 등록",
+        disabled=posted or not draft or not can(Permission.APPROVE),
+        width="stretch",
+        key=f"review_naver_post_start_{inquiry_id}",
+    )
+    if registration_start:
+        st.session_state[f"naver_post_flow_start_{inquiry_id}"] = True
+        st.rerun()
+    top_actions[4].markdown(
         '<div class="workspace-lock-note">승인은 Final Answer만 생성합니다.'
         " <b>승인과 네이버 등록은 별도 작업입니다.</b></div>",
         unsafe_allow_html=True,
@@ -3675,9 +3705,16 @@ def _render_naver_post_prepare(
     result_key = f"naver_post_dry_run_result_{inquiry_id}"
     post_result_key = f"naver_post_result_{inquiry_id}"
     confirm_key = f"naver_post_confirm_{inquiry_id}"
+    start_key = f"naver_post_flow_start_{inquiry_id}"
     settings = NaverPostSettings.from_environment()
+    if not (
+        st.session_state.get(start_key)
+        or st.session_state.get(confirm_key)
+        or st.session_state.get(result_key)
+        or st.session_state.get(post_result_key)
+    ):
+        return
     _render_auto_post_review(database, inquiry, settings=settings)
-    st.markdown("### 네이버 답변 등록")
     approval = ApprovalRepository(database).get_inquiry_approval(inquiry_id)
     draft = (
         AnswerRepository(database).active_for_inquiry(inquiry_id)
@@ -3705,16 +3742,7 @@ def _render_naver_post_prepare(
         "POST_UNKNOWN",
     }
     actions = st.columns([1.2, 4.6], gap="small")
-    actual = actions[0].button(
-        "네이버 답변 등록",
-        key=f"naver_post_actual_{inquiry_id}",
-        disabled=(
-            not settings.enabled
-            or already_posted
-            or not can(Permission.APPROVE)
-        ),
-        width="stretch",
-    )
+    actual = bool(st.session_state.pop(start_key, False))
     if settings.enabled:
         actions[1].caption(
             "수동 등록 모드 · 현재 Final Answer의 안전조건 확인 후 명시적 확인이 필요합니다."
@@ -3724,7 +3752,9 @@ def _render_naver_post_prepare(
             "NAVER_POST_ENABLED=false · 네이버 실제 등록 기능이 잠겨 있습니다."
         )
     if actual:
-        preflight = NaverPostDryRunService(database).run(inquiry_id).to_dict()
+        preflight = NaverPostDryRunService(database).run(
+            inquiry_id, manual_confirmed=True,
+        ).to_dict()
         st.session_state[result_key] = preflight
         if preflight.get("eligible"):
             st.session_state[confirm_key] = True
@@ -3776,6 +3806,7 @@ def _render_naver_post_prepare(
         )
         if cancel:
             st.session_state.pop(confirm_key, None)
+            st.session_state.pop(start_key, None)
             st.rerun()
         if confirm:
             outcome = NaverPostService(database).post(
@@ -3786,6 +3817,7 @@ def _render_naver_post_prepare(
             )
             st.session_state[post_result_key] = outcome.to_dict()
             st.session_state.pop(confirm_key, None)
+            st.session_state.pop(start_key, None)
             st.session_state.pop(result_key, None)
             st.rerun()
 
@@ -3886,8 +3918,7 @@ def render_review_workspace(
             border=True, height=760, key="official_answer_panel"
         ):
             _render_answer_panel(database, inquiry)
-        with st.container(border=True, key="official_naver_post_panel"):
-            _render_naver_post_prepare(database, inquiry)
+        _render_naver_post_prepare(database, inquiry)
     with dps_column:
         with st.container(
             border=True, height=760, key="official_dps_panel"

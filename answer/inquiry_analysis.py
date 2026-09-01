@@ -194,6 +194,9 @@ class InquiryAnalysis:
             ),
             auto_answerable=bool(value.get("auto_answerable")),
             detected_intent=str(value.get("detected_intent") or "GENERAL"),
+            manual_review_sources=tuple(
+                str(item) for item in value.get("manual_review_sources", ())
+            ),
             subquestion_analyses=tuple(
                 dict(item)
                 for item in value.get("subquestion_analyses", ())

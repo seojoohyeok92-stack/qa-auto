@@ -286,6 +286,26 @@ def test_manual_post_rechecks_current_final_answer_validator(
     assert client.requests == []
 
 
+def test_staff_approved_manual_post_only_bypasses_processing_plan_review(
+    database: Database,
+) -> None:
+    inquiry_id = _approved(database)
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    metadata = deserialize_json(draft.get("metadata_json")) or {}
+    metadata["processing_plan"] = {"needs_staff_review": True, "analysis": {}}
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE answer_drafts SET metadata_json=? WHERE id=?",
+            (serialize_json(metadata), int(draft["id"])),
+        )
+    manual_client = RecordingClient()
+    result = _service(database, manual_client, enabled=True).post(
+        inquiry_id, actor="tester", confirmed=True,
+    )
+    assert result.status == "POSTED"
+    assert len(manual_client.requests) == 1
+
+
 def test_manual_post_cannot_bypass_required_dps(
     database: Database,
 ) -> None:
@@ -613,7 +633,7 @@ import streamlit as st
 
 class FakeDry:
     def __init__(self, database): pass
-    def run(self, inquiry_id):
+    def run(self, inquiry_id, *, manual_confirmed=False):
         return SimpleNamespace(to_dict=lambda: {{
           "eligible":True,"status":"READY","method":"PUT",
           "endpoint":"/mock","payload":{{"commentContent":"answer"}},
@@ -623,6 +643,9 @@ class FakeDry:
 class FakePost:
     def __init__(self, database): pass
     def post(self, inquiry_id, **kwargs):
+        st.session_state["test_fake_post_calls"] = (
+            st.session_state.get("test_fake_post_calls", 0) + 1
+        )
         return SimpleNamespace(to_dict=lambda: {{
           "status":"POSTED","error_code":None,"message":"ok"
         }})
@@ -636,6 +659,9 @@ workspace.NaverPostDryRunService=FakeDry
 workspace.NaverPostService=FakePost
 workspace.NaverPostSettings=FakeSettings
 st.session_state["production_admin_mode"] = False
+if not st.session_state.get("test_naver_post_flow_started_{inquiry_id}"):
+    st.session_state["test_naver_post_flow_started_{inquiry_id}"] = True
+    st.session_state["naver_post_flow_start_{inquiry_id}"] = True
 db=Database(r"{database.path}")
 workspace._render_naver_post_prepare(
     db, InquiryRepository(db).get({inquiry_id})
@@ -643,19 +669,12 @@ workspace._render_naver_post_prepare(
 '''
     ).run(timeout=30)
     assert not app.exception
-    actual = next(
-        button
-        for button in app.button
-        if button.label == "\ub124\uc774\ubc84 \ub2f5\ubcc0 \ub4f1\ub85d"
-    )
-    assert actual.disabled is False
-    actual.click()
-    app = app.run(timeout=30)
     labels = {button.label for button in app.button}
     assert {
         "\ucde8\uc18c",
         "\uc2e4\uc81c \ub4f1\ub85d \ud655\uc778",
     } <= labels
+    assert "test_fake_post_calls" not in app.session_state
     next(
         button
         for button in app.button
@@ -667,3 +686,7 @@ workspace._render_naver_post_prepare(
         "\ub124\uc774\ubc84 \ub4f1\ub85d \uc644\ub8cc" in item.value
         for item in app.success
     )
+    assert app.session_state["test_fake_post_calls"] == 1
+    assert f"naver_post_flow_start_{inquiry_id}" not in app.session_state
+    assert f"naver_post_confirm_{inquiry_id}" not in app.session_state
+    assert f"naver_post_dry_run_result_{inquiry_id}" not in app.session_state

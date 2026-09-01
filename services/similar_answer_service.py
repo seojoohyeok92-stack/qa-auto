@@ -258,6 +258,22 @@ class SimilarAnswerService:
             # gate below; this avoids throwing away valid old Positive Learning.
             if required_action and candidate_action and candidate_action != required_action:
                 rejection_counts["SEMANTIC_GOAL_MISMATCH"] += 1
+                diagnostic = {
+                    "learning_id": int(item["id"]),
+                    "lifecycle": (
+                        "APPROVED"
+                        if metadata.get("human_verified") is True
+                        else "AUTO"
+                    ),
+                    "human_verified": metadata.get("human_verified") is True,
+                    "eligible": False,
+                    "similarity": None,
+                    "reject_reason": "SEMANTIC_GOAL_MISMATCH",
+                    "required_action": required_action,
+                    "candidate_action": candidate_action,
+                }
+                if len(compatibility_diagnostics) < 40:
+                    compatibility_diagnostics.append(diagnostic)
                 continue
             human_verified = metadata.get("human_verified") is True
             candidate_product = extract_product_identity(
@@ -320,6 +336,29 @@ class SimilarAnswerService:
                 apply_answer_support(relevance, variant, item.get("final_answer"))[1]
                 for variant in query_variants
             )
+            self_support = apply_answer_support(
+                0.0,
+                item.get("question_original_masked") or candidate_question,
+                item.get("final_answer"),
+            )[1]
+            support_reason = "LEXICAL_ANSWER_SUPPORT"
+            # Legacy verified Learning predates canonical semantic metadata.
+            # It may phrase the same atomic intent differently, so lexical
+            # overlap alone must not discard direct exact-product evidence.
+            # This floor remains narrow: human verification, exact product,
+            # matching topic, and an answer that supports its own source
+            # question are all required.
+            if (
+                required_action
+                and human_verified
+                and str(compatibility.product_match)
+                in {"EXACT_PRODUCT", "EXACT_MODEL"}
+                and str(compatibility.topic_match) == "MATCH"
+                and self_support >= 0.5
+                and (candidate_action == required_action or not candidate_action)
+            ):
+                answer_support = max(answer_support, 0.5)
+                support_reason = "SEMANTIC_EXACT_PRODUCT_HUMAN_VERIFIED"
             relevance += 0.6 * answer_support
             if required_action and candidate_action == required_action:
                 relevance += 0.12
@@ -327,6 +366,7 @@ class SimilarAnswerService:
                 safe = dict(item)
                 safe["relevance"] = round(relevance, 4)
                 safe["answer_support"] = round(answer_support, 4)
+                safe["answer_support_reason"] = support_reason
                 safe["compatibility"] = compatibility.to_dict()
                 safe["semantic_goal"] = {
                     "required_action": required_action or None,
@@ -402,6 +442,7 @@ class SimilarAnswerService:
                 "rating": item["rating"],
                 "relevance": item["relevance"],
                 "answer_support": item.get("answer_support", 0.0),
+                "answer_support_reason": item.get("answer_support_reason"),
                 "source_origin": (
                     (item.get("metadata_json") or {}).get("source_origin")
                     if isinstance(item.get("metadata_json"), dict) else None

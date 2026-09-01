@@ -87,7 +87,9 @@ class NaverPostDryRunService:
             return "ORDER_ID_REQUEST"
         return str(data.get("generation_mode") or draft.get("source") or "").upper()
 
-    def run(self, inquiry_id: int) -> NaverPostDryRunResult:
+    def run(
+        self, inquiry_id: int, *, manual_confirmed: bool = False,
+    ) -> NaverPostDryRunResult:
         inquiry = self.inquiries.get(int(inquiry_id))
         if inquiry is None:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
@@ -153,13 +155,24 @@ class NaverPostDryRunService:
                 draft=current_draft,
                 route=self._route(current_draft),
             )
-            # Manual approval may override only the fact that a safe route was
-            # not configured for automatic posting. Every factual, Validator,
-            # Missing Item, order and DPS blocker remains mandatory.
+            # A persisted staff approval authorizes one explicit manual POST,
+            # not automatic posting.  It may override only the preliminary
+            # processing-plan review flag; every factual, Validator, Missing
+            # Item, order/DPS and transport blocker remains mandatory.
+            approved_manual = bool(
+                manual_confirmed
+                and approval_status == "APPROVED"
+                and str(approval.get("approved_at") or "").strip()
+                and str(approval.get("approved_by") or "").strip()
+            )
             manual_blockers = tuple(
                 reason
                 for reason in eligibility.reasons
                 if reason != "INTENT_NOT_AUTO_POSTABLE"
+                and not (
+                    approved_manual
+                    and reason == "PROCESSING_PLAN_REQUIRES_REVIEW"
+                )
             )
             check(
                 "current_safety",

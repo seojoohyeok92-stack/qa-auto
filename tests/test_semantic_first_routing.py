@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from repositories.database import Database
+from repositories.answer_repository import AnswerRepository
 from repositories.inquiry_repository import InquiryRepository
+from answer.models import AnswerResult, AnswerStatus
 from services.inquiry_processing_plan_service import InquiryProcessingPlanService
 from services.semantic_action_support import MISMATCH, evaluate
 from services.semantic_analysis import parse
@@ -75,6 +79,84 @@ def test_event_notification_timing_does_not_gain_delivery_dps_from_keywords(tmp_
 
     assert plan.requires_order_lookup is False
     assert plan.requires_dps_lookup is False
+
+
+@pytest.mark.parametrize("action", ["COLLECTION", "BENEFIT"])
+def test_order_context_without_external_evidence_does_not_require_lookup(
+    tmp_path, action: str,
+) -> None:
+    database = Database(tmp_path / f"semantic-context-{action}.db")
+    database.initialize()
+    value = inquiry(database, f"context-{action}", "customer policy question")
+
+    plan = InquiryProcessingPlanService(database).create(
+        value,
+        semantic_analysis=semantic(action, order=True),
+    )
+
+    assert plan.requires_order_lookup is False
+    assert plan.requires_dps_lookup is False
+    assert plan.order_id_status == "NOT_REQUIRED"
+    assert plan.order_lookup_status == "NOT_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("content", "action"),
+    [
+        (
+            "\uc124\uce58\uc640 \ud568\uaed8 \ud3d0\uac00\uc804 \uc218\uac70 "
+            "\ucd94\uac00\uc694\uccad\ub4dc\ub824\ub3c4 \ub420\uae4c\uc694?",
+            "COLLECTION",
+        ),
+        (
+            "\ub9ac\ubdf0 \uc791\uc131 \uc644\ub8cc \ud6c4 \ud3ec\uc778\ud2b8 "
+            "\uc9c0\uae09 \uc2dc\uc810\uc774 \uad81\uae08\ud569\ub2c8\ub2e4.",
+            "BENEFIT",
+        ),
+    ],
+)
+def test_policy_or_collection_question_with_purchase_context_never_creates_order_blocker(
+    tmp_path, content: str, action: str,
+) -> None:
+    database = Database(tmp_path / f"runtime-order-context-{action}.db")
+    database.initialize()
+    value = inquiry(database, f"runtime-{action}", content)
+
+    plan = InquiryProcessingPlanService(database).create(
+        value, semantic_analysis=semantic(action, order=True),
+    )
+
+    assert plan.requires_order_lookup is False
+    assert plan.order_id_status == "NOT_REQUIRED"
+    assert plan.order_lookup_status == "NOT_REQUIRED"
+
+
+def test_dashboard_uses_active_draft_execution_plan(tmp_path) -> None:
+    from ui.review_workspace import _processing_plan_for_inquiry
+
+    database = Database(tmp_path / "persisted-execution-plan.db")
+    database.initialize()
+    value = inquiry(database, "persisted-plan", "policy question")
+    persisted = InquiryProcessingPlanService(database).create(
+        value, semantic_analysis=semantic("BENEFIT", order=True),
+    )
+    AnswerRepository(database).create_program_draft(
+        int(value["id"]),
+        AnswerResult(
+            status=AnswerStatus.GENERATED,
+            category="policy",
+            reason="test",
+            answer="safe answer",
+            provider="rules",
+            auto_answerable=True,
+            needs_review=False,
+            metadata={"processing_plan": persisted.to_dict()},
+        ),
+    )
+
+    displayed = _processing_plan_for_inquiry(database, value)
+
+    assert displayed.to_dict() == persisted.to_dict()
 
 
 def test_compound_purchase_question_keeps_order_evidence_and_review(tmp_path) -> None:

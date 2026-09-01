@@ -93,6 +93,7 @@ def make_draft(
     answer: str = "문의하신 기능은 설정 메뉴에서 이용할 수 있습니다.",
     needs_review: bool = False,
     dps_metadata: dict | None = None,
+    processing_plan: dict | None = None,
 ) -> dict:
     return AnswerRepository(database).create_program_draft(
         inquiry_id,
@@ -120,12 +121,15 @@ def make_draft(
                     if dps_metadata is not None
                     else {}
                 ),
+                **({"processing_plan": processing_plan} if processing_plan is not None else {}),
             },
         ),
     )
 
 
-def test_dps_required_login_required_blocks_auto_post(tmp_path) -> None:
+def test_dps_required_login_required_blocks_auto_post(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database = make_database(tmp_path)
     inquiry_id = make_inquiry(database)
     make_draft(
@@ -139,6 +143,17 @@ def test_dps_required_login_required_blocks_auto_post(tmp_path) -> None:
         },
     )
     client = MockClient()
+    notifications: list[dict] = []
+    delivered_keys: set[str] = set()
+    monkeypatch.setattr(
+        "services.auto_post_pipeline_service.notify_qna_safely",
+        lambda **kwargs: (
+            False
+            if kwargs["notify_key"] in delivered_keys
+            else (delivered_keys.add(kwargs["notify_key"]) is None)
+            and (notifications.append(kwargs) is None)
+        ),
+    )
 
     outcome = AutoPostPipelineService(
         database,
@@ -150,6 +165,9 @@ def test_dps_required_login_required_blocks_auto_post(tmp_path) -> None:
     assert outcome.succeeded_count == 0
     assert client.calls == 0
     assert InquiryRepository(database).get(inquiry_id)["workflow_status"] == "NEEDS_ATTENTION"
+    assert [item["notify_key"] for item in notifications] == [
+        f"review-required:{inquiry_id}"
+    ]
 
 
 def test_dps_not_required_is_unaffected_by_login_required(tmp_path) -> None:
@@ -166,6 +184,50 @@ def test_dps_not_required_is_unaffected_by_login_required(tmp_path) -> None:
 
     assert outcome.succeeded_count == 1
     assert client.calls == 1
+
+
+def test_late_auto_post_review_owns_one_review_notification(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = make_database(tmp_path)
+    inquiry_id = make_inquiry(database)
+    make_draft(
+        database,
+        inquiry_id,
+        route="TEMPLATE",
+        processing_plan={
+            "requires_order_lookup": True,
+            "order_id_status": "MISSING",
+            "order_lookup_status": "CUSTOMER_INFORMATION_REQUIRED",
+        },
+    )
+    notifications: list[dict] = []
+    delivered_keys: set[str] = set()
+    monkeypatch.setattr(
+        "services.auto_post_pipeline_service.notify_qna_safely",
+        lambda **kwargs: (
+            False
+            if kwargs["notify_key"] in delivered_keys
+            else (delivered_keys.add(kwargs["notify_key"]) is None)
+            and (notifications.append(kwargs) is None)
+        ),
+    )
+
+    outcome = AutoPostPipelineService(
+        database, post_service=post_service(database, MockClient())
+    ).run_pending(run_id="RUN-LATE-REVIEW", owner_id="OWNER", max_retries=1)
+
+    assert outcome.skipped_count == 1
+    assert len(notifications) == 1
+    assert notifications[0]["notify_key"] == f"review-required:{inquiry_id}"
+    assert notifications[0]["answer"] == "-"
+
+    retry = AutoPostPipelineService(
+        database, post_service=post_service(database, MockClient())
+    ).run_pending(run_id="RUN-LATE-REVIEW-RETRY", owner_id="OWNER", max_retries=1)
+
+    assert retry.succeeded_count == 0
+    assert len(notifications) == 1
 
 
 def post_service(database: Database, client: MockClient) -> NaverPostService:

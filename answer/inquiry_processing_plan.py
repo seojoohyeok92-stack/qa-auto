@@ -127,3 +127,50 @@ class InquiryProcessingPlan:
         value = asdict(self)
         value["analysis"] = self.analysis.to_dict()
         return value
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "InquiryProcessingPlan":
+        """Restore the plan that actually governed a persisted draft."""
+
+        analysis = value.get("analysis")
+        if not isinstance(analysis, dict):
+            raise ValueError("PROCESSING_PLAN_ANALYSIS_REQUIRED")
+        return cls(
+            inquiry_id=int(value["inquiry_id"]),
+            inquiry_type=str(value.get("inquiry_type") or ""),
+            normalized_text=str(value.get("normalized_text") or ""),
+            detected_intent=str(value.get("detected_intent") or "GENERAL"),
+            is_delivery=bool(value.get("is_delivery")),
+            is_installation=bool(value.get("is_installation")),
+            is_high_risk=bool(value.get("is_high_risk")),
+            order_id=str(value.get("order_id") or ""),
+            product_order_id=str(value.get("product_order_id") or ""),
+            order_id_status=str(value.get("order_id_status") or "NOT_REQUIRED"),
+            requires_order_lookup=bool(value.get("requires_order_lookup")),
+            requires_dps_lookup=bool(value.get("requires_dps_lookup")),
+            order_lookup_action=str(value.get("order_lookup_action") or "SKIP"),
+            dps_lookup_action=str(value.get("dps_lookup_action") or "SKIP"),
+            order_lookup_status=str(value.get("order_lookup_status") or "NOT_REQUIRED"),
+            dps_lookup_status=str(value.get("dps_lookup_status") or "NOT_REQUIRED"),
+            valid_order_snapshot_available=bool(value.get("valid_order_snapshot_available")),
+            valid_dps_snapshot_available=bool(value.get("valid_dps_snapshot_available")),
+            installation_date_raw=value.get("installation_date_raw"),
+            installation_date_display=value.get("installation_date_display"),
+            selected_answer_route=str(value.get("selected_answer_route") or ""),
+            can_generate_draft=bool(value.get("can_generate_draft")),
+            needs_staff_review=bool(value.get("needs_staff_review")),
+            workflow_order_status=str(value.get("workflow_order_status") or "SKIPPED"),
+            workflow_dps_status=str(value.get("workflow_dps_status") or "SKIPPED"),
+            workflow_answer_status=str(value.get("workflow_answer_status") or "PENDING"),
+            template_preferred=bool(value.get("template_preferred")),
+            template_id=value.get("template_id"),
+            generation_mode=str(value.get("generation_mode") or ""),
+            reason_code=str(value.get("reason_code") or ""),
+            correlation_id=str(value.get("correlation_id") or ""),
+            analysis=InquiryAnalysis.from_dict(analysis),
+            semantic_routing=(
+                dict(value["semantic_routing"])
+                if isinstance(value.get("semantic_routing"), dict)
+                else None
+            ),
+        )

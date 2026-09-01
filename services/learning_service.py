@@ -148,6 +148,30 @@ class LearningService:
             return None
         metadata = self._metadata(draft or {})
         plan = metadata.get("processing_plan") if isinstance(metadata.get("processing_plan"), dict) else {}
+        semantic_routing = (
+            plan.get("semantic_routing")
+            if isinstance(plan.get("semantic_routing"), dict)
+            else metadata.get("semantic_analysis")
+            if isinstance(metadata.get("semantic_analysis"), dict)
+            else {}
+        )
+        semantic_value = (
+            semantic_routing.get("semantic")
+            if isinstance(semantic_routing.get("semantic"), dict)
+            else semantic_routing
+        )
+        canonical_semantic = {
+            "primary_action": semantic_value.get("primary_action"),
+            "atomic_questions": [
+                dict(item)
+                for item in semantic_value.get("atomic_questions", [])
+                if isinstance(item, dict)
+            ],
+        }
+        canonical_semantic = {
+            key: value for key, value in canonical_semantic.items()
+            if value not in (None, "", [])
+        }
         phase9 = metadata.get("phase9") if isinstance(metadata.get("phase9"), dict) else {}
         analysis = phase9.get("analysis") if isinstance(phase9.get("analysis"), dict) else {}
         original = self.privacy.mask((draft or {}).get("original_answer"), customer_names=names)
@@ -216,6 +240,10 @@ class LearningService:
                 "product_scope": knowledge_profile.scope,
                 "learning_topics": list(knowledge_profile.topics),
                 "product_identity": product_identity.to_dict(),
+                # New Learning keeps the semantic contract that selected and
+                # verified it. Legacy rows without this remain retrievable by
+                # product/topic/text compatibility.
+                **({"semantic": canonical_semantic} if canonical_semantic else {}),
             },
             "active": True,
         }

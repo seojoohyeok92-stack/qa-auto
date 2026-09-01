@@ -206,24 +206,19 @@ def test_sqlite_backup_api_preserves_source_and_rows(
 def test_streamlit_post_prepare_panel_keeps_actual_button_locked(
     database: Database, monkeypatch,
 ) -> None:
+    """A dormant action-row registration flow cannot reach a POST."""
     inquiry_id = _inquiry(database)
     monkeypatch.setenv("NAVER_POST_ENABLED", "false")
-    monkeypatch.setattr(
-        NaverPostSettings,
-        "from_environment",
-        classmethod(lambda cls: cls(enabled=False)),
-    )
-    code = f'''
+    monkeypatch.setattr(NaverPostSettings, "from_environment", classmethod(lambda cls: cls(enabled=False)))
+    code = f"""
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from ui.review_workspace import _render_naver_post_prepare
+import streamlit as st
 db=Database(r"{database.path}")
-inquiry=InquiryRepository(db).get({inquiry_id})
-_render_naver_post_prepare(db, inquiry)
-'''
+_render_naver_post_prepare(db, InquiryRepository(db).get({inquiry_id}))
+assert not st.session_state.get("naver_post_flow_start_{inquiry_id}")
+"""
     app = AppTest.from_string(code).run(timeout=30)
     assert not app.exception
-    labels = {button.label: button for button in app.button}
-    assert "등록 Dry Run" not in labels
-    assert labels["네이버 답변 등록"].disabled is True
-    assert any("내부 preflight" in item.value for item in app.info)
+    assert not app.button
