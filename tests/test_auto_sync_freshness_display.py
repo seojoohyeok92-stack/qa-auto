@@ -133,9 +133,12 @@ def test_a_later_automatic_sync_replaces_the_pinned_manual_result(
     captions = _render(database, monkeypatch, dict(STALE_MANUAL))
     window = next(text for text in captions if "조회 기간" in text)
 
-    assert "12:53" in window, window
-    # The operator's own 11:43:27 manual window must be gone.
-    assert "11:43" not in window, window
+    # Assert the labelled query-window value, not a broad HH:MM substring:
+    # ``최근 실행`` is rendered from the current clock and can legitimately
+    # contain the manual run's minute even when the stale manual *window* has
+    # been replaced.
+    assert "조회 기간: 2026-08-17 12:53:00 ~ 2026-08-24 12:53:00" in window, window
+    assert "조회 기간: 2026-08-17 11:43:27 ~ 2026-08-24 11:43:27" not in window, window
 
 
 def test_the_window_is_stamped_with_when_the_run_happened(

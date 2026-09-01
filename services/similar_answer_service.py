@@ -182,8 +182,26 @@ class SimilarAnswerService:
         limit: int = 3, minimum_relevance: float = 0.24,
         candidate_pool: list[dict[str, Any]] | None = None,
         candidate_diagnostics: dict[str, int] | None = None,
+        semantic_goal: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         query = normalize_learning_question(self.privacy.mask(question))
+        semantic_goal = semantic_goal or {}
+        requested_information = str(
+            semantic_goal.get("requested_information") or ""
+        ).strip()
+        atomic_question = str(semantic_goal.get("atomic_question") or "").strip()
+        # These are alternative representations of the *same* customer goal,
+        # not independent keyword expansions.  Ranking uses the best match,
+        # allowing a verified older Learning written in different words to be
+        # found without letting unrelated topic neighbours accumulate score.
+        query_variants = list(dict.fromkeys(
+            value for value in (
+                query,
+                normalize_learning_question(self.privacy.mask(requested_information)),
+                normalize_learning_question(self.privacy.mask(atomic_question)),
+            ) if value
+        ))
+        required_action = str(semantic_goal.get("customer_goal") or "").upper()
         ranked: list[tuple[float, dict[str, Any]]] = []
         candidates = (
             candidate_pool
@@ -197,6 +215,7 @@ class SimilarAnswerService:
             "BELOW_SIMILARITY_THRESHOLD": 0,
             "CONTEXT_POLICY_REJECTED": 0,
             "REDACTION_TOKEN_CONTAMINATED": 0,
+            "SEMANTIC_GOAL_MISMATCH": 0,
         }
         compatibility_diagnostics: list[dict[str, Any]] = []
         type_mismatch_count = 0
@@ -224,6 +243,22 @@ class SimilarAnswerService:
                 type_mismatch_count += 1
             metadata = item.get("metadata_json")
             metadata = metadata if isinstance(metadata, dict) else {}
+            candidate_semantic = metadata.get("semantic_analysis") or metadata.get("semantic") or {}
+            if not isinstance(candidate_semantic, dict):
+                candidate_semantic = {}
+            candidate_action = str(
+                candidate_semantic.get("primary_action")
+                or metadata.get("semantic_action")
+                or metadata.get("customer_goal")
+                or ""
+            ).upper()
+            # A Learning explicitly understood as a different action is never
+            # evidence for this one.  Missing legacy metadata remains
+            # retrievable, but must still pass the answer-support sufficiency
+            # gate below; this avoids throwing away valid old Positive Learning.
+            if required_action and candidate_action and candidate_action != required_action:
+                rejection_counts["SEMANTIC_GOAL_MISMATCH"] += 1
+                continue
             human_verified = metadata.get("human_verified") is True
             candidate_product = extract_product_identity(
                 product_id=item.get("source_product_id"),
@@ -267,7 +302,11 @@ class SimilarAnswerService:
             if required_context and not required_context.issubset(candidate_concepts):
                 rejection_counts["CONTEXT_POLICY_REJECTED"] += 1
                 continue
-            relevance = self._similarity(query, str(item["question_normalized"]))
+            candidate_question = str(item["question_normalized"])
+            relevance = max(
+                self._similarity(variant, candidate_question)
+                for variant in query_variants
+            )
             relevance += 0.10 if intent and item.get("intent") == intent else 0
             relevance += 0.08 if product_name and item.get("product_name") == product_name else 0
             relevance += 0.08 if model_code and item.get("model_code") == model_code else 0
@@ -277,14 +316,23 @@ class SimilarAnswerService:
             # is a retrieval signal, not proof its *answer* supports this
             # query.  Boost (never replace) the score by how much of the
             # query's content the candidate's own answer actually covers.
-            relevance, answer_support = apply_answer_support(
-                relevance, query, item.get("final_answer")
+            answer_support = max(
+                apply_answer_support(relevance, variant, item.get("final_answer"))[1]
+                for variant in query_variants
             )
+            relevance += 0.6 * answer_support
+            if required_action and candidate_action == required_action:
+                relevance += 0.12
             if relevance >= minimum_relevance:
                 safe = dict(item)
                 safe["relevance"] = round(relevance, 4)
                 safe["answer_support"] = round(answer_support, 4)
                 safe["compatibility"] = compatibility.to_dict()
+                safe["semantic_goal"] = {
+                    "required_action": required_action or None,
+                    "candidate_action": candidate_action or None,
+                    "compatible": not candidate_action or candidate_action == required_action,
+                }
                 ranked.append((relevance, safe))
                 diagnostic.update({
                     "eligible": True,
@@ -309,6 +357,12 @@ class SimilarAnswerService:
         selected = [item for _, item in ranked[: max(0, min(limit, 3))]]
         self.last_trace = {
             "query": query,
+            "query_variants": query_variants,
+            "semantic_goal": {
+                "customer_goal": required_action or None,
+                "requested_information": requested_information or None,
+                "atomic_question": atomic_question or None,
+            },
             "product": product_name,
             "inquiry_type": inquiry_type,
             "candidate_count": len(candidates),
@@ -363,6 +417,7 @@ class SimilarAnswerService:
                     else "AUTO"
                 ),
                 "compatibility": item.get("compatibility") or {},
+                "semantic_goal": item.get("semantic_goal") or {},
             }
             # An answer that says outright it is unsure -- "8월 둘째 주 이후로
             # 예상됩니다", "전날 연락드릴 것으로 보입니다" -- was reaching the

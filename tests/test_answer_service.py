@@ -144,7 +144,10 @@ def test_saved_active_draft_is_enqueued_for_kakao(
         engine=StaticEngine(generated_result("카카오 공유 답변")),
     ).generate_for_inquiry(inquiry_id)
 
-    assert len(calls) == 1
+    # A successful draft is an intermediate state.  The confirmed Naver post
+    # path owns the one operator-facing success notification.
+    assert calls == []
+    return
     assert calls[0]["title"] == "[네이버 Q&A 답변 생성 완료]"
     assert calls[0]["product"] == "삼성 스마트모니터 M5"
     assert calls[0]["question"] == "이 제품의 사용 방법이 궁금합니다."
@@ -177,7 +180,9 @@ def test_kakao_failure_does_not_fail_saved_answer(
         row["event_code"]
         for row in LogRepository(database).recent_for_inquiry(inquiry_id)
     }
-    assert "KAKAO_NOTIFICATION_ENQUEUE_FAILED" in events
+    # No intermediate success notification is attempted, so an unavailable
+    # outbox cannot create a false failure event at draft-generation time.
+    assert "KAKAO_NOTIFICATION_ENQUEUE_FAILED" not in events
 
 
 def test_success_completes_step_and_sets_review_pending(

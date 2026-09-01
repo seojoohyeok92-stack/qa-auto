@@ -63,7 +63,7 @@ class HybridAnswerService:
         *,
         validator: AnswerValidator | None = None,
         fact_selection: FactSelectionService | None = None,
-        learning_context_provider: Callable[[AnswerFacts, IntentResult], dict[str, Any]] | None = None,
+        learning_context_provider: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.provider = provider or create_gpt_provider()
         self.understanding = GptUnderstandingService(self.provider)
@@ -681,11 +681,30 @@ class HybridAnswerService:
                 )
             else:
                 try:
-                    learning_context = (
-                        self._learning_context_provider(facts, intent)
-                        if self._learning_context_provider is not None
-                        else {}
-                    )
+                    if self._learning_context_provider is None:
+                        learning_context = {}
+                    else:
+                        try:
+                            # The semantic pass is a real understanding already
+                            # paid for before routing.  Keep it attached to the
+                            # retrieval request: otherwise atomic questions were
+                            # persisted for audit but retrieval still saw only
+                            # the old keyword split.
+                            learning_context = self._learning_context_provider(
+                                facts,
+                                intent,
+                                semantic_analysis=request.metadata.get(
+                                    "_semantic_routing_value"
+                                ),
+                            )
+                        except TypeError:
+                            # Existing integrations intentionally expose the
+                            # historical two-argument callable.  They are not
+                            # semantic-aware but remain safe, and must not be
+                            # silently converted into an empty context.
+                            learning_context = self._learning_context_provider(
+                                facts, intent
+                            )
                 except Exception:
                     # Learning is an optional enrichment and can never block
                     # GPT.  Computed once here (instead of inside

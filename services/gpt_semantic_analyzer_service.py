@@ -64,12 +64,11 @@ constraints: str list, may be []
 negation, conditional, requires_order_context, requires_delivery_schedule: bool
 confidence: 0..1
 
-The action is what the customer wants done, never a word describing an object:
-"고장난 TV 수거해주세요" is COLLECTION of a BROKEN TV, not REPAIR.
-Asking to be given a date is SCHEDULE_REQUEST; asking what the date already is
-is INSTALLATION_SCHEDULE or DELIVERY_STATUS.
-Campaigns are context. Order ID/other purchased item: ORDER_IDENTIFICATION;
-requires_order_context=true. Delivery schedule=current delivery/install only.
+Action is what customer wants, not object state: broken-TV pickup=COLLECTION.
+Requesting a date=SCHEDULE_REQUEST; asking an existing date=INSTALLATION_SCHEDULE
+or DELIVERY_STATUS. Campaign is context. Order ID/other item=ORDER_IDENTIFICATION
+(requires_order_context=true). A registration/application field value or entry
+is FORM_FIELD_GUIDANCE, never BENEFIT. Delivery schedule=current order only.
 Use OTHER if no ACTION fits. Never invent one.
 
 INQUIRY:

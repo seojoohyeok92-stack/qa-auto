@@ -158,10 +158,9 @@ def test_a_successful_generation_keeps_its_own_notification(
         ),
     ).generate_for_inquiry(inquiry_id)
 
-    assert len(notifications) == 1
-    assert notifications[0]["title"] == "[네이버 Q&A 답변 생성 완료]"
-    assert not notifications[0]["hold_codes"]
-    assert notifications[0]["generation_skipped"] is False
+    # Generation alone is not terminal: the verified Naver-post success path
+    # sends the one success notification for this lifecycle.
+    assert notifications == []
 
 
 def test_a_skipped_generation_never_sends_a_generation_complete_notice(

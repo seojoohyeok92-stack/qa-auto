@@ -934,6 +934,14 @@ class AnswerService:
             plan.needs_staff_review
             or result.status is not AnswerStatus.GENERATED
         )
+        # A generated answer is only an intermediate state while the same
+        # automatic lifecycle still has to decide and perform Naver posting.
+        # The confirmed post path owns the single success notification, so a
+        # draft must not emit a second, misleading "generated" notification.
+        # A held result, on the other hand, is final for this lifecycle and
+        # still needs its one actionable notification.
+        if not needs_review:
+            return
         # Why the answer was written is what the pipeline records; why it is
         # not on Naver is what an operator has to act on. Those are different
         # questions, and the notification used to answer only the first --

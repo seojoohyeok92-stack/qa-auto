@@ -21,6 +21,7 @@ from repositories.feedback_signal_provenance_repository import (
 )
 from services.learning_signal_service import LearningSignalService
 from services.product_fact_guard import classify_product_fact
+from services.semantic_analysis import SemanticAnalysis
 
 
 # Retrieval traces: which candidates were considered, which were filtered and
@@ -139,7 +140,13 @@ class LearningContextService:
         self.feedback_signals = LearningSignalService(database)
         self.feedback_signal_provenance = FeedbackSignalProvenanceRepository(database)
 
-    def build(self, facts: AnswerFacts, intent: IntentResult) -> dict[str, Any]:
+    def build(
+        self,
+        facts: AnswerFacts,
+        intent: IntentResult,
+        *,
+        semantic_analysis: SemanticAnalysis | None = None,
+    ) -> dict[str, Any]:
         inquiry_id = facts.inquiry.get("inquiry_id")
         inquiry = self.inquiries.get(int(inquiry_id)) if inquiry_id is not None else None
         inquiry = inquiry or {}
@@ -159,7 +166,17 @@ class LearningContextService:
         # UNDERSTANDING already decomposes compound inquiries.  Search each
         # sub-question independently so one model-specific item cannot force
         # unrelated policy questions through the same product hard filter.
+        semantic_atomic = (
+            list(semantic_analysis.atomic_questions)
+            if semantic_analysis is not None and semantic_analysis.usable
+            else []
+        )
+        # Semantic atomic questions are authoritative for retrieval scope.
+        # The deterministic split remains as a fallback and preserves legacy
+        # callers that have no semantic provider.
         questions = list(dict.fromkeys(
+            str(item.text).strip() for item in semantic_atomic if str(item.text).strip()
+        )) or list(dict.fromkeys(
             str(item).strip() for item in intent.questions if str(item).strip()
         ))
         if len(questions) <= 1:
@@ -223,6 +240,19 @@ class LearningContextService:
         subquestion_traces: list[dict[str, Any]] = []
         signal_contexts: list[dict[str, Any]] = []
         for question in questions:
+            atomic = next(
+                (item for item in semantic_atomic if item.text.strip() == question),
+                None,
+            )
+            semantic_goal = {
+                "customer_goal": (
+                    atomic.action if atomic is not None
+                    else (semantic_analysis.primary_action if semantic_analysis else None)
+                ),
+                "requested_information": question,
+                "atomic_question": question,
+                "all_atomic_questions": [item.to_dict() for item in semantic_atomic],
+            }
             question_guard = classify_product_fact(
                 question,
                 inquiry_type=inquiry_type,
@@ -246,6 +276,7 @@ class LearningContextService:
                 limit=2 if len(questions) > 1 else 3,
                 candidate_pool=candidate_pool,
                 candidate_diagnostics=candidate_diagnostics,
+                semantic_goal=semantic_goal,
             )
             for key in ("similar_approved_answers", "seller_style_examples"):
                 for item in item_context[key]:
@@ -501,7 +532,12 @@ class LearningContextService:
                     ),
                     default=0.0,
                 ))
-            elif approved_for_question:
+            elif approved_for_question and (
+                not semantic_atomic or coverage_label(max(
+                (float(item.get("answer_support") or 0)
+                 for item in approved_for_question),
+                default=0.0,
+            )) == "SUPPORTED"):
                 status = "ANSWERABLE"
                 evidence_ids = [
                     int(item["learning_example_id"])
@@ -513,6 +549,19 @@ class LearningContextService:
                      for item in approved_for_question),
                     default=0.0,
                 ))
+            elif approved_for_question and semantic_atomic:
+                # Retrieval is deliberately broader than evidence.  A related
+                # Positive Learning may teach tone, but it cannot settle an
+                # unspecified registration/application field (or any other
+                # requested fact) unless its own answer covers the atomic
+                # question strongly enough.  Keep the candidate in retrieval
+                # provenance and send the customer question to staff instead
+                # of inferring a field value from topical similarity.
+                status = "NO_RELIABLE_SOURCE"
+                evidence_ids = []
+                source = "ACTIVE_POSITIVE_LEARNING_INSUFFICIENT_EVIDENCE"
+                historical_ids = []
+                evidence_coverage = "UNSUPPORTED"
             elif historical_for_question:
                 status = "ANSWERABLE"
                 evidence_ids = []
@@ -580,6 +629,14 @@ class LearningContextService:
                 for item in context["similar_approved_answers"]
             ],
             "subquestion_count": len(questions),
+            "semantic_goal": {
+                "primary_action": (
+                    semantic_analysis.primary_action
+                    if semantic_analysis is not None and semantic_analysis.usable
+                    else None
+                ),
+                "atomic_questions": [item.to_dict() for item in semantic_atomic],
+            },
             "subquestions": subquestion_traces,
             "rejection_counts": {
                 "FILTERED_BY_VALIDITY": candidate_diagnostics.get("filtered_by_validity", 0),
