@@ -230,6 +230,14 @@ class InquiryProcessingPlanService:
         elif not analysis.delivery_question:
             route = "GPT_FALLBACK" if template_preferred else "GPT_DIRECT"
             reason = "GENERAL_ROUTE_PENDING_CONTENT_MATCH"
+        elif not analysis.requires_order_lookup:
+            # The plan has already decided this delivery question needs no
+            # customer-specific order evidence. Routing it to ORDER_ID_REQUEST
+            # would contradict that decision in the same object -- and for a
+            # customer whose purchase is not confirmed, demanding an order
+            # number is exactly what the confirmed policy forbids.
+            route = "GPT_FALLBACK" if template_preferred else "GPT_DIRECT"
+            reason = "DELIVERY_WITHOUT_ORDER_EVIDENCE_REQUIREMENT"
         elif order_id_status != "VALID":
             route = "ORDER_ID_REQUEST"
             reason = order_id_status

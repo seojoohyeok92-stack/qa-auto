@@ -503,6 +503,60 @@ class LearningFeedbackRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
+    # Negative feedback whose operator memo never became a retrievable signal.
+    #
+    # ``LearningSignalService`` was added after most of these were written, so
+    # a memo saved before it exists only in ``correction_note`` and has no
+    # ``learning_signals`` row -- 30 of the 47 Negative rows on the server, and
+    # every one of them invisible to generation. The rows themselves are the
+    # source of truth and are never rewritten or migrated; this reads them
+    # where they already are so the knowledge in them can be retrieved
+    # alongside the signals that came later.
+    #
+    # ``NOT EXISTS`` keeps a memo that *did* get promoted from being counted
+    # twice: those already reach retrieval through ``learning_signals``.
+    _LEGACY_MEMO_SELECT = """
+        SELECT lf.id, lf.learning_signal_type, lf.correction_reason,
+               lf.correction_note, lf.question_masked, lf.inquiry_id,
+               lf.created_at,
+               i.store_code AS source_store_code,
+               i.product_id AS source_product_id,
+               i.product_name AS source_product_name,
+               i.option_name AS source_option_name,
+               i.inquiry_type AS source_inquiry_type
+        FROM learning_feedback AS lf
+        LEFT JOIN inquiries AS i ON i.id = lf.inquiry_id
+        WHERE lf.active = 1
+          AND lf.learning_signal_type IN ('NEGATIVE', 'INTENT_CORRECTION')
+          AND lf.correction_note IS NOT NULL
+          AND TRIM(lf.correction_note) <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM learning_signals AS ls
+              WHERE ls.learning_feedback_id = lf.id AND ls.active = 1
+          )
+          AND (i.store_code = ? OR i.store_code IS NULL OR ? IS NULL)
+        ORDER BY lf.id DESC
+        LIMIT ?
+    """
+
+    def legacy_memo_candidates(
+        self, *, store_code: str | None = None, limit: int = 300,
+    ) -> list[dict[str, Any]]:
+        """Active Negative rows carrying an operator memo and no signal row.
+
+        Read-only. Nothing about these rows is changed, backfilled or
+        promoted -- the memo is interpreted at retrieval time and the stored
+        text stays exactly as the operator typed it.
+        """
+
+        safe_limit = max(1, min(int(limit), 1000))
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                self._LEGACY_MEMO_SELECT,
+                (store_code, store_code, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows if row is not None]
+
     def candidates(self, signal_type: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
             rows = connection.execute(

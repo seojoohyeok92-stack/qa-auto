@@ -272,7 +272,11 @@ def test_operating_inquiry_684104045_uses_one_click_gpt_fallback(
 def test_missing_order_delivery_creates_valid_request_without_external_calls(
     database: Database,
 ) -> None:
-    inquiry_id = _inquiry(database, "CASE-B", content="배송 언제 오나요?")
+    # 구매 사실이 확인되는 문의여야 주문번호 요청 경로에 도달한다. 구매 상태가
+    # 확인되지 않으면 정책상 보류되어 요청 템플릿 자체가 선택되지 않는다.
+    inquiry_id = _inquiry(
+        database, "CASE-B", content="어제 주문했는데 언제올까요?"
+    )
     dps = CountingDps()
     outcome = AnswerService(
         database,

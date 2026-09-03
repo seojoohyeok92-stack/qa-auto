@@ -68,12 +68,23 @@ def test_privacy_masks_learning_fields() -> None:
 
 
 def test_quality_priority_and_edit_ratio() -> None:
+    """승인된 답변의 rating 은 승인 사실로 결정되고, edit_ratio 는 계속 기록된다.
+
+    이전에는 APPROVED_EDITED 의 rating 이 edit_ratio 에 따라 5에서 2까지
+    내려가고 APPROVED_UNEDITED 는 4로 고정이었다.  직원이 가장 많이 손본
+    답변이 가장 덜 신뢰받고, 수정 없이 승인한 답변은 최상위에 갈 수 없다는
+    뜻이었다.  얼마나 고쳤는지는 초안의 성질이지 승인된 답변의 성질이 아니다.
+
+    edit_ratio 자체는 그대로 측정/저장된다 -- 운영에서 초안 품질을 보는 지표로
+    계속 쓰이며, 다만 trust 를 정하지 않는다.
+    """
+
     service = LearningQualityService()
-    assert service.score("APPROVED_UNEDITED", "같음", "같음").rating == 4
+    assert service.score("APPROVED_UNEDITED", "같음", "같음").rating == 5
     assert service.score("SELLER_ANSWER", "", "판매자 답변").rating == 3
     minimal = service.score("APPROVED_EDITED", "안녕하세요 고객님", "안녕하세요, 고객님")
     rewritten = service.score("APPROVED_EDITED", "짧은 답", "완전히 새롭게 길게 작성한 직원 답변입니다")
-    assert minimal.rating > rewritten.rating
+    assert minimal.rating == rewritten.rating == 5
     assert minimal.edit_ratio < rewritten.edit_ratio
 
 
@@ -153,7 +164,12 @@ def test_similar_search_prefers_approved_then_legacy_rule_then_legacy_gpt(tmp_pa
     found = SimilarAnswerService(repository).search(
         "TV 사용 문의", store_code="OJE_PLUS", minimum_relevance=0.1, limit=3,
     )
-    assert [item["final_answer"] for item in found] == ["edited", "final", "rule"]
+    order = [item["final_answer"] for item in found]
+    # 승인된 두 건이 legacy rule 보다 앞서고, 그 둘 사이의 순서는 수정 여부로
+    # 정해지지 않는다 -- 둘 다 사람이 승인한 같은 tier 이고, 여기서는 질문/
+    # 답변이 동일해 relevance 로도 갈리지 않는다.
+    assert set(order[:2]) == {"edited", "final"}
+    assert order[2] == "rule"
 
 
 def test_learning_failure_never_blocks_gpt_context() -> None:

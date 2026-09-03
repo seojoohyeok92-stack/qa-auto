@@ -117,7 +117,9 @@ def test_delivery_with_valid_order_selects_only_installation_facts() -> None:
 
 
 def test_delivery_without_order_requests_private_order_id() -> None:
-    req = request("설치 일정은 언제인가요?")
+    # 주문 사실을 밝힌 문의여야 ORDER_ID_REQUEST 경로에 도달한다. 구매
+    # 상태가 확인되지 않으면 정책상 보류되어 이 템플릿 자체가 선택되지 않는다.
+    req = request("어제 주문했는데 설치 일정은 언제인가요?")
     analysis = InquiryAnalysisService().analyze(req)
     result = apply_phase9_rule_policy(req, rule(), analysis)
     assert analysis.inquiry_type is InquiryType.ORDER_INFO_REQUIRED
@@ -204,7 +206,9 @@ def test_selected_prompt_excludes_unselected_internal_facts() -> None:
 
 
 def test_request_order_prompt_requires_private_guidance() -> None:
-    req = request("배송 언제 오나요?")
+    # 주문 사실을 밝힌 문의여야 ORDER_ID_REQUEST 경로에 도달한다. 구매
+    # 상태가 확인되지 않으면 정책상 보류되어 이 템플릿 자체가 선택되지 않는다.
+    req = request("어제 주문했는데 배송 언제 오나요?")
     analysis = InquiryAnalysisService().analyze(req)
     req.metadata["phase9_analysis"] = analysis.to_dict()
     facts = build_answer_facts(req, rule())
@@ -221,7 +225,9 @@ def test_request_order_prompt_requires_private_guidance() -> None:
 
 
 def test_validator_blocks_missing_private_post_guidance() -> None:
-    req = request("배송일은 언제인가요?")
+    # 주문 사실을 밝힌 문의여야 ORDER_ID_REQUEST 경로에 도달한다. 구매
+    # 상태가 확인되지 않으면 정책상 보류되어 이 템플릿 자체가 선택되지 않는다.
+    req = request("어제 주문했는데 배송일은 언제인가요?")
     analysis = InquiryAnalysisService().analyze(req)
     req.metadata["phase9_analysis"] = analysis.to_dict()
     facts = build_answer_facts(req, rule())
@@ -314,7 +320,9 @@ def test_validator_blocks_cross_inquiry_date() -> None:
 
 
 def test_safe_order_request_template_uses_dedicated_validation_route() -> None:
-    req = request("배송은 언제 오나요?")
+    # 주문 사실을 밝힌 문의여야 ORDER_ID_REQUEST 경로에 도달한다. 구매
+    # 상태가 확인되지 않으면 정책상 보류되어 이 템플릿 자체가 선택되지 않는다.
+    req = request("어제 주문했는데 배송은 언제 오나요?")
     analysis = InquiryAnalysisService().analyze(req)
     req.metadata["phase9_analysis"] = analysis.to_dict()
     policy = apply_phase9_rule_policy(req, rule(), analysis)
@@ -425,7 +433,7 @@ def test_order_info_required_service_never_calls_dps_agent(
             "store_code": "S",
             "source_type": "NAVER",
             "source_question_id": "NO-ORDER",
-            "content": "설치 일정은 언제인가요?",
+            "content": "어제 주문했는데 설치 일정은 언제인가요?",
             "raw_json": {},
         }
     ).inquiry_id

@@ -17,6 +17,8 @@ def semantic(
     order: bool = False,
     delivery: bool = False,
     atomic: list[dict] | None = None,
+    purchase_state: str = "UNKNOWN",
+    asks_schedule: bool = False,
 ):
     return parse({
         "primary_action": primary,
@@ -30,6 +32,8 @@ def semantic(
         "conditional": False,
         "requires_order_context": order,
         "requires_delivery_schedule": delivery,
+        "purchase_state": purchase_state,
+        "asks_delivery_schedule": asks_schedule,
         "confidence": 0.95,
     })
 
@@ -186,20 +190,50 @@ def test_compound_purchase_question_keeps_order_evidence_and_review(tmp_path) ->
 
 
 def test_current_delivery_semantics_keeps_order_and_dps_requirements(tmp_path) -> None:
+    """구매가 확인된 배송문의는 기존 Order/DPS pipeline 그대로다."""
+
     database = Database(tmp_path / "semantic-delivery.db")
     database.initialize()
-    value = inquiry(database, "delivery", "현재 배송 상태가 궁금합니다.")
+    value = inquiry(database, "delivery", "주문했는데 현재 배송 상태가 궁금합니다.")
 
     plan = InquiryProcessingPlanService(database).create(
         value,
         semantic_analysis=semantic(
             "DELIVERY_STATUS", order=True, delivery=True,
+            purchase_state="CURRENT_ORDER", asks_schedule=True,
         ),
     )
 
     assert plan.requires_order_lookup is True
     assert plan.requires_dps_lookup is True
     assert plan.selected_answer_route == "ORDER_ID_REQUEST"
+
+
+def test_the_same_question_without_a_stated_purchase_is_held(tmp_path) -> None:
+    """같은 문장이라도 구매 여부가 없으면 주문번호를 요구하지 않는다.
+
+    위 테스트와 짝이다. 문의 본문이 구매를 말하지 않으면 시스템은 주문이
+    있는지 모르고, 모르는 상태에서 주문번호를 자동 요청하는 것이 확정된
+    운영정책이 금지한 동작이다.
+    """
+
+    database = Database(tmp_path / "semantic-delivery-unknown.db")
+    database.initialize()
+    value = inquiry(database, "delivery-unknown", "현재 배송 상태가 궁금합니다.")
+
+    plan = InquiryProcessingPlanService(database).create(
+        value,
+        semantic_analysis=semantic(
+            "DELIVERY_STATUS", order=True, delivery=True,
+            purchase_state="UNKNOWN", asks_schedule=True,
+        ),
+    )
+
+    assert plan.requires_order_lookup is False
+    assert plan.requires_dps_lookup is False
+    assert plan.analysis.requires_order_id is False
+    assert plan.analysis.manual_review_required is True
+    assert plan.selected_answer_route != "ORDER_ID_REQUEST"
 
 
 def test_fixed_event_rule_cannot_answer_order_identification_question() -> None:

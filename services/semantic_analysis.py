@@ -101,6 +101,28 @@ REQUEST_TYPES: frozenset[str] = frozenset({
     "QUESTION", "ACTION_REQUEST", "COMPLAINT", "MIXED",
 })
 
+# Whether the customer already has an order, as an *observation* rather than an
+# inference.
+#
+# The action vocabulary could not carry this. Measured on 40 real inquiries,
+# every pre-purchase and every already-ordered delivery question was classified
+# correctly -- and all six inquiries where the text genuinely does not say
+# ("배송 언제 되나요??", "언제 받을수 있나요?") were still assigned a definite
+# action at confidence 0.9 or above. The model was not unsure; it was answering
+# a question that has no answer in the text. Raising the confidence threshold
+# cannot fix that, because the confidence was never low.
+#
+# So this asks something different: not "has this customer ordered" but "does
+# this message say so". UNKNOWN is the honest answer to most short delivery
+# questions, and it is the default here -- a missing or unrecognised value
+# reads as UNKNOWN, never as a purchase.
+PRE_PURCHASE = "PRE_PURCHASE"
+CURRENT_ORDER = "CURRENT_ORDER"
+UNKNOWN_PURCHASE_STATE = "UNKNOWN"
+PURCHASE_STATES: frozenset[str] = frozenset({
+    PRE_PURCHASE, CURRENT_ORDER, UNKNOWN_PURCHASE_STATE,
+})
+
 
 class SemanticAnalysisError(ValueError):
     """The model returned something this pipeline cannot safely act on."""
@@ -117,11 +139,27 @@ class SemanticObject:
 
 @dataclass(frozen=True)
 class AtomicQuestion:
+    """One thing the customer asked, and what they want to know about it.
+
+    ``action`` is what they want done; ``requested_information`` is the fact
+    they are missing. The two are not the same, and retrieval needs the second
+    one. Three questions about a gift certificate are all BENEFIT -- how to
+    apply, whether an application went through, when the reward is paid -- and
+    an answer to any of them was allowed to stand as evidence for the others
+    because the action matched. Naming the requested fact separates them
+    without a rule per topic.
+    """
+
     text: str
     action: str
+    requested_information: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "action": self.action}
+        return {
+            "text": self.text,
+            "action": self.action,
+            "requested_information": self.requested_information,
+        }
 
 
 @dataclass(frozen=True)
@@ -139,6 +177,30 @@ class SemanticAnalysis:
     conditional: bool = False
     requires_order_context: bool = False
     requires_delivery_schedule: bool = False
+    # What the inquiry *says* about whether an order exists. Defaults to
+    # UNKNOWN so any caller reading an older value, or a provider that omits
+    # the field, gets the state that grants nothing.
+    purchase_state: str = UNKNOWN_PURCHASE_STATE
+    # Whether the customer is asking *when* -- a date, a duration, or whether a
+    # particular day is possible -- as opposed to how something works or what
+    # it costs. The action vocabulary cannot carry this: "배송비는 얼마인가요?"
+    # and "지금 주문하면 배송 얼마나 걸리나요?" are both DELIVERY_POLICY with no
+    # deadline, and only one of them is a schedule question.
+    asks_delivery_schedule: bool = False
+    # The same question one step wider: is the customer asking about *getting
+    # it* at all -- when, how long, by a date, or whether it will arrive as
+    # they need -- rather than how it is carried out or what it costs.
+    #
+    # ``asks_delivery_schedule`` names only the timing half, and "지금 구매하면
+    # 정상적으로 받을 수 있나요?" is the other half: it asks whether receipt
+    # will happen, names no day and no duration, and came back false. Nothing
+    # upstream then held it, and a fabricated "약 3~4주" was stopped only by
+    # the publishing gate reading the finished answer.
+    #
+    # A superset, not a rival: ``parse`` forces it true whenever the timing
+    # field is, so the two can never disagree and an older provider that omits
+    # it keeps the exact behaviour it had.
+    asks_delivery_outcome: bool = False
     confidence: float = 0.0
     # Provenance of this understanding, so nothing downstream can mistake a
     # fallback for a model result.
@@ -174,10 +236,176 @@ class SemanticAnalysis:
             "conditional": self.conditional,
             "requires_order_context": self.requires_order_context,
             "requires_delivery_schedule": self.requires_delivery_schedule,
+            "purchase_state": self.purchase_state,
+            "asks_delivery_schedule": self.asks_delivery_schedule,
+            "asks_delivery_outcome": self.asks_delivery_outcome,
             "confidence": self.confidence,
             "source": self.source,
             "reason": self.reason,
         }
+
+
+# Delivery questions divide on one thing: does the customer already have an
+# order? "지금 주문하면 며칠 걸려요?" and "제 주문 언제 와요?" share every
+# delivery word and are opposite questions -- the first has no order to look
+# up and no date that exists yet, the second is a lookup and nothing else.
+#
+# No new field was needed to tell them apart. Measured over 18 labelled real
+# inquiries from the dev database (9 pre-purchase, 9 already ordered), the
+# fields already on this dataclass separated them with no misclassification:
+# a pre-purchase question carries a policy/deadline/request action with
+# ``requires_order_context`` and ``requires_delivery_schedule`` both false,
+# and an existing order carries a status/schedule action with them true.
+# The model is told "Delivery schedule=current order only", which is what
+# makes ``requires_delivery_schedule`` the reliable half of that pair.
+PRE_PURCHASE_DELIVERY_ACTIONS: frozenset[str] = frozenset({
+    DELIVERY_POLICY, DELIVERY_DEADLINE_CONFIRMATION, SCHEDULE_REQUEST,
+})
+CURRENT_ORDER_DELIVERY_ACTIONS: frozenset[str] = frozenset({
+    DELIVERY_STATUS, INSTALLATION_SCHEDULE, SCHEDULE_CHANGE,
+})
+
+# Actions that are about a date whatever else is true of them. "금요일까지 받을
+# 수 있나요" and "9월 5일에 배송해 주세요" name a date in the action itself;
+# DELIVERY_POLICY does not, which is why it needs the separate observation --
+# it covers "배송 얼마나 걸리나요" and "배송비는 얼마인가요" alike.
+#
+# Listing these keeps the rule working when the provider does not report
+# ``asks_delivery_schedule`` at all, so an older understanding still routes a
+# deadline question the way it always did.
+INHERENT_SCHEDULE_ACTIONS: frozenset[str] = frozenset({
+    *CURRENT_ORDER_DELIVERY_ACTIONS,
+    DELIVERY_DEADLINE_CONFIRMATION,
+    SCHEDULE_REQUEST,
+})
+
+# "When do I get it?", in every form the analyzer uses to say it. One meaning,
+# named once, so the stages that have to agree about it read the same set
+# instead of each keeping its own list.
+#
+# The four differ in framing, not in what would answer them: an existing date
+# settles "제 설치 언제인가요", "언제 설치 가능한가요", "금요일까지 되나요" and
+# "9월 5일에 해주세요" alike. The analyzer picks among them by phrasing --
+# "언제설치가능한가요?" came back SCHEDULE_REQUEST -- and a stage that lists
+# only two of the four then reads a correct DPS answer as addressing the wrong
+# question. That is what held one.
+#
+# SCHEDULE_CHANGE is deliberately absent. It asks us to *move* the date, and
+# telling the customer what the date currently is does not do that.
+SCHEDULE_QUESTION_ACTIONS: frozenset[str] = frozenset({
+    DELIVERY_STATUS, INSTALLATION_SCHEDULE,
+    DELIVERY_DEADLINE_CONFIRMATION, SCHEDULE_REQUEST,
+})
+
+
+def delivery_schedule_question(semantic: SemanticAnalysis | None) -> bool:
+    """Whether the customer is asking about *getting it* -- when, or whether.
+
+    Not "does this mention delivery". "배송비는 얼마인가요?" mentions delivery and
+    asks a price; "배송과 설치는 어떤 방식으로 진행되나요?" asks a procedure.
+    Neither is about receiving it, and neither is held.
+
+    The line that matters is outcome versus process, and it is wider than a
+    date. "지금 구매하면 정상적으로 받을 수 있나요?" names no day and no
+    duration, so the timing observation reported false and nothing upstream
+    held it; what it asks is still whether this customer will receive an order
+    that does not exist yet, which is the same thing the policy is about.
+    ``asks_delivery_outcome`` is that observation, and it is a superset of the
+    timing one.
+
+    The remaining clauses keep older understandings working exactly as before:
+    a delivery status or installation schedule action has always been a
+    schedule question, and a provider that reports neither new field still
+    routes as it did.
+    """
+
+    if semantic is None or not semantic.usable:
+        return False
+    return bool(
+        semantic.asks_delivery_outcome
+        or semantic.asks_delivery_schedule
+        or semantic.requires_delivery_schedule
+        or (semantic.actions & INHERENT_SCHEDULE_ACTIONS)
+    )
+
+
+def purchase_confirmed(
+    semantic: SemanticAnalysis | None, *, order_id_validated: bool = False,
+) -> bool:
+    """Whether an order is known to exist -- never assumed into existence.
+
+    Two independent kinds of evidence, and the absence of both is not evidence
+    of the opposite:
+
+      the message says so   the customer names the purchase, a payment, an
+                            order number, or a delivery already under way
+      the record carries it a validated order id is attached to this inquiry,
+                            which proves the order regardless of the wording
+
+    The second is not "judging by the order id alone" -- it is one of two
+    sources, and the first is about meaning. "어제 주문했는데 언제 오나요?"
+    carries no order number and is confirmed by the first; a bare "배송 언제
+    되나요?" on an inquiry the platform attached to an order is confirmed by the
+    second. A bare question with neither stays unconfirmed, which is the whole
+    point: the pipeline must not decide that customer has ordered.
+    """
+
+    if order_id_validated:
+        return True
+    if semantic is None or not semantic.usable:
+        return False
+    return semantic.purchase_state == CURRENT_ORDER
+
+
+def delivery_schedule_needs_review(
+    semantic: SemanticAnalysis | None, *, order_id_validated: bool = False,
+) -> bool:
+    """A schedule question with no confirmed order behind it.
+
+    Covers both confirmed policies with one rule, because they are one
+    situation: there is no schedule to report. A pre-purchase customer has no
+    order yet, and an ambiguous one may not either -- and answering the second
+    by demanding an order number is the same mistake as inventing a delivery
+    period for the first.
+    """
+
+    return delivery_schedule_question(semantic) and not purchase_confirmed(
+        semantic, order_id_validated=order_id_validated
+    )
+
+
+def is_pre_purchase_delivery(semantic: SemanticAnalysis | None) -> bool:
+    """Whether this is a delivery question from a customer who has not ordered.
+
+    Every clause has to hold, and each rules out a different way of getting
+    this wrong:
+
+      usable              no understanding is not evidence of anything. An
+                          unavailable analysis returns False, so a provider
+                          timeout can never route an inquiry into the
+                          pre-purchase policy by default
+      a delivery action   the question is about delivery at all
+      no current action   SCHEDULE_REQUEST beside INSTALLATION_SCHEDULE is a
+                          customer moving an existing appointment
+      no schedule needed  ``requires_delivery_schedule`` means a date that
+                          already exists, which only an order has
+      no order context    the customer has not put their own purchase in play
+
+    Deliberately not read from the order id. "어제 주문했는데 언제 오나요?"
+    carries no order number and is an existing order; "지금 주문하면 언제
+    와요?" carries none because there is nothing to carry.
+    """
+
+    if semantic is None or not semantic.usable:
+        return False
+    actions = semantic.actions
+    if not actions & PRE_PURCHASE_DELIVERY_ACTIONS:
+        return False
+    if actions & CURRENT_ORDER_DELIVERY_ACTIONS:
+        return False
+    return not (
+        semantic.requires_delivery_schedule or semantic.requires_order_context
+    )
 
 
 def unavailable(reason: str) -> SemanticAnalysis:
@@ -200,6 +428,18 @@ def _states(value: object) -> tuple[str, ...]:
             if str(item).strip().upper() in OBJECT_STATES
         )
     )
+
+
+def _purchase_state(value: object) -> str:
+    """Read the reported state, defaulting to the one that grants nothing.
+
+    Unrecognised input is UNKNOWN rather than an error: this field was added
+    after the fact, and an older provider that omits it must keep working --
+    it simply never claims an order exists.
+    """
+
+    state = str(value or "").strip().upper()
+    return state if state in PURCHASE_STATES else UNKNOWN_PURCHASE_STATE
 
 
 def parse(raw: object) -> SemanticAnalysis:
@@ -262,7 +502,10 @@ def parse(raw: object) -> SemanticAnalysis:
         text = _text(item.get("text"), 160)
         if not text:
             continue
-        atomic.append(AtomicQuestion(text=text, action=action))
+        atomic.append(AtomicQuestion(
+            text=text, action=action,
+            requested_information=_text(item.get("requested_information"), 80),
+        ))
 
     try:
         confidence = float(raw.get("confidence"))
@@ -276,6 +519,7 @@ def parse(raw: object) -> SemanticAnalysis:
         raise SemanticAnalysisError("constraints must be a list")
 
     deadline = _text(raw.get("deadline"), 40) or None
+    asks_schedule = bool(raw.get("asks_delivery_schedule"))
 
     return SemanticAnalysis(
         primary_action=primary,
@@ -291,6 +535,13 @@ def parse(raw: object) -> SemanticAnalysis:
         conditional=bool(raw.get("conditional")),
         requires_order_context=bool(raw.get("requires_order_context")),
         requires_delivery_schedule=bool(raw.get("requires_delivery_schedule")),
+        purchase_state=_purchase_state(raw.get("purchase_state")),
+        asks_delivery_schedule=asks_schedule,
+        # Asking when is one way of asking whether you get it, so the wider
+        # field can never be false while the narrower one is true.
+        asks_delivery_outcome=(
+            asks_schedule or bool(raw.get("asks_delivery_outcome"))
+        ),
         confidence=confidence,
         source="GPT",
         reason=_text(raw.get("reason"), 120),

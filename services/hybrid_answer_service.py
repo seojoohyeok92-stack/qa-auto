@@ -341,6 +341,16 @@ class HybridAnswerService:
                 for item in signals.get(key) or []:
                     if isinstance(item, dict):
                         parts.append(str(item.get("content") or ""))
+        # An operator's Negative memo says what the answer should have said.
+        # That sentence is human-written operational knowledge of the same
+        # kind as a CORRECTION signal, so an answer that follows it is
+        # grounded. ``bad_patterns`` are deliberately absent: they are the
+        # wrong claim, and nothing may be grounded in them.
+        for item in learning_context.get("negative_corrections") or []:
+            if not isinstance(item, dict):
+                continue
+            parts.extend(str(text) for text in (item.get("corrections") or []))
+            parts.extend(str(text) for text in (item.get("good_patterns") or []))
         return " ".join(part for part in parts if part)
 
     @staticmethod

@@ -119,11 +119,25 @@ def resolve_local_ids(
     return resolved
 
 
+def _replay_state_snapshot(
+    connection: sqlite3.Connection, local_ids: list[int]
+) -> dict[int, dict[str, Any]]:
+    marks = ",".join("?" for _ in local_ids)
+    rows = connection.execute(
+        f"""SELECT id, source_answered, source_status, workflow_status,
+                    answer_status, post_status, approval_status, post_error_code
+              FROM inquiries WHERE id IN ({marks})""",
+        local_ids,
+    ).fetchall()
+    return {int(row["id"]): dict(row) for row in rows}
+
+
 def reset_for_replay(connection: sqlite3.Connection, local_ids: list[int]) -> None:
     """Put the copy back to "collected, not yet processed" for these rows.
 
-    Only the throwaway copy is ever touched.  Without this the pipeline would
-    re-read the drafts the old code wrote and prove nothing about the new code.
+    Only the throwaway copy is ever touched.  The minimum reset mirrors the
+    fields that make ``AutoPostRepository.candidates`` exclude an inquiry.
+    Source question/product/order context and source metadata are preserved.
     """
 
     marks = ",".join("?" for _ in local_ids)
@@ -147,6 +161,7 @@ def reset_for_replay(connection: sqlite3.Connection, local_ids: list[int]) -> No
         f"""
         UPDATE inquiries
            SET workflow_status='NEW',
+               source_answered=0,
                answer_status='UNANSWERED',
                post_status='NOT_POSTED',
                approval_status='PENDING',
@@ -159,6 +174,42 @@ def reset_for_replay(connection: sqlite3.Connection, local_ids: list[int]) -> No
         "UPDATE naver_auto_post_settings SET enabled=1 WHERE id=1"
     )
     connection.commit()
+
+
+def _early_exit_reason(
+    connection: sqlite3.Connection, inquiry: dict[str, Any]
+) -> dict[str, Any]:
+    """Report persisted canonical state; never infer POLICY_BLOCK from no draft."""
+    if (
+        bool(inquiry.get("source_answered"))
+        or str(inquiry.get("answer_status") or "").upper() == "ANSWERED"
+        or str(inquiry.get("post_status") or "").upper() == "POSTED"
+    ):
+        return {
+            "reason": "ALREADY_ANSWERED_OR_POSTED",
+            "source": "inquiry_operational_state",
+        }
+    event = connection.execute(
+        """SELECT event_code, details_json FROM activity_logs
+           WHERE inquiry_id=?
+             AND event_code IN (
+                 'AUTO_POST_SKIPPED_POLICY_BLOCKED',
+                 'AUTOMATIC_DRAFT_POLICY_BLOCKED',
+                 'ANSWER_POLICY_BLOCKED',
+                 'AUTO_ANSWER_FAILED',
+                 'AUTO_POST_BLOCKED_DPS_SESSION'
+             )
+           ORDER BY id DESC LIMIT 1""",
+        (int(inquiry["id"]),),
+    ).fetchone()
+    if event is not None:
+        code = str(event["event_code"])
+        return {
+            "reason": "POLICY_BLOCK" if "POLICY_BLOCK" in code else code,
+            "source": "activity_log",
+            "event_code": code,
+        }
+    return {"reason": "UNKNOWN_EARLY_EXIT", "source": "no_persisted_reason"}
 
 
 def offline_order_lookup(access_token: str, number: str, **_: Any) -> dict[str, Any]:
@@ -194,10 +245,14 @@ def describe(connection: sqlite3.Connection, local_id: int) -> dict[str, Any]:
     inquiry = diagnose._inquiry(connection, str(local_id))
     draft, _active = diagnose._active_draft(connection, local_id)
     row: dict[str, Any] = {
+        "inquiry_id": local_id,
         "question": str(inquiry.get("content") or "").replace("\n", " "),
         "workflow_status": inquiry.get("workflow_status"),
         "post_status": inquiry.get("post_status"),
     }
+    persisted_early_exit = _early_exit_reason(connection, inquiry)
+    if persisted_early_exit["reason"] != "UNKNOWN_EARLY_EXIT":
+        row["early_exit"] = persisted_early_exit
     if draft is None:
         row.update(
             {
@@ -212,7 +267,8 @@ def describe(connection: sqlite3.Connection, local_id: int) -> dict[str, Any]:
                 "validator": "-",
                 "review_required": True,
                 "eligible": False,
-                "blocking": ["POLICY_BLOCKED_BEFORE_GENERATION"],
+                "blocking": [],
+                "early_exit": persisted_early_exit,
                 "final_answer": "",
             }
         )
@@ -254,9 +310,83 @@ def describe(connection: sqlite3.Connection, local_id: int) -> dict[str, Any]:
             "eligible": verdict.safe,
             "blocking": list(verdict.reasons),
             "final_answer": str(draft.get("final_answer") or ""),
+            # Observation only: these objects were persisted by the real
+            # production pipeline before this runner reads them.
+            "processing_plan": plan,
+            "semantic_analysis": metadata.get("semantic_analysis") or {},
+            "analysis": analysis,
+            "subquestion_evidence": evidence,
+            "product_fact_guard": guard,
+            "coverage": hybrid.get("coverage") or metadata.get("coverage") or {},
+            "metadata": metadata,
+            "auto_post_eligibility": {
+                "safe": verdict.safe,
+                "decision": verdict.decision,
+                "stage": verdict.stage,
+                "reasons": list(verdict.reasons),
+                "soft_reasons": list(verdict.soft_reasons),
+            },
         }
     )
     return row
+
+
+def write_observation_artifact(
+    destination: Path,
+    *,
+    requested: tuple[str, ...],
+    resolved: list[tuple[str, int]],
+    rows: list[tuple[str, dict[str, Any]]],
+    outcome: Any,
+    recorder: PostRecorder,
+    replay_state: str,
+    original_states: dict[int, dict[str, Any]],
+    replay_states: dict[int, dict[str, Any]],
+) -> None:
+    """Persist values already generated by the replayed production pipeline."""
+    payload = {
+        "kind": "production_golden_run_observation",
+        "requested_ids": list(requested),
+        "resolved_ids": [{"requested": external, "inquiry_id": local}
+                         for external, local in resolved],
+        "pipeline_counters": outcome.to_dict(),
+        "dry_run_post_calls": recorder.calls,
+        "real_naver_post_count": 0,
+        "replay_state": replay_state,
+        "replay_provenance": [
+            {
+                "inquiry_id": local,
+                "original_operational_state": original_states.get(local, {}),
+                "replay_operational_state": replay_states.get(local, {}),
+                "reset_fields": (
+                    ["workflow_status", "source_answered", "answer_status",
+                     "post_status", "approval_status", "post_error_code",
+                     "answer_drafts", "workflow_steps", "answer_versions",
+                     "naver_post_attempts", "post_reviews"]
+                    if replay_state == "new" else []
+                ),
+                "preserved_context": [
+                    "id", "source_question_id", "external_inquiry_id", "content",
+                    "product_name", "option_name", "order_id", "source_status",
+                    "source_metadata_json", "raw_json", "created_at",
+                ],
+            }
+            for _external, local in resolved
+        ],
+        "product_facts_runtime": {
+            "runtime_read_count": 0,
+            "repository_initialization_count": 0,
+            "fallback_count": 0,
+            "evidence_count": 0,
+            "basis": "No ProductFactRepository is constructed by this runner; persisted draft metadata is exported verbatim.",
+        },
+        "inquiries": [{"requested_id": external, **row} for external, row in rows],
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
@@ -265,6 +395,14 @@ def main() -> int:
     parser.add_argument("--database", default="data/oje_automation.db")
     parser.add_argument("--offline-order-lookup", action="store_true")
     parser.add_argument("--keep-copy", action="store_true")
+    parser.add_argument(
+        "--replay-state", choices=("historical", "new"), default="new",
+        help="historical preserves operational state; new resets only replay state in the copied DB",
+    )
+    parser.add_argument(
+        "--observation-artifact",
+        help="JSON path for read-only observation of persisted replay results",
+    )
     arguments = parser.parse_args()
     requested = tuple(arguments.inquiry_ids or GOLDEN_IDS)
 
@@ -289,7 +427,10 @@ def main() -> int:
         print("no inquiries resolved; nothing to replay")
         return 1
     local_ids = [local for _external, local in resolved]
-    reset_for_replay(connection, local_ids)
+    original_states = _replay_state_snapshot(connection, local_ids)
+    if arguments.replay_state == "new":
+        reset_for_replay(connection, local_ids)
+    replay_states = _replay_state_snapshot(connection, local_ids)
 
     from config import NaverPostSettings
     from services.auto_post_pipeline_service import AutoPostPipelineService
@@ -350,6 +491,21 @@ def main() -> int:
         print(f"  Blocking reasons : {row['blocking'] or '-'}")
         print(f"  Final answer len : {len(row['final_answer'])}")
         print(f"  Post status      : {row['post_status']}")
+
+    if arguments.observation_artifact:
+        observation_path = Path(arguments.observation_artifact).expanduser()
+        write_observation_artifact(
+            observation_path,
+            requested=requested,
+            resolved=resolved,
+            rows=rows,
+            outcome=outcome,
+            recorder=recorder,
+            replay_state=arguments.replay_state,
+            original_states=original_states,
+            replay_states=replay_states,
+        )
+        print(f"observation artifact: {observation_path.resolve()}")
 
     print("=" * 100)
     print(f"pipeline counters       : {outcome.to_dict()}")

@@ -112,8 +112,11 @@ TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
         # the question, and it is how install products are honestly described.
         r"일정에\s*(?:맞춰|따라|맞추어)", r"순차적으로", r"기사님\s*배정",
     ),
+    # The place names are not here -- see WRITTEN_FORM_ANCHORS below. 도서산간
+    # stays: it is four syllables and describes a shipping category rather than
+    # naming one place, so it survives compaction without colliding.
     "DELIVERY_REGION": (
-        r"도서산간", r"제주", r"울릉", r"배송[^?!.]{0,8}지역", r"지역[^?!.]{0,8}배송",
+        r"도서산간", r"배송[^?!.]{0,8}지역", r"지역[^?!.]{0,8}배송",
     ),
     "DELIVERY_COST": (
         r"배송비", r"배송료", r"택배비", r"추가운임", r"설치비",
@@ -206,6 +209,51 @@ _COMPILED: dict[str, tuple[re.Pattern[str], ...]] = {
 }
 
 
+# --------------------------------------------------------------------------
+# Anchors read from the sentence as written
+#
+# Every anchor above is matched against ``compact()``, which deletes spaces so
+# that "배송 예정일" and "배송예정일" are one thing. That is right for a phrase
+# whose spacing customers vary, and wrong for a proper noun: deleting the space
+# manufactures the name out of two unrelated words.
+#
+# 제주 is the case that reached customers. It appears wherever one word ends in
+# 제 and the next begins with 주 -- "어제 주문", "제 주문", "결제 주문",
+# "실제 주문일", "감사제 주문량" -- none of which mentions the island.
+# Measured over this repository's own inquiry corpus, 제주 matched 30 such
+# fusions against 29 genuine mentions, and the fused ones put "문의하신 배송
+# 가능 지역 부분은 담당자 확인 후 안내드리겠습니다." on answers to customers
+# who had asked only when their order arrives.
+#
+# A place name is one word, so it is matched against the sentence with its
+# spacing intact. The lookbehind covers the other half of the same problem:
+# text genuinely written without a space ("실제주문일") must not supply the
+# name either -- the name has to begin where a word begins.
+#
+# This is not a list of exceptions. It is where an anchor goes when it names a
+# thing rather than describing a relationship between words; anything added
+# here is subject to the same rule.
+WRITTEN_FORM_ANCHORS: dict[str, tuple[str, ...]] = {
+    "DELIVERY_REGION": (
+        r"(?<![가-힣])제주",
+        r"(?<![가-힣])울릉",
+    ),
+}
+
+_COMPILED_WRITTEN: dict[str, tuple[re.Pattern[str], ...]] = {
+    topic: tuple(re.compile(pattern) for pattern in patterns)
+    for topic, patterns in WRITTEN_FORM_ANCHORS.items()
+}
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _as_written(sentence: str) -> str:
+    """The sentence with its word boundaries intact, spacing normalised."""
+
+    return _WHITESPACE.sub(" ", str(sentence or "")).strip()
+
+
 # A question topic may be answered by a different answer topic. These are the
 # only such edges, and each one is a real equivalence rather than a shortcut:
 # a schedule *is* what a duration question is asking about for an install
@@ -248,6 +296,12 @@ def _sentence_topics(sentence: str) -> set[str]:
         topic
         for topic, patterns in _COMPILED.items()
         if any(pattern.search(flat) for pattern in patterns)
+    }
+    written = _as_written(sentence)
+    found |= {
+        topic
+        for topic, patterns in _COMPILED_WRITTEN.items()
+        if any(pattern.search(written) for pattern in patterns)
     }
     # The notice is a subject of its own. "설치 예정일 관련 알림톡은 설치일
     # 전날 발송됩니다" names the schedule only to say when it is announced, and

@@ -144,11 +144,21 @@ def test_case_a_needs_no_order_and_no_dps() -> None:
 
 
 def test_case_a_is_recognised_as_a_policy_question() -> None:
+    """분류는 그대로, 결론만 바뀌었다.
+
+    "주문하면 바로 배송되나요" 는 여전히 구매 전 배송 정책 문의로 인식되고
+    주문/DPS 조회도 요구하지 않는다. 달라진 것은 자동답변 여부다 -- 확정된
+    운영정책상 구매 전 고객에게 배송 시점을 자동으로 답하지 않는다. 안내할
+    확정 배송기간이 존재하지 않기 때문이다.
+    """
+
     analysis = analyse(CASE_A)
 
     assert analysis.inquiry_subtype == "PRE_PURCHASE_DELIVERY_GUIDANCE"
-    assert analysis.manual_review_required is False
     assert analysis.answer_strategy is AnswerStrategy.GENERAL_GUIDANCE
+    assert analysis.manual_review_required is True
+    assert analysis.requires_order_lookup is False
+    assert analysis.requires_dps_lookup is False
 
 
 # ==========================================================================
@@ -181,12 +191,19 @@ def test_case_b_needs_no_order_and_no_dps() -> None:
     ],
 )
 def test_case_b_parts_are_not_unclassified(question: str) -> None:
-    """Each part is an ordinary policy question, judged as one."""
+    """Each part is an ordinary policy question, judged as one.
+
+    분류기가 이 문장들을 이해한다는 것이 이 테스트의 요지이고, 그 부분은
+    그대로다. 다만 구매 전 배송 시점 문의라는 결론에 따르는 처리가 자동답변에서
+    직원 검토로 바뀌었다 -- 조회는 여전히 필요 없다.
+    """
 
     analysis = analyse(question)
 
     assert analysis.inquiry_subtype != "UNCLASSIFIED", question
-    assert analysis.manual_review_required is False, question
+    assert analysis.requires_order_lookup is False, question
+    assert analysis.requires_dps_lookup is False, question
+    assert analysis.manual_review_required is True, question
 
 
 def test_the_classifier_and_text_utils_agree_on_policy_questions() -> None:
@@ -426,11 +443,14 @@ def test_invariant_a_real_schedule_with_a_valid_order_needs_dps(
 
 
 @pytest.mark.parametrize(
-    "question", ["제가 주문한 상품 언제 배송되나요?", "언제 발송되나요?"]
+    "question",
+    ["제가 주문한 상품 언제 배송되나요?", "어제 주문했는데 언제 발송되나요?"],
 )
 def test_invariant_b_schedule_without_an_order_asks_for_it(
     question: str,
 ) -> None:
+    # 두 번째 문의는 구매 사실을 밝혀야 주문번호 요청 경로에 도달한다.
+    # 아무것도 밝히지 않은 문의는 현재 정책상 보류된다.
     analysis = analyse(question, source_type="CUSTOMER_INQUIRY")
 
     assert analysis.order_id_status is OrderIdStatus.MISSING

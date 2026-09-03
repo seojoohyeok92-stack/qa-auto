@@ -34,6 +34,7 @@ from answer.providers.interfaces import JsonGptProvider
 from services.semantic_analysis import (
     ACTIONS,
     OBJECT_STATES,
+    PURCHASE_STATES,
     REQUEST_TYPES,
     SemanticAnalysis,
     SemanticAnalysisError,
@@ -47,6 +48,17 @@ TASK = "SEMANTIC_ANALYSIS"
 # A model that is unsure has told us the one thing we needed: do not act on it.
 MINIMUM_CONFIDENCE = 0.7
 
+# The ceiling on the prompt, in characters, paid on every semantic call.
+#
+# Derived, not chosen. The header, the field contract and the inquiry slot cost
+# 1101 with every sentence of policy prose removed; the rules for
+# purchase_state, asks_delivery_schedule and asks_delivery_outcome -- the three
+# fields the purchase-state safety policy reads -- cannot be stated in what is
+# left under a smaller number. Measured length is 2272, so this leaves 128
+# characters: enough for another ACTION or two, not enough to explain anything
+# twice. Raise it only with the same kind of measurement.
+PROMPT_BUDGET = 2400
+
 # The prompt is the contract. No examples, no prose, no "explain your
 # reasoning" -- every token here is paid on every semantic call, and the output
 # is consumed by a parser, not read by a person.
@@ -54,22 +66,37 @@ _PROMPT = """Classify the customer inquiry. Reply with one JSON object only.
 
 ACTION={actions}
 STATE={states}
-primary_action: one ACTION
-secondary_actions: ACTION list, may be []
+primary_action: one ACTION; secondary_actions: ACTION list, may be []
 request_type: {request_types}
 objects: [{{"type": noun, "states": STATE subset}}]
-atomic_questions: [{{"text": str, "action": ACTION}}], keep every one asked
+atomic_questions: [{{"text": str, "action": ACTION,
+  "requested_information": noun phrase naming the fact wanted}}], keep every one
 deadline: date/period the customer requires, else null
 constraints: str list, may be []
 negation, conditional, requires_order_context, requires_delivery_schedule: bool
+purchase_state: {purchase_states}
+asks_delivery_schedule, asks_delivery_outcome: bool
 confidence: 0..1
 
-Action is what customer wants, not object state: broken-TV pickup=COLLECTION.
-Requesting a date=SCHEDULE_REQUEST; asking an existing date=INSTALLATION_SCHEDULE
-or DELIVERY_STATUS. Campaign is context. Order ID/other item=ORDER_IDENTIFICATION
-(requires_order_context=true). A registration/application field value or entry
-is FORM_FIELD_GUIDANCE, never BENEFIT. Delivery schedule=current order only.
-Use OTHER if no ACTION fits. Never invent one.
+purchase_state is what the message SAYS, never inferred. CURRENT_ORDER only if
+it states a purchase made (ordered/paid/bought, an order number, an awaited
+delivery); PRE_PURCHASE only if it states none yet or asks conditionally; else
+UNKNOWN -- "배송 언제 되나요?" is UNKNOWN.
+asks_delivery_outcome: asks about RECEIVING it -- when, how long, by a date, or
+at all. asks_delivery_schedule: the subset asking WHEN (date, duration, whether
+a given day works); schedule true implies outcome true. Both false for how
+delivery or installation is performed, its cost, or what is included.
+"지금 구매하면 정상적으로 받을 수 있나요?" outcome only; "설치는 기사님이
+해주시나요?" both false.
+
+requested_information is the missing fact, not the topic ("신청 방법" vs
+"지급 시점"). Action is what customer wants, not object state: broken-TV
+pickup=COLLECTION. Requesting a date=SCHEDULE_REQUEST; asking an existing
+date=INSTALLATION_SCHEDULE or DELIVERY_STATUS. Campaign is context. Order
+ID/other item=ORDER_IDENTIFICATION (requires_order_context=true). A
+registration/application field value or entry is FORM_FIELD_GUIDANCE, never
+BENEFIT. Delivery schedule=current order only. Use OTHER if no ACTION fits.
+Never invent one.
 
 INQUIRY:
 {question}"""
@@ -106,6 +133,7 @@ class GptSemanticAnalyzerService:
             actions="|".join(sorted(ACTIONS)),
             request_types="|".join(sorted(REQUEST_TYPES)),
             states="|".join(sorted(OBJECT_STATES)),
+            purchase_states="|".join(sorted(PURCHASE_STATES)),
             question=" ".join(str(question or "").split())[:1200],
         )
 

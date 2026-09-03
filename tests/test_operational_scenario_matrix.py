@@ -96,17 +96,24 @@ SCENARIOS: tuple[Scenario, ...] = (
              1, True, False, False, False, True),
     Scenario("card-payment", "카드 결제 가능한가요?",
              1, True, False, False, False, True),
+    # 구매 전 고객의 실제 배송 소요 기간 문의(유형 A). 확정된 운영정책상
+    # 자동답변하지 않는다 -- 알려줄 확정 배송기간이 존재하지 않는다.
+    # 조회는 여전히 필요 없다: 조회할 주문 자체가 없다.
     Scenario("pre-purchase", "지금 주문하면 배송 얼마나 걸리나요?",
-             1, True, False, False, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("order-status", "주문 상태 확인해주세요.",
              1, True, True, False, False, True),
     # ------------------------------------------------ schedule / DPS
+    # Nothing in these says an order exists, so the purchase-state policy
+    # holds them: no order number is demanded and DPS is never consulted.
+    # "with-order-id" just below is the same shape with the number supplied,
+    # and it still takes the full order/DPS route.
     Scenario("install-date", "설치예정일은 언제인가요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("delivery-date", "배송 언제 오나요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("delivery-delay", "배송이 너무 늦는데 언제 오나요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("with-order-id", "주문번호 2024010112345678 설치일 언제인가요?",
              1, True, True, True, False, True),
     Scenario("schedule-change", "설치일을 10일로 변경해주세요.",
@@ -165,7 +172,7 @@ SCENARIOS: tuple[Scenario, ...] = (
              2, True, False, False, False, True),
     Scenario("compound-safe-dps",
              "A/S는 어디서 받나요? 설치예정일은 언제인가요?",
-             2, True, True, True, False, True),
+             2, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("compound-safe-compat",
              "A/S는 어디서 받나요? 집에 있는 브라켓과 호환되나요?",
              2, True, False, False, False, False,
@@ -187,7 +194,7 @@ SCENARIOS: tuple[Scenario, ...] = (
              3, True, False, False, False, False,
              "PRODUCT_COMPATIBILITY_NOT_VERIFIED"),
     Scenario("six-part-686058300", SIX_PART,
-             6, True, True, True, True, False,
+             6, True, False, False, True, False,
              "PRODUCT_COMPATIBILITY_NOT_VERIFIED"),
     # ------------------------------------------- connector compounds
     # Split only when the two sides carry different intents; `subquestions`
@@ -217,7 +224,8 @@ SCENARIOS: tuple[Scenario, ...] = (
              "POLICY_OR_HIGH_RISK_REVIEW", analysis_parts=1),
     Scenario("connector-delivery-install",
              "배송일도 알고 싶고 설치방법도 궁금합니다",
-             1, True, True, True, False, True, analysis_parts=2),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW",
+             analysis_parts=2),
     Scenario("connector-as-install", "A/S는 어디서 받고 설치는 누가 하나요?",
              1, True, False, False, False, True, analysis_parts=2),
     # -------------------------------- one question despite the connector
@@ -225,17 +233,25 @@ SCENARIOS: tuple[Scenario, ...] = (
              1, True, False, False, False, True, analysis_parts=1),
     Scenario("comparison-mount", "스탠드, 벽걸이 중 선택 가능한가요",
              1, True, False, False, False, True, analysis_parts=1),
+    # 경계 사례로 확정된 것: 절차가 아니라 실제 일정 가능성을 묻고 있다
+    # (유형 A). "배송과 설치는 어떤 방식으로 진행되나요?" 는 유형 B 로 남아
+    # 계속 자동답변된다 -- 아래 relationship-procedure 참고.
     Scenario("relationship-sameday", "배송, 설치를 같은 날 받을 수 있나요",
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW",
+             analysis_parts=1),
+    Scenario("relationship-procedure", "배송과 설치는 어떤 방식으로 진행되나요?",
              1, True, False, False, False, True, analysis_parts=1),
     # ------------------------- schedule complaint vs change request
+    # "미뤄지는데" complains about a delay without ever stating an order,
+    # so these are held for the same reason as the plain schedule questions.
     Scenario("delay-install-lookup", "설치가 계속 미뤄지는데 언제 되나요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("delay-install-lookup2", "설치가 미뤄졌는데 언제 설치되나요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("delay-delivery-lookup", "배송이 계속 미뤄지는데 언제 오나요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("delay-visit-lookup", "기사님 방문이 미뤄졌는데 언제 오시나요?",
-             1, True, True, True, False, True),
+             1, True, False, False, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("change-install-request", "설치일을 미뤄주세요",
              1, True, True, True, True, False, "POLICY_OR_HIGH_RISK_REVIEW"),
     Scenario("change-visit-request", "기사님 방문일을 변경해주세요",
@@ -330,14 +346,29 @@ def test_schedule_complaint_is_a_lookup_not_a_change_request() -> None:
     it is a change request and stays in review.
     """
 
-    for question in (
+    complaints = (
         "설치가 계속 미뤄지는데 언제 되나요?",
         "배송이 계속 미뤄지는데 언제 오나요?",
         "기사님 방문이 미뤄졌는데 언제 오시나요?",
-    ):
+    )
+    for question in complaints:
         analysis = ANALYSIS.analyze(request_for(question))
-        assert analysis.requires_dps_lookup is True, question
+        # Read as a lookup, not as a request to move the date. That is the
+        # distinction this case exists for and it is unchanged.
+        assert analysis.inquiry_subtype != "SCHEDULE_CHANGE_REQUEST", question
+        assert analysis.detected_intent != "SCHEDULE_CHANGE", question
+        # None of them says an order exists, so the lookup is held rather than
+        # run -- complaining that something is late does not prove it was
+        # bought here, and DPS has nothing to be asked about.
+        assert analysis.inquiry_subtype == "UNCONFIRMED_DELIVERY_OUTCOME"
+        assert analysis.requires_dps_lookup is False, question
+
+    # The same complaints from a customer who says they ordered: still a
+    # lookup, and now one the pipeline can actually perform.
+    for question in complaints:
+        analysis = ANALYSIS.analyze(request_for(f"어제 주문했는데 {question}"))
         assert analysis.inquiry_subtype == "DELIVERY_OR_INSTALLATION_SCHEDULE"
+        assert analysis.requires_dps_lookup is True, question
 
     for question in ("설치일을 미뤄주세요", "기사님 방문일을 변경해주세요"):
         analysis = ANALYSIS.analyze(request_for(question))

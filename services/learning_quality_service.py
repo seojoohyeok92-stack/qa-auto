@@ -28,11 +28,20 @@ class LearningQualityService:
         )
         if source == "AUTO_POST_CORRECTED":
             rating = 5
-        elif source == "APPROVED_EDITED":
-            rating = 5 if edit_ratio <= 0.1 else 4 if edit_ratio <= 0.3 else 3 if edit_ratio <= 0.6 else 2
+        elif source in {"APPROVED_EDITED", "APPROVED_UNEDITED"}:
+            # Both are the same event: a person read the final answer and
+            # approved it. The rating used to slide from 5 down to 2 with the
+            # edit ratio for APPROVED_EDITED while APPROVED_UNEDITED sat flat
+            # at 4, so a heavily-reworked answer -- the one a member of staff
+            # took the most care over -- ended up the least trusted of all,
+            # and an unedited approval could never reach the top. How much of
+            # the draft survived describes the draft, not the approved answer.
+            #
+            # ``edit_ratio`` is still measured and still stored: it is how
+            # operations sees how often drafts need rewriting. It just no
+            # longer sets the trust this row carries into retrieval.
+            rating = 5
         elif source == "AUTO_POST_REVIEWED_NO_CHANGE":
-            rating = 4
-        elif source == "APPROVED_UNEDITED":
             rating = 4
         else:
             rating = 3

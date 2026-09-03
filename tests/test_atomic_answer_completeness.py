@@ -363,13 +363,20 @@ def run(tmp_path, label, question, *, order_id=None, gpt_answer="무타공 설�
 
 
 def test_case_a_unchanged(tmp_path) -> None:
-    """A: the direct-answer improvement survives, and still auto-posts."""
+    """A: the direct-answer improvement survives; publishing is now a policy hold.
+
+    답변 자체는 그대로다 -- 같은 문장을 만들고 validator 도 통과한다. 바뀐 것은
+    자동등록뿐이다. "주문하면 바로 배송되나요" 는 구매 전 고객의 배송 시점
+    문의이고, 확정된 운영정책상 그런 문의는 직원이 확인한 뒤 나간다.
+    """
 
     result = run(tmp_path, "A", CASE_A)
 
     assert "바로 배송되는 방식은 아닙니다" in result["answer"]
     assert result["validation_status"] == "PASS"
-    assert result["auto_post_allowed"] is True
+    assert result["auto_post_allowed"] is False
+    assert result["eligibility"] == "REVIEW_REQUIRED"
+    assert result["dps_calls"] == []
     assert result["completeness"].get("completed") is False
 
 

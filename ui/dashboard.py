@@ -9,7 +9,7 @@ from typing import Any
 import streamlit as st
 import streamlit.components.v1 as components
 
-from core.time_utils import format_datetime_kst
+from core.time_utils import KST, format_datetime_kst
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
 from services.work_queue_service import WorkItem, parse_registered_at
@@ -25,6 +25,30 @@ from ui.session_identity import current_identity
 
 CSS_PATH = Path(__file__).with_name("dashboard.css")
 UNCLASSIFIED_FILTER_VALUE = "UNCLASSIFIED"
+
+# The automatic date range, and the KST day it was computed for.
+#
+# The range used to be set once per session. The dashboard is left open on the
+# operations PC, so crossing midnight left "오늘" pointing at yesterday and the
+# day's new inquiries fell outside the filter until somebody pressed 초기화.
+# Recording the day this was last derived is what lets the next rerun notice.
+AUTO_RANGE_STATE_KEY = "dashboard_auto_range_day_v1"
+
+
+def today_kst() -> date:
+    """The operating day. The store, the staff and the KPIs are all KST."""
+
+    return datetime.now(KST).date()
+
+
+def _as_range(value: Any) -> tuple[date, date] | None:
+    """A (start, end) pair, or None while the widget holds a partial pick."""
+
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        start, end = value
+        if isinstance(start, date) and isinstance(end, date):
+            return start, end
+    return None
 
 
 def metadata_filter_matches(value: Any, selected: list[str]) -> bool:
@@ -68,14 +92,27 @@ def render_header(
         if (parsed := parse_registered_at(item.get("registered_at")))
         != datetime.min
     ]
-    default_start = min(item_dates) if item_dates else date.today() - timedelta(days=30)
-    default_end = max([date.today(), *item_dates]) if item_dates else date.today()
+    today = today_kst()
+    default_start = min(item_dates) if item_dates else today - timedelta(days=30)
+    default_end = max([today, *item_dates]) if item_dates else today
+    default_range = (default_start, default_end)
     if not st.session_state.get("dashboard_full_range_v1"):
-        st.session_state["dashboard_date_range"] = (
-            default_start,
-            default_end,
-        )
+        st.session_state["dashboard_date_range"] = default_range
+        st.session_state[AUTO_RANGE_STATE_KEY] = (today, default_range)
         st.session_state["dashboard_full_range_v1"] = True
+    else:
+        # Follow the calendar only while the operator is still on the range we
+        # chose for them. A range they picked themselves is an instruction, and
+        # midnight is not a reason to overwrite it -- so the comparison is
+        # against what was last applied automatically, not merely against
+        # "is a range set".
+        applied = st.session_state.get(AUTO_RANGE_STATE_KEY)
+        if isinstance(applied, tuple) and len(applied) == 2:
+            applied_day, applied_range = applied
+            current = _as_range(st.session_state.get("dashboard_date_range"))
+            if applied_day != today and current == _as_range(applied_range):
+                st.session_state["dashboard_date_range"] = default_range
+                st.session_state[AUTO_RANGE_STATE_KEY] = (today, default_range)
     title_col, date_col, profile_col = st.columns(
         [4.8, 2.5, 3.2], gap="medium", vertical_alignment="center"
     )
@@ -392,6 +429,7 @@ def _render_filter_bar_legacy(available_stores: dict[str, str], available_queues
             "dashboard_kpi_filter",
             "dashboard_date_range",
             "dashboard_full_range_v1",
+            AUTO_RANGE_STATE_KEY,
         ]:
             st.session_state.pop(key, None)
         st.rerun()
@@ -514,6 +552,7 @@ def render_filter_bar(
             "dashboard_kpi_filter",
             "dashboard_date_range",
             "dashboard_full_range_v1",
+            AUTO_RANGE_STATE_KEY,
         ]:
             st.session_state.pop(key, None)
         st.rerun()

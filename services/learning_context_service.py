@@ -19,9 +19,20 @@ from repositories.learning_provenance_repository import LearningProvenanceReposi
 from repositories.feedback_signal_provenance_repository import (
     FeedbackSignalProvenanceRepository,
 )
+from services.learning_evidence_policy import order_identifier_request_reason
 from services.learning_signal_service import LearningSignalService
+from services.learning_compatibility_service import (
+    GENERIC_TOPICS,
+    classify_topics,
+)
 from services.product_fact_guard import classify_product_fact
-from services.semantic_analysis import SemanticAnalysis
+from services.semantic_analysis import (
+    CURRENT_ORDER_DELIVERY_ACTIONS,
+    PRE_PURCHASE_DELIVERY_ACTIONS,
+    SemanticAnalysis,
+    delivery_schedule_needs_review,
+    purchase_confirmed,
+)
 
 
 # Retrieval traces: which candidates were considered, which were filtered and
@@ -126,6 +137,96 @@ def apply_prompt_budget(
     report["final_chars"] = size(trimmed)
     report["within_budget"] = report["final_chars"] <= budget
     return trimmed, report
+
+
+# Atomic actions that genuinely turn on the customer's own order. Everything
+# else -- a delivery *policy* question, a benefit's payout timing, how to apply
+# for something -- is answerable before an order exists, and reusing an answer
+# written for an existing order is how a customer who had said "아직 주문 안
+# 했는데" was asked for their order number.
+_VALID_ORDER_ID = re.compile(r"\d{16}")
+
+_ORDER_SCOPED_ACTIONS: frozenset[str] = frozenset({
+    "ORDER_IDENTIFICATION",
+    "DELIVERY_STATUS",
+    "INSTALLATION_SCHEDULE",
+    "SCHEDULE_CHANGE",
+    "DELIVERY_DEADLINE_CONFIRMATION",
+})
+
+
+def _atomic_delivery_schedule_review(
+    semantic_analysis: SemanticAnalysis | None,
+    atomic: Any,
+    *,
+    order_id_validated: bool = False,
+) -> bool:
+    """Whether *this* sub-question asks when, with no confirmed order behind it.
+
+    Per sub-question, not per inquiry: "오늘 주문하면 언제 도착? / A/S 되나요?"
+    holds only the delivery half and leaves the A/S half answerable.
+
+    The inquiry-level judgement decides whether an order exists -- that is a
+    fact about the customer, not about one sentence -- and the sub-question's
+    own action decides whether it is a schedule question at all.
+    """
+
+    if not delivery_schedule_needs_review(
+        semantic_analysis, order_id_validated=order_id_validated
+    ):
+        return False
+    if atomic is None:
+        return True
+    action = str(atomic.action).upper()
+    return bool(
+        action in PRE_PURCHASE_DELIVERY_ACTIONS
+        or action in CURRENT_ORDER_DELIVERY_ACTIONS
+    )
+
+
+def _schedule_scoped(
+    semantic_analysis: SemanticAnalysis | None, atomic: Any,
+) -> bool | None:
+    """Whether this sub-question is about a date, either side of the purchase."""
+
+    if semantic_analysis is None or not semantic_analysis.usable:
+        return None
+    required = _order_evidence_required(semantic_analysis, atomic)
+    if required:
+        return True
+    if _atomic_delivery_schedule_review(semantic_analysis, atomic):
+        return True
+    if atomic is not None:
+        action = str(atomic.action).upper()
+        return bool(
+            action in PRE_PURCHASE_DELIVERY_ACTIONS
+            or action in CURRENT_ORDER_DELIVERY_ACTIONS
+        )
+    return bool(semantic_analysis.asks_delivery_schedule)
+
+
+def _order_evidence_required(
+    semantic_analysis: SemanticAnalysis | None, atomic: Any,
+) -> bool | None:
+    """Whether this sub-question needs the customer's own order, or unknown.
+
+    Tri-state. ``None`` means no usable understanding was available, and every
+    downstream gate that reads this must then behave exactly as it did before
+    the field existed -- a missing understanding is not evidence that the
+    question is order-free.
+    """
+
+    if semantic_analysis is None or not semantic_analysis.usable:
+        return None
+    if atomic is not None:
+        return bool(
+            str(atomic.action).upper() in _ORDER_SCOPED_ACTIONS
+            or semantic_analysis.requires_order_context
+        )
+    return bool(
+        semantic_analysis.actions & _ORDER_SCOPED_ACTIONS
+        or semantic_analysis.requires_order_context
+    )
 
 
 class LearningContextService:
@@ -239,6 +340,19 @@ class LearningContextService:
         contexts: list[dict[str, Any]] = []
         subquestion_traces: list[dict[str, Any]] = []
         signal_contexts: list[dict[str, Any]] = []
+        negative_correction_contexts: list[dict[str, Any]] = []
+        order_scope_by_question: dict[str, bool | None] = {}
+        pre_purchase_by_question: dict[str, bool] = {}
+        schedule_by_question: dict[str, bool | None] = {}
+        # A validated order id on the inquiry proves the order exists whatever
+        # the wording says, so it settles the same question the understanding
+        # answers -- see semantic_analysis.purchase_confirmed.
+        current_order_id_validated = bool(
+            _VALID_ORDER_ID.fullmatch(str(inquiry.get("order_id") or "").strip())
+        )
+        purchase_is_confirmed = purchase_confirmed(
+            semantic_analysis, order_id_validated=current_order_id_validated,
+        )
         for question in questions:
             atomic = next(
                 (item for item in semantic_atomic if item.text.strip() == question),
@@ -252,6 +366,20 @@ class LearningContextService:
                 "requested_information": question,
                 "atomic_question": question,
                 "all_atomic_questions": [item.to_dict() for item in semantic_atomic],
+                # Whether *this* sub-question depends on the customer's own
+                # order. Derived from the understanding, never from the words:
+                # "주문 전인데 며칠 걸려요?" and "제 주문 언제 와요?" are the
+                # same words and opposite scopes. ``None`` when there is no
+                # usable understanding, which leaves retrieval unchanged.
+                "order_evidence_required": _order_evidence_required(
+                    semantic_analysis, atomic,
+                ),
+                # True when this sub-question turns on a date at all -- the
+                # customer's own, or one that does not exist yet. Retrieval's
+                # question-match support floor is off for these: a past
+                # question worded almost identically carries another
+                # customer's schedule.
+                "schedule_scoped": _schedule_scoped(semantic_analysis, atomic),
             }
             question_guard = classify_product_fact(
                 question,
@@ -300,6 +428,7 @@ class LearningContextService:
                     inquiry.get("option_name") or facts.product.get("option_name")
                 ),
                 inquiry_type=inquiry_type,
+                semantic_goal=semantic_goal,
                 limit=2 if len(questions) > 1 else 3,
             )
             for key in (
@@ -308,6 +437,34 @@ class LearningContextService:
                 for item in signal_result[key]:
                     item["matched_subquestion"] = question
             signal_contexts.append(signal_result)
+            legacy = self.feedback_signals.negative_corrections(
+                question,
+                store_code=store_code,
+                product_name=product_name,
+                model_code=question_guard.model_code,
+                product_id=question_guard.product_id,
+                option_name=(
+                    inquiry.get("option_name") or facts.product.get("option_name")
+                ),
+                semantic_goal=semantic_goal,
+                limit=1 if len(questions) > 1 else 2,
+            )
+            for item in legacy["selected"]:
+                item["matched_subquestion"] = question
+            negative_correction_contexts.append(legacy)
+            order_scope_by_question[question] = semantic_goal[
+                "order_evidence_required"
+            ]
+            # Per sub-question, not per inquiry: a compound message can ask a
+            # pre-purchase delivery question beside an answerable one, and only
+            # the delivery part is held.
+            pre_purchase_by_question[question] = _atomic_delivery_schedule_review(
+                semantic_analysis, atomic,
+                order_id_validated=current_order_id_validated,
+            )
+            schedule_by_question[question] = _schedule_scoped(
+                semantic_analysis, atomic,
+            )
 
         def merged(key: str, limit: int = 6) -> list[dict[str, Any]]:
             by_id: dict[int, dict[str, Any]] = {}
@@ -397,6 +554,55 @@ class LearningContextService:
             ],
             "unresolved_conflicts": len(conflicting_signal_ids) > 0,
         }
+
+        # Correction knowledge the operator wrote into a Negative memo before
+        # the signal table existed. Constraints, never evidence: the model is
+        # told what not to repeat and what to say instead, and none of this
+        # can make a sub-question answerable -- that decision is made below
+        # from Positive/verified evidence exactly as it was.
+        negative_by_feedback: dict[int, dict[str, Any]] = {}
+        for legacy_context in negative_correction_contexts:
+            for item in legacy_context["selected"]:
+                feedback_id = int(item["feedback_id"])
+                current = negative_by_feedback.get(feedback_id)
+                if current is None or float(item.get("relevance") or 0) > float(
+                    current.get("relevance") or 0
+                ):
+                    negative_by_feedback[feedback_id] = item
+        negative_corrections = sorted(
+            negative_by_feedback.values(),
+            key=lambda item: float(item.get("relevance") or 0),
+            reverse=True,
+        )[:3]
+        context["negative_corrections"] = [
+            {
+                "correction_id": int(item["feedback_id"]),
+                "matched_subquestion": item.get("matched_subquestion"),
+                "reason": item.get("reason"),
+                "bad_patterns": list(item.get("bad_patterns") or []),
+                "corrections": list(item.get("corrections") or []),
+                "good_patterns": list(item.get("good_patterns") or []),
+                "relevance": item.get("relevance"),
+                "answer_support": item.get("answer_support"),
+                "source": item.get("source"),
+            }
+            for item in negative_corrections
+        ]
+        if context["negative_corrections"]:
+            context["negative_correction_policy"] = {
+                "operator_written_constraints": True,
+                "never_repeat_bad_pattern_content": True,
+                "apply_correction_direction_when_relevant": True,
+                # Section 13. A Negative was saved because one claim in a past
+                # answer was wrong; the rest of that answer, and every other
+                # approved answer on the topic, stays true. Widening a
+                # correction into "this whole subject is unsafe" would delete
+                # correct knowledge to punish one sentence.
+                "correction_scope_is_the_named_claim_only": True,
+                "a_correction_never_invalidates_an_unrelated_correct_claim": True,
+                "never_invent_a_correction_that_is_not_written": True,
+                "corrections_are_not_current_order_or_schedule_facts": True,
+            }
         confirmed_schedule = bool(
             facts.installation.get("installation_date_confirmed")
             and facts.installation.get("date")
@@ -406,6 +612,8 @@ class LearningContextService:
         )
         historical_by_id: dict[int, dict[str, Any]] = {}
         historical_traces: list[dict[str, Any]] = []
+        historical_order_scope_rejections = 0
+        historical_topic_scope_rejections = 0
         for question in questions:
             detailed = self.historical.search_detailed(
                 question,
@@ -424,6 +632,38 @@ class LearningContextService:
                 if key != "selected"
             })
             for item in detailed["selected"]:
+                # Same order scope the Positive path applies. A past seller
+                # answer that exists to collect an order number is the single
+                # most reusable-looking, most wrong reference for a customer
+                # who has just said they have not ordered yet.
+                if order_scope_by_question.get(question) is False and (
+                    order_identifier_request_reason(item.get("seller_answer"))
+                    is not None
+                ):
+                    historical_order_scope_rejections += 1
+                    continue
+                # A historical case has no semantic metadata of its own, and
+                # the general topic gate lets a candidate through on UNCERTAIN
+                # when the *query* carries no explicit topic. That is how
+                # "재입고 가능한가요?" -- topic OTHER -- was answered from a
+                # case about ceiling-mount VESA installation, promoted to
+                # ANSWERABLE with nothing holding it. Old metadata is a reason
+                # to check meaning differently, never a reason to skip it: if
+                # the case is about something specific and this question is
+                # not about that thing, it is not evidence here.
+                case_topics = {
+                    topic
+                    for topic in (
+                        set(classify_topics(item.get("question")))
+                        | set(classify_topics(item.get("seller_answer")))
+                    )
+                    if topic not in GENERIC_TOPICS
+                }
+                if case_topics and not (
+                    case_topics & set(classify_topics(question))
+                ):
+                    historical_topic_scope_rejections += 1
+                    continue
                 copied = dict(item)
                 copied["matched_subquestion"] = question
                 case_id = int(copied["id"])
@@ -491,7 +731,49 @@ class LearningContextService:
                 explicit_current_schedule
                 or (current_order_present and asks_when)
             )
-            if schedule_specific and not confirmed_schedule:
+            # "주문 전인데 배송일 지정 되나요?" carries 배송일, so the regex
+            # above read it as a question about a schedule that exists. The
+            # plan had already decided otherwise -- requires_dps_lookup False,
+            # DPS SKIPPED on the dashboard -- and the evidence map disagreeing
+            # with it is the inconsistency, not a second opinion. Where the
+            # understanding says this sub-question needs no customer-specific
+            # order evidence, a keyword cannot make it need a current date.
+            #
+            # Only ``False`` suppresses. With no usable understanding the
+            # keyword rule stands exactly as it did.
+            if order_scope_by_question.get(question) is False:
+                schedule_specific = False
+            # And the understanding can add what the keywords miss. "배송이
+            # 이번주 수요일로 잡혀있어 구매했는데 ... 도착 날짜좀 알려주세요"
+            # is a confirmed order asking for its own arrival date, but the
+            # regex above looks for 도착일 and finds 도착 날짜, so this
+            # deferred to nothing and was answered from a historical case
+            # carrying another customer's installation day. When the customer
+            # has an order and is asking when, the current fact is DPS's to
+            # give -- that is the same rule the plan already applied.
+            if (
+                schedule_by_question.get(question) is True
+                and purchase_is_confirmed
+            ):
+                schedule_specific = True
+            pre_purchase_delivery = pre_purchase_by_question.get(question, False)
+            if pre_purchase_delivery:
+                # Checked before every evidence branch, so nothing can settle
+                # it. A CORRECTION signal an operator wrote -- "아직 구매하지
+                # 않은 고객의 배송문의이다. 배송기간을 유추할수 없으므로
+                # 답변이 생성 되더라도 직원이 검토하는게 맞다" -- was being
+                # read as a verified fact and marking these ANSWERABLE. The
+                # instruction to hold was being spent as grounds to answer.
+                #
+                # Approved Positive Learning cannot settle it either: a past
+                # answer records how long one order took, which says nothing
+                # about an order that does not exist yet.
+                status = "DELIVERY_SCHEDULE_REVIEW"
+                evidence_ids = []
+                historical_ids = []
+                source = "DELIVERY_SCHEDULE_UNCONFIRMED_PURCHASE"
+                evidence_coverage = "UNSUPPORTED"
+            elif schedule_specific and not confirmed_schedule:
                 status = "NEEDS_DPS"
                 evidence_ids: list[int] = []
                 source = "CURRENT_DPS_REQUIRED"
@@ -562,7 +844,12 @@ class LearningContextService:
                 source = "ACTIVE_POSITIVE_LEARNING_INSUFFICIENT_EVIDENCE"
                 historical_ids = []
                 evidence_coverage = "UNSUPPORTED"
-            elif historical_for_question:
+            elif historical_for_question and (
+                not semantic_atomic or coverage_label(max(
+                (float(item.get("answer_support") or 0)
+                 for item in historical_for_question),
+                default=0.0,
+            )) == "SUPPORTED"):
                 status = "ANSWERABLE"
                 evidence_ids = []
                 historical_ids = [
@@ -574,6 +861,24 @@ class LearningContextService:
                      for item in historical_for_question),
                     default=0.0,
                 ))
+            elif historical_for_question and semantic_atomic:
+                # The same test Positive Learning has to pass, applied to the
+                # historical shelf, which was exempt from it.
+                #
+                # ``SAFE_REUSABLE`` answers one question -- may this past
+                # answer be reused at all -- and the ladder was reading it as
+                # the answer to a different one: does it answer *this*
+                # sub-question. So "무타공설치비용 문의합니다" was settled by a
+                # past reply about another product's courier delivery, and
+                # "쿠폰 1만원 보냈는지 확인해주세요" was answered verbatim with a
+                # 온누리 상품권 application guide. Both cases are genuinely
+                # reusable; neither is an answer to what was asked, and the
+                # coverage recorded alongside the promotion already said so.
+                status = "NO_RELIABLE_SOURCE"
+                evidence_ids = []
+                historical_ids = []
+                source = "SAFE_HISTORICAL_LEARNING_INSUFFICIENT_EVIDENCE"
+                evidence_coverage = "UNSUPPORTED"
             else:
                 status = "NO_RELIABLE_SOURCE"
                 evidence_ids = []
@@ -602,6 +907,11 @@ class LearningContextService:
             "NEEDS_DPS": "Do not use Learning as the current order date.",
             "NO_RELIABLE_SOURCE": "Only this item may request confirmation.",
             "CONFLICT": "Do not choose between conflicting sources.",
+            "DELIVERY_SCHEDULE_REVIEW": (
+                "No order is confirmed to exist. Do not state a delivery "
+                "period, a dispatch cutoff or an arrival date, and do not ask "
+                "for an order number. Staff will answer this item."
+            ),
         }
         selected_ids = [
             int(item["learning_example_id"])
@@ -639,11 +949,41 @@ class LearningContextService:
                 ),
                 "atomic_questions": [item.to_dict() for item in semantic_atomic],
             },
+            # Why a Negative memo was or was not applied, per sub-question --
+            # the operational question "왜 이 Negative가 적용됐지?" answered
+            # without opening the database.
+            "negative_corrections": {
+                "selected": [
+                    {
+                        "correction_id": int(item["feedback_id"]),
+                        "matched_subquestion": item.get("matched_subquestion"),
+                        "relevance": item.get("relevance"),
+                        "answer_support": item.get("answer_support"),
+                        "structured_memo": bool(item.get("structured")),
+                        "has_bad_pattern": bool(item.get("bad_patterns")),
+                        "has_correction": bool(item.get("corrections")),
+                        "product_scope": item.get("product_scope"),
+                        "topics": item.get("topics"),
+                        "usage_status": "ATTACHED_AS_CONSTRAINT",
+                    }
+                    for item in negative_corrections
+                ],
+                "subquestions": [
+                    legacy_context["trace"]
+                    for legacy_context in negative_correction_contexts
+                ],
+            },
             "subquestions": subquestion_traces,
             "rejection_counts": {
                 "FILTERED_BY_VALIDITY": candidate_diagnostics.get("filtered_by_validity", 0),
                 "REVOKED": candidate_diagnostics.get("revoked", 0),
                 "NEGATIVE_EXCLUDED": candidate_diagnostics.get("negative_excluded", 0),
+                "HISTORICAL_ORDER_SCOPE_MISMATCH": (
+                    historical_order_scope_rejections
+                ),
+                "HISTORICAL_TOPIC_SCOPE_MISMATCH": (
+                    historical_topic_scope_rejections
+                ),
                 "FILTERED_BY_RUNTIME_QUALITY": sum(
                     learning_quality_rejections.values()
                 ),

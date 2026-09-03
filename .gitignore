@@ -83,3 +83,19 @@ exports/
 # Single-inquiry diagnostic exports. Masked, but still customer text:
 # they are produced to be read and deleted, not versioned.
 diagnostics/
+
+# 서버 PC에서 복사해 온 운영 스냅샷(약 955MB). 개발 PC에서는 분석용으로 계속
+# 필요하므로 그대로 두되, 저장소에는 넣지 않는다. 위쪽 *.db 규칙은 안에 든
+# oje_automation.db / product_facts.db 만 가리고, 같이 들어 있는 Catalog 사본과
+# DPS 캐시 JSON 은 걸러지지 않으므로 폴더째 지정한다.
+data/서버pc_data/
+
+# COHORT 1~3 검증 산출물. 지금까지 Git 으로 관리된 적이 없고, observation dump
+# 와 selection 파일에는 운영 DB 에서 그대로 뽑은 고객 문의 원문·주문번호·답변
+# 본문이 들어 있다. diagnostics/ · exports/ 와 같은 이유로 로컬에만 남긴다.
+# 재현에 필요한 selection rule 과 oracle 도 같은 폴더에 있으므로 개발 PC 에서
+# 삭제하지 말 것.
+.verification/
+
+# 테스트 실행 marker. 실행할 때마다 다시 만들어지는 1바이트 산출물이다.
+*.exitcode.txt

@@ -60,6 +60,11 @@ class InquiryAnalysis:
     # analysis built outside this classifier, so a caller that cannot see the
     # cause must treat the hold as unexplained.
     manual_review_sources: tuple[str, ...] = ()
+    # Whether an order is known to exist for this customer. Carried from the
+    # understanding so the publishing gate can ask it without re-deriving it,
+    # and defaulting to False so an analysis built anywhere else never claims
+    # a purchase this classifier did not see.
+    purchase_confirmed: bool = False
     # One record per atomic question the customer actually asked, each holding
     # that question's own verdict. ``manual_review_required`` above is the OR
     # across them and is what the safety gates read; it answers "does a person
@@ -157,6 +162,7 @@ class InquiryAnalysis:
         result["selected_fact_keys"] = list(self.selected_fact_keys)
         result["reasons"] = list(self.reasons)
         result["manual_review_sources"] = list(self.manual_review_sources)
+        result["purchase_confirmed"] = self.purchase_confirmed
         result["subquestion_analyses"] = [
             dict(item) for item in self.subquestion_analyses
         ]
@@ -197,6 +203,7 @@ class InquiryAnalysis:
             manual_review_sources=tuple(
                 str(item) for item in value.get("manual_review_sources", ())
             ),
+            purchase_confirmed=bool(value.get("purchase_confirmed")),
             subquestion_analyses=tuple(
                 dict(item)
                 for item in value.get("subquestion_analyses", ())

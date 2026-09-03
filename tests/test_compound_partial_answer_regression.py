@@ -375,9 +375,18 @@ def test_case_g_compound_keeps_compatibility_review_reason() -> None:
 # ------------------------------------------------------------ CASE H
 
 def test_case_h_no_installation_date_without_order_and_dps() -> None:
+    """No order, no DPS result, so no installation date may be stated.
+
+    The inquiry says nothing about an order, so the purchase-state policy now
+    suppresses the order and DPS requirements outright rather than recording
+    them as unmet. Either way there is no date to quote, which is what the
+    validator assertion below is actually guarding.
+    """
+
     analysis = ANALYSIS.analyze(request())
-    assert analysis.requires_order_id is True
-    assert analysis.requires_dps_lookup is True
+    assert analysis.requires_order_id is False
+    assert analysis.requires_dps_lookup is False
+    assert analysis.manual_review_required is True
     facts, _, _ = _pieces()
     assert not facts.installation.get("date")
     result = _validate("설치예정일은 2026-09-01입니다.", ())

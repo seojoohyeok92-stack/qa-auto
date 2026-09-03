@@ -28,6 +28,7 @@ import pytest
 
 from answer.source_adapter import answer_request_from_inquiry
 from services.gpt_semantic_analyzer_service import (
+    PROMPT_BUDGET,
     GptSemanticAnalyzerService,
     shadow_record,
 )
@@ -372,7 +373,9 @@ def test_the_prompt_carries_no_prose_budget() -> None:
     service = GptSemanticAnalyzerService(ScriptedProvider())
     prompt = service.build_prompt("고장난 기존 tv 수거 요청드려요")
 
-    assert len(prompt) < 1400
+    # See PROMPT_BUDGET: the ceiling is what the field contract costs, and the
+    # paragraph count is what stops prose from returning under it.
+    assert len(prompt) < PROMPT_BUDGET
     assert "COLLECTION" in prompt
     assert prompt.count("\n\n") <= 4
 

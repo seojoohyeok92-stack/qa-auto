@@ -107,21 +107,38 @@ def test_schedule_change_is_hard_blocked_from_auto_post() -> None:
 
 
 # CASE F -- a plain schedule *lookup* must not be swept up by the change
-# detection; it keeps the existing order/DPS route.
-@pytest.mark.parametrize(
-    "question",
-    [
-        "설치 예정일이 언제인가요?",
-        "배송 언제 와요?",
-        "설치일 알려주세요",
-        "배송일 확인 부탁드립니다",
-        "언제 설치되나요?",
-    ],
-)
+# detection. Whether it is held is a separate decision, made on the evidence
+# about the order; being mistaken for a change request never is.
+SCHEDULE_LOOKUPS = [
+    "설치 예정일이 언제인가요?",
+    "배송 언제 와요?",
+    "설치일 알려주세요",
+    "배송일 확인 부탁드립니다",
+    "언제 설치되나요?",
+]
+
+
+@pytest.mark.parametrize("question", SCHEDULE_LOOKUPS)
 def test_case_f_schedule_lookup_is_not_a_change_request(question: str) -> None:
     analysis = analyze(question)
     assert analysis.inquiry_subtype != "SCHEDULE_CHANGE_REQUEST"
+
+
+@pytest.mark.parametrize("question", SCHEDULE_LOOKUPS)
+def test_case_f_lookup_with_an_order_keeps_the_existing_route(
+    question: str,
+) -> None:
+    """The order/DPS route this case used to assert, on a stated order.
+
+    Without one the purchase-state policy holds the inquiry, so
+    ``manual_review_required is False`` can no longer stand for "not a change
+    request". Saying the order exists restores the route the case is about.
+    """
+
+    analysis = analyze(f"어제 주문했는데 {question}")
+    assert analysis.inquiry_subtype != "SCHEDULE_CHANGE_REQUEST"
     assert analysis.manual_review_required is False
+    assert analysis.requires_order_lookup is True
 
 
 # Unrelated "변경" wording must not be captured either.

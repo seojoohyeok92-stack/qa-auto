@@ -343,7 +343,15 @@ def test_case_b_valid_order_number_requires_dps(question: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "question", ["언제 발송되나요?", "배송은 언제 되나요?", "언제 받을 수 있나요?"]
+    "question",
+    [
+        # CASE D is the customer who has an order but has not given the
+        # number. Each says so; without that the purchase-state policy holds
+        # the inquiry and the request template is not the route at all.
+        "어제 주문했는데 언제 발송되나요?",
+        "주문했는데 배송은 언제 되나요?",
+        "주문한 상품 언제 받을 수 있나요?",
+    ],
 )
 def test_case_d_no_order_number_asks_for_it_and_skips_dps(question: str) -> None:
     analysis = analyse(question)
@@ -390,7 +398,7 @@ def test_validated_order_number_survives_the_delivery_routing() -> None:
 
 
 def test_invalid_order_number_is_not_sent_to_dps() -> None:
-    analysis = analyse("주문번호 123입니다. 배송 언제 되나요?")
+    analysis = analyse("어제 주문했는데 주문번호 123입니다. 배송 언제 되나요?")
 
     assert analysis.order_id_status is not OrderIdStatus.VALIDATED
     assert analysis.answer_strategy is AnswerStrategy.REQUEST_ORDER_ID
@@ -611,7 +619,8 @@ def test_no_order_number_asks_for_it_without_touching_dps(database) -> None:
     """CASE D, end to end. The DPS agent must not be called at all."""
 
     inquiry_id = store_inquiry(
-        database, "E2E-NO-ORDER", question="언제 발송되나요?", order_id=None
+        database, "E2E-NO-ORDER",
+        question="어제 주문했는데 언제 발송되나요?", order_id=None
     )
     stub = _StubDps(dps_success(UPCOMING_DATE))
 

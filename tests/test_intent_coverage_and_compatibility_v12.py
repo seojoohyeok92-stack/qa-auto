@@ -196,15 +196,28 @@ def test_case_n_o_card_policy_preserved() -> None:
     assert analyze("카드 결제 가능한가요?").manual_review_required is False
 
 
-# CASE H/R -- schedule lookups keep their existing DPS/order route.
+# CASE H/R -- schedule lookups keep their existing DPS/order route once the
+# customer has said there is an order to look up.
 @pytest.mark.parametrize(
     "question", ["설치 예정일이 언제인가요?", "배송 언제 와요?"]
 )
 def test_case_h_r_schedule_lookup_unchanged(question: str) -> None:
-    analysis = analyze(question)
+    analysis = analyze(f"어제 주문했는데 {question}")
     assert analysis.inquiry_subtype == "DELIVERY_OR_INSTALLATION_SCHEDULE"
     assert analysis.manual_review_required is False
     assert analysis.requires_dps_lookup is True
+
+
+@pytest.mark.parametrize(
+    "question", ["설치 예정일이 언제인가요?", "배송 언제 와요?"]
+)
+def test_case_h_r_schedule_lookup_without_an_order_is_held(
+    question: str,
+) -> None:
+    analysis = analyze(question)
+    assert analysis.inquiry_subtype == "UNCONFIRMED_DELIVERY_OUTCOME"
+    assert analysis.manual_review_required is True
+    assert analysis.requires_dps_lookup is False
 
 
 # ------------------------------------------------- POST is never called

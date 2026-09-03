@@ -8,6 +8,7 @@ from answer.answer_diff_classifier import (
     classify_operator_note,
 )
 from answer.evidence_support import apply_answer_support
+from answer.negative_correction import NegativeCorrection, parse_operator_memo
 from answer.learning_signal import (
     ConfirmationStatus,
     FACTUAL_SIGNAL_KINDS,
@@ -21,17 +22,39 @@ from answer.learning_signal import (
 )
 from config import StructuredSignalAutoLearningSettings
 from repositories.database import Database
+from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_compatibility_service import (
+    GENERIC_TOPICS,
     LearningCompatibilityService,
     extract_product_identity,
     profile_knowledge,
+)
+from services.learning_evidence_policy import (
+    current_schedule_scope_reason,
+    order_identifier_request_reason,
 )
 from services.learning_privacy_service import LearningPrivacyService
 from services.similar_answer_service import (
     SimilarAnswerService,
     normalize_learning_question,
 )
+
+
+# Constraints are ranked on a lower bar than evidence, and the asymmetry is
+# the point. Getting a marginal *fact* wrong publishes a wrong answer; getting
+# a marginal *constraint* wrong makes the answer more careful than it needed to
+# be. What stops an unrelated Negative from reaching the prompt is the
+# compatibility gate -- product identity and topic scope, the same gate the
+# Positive path uses -- not this number.
+#
+# 0.24 was measured too high for this corpus specifically: two operator memos
+# about the same mistake are written in whatever words the operator reached
+# for, so "상품권 신청했는데 확인해주세요" and "상품권 신청 얼마 전에 했는데
+# 확인 부탁드려요" score 0.21 against each other while plainly being the same
+# situation. Against the 30 legacy memos on the server this value changes which
+# memos are reachable without letting any of them cross a topic boundary.
+NEGATIVE_CORRECTION_RELEVANCE = 0.18
 
 
 class LearningSignalService:
@@ -49,6 +72,7 @@ class LearningSignalService:
     def __init__(self, database: Database) -> None:
         self.database = database
         self.repository = LearningSignalRepository(database)
+        self.feedback = LearningFeedbackRepository(database)
         self.privacy = LearningPrivacyService()
         self.compatibility = LearningCompatibilityService()
 
@@ -191,6 +215,198 @@ class LearningSignalService:
         }
         return self.repository.upsert(signal)
 
+    def negative_corrections(
+        self,
+        question: str,
+        *,
+        store_code: str | None = None,
+        product_name: str | None = None,
+        model_code: str | None = None,
+        product_id: str | None = None,
+        option_name: str | None = None,
+        semantic_goal: dict[str, Any] | None = None,
+        limit: int = 2,
+        minimum_relevance: float = NEGATIVE_CORRECTION_RELEVANCE,
+    ) -> dict[str, Any]:
+        """Correction knowledge from Negative memos that predate the signal table.
+
+        Same shape as the guidance the signal path already produces, ranked by
+        the same compatibility gate, and deliberately *not* factual evidence:
+        a Negative memo says which claim was wrong and what to say instead, it
+        does not license a sub-question to become answerable on its own. That
+        keeps the existing conflict/coverage safety exactly where it is --
+        nothing here can flip a NO_RELIABLE_SOURCE into an answer.
+
+        A Negative with no memo never appears. There is nothing to read, and
+        inventing a reason it was rejected is the failure this whole path
+        exists to avoid; those rows keep their existing exclusion behaviour
+        and nothing else.
+        """
+
+        semantic_goal = semantic_goal or {}
+        query_variants = self._query_variants(question, semantic_goal)
+        if not query_variants:
+            return {"selected": [], "trace": {"candidate_count": 0}}
+        order_evidence_required = semantic_goal.get("order_evidence_required")
+        current_product = extract_product_identity(
+            product_id=product_id, product_name=product_name,
+            model_code=model_code, option=option_name,
+        )
+        candidates = self.feedback.legacy_memo_candidates(store_code=store_code)
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        rejection_counts: dict[str, int] = {}
+
+        def reject(reason: str) -> None:
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+        for item in candidates:
+            parsed = parse_operator_memo(
+                item.get("correction_note"),
+                reason_code=item.get("correction_reason"),
+                feedback_id=item.get("id"),
+            )
+            if parsed is None:
+                reject("NO_OPERATOR_MEMO")
+                continue
+            masked = self._mask_correction(parsed)
+            candidate_product = extract_product_identity(
+                product_id=item.get("source_product_id"),
+                product_name=item.get("source_product_name"),
+                model_code=None,
+                option=item.get("source_option_name"),
+            )
+            question_masked = self.privacy.mask(item.get("question_masked") or "")
+            compatibility = self.compatibility.evaluate(
+                current_question=question,
+                current_product=current_product,
+                candidate_question=question_masked,
+                candidate_answer=masked.guidance_text or masked.source_memo,
+                candidate_product=candidate_product,
+                candidate_metadata={},
+                authority="VERIFIED_SIGNAL",
+            )
+            if not compatibility.eligible:
+                reject(str(compatibility.reject_reason or "COMPATIBILITY_REJECTED"))
+                continue
+            # Section 11's rule, applied strictly. The generic gate lets a
+            # candidate through on UNCERTAIN when the *query* carries no
+            # explicit topic, which is right for evidence (a policy answer
+            # should still be reachable) and wrong here: measured against the
+            # 30 legacy memos on the server, "포토리뷰 네이버페이 2만원은 언제
+            # 받나요?" pulled in two 설치예정일 memos that way. A correction has
+            # to share a topic with the question it constrains.
+            candidate_topics = {
+                topic for topic in compatibility.candidate_topics
+                if topic not in GENERIC_TOPICS
+            }
+            if candidate_topics and not (
+                candidate_topics & set(compatibility.query_topics)
+            ):
+                reject("TOPIC_SCOPE_MISMATCH")
+                continue
+            # A memo that says "ask for the order number", or one about a
+            # 설치예정일 that has not been booked yet, is right about the
+            # inquiry it was written for and wrong about a customer who has
+            # not ordered. The same scope rule the Positive path applies.
+            if order_evidence_required is False and any(
+                order_identifier_request_reason(text) is not None
+                or current_schedule_scope_reason(text) is not None
+                for text in (
+                    *masked.corrections, *masked.good_patterns,
+                    *masked.bad_patterns,
+                )
+            ):
+                reject("ORDER_SCOPE_MISMATCH")
+                continue
+            relevance = max(
+                SimilarAnswerService._similarity(
+                    variant, normalize_learning_question(question_masked)
+                )
+                for variant in query_variants
+            )
+            relevance += compatibility.score_adjustment
+            support = max(
+                apply_answer_support(
+                    relevance, variant, masked.guidance_text
+                )[1]
+                for variant in query_variants
+            )
+            if relevance < minimum_relevance:
+                reject("BELOW_SIMILARITY_THRESHOLD")
+                continue
+            ranked.append((relevance, {
+                **masked.to_dict(),
+                "relevance": round(relevance, 4),
+                "answer_support": round(support, 4),
+                "source": "LEGACY_NEGATIVE_MEMO",
+                "learning_feedback_id": int(item["id"]),
+                "product_scope": compatibility.product_match,
+                "topics": list(compatibility.candidate_topics),
+                "compatibility": compatibility.to_dict(),
+            }))
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        selected = [item for _, item in ranked[:max(0, limit)]]
+        return {
+            "selected": selected,
+            "trace": {
+                "candidate_count": len(candidates),
+                "above_threshold_count": len(ranked),
+                "selected_count": len(selected),
+                "selected_feedback_ids": [
+                    int(item["feedback_id"]) for item in selected
+                ],
+                "not_selected_feedback_ids": [
+                    int(item["feedback_id"]) for _, item in ranked[len(selected):]
+                ],
+                "rejection_counts": rejection_counts,
+            },
+        }
+
+    def _mask_correction(self, parsed: NegativeCorrection) -> NegativeCorrection:
+        """The same correction with every part run through the privacy mask.
+
+        Operator memos are internal text and were never masked on the way in.
+        The stored row keeps the operator's original wording; only this
+        runtime copy, the one that can reach a prompt, is masked.
+        """
+
+        return NegativeCorrection(
+            feedback_id=parsed.feedback_id,
+            source_memo=self.privacy.mask(parsed.source_memo),
+            reason_code=parsed.reason_code,
+            bad_patterns=tuple(
+                self.privacy.mask(text) for text in parsed.bad_patterns
+            ),
+            corrections=tuple(
+                self.privacy.mask(text) for text in parsed.corrections
+            ),
+            good_patterns=tuple(
+                self.privacy.mask(text) for text in parsed.good_patterns
+            ),
+        )
+
+    def _query_variants(
+        self, question: str, semantic_goal: dict[str, Any],
+    ) -> list[str]:
+        """The same query representations the Positive path ranks against.
+
+        Retrieval for Negative knowledge has to key on the same understanding
+        as retrieval for Positive knowledge, or the two answer different
+        questions about the same inquiry.
+        """
+
+        return list(dict.fromkeys(
+            value for value in (
+                normalize_learning_question(self.privacy.mask(question)),
+                normalize_learning_question(self.privacy.mask(
+                    str(semantic_goal.get("requested_information") or "")
+                )),
+                normalize_learning_question(self.privacy.mask(
+                    str(semantic_goal.get("atomic_question") or "")
+                )),
+            ) if value
+        ))
+
     def retrieve(
         self,
         question: str,
@@ -201,6 +417,7 @@ class LearningSignalService:
         product_id: str | None = None,
         option_name: str | None = None,
         inquiry_type: str | None = None,
+        semantic_goal: dict[str, Any] | None = None,
         limit: int = 3,
         minimum_relevance: float = 0.24,
     ) -> dict[str, Any]:
@@ -215,6 +432,13 @@ class LearningSignalService:
         """
 
         query = normalize_learning_question(self.privacy.mask(question))
+        # The same query representations the Positive path uses. A signal
+        # written in different words for the same atomic question was
+        # previously reachable only through the raw sub-question text, so
+        # Positive and Negative retrieval could disagree about what the
+        # customer asked. ``query`` stays first, so a caller that passes no
+        # semantic goal ranks exactly as it did before.
+        query_variants = self._query_variants(question, semantic_goal or {})
         current_product = extract_product_identity(
             product_id=product_id, product_name=product_name,
             model_code=model_code, option=option_name,
@@ -264,12 +488,22 @@ class LearningSignalService:
                 reason = str(compatibility.reject_reason or "COMPATIBILITY_REJECTED")
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 continue
-            relevance = SimilarAnswerService._similarity(
-                query, normalize_learning_question(item.get("question_masked"))
+            candidate_question = normalize_learning_question(
+                item.get("question_masked")
+            )
+            relevance = max(
+                SimilarAnswerService._similarity(variant, candidate_question)
+                for variant in query_variants
             )
             relevance += compatibility.score_adjustment
-            relevance, support = apply_answer_support(
-                relevance, query, item.get("content_text")
+            relevance, support = max(
+                (
+                    apply_answer_support(
+                        relevance, variant, item.get("content_text")
+                    )
+                    for variant in query_variants
+                ),
+                key=lambda pair: pair[0],
             )
             if relevance < minimum_relevance:
                 rejection_counts["BELOW_SIMILARITY_THRESHOLD"] = (
@@ -335,6 +569,7 @@ class LearningSignalService:
             "conflicting_signals": conflicting_signals,
             "trace": {
                 "query": query,
+                "query_variants": query_variants,
                 "candidate_count": len(candidates),
                 "above_threshold_count": len(ranked),
                 "rejection_counts": rejection_counts,

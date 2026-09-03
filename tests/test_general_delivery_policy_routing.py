@@ -258,9 +258,12 @@ def test_case_e_valid_order_still_requires_dps(question: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "question", ["제가 주문한 상품 언제 배송되나요?", "언제 발송되나요?"]
+    "question",
+    ["제가 주문한 상품 언제 배송되나요?", "어제 주문했는데 언제 발송되나요?"],
 )
 def test_case_f_missing_order_number_still_asks_for_it(question: str) -> None:
+    # 두 번째 문의는 구매 사실을 밝혀야 주문번호 요청 경로에 도달한다.
+    # 아무것도 밝히지 않은 문의는 현재 정책상 보류된다.
     analysis = analyse(question, source_type="CUSTOMER_INQUIRY")
 
     assert analysis.order_id_status is OrderIdStatus.MISSING

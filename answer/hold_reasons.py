@@ -50,6 +50,9 @@ REASON_LABELS: dict[str, str] = {
     "DPS_RESULT_NOT_TRUSTED": "DPS 조회 결과를 신뢰할 수 없습니다.",
     "DPS_SNAPSHOT_NOT_VALIDATED": "DPS 설치 일정 스냅샷이 검증되지 않았습니다.",
     "DELIVERY_DEADLINE_NOT_CONFIRMABLE": "고객이 지정한 날짜까지 배송·설치가 가능한지 확정할 근거가 없습니다.",
+    "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD": (
+        "주문이 확인되지 않았는데 답변이 배송 기간을 안내하고 있습니다."
+    ),
     "SEMANTIC_ACTION_MISMATCH": "고객이 요청한 내용과 답변이 다루는 내용이 서로 다릅니다.",
     # Recorded but not blocking
     "ORDER_ID_REQUESTED_FROM_CUSTOMER": "고객에게 주문번호를 요청하는 답변입니다.",
@@ -156,6 +159,7 @@ STAFF_REASON_LABELS: dict[str, str] = {
     "DPS_RESULT_NOT_TRUSTED": "배송·설치 조회 불가",
     "DPS_SNAPSHOT_NOT_VALIDATED": "설치 일정 미확정",
     "DELIVERY_DEADLINE_NOT_CONFIRMABLE": "지정 날짜 확정 불가",
+    "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD": "주문 미확인 배송기간",
     "SEMANTIC_ACTION_MISMATCH": "요청과 답변 불일치",
     # Recorded but not blocking
     "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": "문의 유형 불명확",

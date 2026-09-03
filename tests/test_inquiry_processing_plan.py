@@ -334,10 +334,14 @@ def test_actual_324599122_plan_overrides_stale_skipped_classification(
 @pytest.mark.parametrize(
     ("text", "intent"),
     [
+        # Each states the order in its own way: a date it was placed on, how
+        # long ago it was placed, and the plain past tense. Without one of
+        # those the purchase-state policy holds the inquiry instead of looking
+        # anything up -- see the paired case below.
         ("7월4일 주문 언제 배송되나요?", "DELIVERY_DATE"),
         ("주문한지 한달이네요. 언제쯤 받을 수 있을까요?", "DELIVERY_DATE"),
-        ("몇시에 도착할까요?", "DELIVERY_TIME"),
-        ("설치 기사님은 언제 오시나요?", "INSTALLATION_DATE"),
+        ("주문했는데 몇시에 도착할까요?", "DELIVERY_TIME"),
+        ("주문했는데 설치 기사님은 언제 오시나요?", "INSTALLATION_DATE"),
     ],
 )
 def test_deterministic_schedule_intents_override_scores(
@@ -353,6 +357,30 @@ def test_deterministic_schedule_intents_override_scores(
     assert plan.is_delivery is True
     assert plan.requires_order_lookup is True
     assert plan.requires_dps_lookup is True
+
+
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [
+        ("몇시에 도착할까요?", "DELIVERY_TIME"),
+        ("설치 기사님은 언제 오시나요?", "INSTALLATION_DATE"),
+    ],
+)
+def test_schedule_intent_without_a_stated_order_is_not_looked_up(
+    database: Database,
+    text: str,
+    intent: str,
+) -> None:
+    """The intent is still read; the lookups are what the evidence gates."""
+
+    inquiry_id = inquiry(database, f"NOORDER-{intent}-{text}", text)
+    plan = InquiryProcessingPlanService(database).create(
+        InquiryRepository(database).get(inquiry_id)
+    )
+    assert plan.detected_intent == intent
+    assert plan.is_delivery is True
+    assert plan.requires_order_lookup is False
+    assert plan.requires_dps_lookup is False
 
 
 def test_delivery_notification_policy_is_not_a_schedule_lookup(
@@ -416,7 +444,10 @@ def test_delivery_without_valid_general_order_id_always_creates_request_draft(
     inquiry_id = inquiry(
         database,
         f"NO-ORDER-{expected_status}",
-        "배송 언제 오나요?",
+        # The subject is the missing or unusable *general order number*, so the
+        # customer has to be one who says they ordered. Without that the
+        # purchase-state policy holds the inquiry and no request draft is made.
+        "주문했는데 배송 언제 오나요?",
         order_id=order_id,
         product_order_id=product_order_id,
     )

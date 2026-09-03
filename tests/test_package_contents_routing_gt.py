@@ -228,7 +228,8 @@ def analyse_with_order(question: str, order_id: str) -> dict:
 
 
 def test_gtr01_no_order_number_still_asks_for_it() -> None:
-    analysis = analyse_with_order("언제 발송되나요?", "")
+    # 구매 사실이 확인되는 문의여야 주문번호 요청 경로에 도달한다.
+    analysis = analyse_with_order("어제 주문했는데 언제 발송되나요?", "")
 
     assert analysis["detected_intent"] == "DELIVERY_DATE"
     assert analysis["requires_order_lookup"] is True

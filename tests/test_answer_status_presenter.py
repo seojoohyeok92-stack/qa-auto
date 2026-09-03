@@ -37,6 +37,7 @@ from ui.answer_status_presenter import (
     describe_reason,
     pipeline_route,
 )
+from answer.hold_reasons import primary_reason
 
 
 def _inquiry(**overrides):
@@ -320,6 +321,36 @@ def test_every_reason_the_gate_can_emit_has_a_human_sentence() -> None:
     assert emitted, "no reason codes were discovered -- the scan is wrong"
     for code in sorted(emitted):
         assert describe_reason(code) != code, f"{code} has no Korean sentence"
+
+
+def test_unconfirmed_purchase_delivery_period_reads_as_korean() -> None:
+    """The purchase-state gate's own reason, on the surfaces staff read.
+
+    ``AutoProcessingEligibilityService`` began emitting this when the answer
+    names a delivery period for an order nobody has confirmed. It had no entry
+    in ``REASON_LABELS``, so the dashboard and the KakaoTalk hold notice both
+    fell through to ``describe_reason``'s last resort and showed the operator
+    the bare code.
+    """
+
+    sentence = describe_reason("UNCONFIRMED_PURCHASE_DELIVERY_PERIOD")
+
+    assert sentence != "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD"
+    assert "UNCONFIRMED" not in sentence
+    assert "_" not in sentence
+    # It has to say which of the two facts is missing, or it explains nothing.
+    assert "주문" in sentence and "배송" in sentence
+    # primary_reason is what the notifier and the presenter actually call.
+    assert primary_reason(["UNCONFIRMED_PURCHASE_DELIVERY_PERIOD"]) == sentence
+
+    # The KakaoTalk hold notice reads from its own short vocabulary, so a
+    # sentence here is not enough on its own -- the phone message would fall
+    # back to "추가 확인 필요" and name nothing.
+    from answer.hold_reasons import STAFF_REASON_LABELS
+
+    label = STAFF_REASON_LABELS["UNCONFIRMED_PURCHASE_DELIVERY_PERIOD"]
+    assert "_" not in label and label != "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD"
+    assert "주문" in label
 
 
 def test_a_route_reason_is_explained_without_being_hardcoded() -> None:

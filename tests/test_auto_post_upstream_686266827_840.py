@@ -139,15 +139,23 @@ def test_827_generic_title_leaves_only_the_two_customer_questions() -> None:
 
 
 def test_840_generic_title_does_not_inflate_safe_compound_count() -> None:
+    """제목이 분해를 부풀리지 않는다는 것이 이 테스트의 요지이고 그대로다.
+
+    다만 두 번째 하위질문 "주문하면 배송은 보통 얼마나 걸리나요"는 구매 전
+    고객의 실제 배송 소요 기간 문의(유형 A)라, 확정된 운영정책상 직원 검토로
+    간다. 분해 결과와 confidence 는 영향받지 않는다.
+    """
+
     body = "이 제품 혼자 설치 가능한가요? 그리고 주문하면 배송은 보통 얼마나 걸리나요?"
     inquiry = _inquiry("상품 문의", body)
     request = answer_request_from_inquiry(inquiry)
 
     assert len(split_subquestions(request.question)) == 2
     analysis = InquiryAnalysisService().analyze(request)
-    assert analysis.manual_review_required is False
-    assert analysis.auto_answerable is True
     assert analysis.confidence > 0.45
+    assert analysis.manual_review_required is True
+    assert analysis.requires_order_lookup is False
+    assert analysis.requires_dps_lookup is False
 
 
 def test_meaningful_title_is_preserved() -> None:
@@ -361,9 +369,13 @@ def test_template_pass_uses_template_contract_not_hybrid_metadata() -> None:
         route="TEMPLATE",
     )
 
-    assert result.safe is True
-    assert result.reasons == ()
-    assert "PRELIMINARY_REVIEW_RESOLVED" in result.soft_reasons
+    # 하위질문 하나가 구매 전 배송 소요 기간 문의(유형 A)라 정책상 보류된다.
+    # 이 테스트가 지키려던 것 -- Template 경로가 hybrid metadata 가 아니라
+    # template contract 를 읽는다는 것 -- 은 그대로 유지된다: 보류 사유가
+    # 정책이지 stale metadata 가 아니다.
+    assert result.decision == "REVIEW_REQUIRED"
+    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.reasons
 
 
 @pytest.mark.parametrize("status", ["REVIEW_REQUIRED", "BLOCK"])

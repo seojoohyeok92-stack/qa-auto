@@ -163,6 +163,17 @@ def test_notification_question_remains_general_policy(
     assert result.result.metadata["generation_mode"] == "TEMPLATE"
 
 
+# 이 파일은 semantic analyzer 가 꺼진 결정적 경로를 검증한다(테스트 기본 설정).
+#
+# AMBIGUOUS/INVALID 두 경우는 레코드에 주문 식별자가 붙어 있어, semantic 이
+# 켜지든 꺼지든 주문번호를 요청하는 기존 동작이 그대로 맞다 -- 검증할 수 없는
+# 값이어도 주문 자체는 실재한다.
+#
+# MISSING 은 다르다. 주문 식별자가 어디에도 없고 "몇시에 도착할까요?"는 구매
+# 여부를 말하지 않는다. semantic 이 켜지면 purchase_state=UNKNOWN 이 되어
+# 확정 운영정책상 주문번호를 요구하지 않고 보류된다. 그 동작은 flag 에 의존하지
+# 않도록 tests/test_delivery_schedule_review_policy.py 에서 semantic 을 직접
+# 넣어 검증한다. 여기서는 flag 가 꺼진 현재 기본 경로를 그대로 지킨다.
 @pytest.mark.parametrize(
     ("order_id", "product_order_id", "status"),
     [
@@ -171,7 +182,7 @@ def test_notification_question_remains_general_policy(
         ("ORDER-123", None, "INVALID"),
     ],
 )
-def test_missing_product_only_or_invalid_order_requests_general_order_id(
+def test_unconfirmed_or_unvalidated_order_does_not_request_general_order_id(
     database: Database,
     order_id: str | None,
     product_order_id: str | None,
@@ -188,14 +199,44 @@ def test_missing_product_only_or_invalid_order_requests_general_order_id(
     outcome = generate(database, inquiry_id, dps)
 
     assert dps.calls == []
-    assert outcome.result.answer == ORDER_ID_REQUEST_ANSWER
-    assert outcome.result.metadata["selected_answer_route"] == (
-        "ORDER_ID_REQUEST"
-    )
     analysis = outcome.result.metadata["phase9"]["analysis"]
-    assert analysis["order_id_status"] == status
     saved = InquiryRepository(database).get(inquiry_id)
-    assert saved["raw_json"]["queue"] == "CUSTOMER_CONFIRMATION_REQUIRED"
+    if status == "AMBIGUOUS":
+        # A platform product-order identifier is affirmative evidence that
+        # this is a current order, even though it is not a general ID.
+        assert outcome.result.answer == ORDER_ID_REQUEST_ANSWER
+        assert outcome.result.metadata["selected_answer_route"] == (
+            "ORDER_ID_REQUEST"
+        )
+        assert saved["raw_json"]["queue"] == "CUSTOMER_CONFIRMATION_REQUIRED"
+    else:
+        assert outcome.result.metadata["selected_answer_route"] != (
+            "ORDER_ID_REQUEST"
+        )
+        assert analysis["requires_order_id"] is False
+        assert analysis["requires_order_lookup"] is False
+        assert analysis["requires_dps_lookup"] is False
+        assert saved["raw_json"]["queue"] != "CUSTOMER_CONFIRMATION_REQUIRED"
+
+
+def test_explicit_current_order_without_general_id_keeps_order_request_template(
+    database: Database,
+) -> None:
+    inquiry_id = create_inquiry(
+        database,
+        "ORDER-EXPLICIT-CURRENT",
+        content="어제 주문했는데 배송 일정이 언제인지 알고 싶습니다.",
+    )
+
+    outcome = generate(database, inquiry_id, FakeDps())
+
+    assert outcome.result.metadata["selected_answer_route"] == "ORDER_ID_REQUEST"
+    # Asserted on the template's content rather than on equality with the
+    # constant: the atomic-completeness layer appends a sentence naming the
+    # part staff will follow up, so the published answer is the template plus
+    # that line. The request itself is what this case is about.
+    assert "일반 주문번호가 필요합니다" in outcome.result.answer
+    assert "상품주문번호가 아닌" in outcome.result.answer
 
 
 def _successful_dps(**values) -> FakeDps:

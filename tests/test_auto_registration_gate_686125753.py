@@ -305,17 +305,29 @@ def test_asserting_an_unsupported_subquestion_still_signals() -> None:
 # ------------------------------------- cause 3: the auto-registration gate
 
 
-def test_this_inquiry_becomes_auto_postable() -> None:
-    """The whole point: a grounded answer with a safe hold can publish."""
+def test_this_inquiry_now_holds_on_the_delivery_half_not_on_a_classifier_gap() -> None:
+    """분류기 공백은 사라졌고, 남은 보류 사유는 운영정책이다.
+
+    "삼성센터AS무상기간알려주세요 배송기한얼마나생각하면될까요?" 의 두 번째
+    하위질문은 구매 전 고객의 배송 소요 기간 문의(유형 A)다. 확정된 운영정책상
+    자동답변하지 않는다.
+
+    이 파일이 원래 없애려던 결함 -- 문장이 키워드 표에 없다는 이유만으로
+    UNCLASSIFIED 가 되어 근거 있는 답변까지 막히던 것 -- 은 그대로 해결되어
+    있다. 지금 보류하는 이유는 분류 실패가 아니라 정책 판단이고, 조회는 여전히
+    필요 없다.
+    """
 
     result = _gate()
-    assert result.decision == "SAFE", result.reasons
-    assert result.reasons == ()
-    # Prose-aware splitting now keeps each complete question intact, so the
-    # former UNCLASSIFIED fragment no longer exists and needs no soft waiver.
     analysis = ANALYSIS.analyze(_request())
-    assert analysis.manual_review_required is False
+
+    assert result.decision == "REVIEW_REQUIRED"
+    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
     assert "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR" not in result.soft_reasons
+    assert analysis.manual_review_required is True
+    assert "UNCLASSIFIED" not in analysis.manual_review_sources
+    assert analysis.requires_order_lookup is False
+    assert analysis.requires_dps_lookup is False
 
 
 @pytest.mark.parametrize(

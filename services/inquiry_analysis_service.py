@@ -30,7 +30,62 @@ from services.semantic_analysis import (
     NOTIFICATION_POLICY,
     ORDER_IDENTIFICATION,
     SemanticAnalysis,
+    delivery_schedule_needs_review,
+    purchase_confirmed as semantic_purchase_confirmed,
 )
+
+# The subtype names the finding, and ``manual_review_sources`` is built from
+# the subtype, so this one string is both. Eligibility reads the source to
+# tell a policy decision apart from a classifier gap: anything that is not
+# "UNCLASSIFIED" keeps its hold. Kept as the subtype this branch has always
+# used -- the finding is the same one, only its consequence changed.
+PRE_PURCHASE_DELIVERY_REVIEW_SOURCE = "PRE_PURCHASE_DELIVERY_GUIDANCE"
+# The semantic-side finding, which covers pre-purchase and ambiguous alike.
+# Distinct from the keyword subtype above so an operator can tell which stage
+# made the call.
+DELIVERY_SCHEDULE_REVIEW_SOURCE = "DELIVERY_SCHEDULE_UNCONFIRMED_PURCHASE"
+
+# Intents that already mean "this customer's current schedule". The semantic
+# layer agrees with all of them, so it has nothing to add by relabelling.
+CURRENT_SCHEDULE_INTENTS: frozenset[str] = frozenset({
+    "DELIVERY_DATE", "DELIVERY_TIME", "DELIVERY_STATUS",
+    "INSTALLATION_DATE", "INSTALLATION_TIME",
+})
+
+# The hold is narrower than the route. ``_is_pre_purchase_delivery`` sends a
+# question here on a delivery *context* that includes 설치, which is what makes
+# "이 제품 벽걸이 설치 가능한가요?" and "기존 벽에 타공구멍이 있는데 같은 곳에
+# 타공 설치 가능한지" land in this branch -- neither asks when anything arrives.
+# Routing is unchanged for them (same subtype, still no order or DPS lookup);
+# only the review hold is withheld, so an installation question does not become
+# staff work as a side effect of a delivery policy.
+#
+# What the policy is actually about is *when the customer receives it*, so the
+# hold needs either a delivery noun or a timing word.
+# When the semantic analyzer is off, this is the only thing standing between a
+# pre-purchase customer and an invented delivery date, so it has to make the
+# call from wording alone. It is an approximation of
+# ``SemanticAnalysis.asks_delivery_schedule`` and nothing more -- when the
+# understanding is available it overrides this entirely, in both directions.
+#
+# A timing word is required, not merely a delivery noun. The branch that routes
+# here fires on a delivery *context* that includes 설치 and on feasibility
+# wording, so "이 제품 벽걸이 설치 가능한가요?" and "지금 주문하면 배송은 보통
+# 어떻게 진행되나요?" both arrive -- one asks whether installation fits, the
+# other asks how the process works, and neither asks when anything comes.
+PRE_PURCHASE_DELIVERY_TIMING_WORDS = (
+    "언제", "며칠", "몇일", "얼마나", "기간", "소요", "날짜", "일자", "예정일",
+    "당일", "익일", "바로", "오늘", "내일", "모레", "이번주", "다음주",
+    "주말", "평일", "같은날", "월요일", "화요일", "수요일", "목요일",
+    "금요일", "토요일", "일요일",
+)
+
+
+def _asks_about_delivery_timing(question: str) -> bool:
+    """Whether the question is about *when*, judged from wording alone."""
+
+    compact = re.sub(r"\s+", "", str(question or ""))
+    return any(word in compact for word in PRE_PURCHASE_DELIVERY_TIMING_WORDS)
 
 
 GENERAL_ORDER_ID_PATTERN = re.compile(r"(?<!\d)\d{16}(?!\d)")
@@ -553,6 +608,34 @@ POST_PURCHASE_DELIVERY_WORDS = (
     "운송장",
 )
 
+# Customers state a completed order attributively at least as often as with
+# 주문했: "주문한 제품 배송 예정일은 언제인가요", "제가 주문한 상품 언제
+# 배송되나요". The word list above could not carry the bare stem, because
+# 주문한다면 / 주문한다고 are the conditional and quotative forms of the
+# *opposite* state -- a customer who has not ordered and is asking what would
+# happen if they did. Matching those as a completed purchase would hand a
+# pre-purchase customer the order-number request, which is the mistake the
+# purchase-state policy exists to prevent. The lookahead is the whole
+# difference: 주문한 + 다/대 is the conditional, anything else is the noun it
+# modifies. Applied to whitespace-stripped text, so "주문한 상품" reads as
+# "주문한상품".
+POST_PURCHASE_ATTRIBUTIVE = re.compile(r"주문한(?![다대])")
+
+# "7월4일 주문", "7/4 주문" -- a date attached to 주문 is the day it was placed,
+# which only an order that exists can have. The general-policy branch already
+# read it that way; this is the same fact, named once so both branches agree.
+POST_PURCHASE_ORDER_DATE = re.compile(r"\d{1,2}(?:월|[./-])\d{1,2}(?:일)?주문")
+
+
+def _states_completed_order(compact: str) -> bool:
+    """Whether whitespace-stripped text says a purchase has already happened."""
+
+    if any(word in compact for word in POST_PURCHASE_DELIVERY_WORDS):
+        return True
+    if POST_PURCHASE_ATTRIBUTIVE.search(compact):
+        return True
+    return bool(POST_PURCHASE_ORDER_DATE.search(compact))
+
 
 class InquiryAnalysisService:
     """Deterministic first-pass analysis used before any provider call."""
@@ -779,9 +862,7 @@ class InquiryAnalysisService:
         ):
             return False
         compact = re.sub(r"[\s\W_]+", "", str(question or "")).lower()
-        if any(word in compact for word in POST_PURCHASE_DELIVERY_WORDS):
-            return False
-        if re.search(r"\d{1,2}(?:월|[./-])\d{1,2}(?:일)?주문", compact):
+        if _states_completed_order(compact):
             return False
         # A general delivery-policy question is one concept, and it had three
         # separate definitions: this word list, the rule engine's shipping
@@ -829,6 +910,19 @@ class InquiryAnalysisService:
             word in compact for word in PRE_PURCHASE_FEASIBILITY_WORDS
         ) or is_weekend_delivery_policy_question(question)
         return feasibility and not EXPLICIT_WHEN.search(compact)
+
+    @staticmethod
+    def _has_current_order_evidence(
+        question: str,
+        *,
+        has_order_evidence: bool,
+    ) -> bool:
+        """Return only affirmative current-order evidence for fallback use."""
+
+        if has_order_evidence:
+            return True
+        compact = re.sub(r"[\s\W_]+", "", str(question or "")).lower()
+        return _states_completed_order(compact)
 
     # A connector joins two clauses, but it does not on its own mean there
     # are two questions: "50인치, 60인치 중 어떤 게 좋나요" is one comparison.
@@ -921,18 +1015,88 @@ class InquiryAnalysisService:
         manual = deterministic.manual_review_required
         sources = list(deterministic.manual_review_sources)
         reasons = list(deterministic.reasons)
+        requires_order_id_override: bool | None = None
 
         if requires_current_schedule:
             requires_order = True
             requires_dps = True
-            detected_intent = (
-                "INSTALLATION_DATE"
-                if INSTALLATION_SCHEDULE in actions else "DELIVERY_STATUS"
-            )
+            # Only name the intent when the deterministic analysis has not
+            # already named a more specific one. Both agree this is a current
+            # schedule question; DELIVERY_TIME says the customer asked what
+            # *time*, and overwriting it with DELIVERY_STATUS threw that away
+            # -- the answer builder reads this to decide whether to talk about
+            # a visiting hour at all.
+            if detected_intent not in CURRENT_SCHEDULE_INTENTS:
+                detected_intent = (
+                    "INSTALLATION_DATE"
+                    if INSTALLATION_SCHEDULE in actions else "DELIVERY_STATUS"
+                )
         elif is_context_or_policy:
             # Event/review context plus "when" or "order number" is not a
             # current delivery schedule solely because broad keywords match.
             reasons.append("semantic routing suppressed keyword delivery/DPS route")
+
+        # Any order identifier the platform attached proves the order exists,
+        # even one this system cannot validate. "ORDER-123" is not a general
+        # order number and a product order id is not either, but a customer
+        # with neither an order nor a purchase in their words does not have one
+        # of those sitting on their inquiry. Requiring a *validated* id here
+        # read three such customers as unconfirmed and took away the
+        # order-number request that is the correct next step for them.
+        order_evidence_on_record = bool(
+            deterministic.order_id_present
+            or deterministic.order_id_validated
+            or deterministic.order_id_status in {
+                OrderIdStatus.VALIDATED, OrderIdStatus.INVALID,
+                OrderIdStatus.AMBIGUOUS, OrderIdStatus.CANDIDATE_FOUND,
+            }
+        )
+        if delivery_schedule_needs_review(
+            semantic, order_id_validated=order_evidence_on_record,
+        ):
+            # Both confirmed policies, as one rule: the customer is asking when
+            # they will receive something and no order is known to exist. There
+            # is no schedule to report, so nothing may be published.
+            #
+            # Order and DPS go off, and the order-number request goes with
+            # them. Demanding an order number from a customer who may not have
+            # ordered is the ambiguous case's version of inventing a delivery
+            # period for the pre-purchase one -- both answer a question the
+            # system cannot answer, and the conditional phrasing ("이미
+            # 주문하셨다면...") is not currently used either.
+            manual = True
+            sources.append(DELIVERY_SCHEDULE_REVIEW_SOURCE)
+            reasons.append(
+                "구매 완료가 확인되지 않은 배송 일정 문의는 자동답변하지 "
+                "않습니다."
+            )
+            requires_order = False
+            requires_dps = False
+            requires_order_id_override = False
+            if strategy is AnswerStrategy.REQUEST_ORDER_ID:
+                strategy = AnswerStrategy.GENERAL_GUIDANCE
+        elif PRE_PURCHASE_DELIVERY_REVIEW_SOURCE in sources:
+            # The keyword tier read this as a pre-purchase delivery question
+            # and the understanding disagrees. Measured: "1. 무타공 설치인가요?
+            # 2. 브라켓 별도 구매해야하나요? ..." matched the feasibility tier
+            # on "설치 가능" and was held, though none of its four atomic
+            # questions is about delivery at all -- they are installation
+            # method, package contents and a product concept.
+            #
+            # Semantic-first, the same precedence this method already applies
+            # to the keyword delivery/DPS route. Only this hold is lifted: any
+            # other source keeps its own, so a risk or cancel finding beside it
+            # is untouched.
+            sources = [
+                source for source in sources
+                if source != PRE_PURCHASE_DELIVERY_REVIEW_SOURCE
+            ]
+            if not sources:
+                manual = False
+            reasons.append(
+                "semantic 이해가 구매 전 배송 문의가 아니라고 판단해 "
+                "키워드 기반 보류를 해제했습니다."
+            )
 
         if requires_order_context:
             if ORDER_IDENTIFICATION in actions:
@@ -983,13 +1147,19 @@ class InquiryAnalysisService:
             inquiry_subtype=subtype,
             requires_order_lookup=requires_order,
             requires_dps_lookup=requires_dps,
-            requires_order_id=requires_order,
+            requires_order_id=(
+                requires_order if requires_order_id_override is None
+                else requires_order_id_override
+            ),
             answer_strategy=strategy,
             detected_intent=detected_intent,
             manual_review_required=manual,
             auto_answerable=not manual,
             reasons=tuple(dict.fromkeys(reasons)),
             manual_review_sources=tuple(dict.fromkeys(sources)),
+            purchase_confirmed=semantic_purchase_confirmed(
+                semantic, order_id_validated=order_evidence_on_record,
+            ),
             subquestion_analyses=subquestion_analyses,
         )
 
@@ -1354,16 +1524,34 @@ class InquiryAnalysisService:
             reasons.append("배송·설치 알림 방식에 대한 일반 정책 문의입니다.")
         elif pre_purchase_delivery:
             kind = InquiryType.INSTALLATION_GENERAL
-            subtype = "PRE_PURCHASE_DELIVERY_GUIDANCE"
+            subtype = PRE_PURCHASE_DELIVERY_REVIEW_SOURCE
             requires_order = False
             requires_dps = False
             strategy = AnswerStrategy.GENERAL_GUIDANCE
             confidence = 0.99
-            manual = False
+            # Confirmed operating policy: a delivery question from a customer
+            # who has not ordered is never answered automatically.
+            #
+            # There is no delivery period to give them. It depends on when
+            # they pay, on the installer's calendar and on stock, none of
+            # which exist yet, so any number in the answer is either another
+            # customer's history or an average -- and the model produced
+            # exactly that when left to it. Measured on real past inquiries:
+            # "지금 구매하면 정상적으로 받을 수 있나요" was answered "배송·
+            # 설치까지 약 3~4주 소요될 예정입니다" with nothing behind the
+            # figure, and "오늘 12시전 주문하면 출고예정일 좀 알려주세요" was
+            # answered with a same-day-dispatch cutoff and "보통 1~2영업일"
+            # while its own evidence row said NO_RELIABLE_SOURCE.
+            #
+            # Order and DPS stay suppressed, which was already right -- there
+            # is no order to look up. The hold is the part that was missing.
+            manual = _asks_about_delivery_timing(question)
             detected_intent = "PRE_PURCHASE_DELIVERY"
-            reasons.append(
-                "주문 전 배송·설치 가능 여부를 묻는 일반 정책 문의입니다."
-            )
+            if manual:
+                reasons.append(
+                    "주문 전 배송 문의는 안내할 확정 배송기간이 없어 "
+                    "직원 검토가 필요합니다."
+                )
         elif detected_intent in {
             "DELIVERY_DATE",
             "DELIVERY_TIME",
@@ -1383,6 +1571,21 @@ class InquiryAnalysisService:
             confidence = 0.98
             manual = False
             detected_intent = detected_intent or "DELIVERY_DATE"
+            if not self._has_current_order_evidence(
+                question,
+                has_order_evidence=bool(
+                    has_order or has_product_order or candidates or long_numbers
+                ),
+            ):
+                # No usable semantic interpretation is available on this
+                # fallback path. A delivery outcome without affirmative
+                # current-order evidence is ambiguous, not a request for an
+                # order number: fail closed without Order/DPS access.
+                subtype = "UNCONFIRMED_DELIVERY_OUTCOME"
+                requires_order = False
+                requires_dps = False
+                strategy = AnswerStrategy.GENERAL_GUIDANCE
+                manual = True
             reasons.append("배송 또는 설치 일정 확인 표현을 찾았습니다.")
         elif any(word in question for word in ORDER_STATUS_WORDS):
             kind = InquiryType.ORDER_STATUS

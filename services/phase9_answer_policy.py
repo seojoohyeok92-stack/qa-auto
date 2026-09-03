@@ -76,6 +76,17 @@ DELIVERY_LOOKUP_REQUIRED_ANSWER = format_final_answer(
 조회가 완료되기 전에는 일반 안내 문구나 임의의 일정을 답변으로 사용하지 않습니다."""
 )
 
+# No order exists to look up. Saying "주문 조회가 필요합니다" to a customer who
+# has not ordered -- or whose message never said they had -- describes work the
+# pipeline has already decided not to do, and points them at an order number
+# they may not have. The hold is the same; only the sentence differs, because
+# the reason differs.
+DELIVERY_SCHEDULE_REVIEW_ANSWER = format_final_answer(
+    """문의하신 배송·설치 일정은 담당자가 확인 후 안내드리겠습니다.
+
+주문이 확인되지 않은 상태에서는 예상 일정을 임의로 안내드리지 않습니다."""
+)
+
 DELIVERY_MANUAL_REVIEW_ANSWER = DELIVERY_LOOKUP_FAILED_ANSWER
 
 DELIVERY_CHANGE_REVIEW_ANSWER = format_final_answer(
@@ -483,18 +494,26 @@ def apply_phase9_rule_policy(
     # two cannot drift.
     if analysis.delivery_question:
         change_request = _is_schedule_change(analysis)
+        # The plan may already have decided this inquiry needs no order
+        # evidence -- a customer who has not ordered, or whose message never
+        # said they had. Telling them an order lookup is pending contradicts
+        # that decision and asks them to produce an order number for an order
+        # that may not exist. Read from the analysis, so the sentence and the
+        # routing cannot disagree.
+        no_order_to_look_up = not analysis.requires_order_lookup
+        if no_order_to_look_up and not change_request:
+            template = "PHASE9_DELIVERY_SCHEDULE_REVIEW"
+            answer = DELIVERY_SCHEDULE_REVIEW_ANSWER
+        elif change_request:
+            template = "PHASE9_DELIVERY_CHANGE_REVIEW"
+            answer = DELIVERY_CHANGE_REVIEW_ANSWER
+        else:
+            template = "PHASE9_DELIVERY_LOOKUP_REQUIRED"
+            answer = DELIVERY_LOOKUP_REQUIRED_ANSWER
         return routed_result(
             route="DELIVERY_LOOKUP_REQUIRED",
-            template=(
-                "PHASE9_DELIVERY_CHANGE_REVIEW"
-                if change_request
-                else "PHASE9_DELIVERY_LOOKUP_REQUIRED"
-            ),
-            answer=(
-                DELIVERY_CHANGE_REVIEW_ANSWER
-                if change_request
-                else DELIVERY_LOOKUP_REQUIRED_ANSWER
-            ),
+            template=template,
+            answer=answer,
             answer_type="manual_review_required",
             source="SAFE_TEMPLATE",
             requires_review=True,

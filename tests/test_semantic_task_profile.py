@@ -169,7 +169,10 @@ def test_the_transport_body_carries_the_options(monkeypatch) -> None:
 
 
 def test_the_prompt_still_requests_every_field_the_gate_reads() -> None:
-    from services.gpt_semantic_analyzer_service import GptSemanticAnalyzerService
+    from services.gpt_semantic_analyzer_service import (
+        PROMPT_BUDGET,
+        GptSemanticAnalyzerService,
+    )
 
     class Provider:
         name = "p"
@@ -185,7 +188,18 @@ def test_the_prompt_still_requests_every_field_the_gate_reads() -> None:
     ):
         assert field in prompt, field
     # Still no prose budget: this is paid on every semantic call.
-    assert len(prompt) < 1400
+    #
+    # 1400 was this prompt's own length (1386) before purchase_state,
+    # asks_delivery_schedule and asks_delivery_outcome existed -- three output
+    # fields the purchase-state safety policy now reads, each needing a rule
+    # the model can apply. Measured floor with *every* sentence of policy prose
+    # deleted, keeping only the header, the field contract and the inquiry, is
+    # 1101; the three fields' rules cannot be stated in the 299 characters that
+    # would leave. So the ceiling is set from what the contract actually costs,
+    # not from what would make this line pass: 2272 measured, 2400 here. Prose
+    # creep still fails -- there is 128 characters of slack, not room to think
+    # out loud in.
+    assert len(prompt) < PROMPT_BUDGET
 
 
 def test_the_prompt_separates_asking_for_a_date_from_asking_what_it_is() -> None:

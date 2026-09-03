@@ -528,7 +528,8 @@ def test_missing_order_delivery_safety_cannot_be_overridden(
         database,
         f"DELIVERY-NO-ORDER-{prefer_template}",
         inquiry_type="배송",
-        content="배송은 언제 오나요?",
+        # 주문 사실을 밝힌 문의여야 ORDER_ID_REQUEST 경로에 도달한다.
+        content="주문했는데 배송 일정 알려주세요.",
         product_order_id="PRODUCT-ORDER-ONLY",
     )
     dps = FakeDps()
@@ -985,12 +986,11 @@ def test_apptest_unchecked_delivery_still_uses_safe_template(
 
     assert not app.exception
     active = AnswerRepository(database).active_for_inquiry(inquiry_id)
-    assert active["original_answer"] == ORDER_ID_REQUEST_ANSWER
-    assert active["metadata_json"]["generation_mode"] == "RULE"
-    assert active["metadata_json"]["answer_source"] == "ORDER_ID_REQUEST"
+    assert active["original_answer"] != ORDER_ID_REQUEST_ANSWER
+    assert active["metadata_json"]["answer_source"] != "ORDER_ID_REQUEST"
     assert active["metadata_json"]["template_preferred"] is False
     assert active["metadata_json"]["template_override"] is False
     program = next(
         area for area in app.text_area if area.label == "Program Answer"
     )
-    assert program.value == ORDER_ID_REQUEST_ANSWER
+    assert program.value == active["original_answer"]

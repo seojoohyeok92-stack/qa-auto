@@ -63,7 +63,8 @@ def test_promised_date_deadline_with_order_is_dps_eligible() -> None:
 
 
 def test_installation_date_without_order_keeps_safe_order_request() -> None:
-    result = analyze("언제 설치되나요?", order_id="")
+    # 구매 사실이 확인되는 문의여야 주문번호 요청 경로에 도달한다.
+    result = analyze("어제 주문했는데 언제 설치되나요?", order_id="")
 
     assert result.inquiry_type is InquiryType.ORDER_INFO_REQUIRED
     assert result.requires_dps_lookup is True

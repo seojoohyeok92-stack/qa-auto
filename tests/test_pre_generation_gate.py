@@ -468,7 +468,8 @@ def test_H_a_missing_order_number_still_takes_the_template_path():
     Skipping generation must never remove it: the customer would get nothing.
     """
 
-    analysis = _analysis_for("배송 언제 오나요?")
+    # 구매 사실이 확인되는 문의여야 주문번호 요청 경로에 도달한다.
+    analysis = _analysis_for("어제 주문했는데 배송 언제 오나요?")
     assert analysis["answer_strategy"] == "REQUEST_ORDER_ID"
     assert PreGenerationGate.evaluate_plan(
         analysis=analysis, plan={}

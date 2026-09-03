@@ -358,7 +358,13 @@ class ProductKnowledgeResult:
 
         groups = required_fact_groups(question)
         if not groups:
-            return self.has_safe_facts
+            # Not "everything is covered" -- nothing was identified to cover.
+            # Returning ``has_safe_facts`` here let the mere existence of a
+            # catalogued value vouch for a question that never asked for it,
+            # and that answer then cleared the auto-post product-fact hold.
+            # A question whose claims this model cannot name is a question
+            # the catalog cannot be said to answer.
+            return False
         safe = self.safe_field_keys()
         return all(bool(safe.intersection(group)) for group in groups)
 
@@ -463,14 +469,23 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
     for group in required_fact_groups(text):
         fields.extend(group)
     for keywords, base_fields, accessory_fields in FIELD_TOPICS:
-        if not any(keyword in text for keyword in keywords):
+        present = [keyword for keyword in keywords if keyword in text]
+        if not present:
+            continue
+        # A word the customer used only to take something *out* of the
+        # question does not put that topic in it. "기존 벽걸이 티비 제거는
+        # 무상인가요?" names a wall mount in order to have it hauled away;
+        # answering it with this product's VESA holes is a fact about a
+        # different object. Same reading ``asks_about_a_bundled_component``
+        # already applies to component scope, applied to topic scope.
+        if all(_is_excluded_mention(text, keyword) for keyword in present):
             continue
         if (
             "installation_method" in base_fields
             and any(marker in text for marker in INSTALLATION_SCHEDULE_MARKERS)
         ):
             continue
-        topics.append(keywords[0])
+        topics.append(present[0])
         fields.extend(base_fields)
         # A bare "this product's VESA holes" means the base display even when
         # the customer says they plan to install a wall bracket.  Accessory

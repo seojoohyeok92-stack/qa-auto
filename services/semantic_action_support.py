@@ -51,6 +51,7 @@ from services.semantic_analysis import (
     PRODUCT_SPEC,
     REPAIR,
     SCHEDULE_CHANGE,
+    SCHEDULE_QUESTION_ACTIONS,
     SCHEDULE_REQUEST,
     STORE_PICKUP,
     SemanticAnalysis,
@@ -106,9 +107,12 @@ ANSWER_ACTION_SUPPORT: dict[str, frozenset[str]] = {
 # does. A DPS schedule answer states a date; an order-id request states
 # nothing at all and asks the customer for a number.
 ROUTE_ACTION_SUPPORT: dict[str, frozenset[str]] = {
-    "DELIVERY_WITH_INSTALLATION_DATE": frozenset({
-        DELIVERY_STATUS, INSTALLATION_SCHEDULE,
-    }),
+    # A confirmed date answers every way of asking when, so this reads the
+    # shared definition rather than repeating a subset of it. Listing only
+    # DELIVERY_STATUS and INSTALLATION_SCHEDULE here made a correct DPS answer
+    # look like a mismatch whenever the analyzer labelled the question
+    # SCHEDULE_REQUEST, which is how "언제설치가능한가요?" came back.
+    "DELIVERY_WITH_INSTALLATION_DATE": SCHEDULE_QUESTION_ACTIONS,
     "PRODUCT_DB": frozenset({PRODUCT_SPEC, PRODUCT_CONCEPT}),
 }
 

@@ -13,16 +13,90 @@ DATE_RANGE = re.compile(
     r"(?:20\d{2}\s*[년./-]\s*\d{1,2}(?:\s*[월./-]\s*\d{1,2})?)|"
     r"(?:\d{1,2}\s*월\s*\d{1,2}\s*일(?:까지|부터)?)"
 )
-TEMPORARY = re.compile(
-    r"하계\s*휴가|휴무|설\s*연휴|추석|명절|감사제|기간\s*한정|"
-    r"프로모션|이벤트|행사(?:\s*기간|\s*페이지)?|리뷰\s*이벤트|"
-    r"배송\s*지연\s*공지|온누리.{0,20}(?:혜택|환급)|한시적|"
-    r"브랜드\s*위크|쇼핑\s*라이브|라이브\s*전용\s*쿠폰|"
+# Wording that bounds an answer to a window all by itself: a closure, a
+# limited run, a claim about how things stand right now.
+SELF_BOUNDED_PERIOD = re.compile(
+    r"하계\s*휴가|휴무|설\s*연휴|추석|명절|기간\s*한정|한시적|"
+    r"배송\s*지연\s*공지|브랜드\s*위크|쇼핑\s*라이브|라이브\s*전용\s*쿠폰|"
     r"현재.{0,30}(?:판매|재고).{0,8}(?:중|가능)",
     re.IGNORECASE,
 )
+# The *name* of a programme. Naming one is not being bound to one, and that
+# was the whole difference: nine approved answers -- three of them
+# human-verified -- were withheld from "포토리뷰 언제 받을 수 있나요?" because
+# they say the words "리뷰 이벤트". What they actually state is a standing
+# rule, "네이버폼 작성일 기준 다음달 초 5영업일 내에 지급", which is as true
+# today as when it was written. Naming the programme makes an answer temporary
+# only when the answer also puts a boundary on it.
+PROGRAMME_NAME = re.compile(
+    r"프로모션|이벤트|행사(?:\s*기간|\s*페이지)?|감사제|"
+    r"온누리.{0,20}(?:혜택|환급)",
+    re.IGNORECASE,
+)
+# What puts a boundary on a programme: an end, a cap, or a claim about how
+# things stand at this moment. "감사제 주문량 증가로 배송이 평소보다 지연되고
+# 있습니다" names no date and never ends with a word like 까지, yet it is only
+# true while that is happening -- 평소보다 says so by comparing to normal.
+PERIOD_BOUNDARY = re.compile(
+    r"까지|마감|종료|선착순|소진|한정|기간\s*내|진행\s*중|진행중|"
+    r"이번\s*(?:주|달|월)|다음\s*주까지|평소보다|현재|지금"
+)
+
+
+def is_time_bound(answer: str) -> bool:
+    """Whether this answer is only true inside some window."""
+
+    if DATE_RANGE.search(answer) or SELF_BOUNDED_PERIOD.search(answer):
+        return True
+    return bool(PROGRAMME_NAME.search(answer) and PERIOD_BOUNDARY.search(answer))
+
+
+# The weaker question -- does this text mention anything time-flavoured at all.
+# Kept for the re-audit service, which asks it of a *question* to decide event
+# context. Answer eligibility uses ``is_time_bound``.
+TEMPORARY = re.compile(
+    f"{SELF_BOUNDED_PERIOD.pattern}|{PROGRAMME_NAME.pattern}", re.IGNORECASE
+)
+
+
+# A statement about *this* asker's own order: its identifier, or the day it is
+# scheduled for. Both are true of exactly one customer, so neither can be
+# evidence for anybody else.
+#
+# The list below grew from literal shapes and had gaps an ordinary sentence
+# walks straight through. "고객님의 주문번호는 2026****1251 입니다" missed
+# because a possessive 의 sits between the two words the pattern required
+# adjacent, and "주문하신 상품은 8/7(금) 설치 예정" missed because the date
+# detector only recognised ranges and 월/일 spelling, not a bare 8/7. Both were
+# promoted as SAFE_REUSABLE evidence for other customers' inquiries.
+#
+# These three add the *kinds* rather than the two sentences: a possessive or
+# relative reference to the asker's order, an identifier read back to them, and
+# a specific calendar day given as their schedule.
+# Naming the person makes any of these theirs. A bare demonstrative does not:
+# "해당 제품은 QLED 패널을 사용합니다" points at the product under discussion,
+# which is how every catalogue answer refers to it, so 해당 only marks the
+# asker's own when it sits on something an order actually has.
+_ASKERS_ORDER = (
+    r"(?:고객님|귀하)(?:의|께서)?\s*(?:주문|상품|제품|배송|설치)"
+    r"|해당\s*(?:주문|배송|설치|건)"
+    r"|(?:주문|구매|결제)하신\s*(?:상품|제품|건)"
+)
+_IDENTIFIER_READ_BACK = (
+    r"(?:주문|상품주문|판매|운송장|송장)\s*번호(?:는|은|가|:)\s*[\d*]{4,}"
+)
+# A named day paired with what is scheduled for it. The day alone is not
+# enough -- "9월 5일까지 신청" is a campaign deadline, not one order's date --
+# so the schedule word has to be there too.
+_SCHEDULED_DAY = (
+    r"(?:설치|배송|출고|도착)\s*(?:예정일?|예정)?\s*(?:은|는|이|가)?\s*"
+    r"\d{1,2}\s*(?:[./월]\s*)\d{1,2}\s*(?:일)?"
+    r"|\d{1,2}\s*[./월]\s*\d{1,2}\s*(?:일)?\s*\(?[월화수목금토일]?\)?\s*"
+    r"(?:설치|배송|출고|도착)\s*예정"
+)
 ORDER_SPECIFIC = re.compile(
-    r"(?:고객님|해당)\s*(?:주문|상품)|배송\s*완료(?:로|처리)|"
+    rf"{_ASKERS_ORDER}|{_IDENTIFIER_READ_BACK}|{_SCHEDULED_DAY}|"
+    r"배송\s*완료(?:로|처리)|"
     r"(?:발송|출고|구성품|스탠드|본품).{0,24}(?:누락|완료|진행)|"
     r"누락(?:된|된 것으로|으로)|익일\s*(?:출고|발송)|"
     r"(?:오늘|내일|금일)\s*(?:출고|발송|도착)|송장\s*번호|"
@@ -148,7 +222,7 @@ class HistoricalLearningQualityService:
         concept_coverage = len(shared) / max(len(q_core), 1)
         lexical = self._lexical_alignment(question, answer)
         alignment = round(0.78 * concept_coverage + 0.22 * lexical, 4)
-        temporal = bool(DATE_RANGE.search(answer) or TEMPORARY.search(answer))
+        temporal = is_time_bound(answer)
         order_specific = bool(ORDER_SPECIFIC.search(answer))
         risk = str(policy_risk or "NONE").upper()
         unsupported_answer_concepts = a_core - q_core

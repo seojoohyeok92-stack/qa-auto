@@ -303,9 +303,47 @@ def _learning_context(question: str, *, match="EXACT_MODEL", conflict=False):
 
 
 # GS-01
-def test_gs01_delivery_without_order_posts_confirmed_request_template(database):
+def test_gs01_delivery_without_a_stated_order_is_held_not_posted(database):
+    """Nothing here says an order exists, so nothing may be published.
+
+    This used to post the order-number request. The purchase-state policy
+    treats demanding an order number from someone who may not have ordered as
+    the same error as quoting them a delivery period, so the inquiry is held
+    and the draft is a review-safe one. GPT and DPS stay untouched either way.
+    """
+
     inquiry_id = _insert(
         database, "GS-01", "배송이 언제쯤 되는지 확인 부탁드립니다.",
+        inquiry_type="배송",
+    )
+    order = RecordingOrderLookup()
+    dps = RecordingDps()
+    outcome, client, draft = _run(
+        database, inquiry_id, _template_service(database, order=order, dps=dps)
+    )
+    metadata = draft["metadata_json"]
+    assert outcome.succeeded_count == 0
+    assert client.calls == 0
+    assert metadata["selected_answer_route"] == "DELIVERY_LOOKUP_REQUIRED"
+    assert metadata["requires_manual_review"] is True
+    assert metadata["gpt_called"] is False
+    assert metadata["dps_lookup_attempted"] is False
+    assert metadata["validator_result"]["status"] == "PASS_REVIEW_REQUIRED"
+    # What the policy is actually about: no order and no DPS access, and no
+    # order number demanded of a customer who never said they had one.
+    assert order.calls == []
+    assert dps.calls == 0
+
+
+# GS-01o
+def test_gs01o_the_same_question_with_an_order_posts_the_request_template(
+    database,
+):
+    """The order-number request template is not gone -- it is now conditional."""
+
+    inquiry_id = _insert(
+        database, "GS-01o",
+        "어제 주문했는데 배송이 언제쯤 되는지 확인 부탁드립니다.",
         inquiry_type="배송",
     )
     dps = RecordingDps()
@@ -397,8 +435,34 @@ def test_gs04_schedule_change_blocks_even_with_healthy_order_and_dps(database):
 
 # GS-05
 def test_gs05_plain_schedule_lookup_is_not_change_request(database):
+    """Asking what the date is, versus asking us to move it.
+
+    Both are held now, so the post count no longer separates them; the
+    template does. A lookup gets the schedule-review sentence, a change request
+    gets the change-review one, and reading them the wrong way round is what
+    this case exists to catch.
+    """
+
     inquiry_id = _insert(
         database, "GS-05", "설치 예정일이 언제인가요?", inquiry_type="배송"
+    )
+    outcome, client, draft = _run(
+        database, inquiry_id, _template_service(database)
+    )
+    metadata = draft["metadata_json"]
+    assert outcome.succeeded_count == 0 and client.calls == 0
+    assert metadata["selected_answer_route"] == "DELIVERY_LOOKUP_REQUIRED"
+    assert metadata["template_id"] == "PHASE9_DELIVERY_SCHEDULE_REVIEW"
+    assert metadata["template_id"] != "PHASE9_DELIVERY_CHANGE_REVIEW"
+
+
+# GS-05o
+def test_gs05o_schedule_lookup_with_an_order_reaches_the_request_template(
+    database,
+):
+    inquiry_id = _insert(
+        database, "GS-05o", "제가 주문한 상품 설치 예정일이 언제인가요?",
+        inquiry_type="배송",
     )
     outcome, client, draft = _run(
         database, inquiry_id, _template_service(database)
@@ -570,21 +634,28 @@ def test_gs11_placeholder_never_reaches_post_client(database):
 @pytest.mark.parametrize(
     "question,expected_post",
     [
-        ("배송 언제 와요", 1),
-        ("배송 언제되나요", 1),
-        ("설치 언제 오나요", 1),
-        ("기사님 언제 오시나요", 1),
-        ("배송 일정 확인 부탁드려요", 1),
-        ("설치 예정일 알려주세요", 1),
-        ("언제쯤 배송될까요", 1),
-        ("설치일이 궁금합니다", 1),
-        ("배송 날짜가 언제인가요", 1),
-        ("기사 방문 예정일 확인해주세요", 1),
+        # A schedule question with nothing said about an order. These used to
+        # post the order-number request; under the purchase-state policy there
+        # may be no order to ask about, so they are held for staff instead.
+        ("배송 언제 와요", 0),
+        ("배송 언제되나요", 0),
+        ("설치 언제 오나요", 0),
+        ("기사님 언제 오시나요", 0),
+        ("배송 일정 확인 부탁드려요", 0),
+        ("설치 예정일 알려주세요", 0),
+        ("언제쯤 배송될까요", 0),
+        ("설치일이 궁금합니다", 0),
+        ("배송 날짜가 언제인가요", 0),
+        ("기사 방문 예정일 확인해주세요", 0),
+        ("설치 일정 조회 부탁드립니다", 0),
+        ("배송일 확인 가능할까요", 0),
+        ("설치 날짜 언제예요", 0),
+        # The same shape with the order stated -- 배송상태 and 주문한 both say
+        # a purchase exists -- still reaches the order-number request and posts.
         ("배송 상태와 예정일 알려주세요", 1),
-        ("설치 일정 조회 부탁드립니다", 1),
         ("주문한 제품 배송 예정일은 언제인가요", 1),
-        ("배송일 확인 가능할까요", 1),
-        ("설치 날짜 언제예요", 1),
+        ("어제 주문했는데 배송 언제 와요", 1),
+        ("제가 주문한 상품 설치 날짜 언제예요", 1),
         ("이번 주로 당겨주세요", 0),
         ("설치일을 하루만 앞당길 수 있나요", 0),
         ("배송 날짜 변경 가능할까요", 0),

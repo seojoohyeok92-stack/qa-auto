@@ -29,6 +29,13 @@ from services.auto_processing_eligibility_service import (
 )
 
 
+# Mirrors services/inquiry_analysis_service.py's constant of the same name.
+# Duplicated rather than imported to keep this gate free of a service-layer
+# import cycle -- the same intentional duplication the learning modules use
+# for their shared regexes.
+PRE_PURCHASE_DELIVERY_REVIEW_SOURCE = "PRE_PURCHASE_DELIVERY_GUIDANCE"
+
+
 @dataclass(frozen=True)
 class PreGenerationDecision:
     """Whether to compose an answer, and the final gate's reason if not."""
@@ -121,6 +128,17 @@ class PreGenerationGate:
         if (
             str(analysis.get("inquiry_subtype") or "").upper()
             == "COMPOUND_MULTI_INTENT"
+        ):
+            return True
+        # A pre-purchase delivery question is held from publishing, not from
+        # being written. It is the same case as the schedule request above:
+        # there is a deterministic safe answer for it, it states no date and
+        # promises nothing, and handing staff that draft to edit beats handing
+        # them an empty reply. Holding the *answer* and refusing to *draft* it
+        # are different decisions, and only the first is the policy.
+        if (
+            str(analysis.get("inquiry_subtype") or "").upper()
+            == PRE_PURCHASE_DELIVERY_REVIEW_SOURCE
         ):
             return True
         return bool(analysis.get("delivery_question")) and not bool(

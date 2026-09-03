@@ -69,6 +69,24 @@ class PromptBuilder:
         "인사말(예: 안녕하세요)과 마무리 인사(예: 감사합니다)는 별도 Template이 "
         "자동으로 추가하므로 답변 본문에 포함하지 않는다."
     )
+    # negative_corrections carry what a member of staff wrote down after
+    # rejecting a past answer: which claim was wrong, and what should have
+    # been said. They constrain the answer; they never license one. The last
+    # two lines matter most -- a Negative was saved about one claim, and
+    # widening it into "avoid this whole subject" throws away correct
+    # knowledge, which is the failure mode this section exists to prevent.
+    NEGATIVE_CORRECTION_INSTRUCTIONS: tuple[str, ...] = (
+        "negative_corrections의 bad_patterns에 있는 잘못된 내용을 "
+        "다시 답변하지 않는다.",
+        "관련된 corrections의 교정 방향을 답변에 반영한다.",
+        "corrections에 적혀 있지 않은 교정 내용을 만들어내지 않는다.",
+        "negative_corrections는 제약이며, 그 자체로 답변 가능 여부를 "
+        "결정하지 않는다.",
+        "교정 범위는 지적된 claim에만 적용한다. 같은 주제의 다른 "
+        "올바른 사실까지 취소하지 않는다.",
+        "Approved Positive 근거가 맞다면 그 사실은 유지하고, 잘못된 "
+        "부분만 corrections에 따라 바로잡는다.",
+    )
     OUTPUT_CONTRACTS: dict[str, dict[str, Any]] = {
         "UNDERSTANDING": {
             "category": "string",
@@ -126,6 +144,7 @@ class PromptBuilder:
                         "enum": [
                             "ANSWERABLE", "NEEDS_DPS",
                             "NO_RELIABLE_SOURCE", "CONFLICT",
+                            "DELIVERY_SCHEDULE_REVIEW",
                         ]
                     },
                     "learning_ids": ["integer"],
@@ -268,6 +287,18 @@ class PromptBuilder:
                 "never_choose_between_conflicting_verified_facts": True,
                 "report_each_feedback_signal_id_actually_used": True,
             },
+            # Only present when a Negative memo was actually retrieved for this
+            # inquiry, so an inquiry with no relevant Negative keeps exactly
+            # the prompt it had before this contract existed.
+            **(
+                {
+                    "negative_correction_instructions": list(
+                        self.NEGATIVE_CORRECTION_INSTRUCTIONS
+                    )
+                }
+                if (extra or {}).get("negative_corrections")
+                else {}
+            ),
             "installation_date_instructions": (
                 [
                     "확정된 설치예정일이 있으면 고객에게 자연스럽게 안내한다.",

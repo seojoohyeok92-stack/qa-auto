@@ -10,8 +10,11 @@ installation notices are sent*, and that was auto-posted to a customer asking
 about their own shipment.
 
 These tests pin the shape of the question rather than its spelling, and they
-pin both directions: a current-order schedule question must require an order
-lookup, and a notification-policy or pre-purchase question must not become one.
+pin every direction the shape can go: a notification-policy or pre-purchase
+question must never become a schedule lookup, and among the real schedule
+questions the *evidence about the order* decides the route -- nothing said
+about a purchase holds the inquiry for staff, a stated purchase asks for the
+order number, and an order number present reaches the order and DPS lookups.
 """
 from __future__ import annotations
 
@@ -62,7 +65,7 @@ def is_order_number_required(analysis: dict) -> bool:
 
 
 # --------------------------------------------------------------------------
-# DR-01 .. DR-06 -- a current-order schedule question, however it is worded
+# DR-01 .. DR-06 -- a schedule question with no order behind it, however worded
 # --------------------------------------------------------------------------
 
 
@@ -87,13 +90,38 @@ def is_order_number_required(analysis: dict) -> bool:
         ("DR-05d", "배송 일정 알려주세요."),
     ],
 )
-def test_current_schedule_question_requires_an_order_number(
+def test_unconfirmed_schedule_question_is_held_without_touching_an_order(
     case: str, question: str
 ) -> None:
+    """The shape is still recognised; what follows it changed.
+
+    Every question here asks when the customer receives something and says
+    nothing about having ordered. Detecting the shape is what 686472270 needed
+    and it still happens -- the intent below is a delivery/installation date,
+    not the notification fall-through that was auto-posted.
+
+    What the pipeline does next is now the purchase-state policy: with no
+    statement of a purchase there may be no order at all, so asking for an
+    order number answers a question the system cannot answer, exactly as
+    quoting a delivery period would. The inquiry is held for staff and no
+    order, DPS or order-number path runs. That is strictly safer than the
+    order-number request this used to assert, and the harm the case was
+    written against -- an automatic answer about someone's shipment -- is
+    still prevented.
+    """
+
     analysis = analyse(question)
 
-    assert analysis["requires_order_lookup"] is True, case
-    assert is_order_number_required(analysis), (case, analysis["answer_strategy"])
+    assert analysis["detected_intent"] in {
+        "DELIVERY_DATE", "INSTALLATION_DATE",
+    }, (case, analysis["detected_intent"])
+    assert analysis["inquiry_subtype"] == "UNCONFIRMED_DELIVERY_OUTCOME", case
+    assert analysis["manual_review_required"] is True, case
+    assert analysis["requires_order_lookup"] is False, case
+    assert analysis["requires_dps_lookup"] is False, case
+    assert not is_order_number_required(analysis), (
+        case, analysis["answer_strategy"]
+    )
 
 
 def test_dr01_the_exact_production_question_no_longer_falls_through() -> None:
@@ -101,10 +129,61 @@ def test_dr01_the_exact_production_question_no_longer_falls_through() -> None:
 
     analysis = analyse("언제 발송되나요?")
 
-    assert analysis["inquiry_subtype"] == "DELIVERY_OR_INSTALLATION_SCHEDULE"
+    assert analysis["inquiry_subtype"] == "UNCONFIRMED_DELIVERY_OUTCOME"
     assert analysis["detected_intent"] == "DELIVERY_DATE"
-    assert analysis["question_category"] == "ORDER_INFO_REQUIRED"
-    assert analysis["requires_order_lookup"] is True
+    assert analysis["question_category"] == "DELIVERY_INSTALLATION_STATUS"
+    assert analysis["manual_review_required"] is True
+    assert analysis["requires_order_lookup"] is False
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 주문했 -- the finite past form the word list always carried.
+        "어제 주문했는데 언제 발송되나요?",
+        # 주문한 + noun -- the attributive form, which it did not. Measured:
+        # both of these were held as unconfirmed, so a customer who had said
+        # plainly that they ordered got staff review instead of the order
+        # number request that would have answered them.
+        "제가 주문한 상품 언제 배송되나요?",
+        "주문한 제품 배송 예정일은 언제인가요?",
+    ],
+)
+def test_an_explicit_current_order_still_asks_for_the_order_number(
+    question: str,
+) -> None:
+    """The other side of the purchase-state branch, on the same shape.
+
+    The hold above is about not knowing whether an order exists. When the
+    customer says one does, the order-number request is the right next step
+    and must survive -- otherwise the policy would have replaced one wrong
+    answer with a dead end for every customer who actually ordered.
+    """
+
+    analysis = analyse(question)
+
+    assert analysis["requires_order_lookup"] is True, question
+    assert is_order_number_required(analysis), (
+        question, analysis["answer_strategy"]
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # 주문한다면 / 주문한다고 look like the attributive form and mean the
+        # opposite: no order exists yet. They must not reach the order path.
+        "지금 주문한다면 언제 배송되나요?",
+        "오늘 주문한다고 하면 언제 받을 수 있나요?",
+    ],
+)
+def test_a_conditional_order_is_not_read_as_a_current_one(question: str) -> None:
+    analysis = analyse(question)
+
+    assert analysis["requires_order_lookup"] is False, question
+    assert analysis["requires_dps_lookup"] is False, question
+    assert not is_order_number_required(analysis), question
+    assert analysis["manual_review_required"] is True, question
 
 
 # --------------------------------------------------------------------------
@@ -214,34 +293,48 @@ def test_non_schedule_questions_do_not_ask_for_an_order_number(
 @pytest.mark.parametrize(
     "source_type", ["PRODUCT_INQUIRY", "CUSTOMER_INQUIRY"]
 )
-def test_dr15_external_inquiry_type_does_not_block_the_order_lookup(
+def test_dr15_external_inquiry_type_does_not_decide_the_route(
     source_type: str,
 ) -> None:
-    """A product-board question can still be about the asker's own order."""
+    """The Naver board an inquiry arrived on is still not the intent.
 
-    inquiry = {
-        "id": 1,
-        "source_type": source_type,
-        "inquiry_type": source_type,
-        "source_question_id": "dr15",
-        "external_inquiry_id": "dr15",
-        "title": "상품 문의",
-        "content": "언제 발송되나요?",
-        "product_name": PRODUCT,
-        "order_id": "",
-        "product_order_id": "",
-        "raw_json": {},
-        "source_answered": 0,
-        "post_status": "NOT_POSTED",
-    }
-    analysis = (
-        InquiryAnalysisService()
-        .analyze(answer_request_from_inquiry(inquiry))
-        .to_dict()
-    )
+    Both boards reach the same place, which is the point of the case. Where
+    that place is now depends on the purchase state rather than the board:
+    "언제 발송되나요?" says nothing about an order, so both are held.
+    """
 
-    assert analysis["requires_order_lookup"] is True
-    assert is_order_number_required(analysis)
+    def analysis_for(content: str) -> dict:
+        inquiry = {
+            "id": 1,
+            "source_type": source_type,
+            "inquiry_type": source_type,
+            "source_question_id": "dr15",
+            "external_inquiry_id": "dr15",
+            "title": "상품 문의",
+            "content": content,
+            "product_name": PRODUCT,
+            "order_id": "",
+            "product_order_id": "",
+            "raw_json": {},
+            "source_answered": 0,
+            "post_status": "NOT_POSTED",
+        }
+        return (
+            InquiryAnalysisService()
+            .analyze(answer_request_from_inquiry(inquiry))
+            .to_dict()
+        )
+
+    unconfirmed = analysis_for("언제 발송되나요?")
+    assert unconfirmed["detected_intent"] == "DELIVERY_DATE"
+    assert unconfirmed["manual_review_required"] is True
+    assert unconfirmed["requires_order_lookup"] is False
+    assert not is_order_number_required(unconfirmed)
+
+    # Same board, same shape, a purchase stated: the order path is reached.
+    ordered = analysis_for("어제 주문했는데 언제 발송되나요?")
+    assert ordered["requires_order_lookup"] is True
+    assert is_order_number_required(ordered)
 
 
 # --------------------------------------------------------------------------
@@ -373,17 +466,36 @@ def test_case_b_verbatim_requires_dps() -> None:
     assert analysis["requires_dps_lookup"] is True
 
 
-def test_the_two_cases_share_one_intent_and_differ_only_on_the_order_number() -> None:
-    """The branch the pipeline is supposed to make, stated as one assertion."""
+def test_the_three_cases_share_one_intent_and_differ_on_the_order_evidence() -> None:
+    """The branch the pipeline is supposed to make, stated as one assertion.
 
-    without = analyse("언제 발송되나요?")
+    One shape, three states of evidence about the order behind it. The intent
+    is the same in all three -- that is 686472270's fix -- and the evidence is
+    what decides how far the pipeline may go.
+    """
+
+    nothing_said = analyse("언제 발송되나요?")
+    said_ordered = analyse("어제 주문했는데 언제 발송되나요?")
     with_order = analyse("모니터 언제 발송되나요?", order_id=CASE_B_ORDER)
 
-    assert without["detected_intent"] == with_order["detected_intent"] == "DELIVERY_DATE"
-    assert without["requires_order_lookup"] is with_order["requires_order_lookup"] is True
+    assert (
+        nothing_said["detected_intent"]
+        == said_ordered["detected_intent"]
+        == with_order["detected_intent"]
+        == "DELIVERY_DATE"
+    )
 
-    # No order number -> ask for it, and do not touch DPS.
-    assert is_order_number_required(without)
+    # Nothing said about an order -> hold; no order, DPS or order-number path.
+    assert nothing_said["manual_review_required"] is True
+    assert nothing_said["requires_order_lookup"] is False
+    assert nothing_said["requires_dps_lookup"] is False
+    assert not is_order_number_required(nothing_said)
+
+    # A purchase stated but no number -> ask for it, and do not touch DPS.
+    assert said_ordered["requires_order_lookup"] is True
+    assert is_order_number_required(said_ordered)
+
     # Order number present -> look it up and consult DPS.
+    assert with_order["requires_order_lookup"] is True
     assert with_order["answer_strategy"] == "DIRECT_FACT_ANSWER"
     assert with_order["requires_dps_lookup"] is True

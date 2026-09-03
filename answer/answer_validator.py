@@ -216,6 +216,17 @@ def ungrounded_feature_claims(answer: str, evidence: str) -> list[str]:
     return list(dict.fromkeys(findings))
 
 
+# Sub-question states from which the answer may state nothing. Both mean the
+# same thing to this rule -- there is no source for this item -- and differ
+# only in why. PRE_PURCHASE_DELIVERY_REVIEW is a policy decision rather than
+# an absence of evidence, and it belongs here for the same reason: a delivery
+# period stated to a customer who has not ordered is a claim with nothing
+# behind it, whichever way the pipeline arrived at having nothing to say.
+_UNGROUNDED_STATUSES = frozenset(
+    {"NO_RELIABLE_SOURCE", "DELIVERY_SCHEDULE_REVIEW"}
+)
+
+
 class AnswerValidator:
     def validate_route(
         self,
@@ -836,7 +847,7 @@ class AnswerValidator:
             leaked_subquestions = [
                 str(item.get("subquestion") or "")
                 for item in subquestion_evidence
-                if str(item.get("status") or "") == "NO_RELIABLE_SOURCE"
+                if str(item.get("status") or "") in _UNGROUNDED_STATUSES
                 and str(item.get("evidence_coverage") or "") == "UNSUPPORTED"
                 and (
                     set(classify_topics(item.get("subquestion")))

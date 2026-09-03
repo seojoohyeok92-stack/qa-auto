@@ -218,7 +218,7 @@ def test_a_fast_path_inquiry_is_understood_before_routing(
     assert REASON_CODE not in result["reasons"]
 
 
-def test_off_and_on_agree_on_a_fast_path_inquiry(
+def test_semantic_off_fails_closed_while_usable_semantic_keeps_policy_answer(
     tmp_path, monkeypatch,
 ) -> None:
     seen = {}
@@ -232,8 +232,11 @@ def test_off_and_on_agree_on_a_fast_path_inquiry(
         )
         assert len(provider.calls) == (0 if mode == "0" else 1)
 
-    for field in ("decision", "answer", "validation_status", "route"):
-        assert seen["0"][field] == seen["1"][field], field
+    # The fallback has no purchase-state understanding, so a delivery outcome
+    # without affirmative order evidence must be held.  A usable semantic
+    # analysis can recognise this as a general delivery-policy question.
+    assert seen["0"]["decision"] == "REVIEW_REQUIRED"
+    assert seen["1"]["decision"] == "SAFE"
 
 
 # ==========================================================================

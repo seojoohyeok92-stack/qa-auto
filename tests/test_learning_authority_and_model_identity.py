@@ -215,8 +215,18 @@ def test_human_verified_alone_no_longer_outranks_staff_work(database) -> None:
 
 
 def test_the_ladder_is_ordered(database) -> None:
+    """승인된 두 경로는 한 tier, 대량 verified seller 답변은 그 아래.
+
+    이전에는 APPROVED_EDITED(8) > APPROVED_UNEDITED(6) 이었다.  직원이 초안을
+    고쳐야 했다는 사실을 "그 답변이 더 믿을 만하다"로 읽은 것인데, 두 행 모두
+    사람이 최종 답변을 읽고 승인한 같은 관문을 통과했다.  provenance 구분은
+    그대로 남아 있고(``classify_provenance`` 는 여전히 둘을 구별한다), trust
+    만 같아진다.  한 건씩 승인 경로를 거치지 않은 대량 verified seller 답변이
+    그 아래라는 구분은 실제로 trust 에 대해 말해 주는 것이므로 유지한다.
+    """
+
     assert (LEARNING_AUTHORITY[APPROVED_EDITED]
-            > LEARNING_AUTHORITY[APPROVED_UNEDITED]
+            == LEARNING_AUTHORITY[APPROVED_UNEDITED]
             > LEARNING_AUTHORITY[SELLER_ANSWER_VERIFIED])
     promoted = row(database, add(
         database, question="과거 사례", answer="과거에는 이렇게 안내했습니다.",
@@ -253,13 +263,21 @@ def _four_provenances(database: Database) -> dict[str, int]:
 
 
 def test_equally_relevant_candidates_rank_by_who_wrote_them(database) -> None:
+    """승인 여부는 순서를 정하고, 수정 여부는 정하지 않는다.
+
+    A(수정 후 승인)와 B(수정 없이 승인)는 이제 같은 tier 라서 서로의 순서가
+    고정되지 않는다.  둘 다 C(대량 verified seller 답변)보다 앞서고,
+    D(historical promoted)는 여전히 후보에 들지 않는다는 것이 이 테스트가
+    실제로 지키려던 구분이다.
+    """
+
     ids = _four_provenances(database)
     order = ranked_ids(database, QUESTION)
 
-    assert order == [ids["A"], ids["B"], ids["C"]], (
-        "A > B > C > D must hold when relevance and compatibility do not "
-        "separate the candidates"
+    assert set(order[:2]) == {ids["A"], ids["B"]}, (
+        "두 승인 경로가 대량 verified seller 답변보다 앞서야 한다"
     )
+    assert order[2] == ids["C"]
     assert ids["D"] not in order
 
 

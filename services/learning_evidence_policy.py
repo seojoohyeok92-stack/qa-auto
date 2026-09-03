@@ -278,11 +278,46 @@ UNKNOWN_PROVENANCE = "UNKNOWN_PROVENANCE"
 # compatibility gate have already accepted as equally applicable. It is not a
 # licence to admit anything: a class absent from this table keeps whatever the
 # existing source table gives it.
+#
+# APPROVED_EDITED and APPROVED_UNEDITED share one number on purpose. The table
+# used to read 8 and 6, which said an answer is more trustworthy because a
+# member of staff had to change it. That is the wrong question. Both rows
+# reached the store through the same gate -- a person read the final answer and
+# approved it -- and the edit only records how the text got to the state they
+# approved. An answer GPT wrote correctly the first time and an answer a member
+# of staff rewrote are, once approved, the same claim about the world with the
+# same person behind it.
+#
+# The distinction itself is kept: ``classify_provenance`` still returns
+# APPROVED_EDITED / APPROVED_UNEDITED, both classes still appear here, and
+# ``learning_source`` / ``answer_provenance`` still record which path an answer
+# took, so operations can still ask how often drafts need editing. It just no
+# longer decides which Learning to believe. Inside this tier, relevance,
+# atomic-question match, product/model scope, validity and answer support
+# choose -- all of which are about *this* question, which is what "which
+# Learning is right here" actually depends on.
+HUMAN_APPROVED_TRUST = 8
 LEARNING_AUTHORITY: Mapping[str, int] = {
-    APPROVED_EDITED: 8,
-    APPROVED_UNEDITED: 6,
+    APPROVED_EDITED: HUMAN_APPROVED_TRUST,
+    APPROVED_UNEDITED: HUMAN_APPROVED_TRUST,
+    # Bulk-verified Naver answers stay below both: nobody approved them one by
+    # one through the review path, which is the distinction that does mean
+    # something about trust.
     SELLER_ANSWER_VERIFIED: 4,
 }
+
+# The provenance classes a person explicitly approved, one at a time. Callers
+# ask this rather than comparing the two names, so no new call site can
+# reintroduce an edited/unedited trust gap.
+HUMAN_APPROVED_PROVENANCES: frozenset[str] = frozenset(
+    {APPROVED_EDITED, APPROVED_UNEDITED}
+)
+
+
+def human_approved_trust(item: Mapping[str, Any]) -> bool:
+    """Whether this Learning row carries the human-approved trust tier."""
+
+    return classify_provenance(item) in HUMAN_APPROVED_PROVENANCES
 
 
 def classify_provenance(item: Mapping[str, Any]) -> str:
@@ -307,6 +342,72 @@ def classify_provenance(item: Mapping[str, Any]) -> str:
     if provenance == "NAVER_POSTED":
         return SELLER_ANSWER_VERIFIED
     return UNKNOWN_PROVENANCE
+
+
+# An answer that asks the customer for their order number only makes sense
+# when the answer depends on *that customer's* order. Retrieval had no way to
+# see this: a stored answer for "내 주문 언제 와요?" and one for "주문 전인데
+# 며칠 걸려요?" share every delivery word, so the first was reused for the
+# second and a customer who had explicitly not ordered yet was asked for an
+# order number. The distinction is not a phrase to exclude, it is a scope --
+# the semantic understanding already says whether this question needs
+# customer-specific order evidence, and this reads whether the candidate
+# answer only works inside that scope.
+_ORDER_IDENTIFIER_REQUEST: tuple[re.Pattern[str], ...] = (
+    # A demand, not a mention. "주문번호는 네이버 주문내역에서 확인하실 수
+    # 있습니다" tells the customer where their own number lives and is
+    # perfectly reusable before an order exists, so a bare 확인 is not enough
+    # -- the verb has to be directed at the customer.
+    re.compile(
+        r"주문\s*번호[^\n]{0,24}"
+        r"(?:알려|남겨|기재해|입력해|회신|부탁|요청|유도|"
+        r"안내\s*(?:를)?\s*(?:해야|하는|필요)|"
+        r"확인\s*(?:해|하여)?\s*주|확인이\s*필요|전달\s*(?:해|하여)?\s*주)"
+    ),
+    re.compile(
+        r"(?:알려|남겨|기재|입력|전달|회신)[^\n]{0,14}주문\s*번호"
+    ),
+    re.compile(r"주문\s*번호를?\s*(?:함께|같이)?\s*(?:비밀글|비공개)"),
+)
+
+
+# The other half of the same scope. "설치예정일이 있을경우 날짜를 안내해야함"
+# is sound advice about a customer whose installation is already booked, and
+# nonsense for one who has not ordered -- there is no date to look up. Mirrors
+# learning_context_service's schedule regex, duplicated here for the same
+# reason answer_diff_classifier duplicates it: neither module may perturb the
+# retrieval module's own behaviour.
+_CURRENT_SCHEDULE_SCOPE = re.compile(
+    r"예정일|도착일|설치일|출고일|배송\s*일자|내\s*주문|주문한\s*(?:제품|상품)"
+)
+
+
+def current_schedule_scope_reason(text: object) -> str | None:
+    """Whether this text only makes sense for an order that already exists."""
+
+    body = _text(text)
+    if not body:
+        return None
+    found = _CURRENT_SCHEDULE_SCOPE.search(body)
+    return found.group(0) if found else None
+
+
+def order_identifier_request_reason(answer: object) -> str | None:
+    """Which "tell us your order number" phrasing this answer carries, or None.
+
+    Read as scope, never as a keyword ban: an answer that merely mentions an
+    order number ("주문번호는 네이버 주문내역에서 확인하실 수 있습니다") is
+    describing where to find one, not demanding one, and stays usable.
+    """
+
+    text = _text(answer)
+    if not text:
+        return None
+    for pattern in _ORDER_IDENTIFIER_REQUEST:
+        found = pattern.search(text)
+        if found:
+            return found.group(0)[:60]
+    return None
 
 
 def contamination_reason(value: object) -> str | None:

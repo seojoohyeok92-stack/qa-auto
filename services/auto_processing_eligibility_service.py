@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +77,34 @@ class AutoProcessingEligibility:
     @property
     def safe(self) -> bool:
         return self.decision == "SAFE"
+
+
+# A delivery duration, a dispatch cut-off, or an arrival date. Read from the
+# answer rather than from the question, because that is where the harm is: the
+# question can be classified any way at all, and what reaches the customer is
+# the sentence.
+#
+# Measured need. "지금 구매하면 정상적으로 받을 수 있나요" was understood as
+# PRE_PURCHASE but not as a schedule question -- defensibly, since it asks
+# whether delivery will happen rather than when -- and the answer still came
+# back "배송 및 설치까지 약 3~4주 소요될 예정입니다" for a customer with no
+# order. No number like that can be right before an order exists: it depends on
+# when they pay, on the installer's calendar, and on stock.
+_DELIVERY_PERIOD_CLAIM = re.compile(
+    r"\d+\s*~\s*\d+\s*(?:일|영업일|주|개월)"
+    r"|약\s*\d+\s*(?:일|영업일|주|개월)"
+    r"|\d+\s*(?:영업일|주일|개월)"
+    r"|\d+\s*(?:주|일)\s*(?:정도|가량|이내|안에|쯤)"
+    r"|당일\s*발송|익일\s*발송"
+    r"|\d{1,2}\s*월\s*\d{1,2}\s*일에?\s*(?:배송|도착|설치|출고|받)"
+)
+
+
+def delivery_period_claim(answer: object) -> str | None:
+    """Which delivery-period claim this answer makes, or None."""
+
+    found = _DELIVERY_PERIOD_CLAIM.search(str(answer or ""))
+    return found.group(0) if found else None
 
 
 class AutoProcessingEligibilityService:
@@ -371,6 +401,20 @@ class AutoProcessingEligibilityService:
         # validator, so an unclassified intent is recorded but stops blocking
         # once that validator has passed with nothing to report. Genuine high
         # risk, and any validator finding at all, still block.
+        # Publishing policy, applied to what the answer actually says. The
+        # routing rules hold a *question* the understanding recognised as a
+        # schedule question; this holds an *answer* that names a delivery
+        # period when no order is known to exist, whatever the question was
+        # classified as. Confirmed orders are untouched -- for them the period
+        # comes from DPS and is a real date.
+        if not bool(analysis.get("purchase_confirmed")):
+            period = delivery_period_claim(
+                draft.get("final_answer")
+                or draft.get("edited_answer")
+                or draft.get("original_answer")
+            )
+            if period is not None:
+                reasons.append("UNCONFIRMED_PURCHASE_DELIVERY_PERIOD")
         if bool(plan.get("is_high_risk")):
             reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
         elif bool(analysis.get("manual_review_required")):

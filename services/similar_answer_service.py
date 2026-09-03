@@ -5,7 +5,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any
 
-from answer.evidence_support import apply_answer_support
+from answer.evidence_support import SUPPORTED_THRESHOLD, apply_answer_support
 from repositories.learning_repository import LearningRepository
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
@@ -16,6 +16,7 @@ from services.learning_evidence_policy import (
     classify_provenance,
     contamination_reason,
     estimation_reason,
+    order_identifier_request_reason,
 )
 from services.learning_privacy_service import LearningPrivacyService
 
@@ -61,6 +62,11 @@ def normalize_learning_question(value: object) -> str:
 # needs a total order; the cost is that a near-tie straddling a band edge falls
 # back to pure relevance, which errs toward leaving the existing order alone.
 AUTHORITY_TIE_BAND = 0.01
+
+# How similar a stored question has to be before its answer counts as an answer
+# to this one. See the SEMANTIC_QUESTION_MATCH branch in ``search`` for the
+# measurement behind it.
+SEMANTIC_QUESTION_MATCH_RELEVANCE = 0.60
 
 
 def _band(value: float) -> int:
@@ -165,7 +171,13 @@ class SimilarAnswerService:
                 return 2
             return 4
         if source == "APPROVED_UNEDITED":
-            return 3
+            # Same number as APPROVED_EDITED, for the same reason the
+            # LEARNING_AUTHORITY table gives them one tier: both were approved
+            # by a person, and whether the draft needed editing first says
+            # nothing about whether the approved answer is right. This branch
+            # only runs for rows with no ``human_verified`` metadata, so it is
+            # the legacy mirror of that table and has to agree with it.
+            return 5
         if legacy_source == "LEGACY_RULE":
             return 2
         if legacy_source == "LEGACY_GPT":
@@ -186,6 +198,24 @@ class SimilarAnswerService:
     ) -> list[dict[str, Any]]:
         query = normalize_learning_question(self.privacy.mask(question))
         semantic_goal = semantic_goal or {}
+        # Tri-state on purpose. ``False`` is the semantic understanding
+        # actively saying this sub-question does not depend on the customer's
+        # own order; ``None`` is no understanding at all, and leaves every
+        # candidate exactly as eligible as it was before this gate existed.
+        order_evidence_required = semantic_goal.get("order_evidence_required")
+        order_evidence_required = (
+            bool(order_evidence_required)
+            if isinstance(order_evidence_required, bool)
+            else None
+        )
+        # Whether this sub-question turns on a date -- the customer's own
+        # schedule, or one that does not exist yet. Tri-state like the field
+        # above: ``None`` means no understanding, and every gate that reads it
+        # then behaves as it did before it existed.
+        schedule_scoped = semantic_goal.get("schedule_scoped")
+        schedule_scoped = (
+            bool(schedule_scoped) if isinstance(schedule_scoped, bool) else None
+        )
         requested_information = str(
             semantic_goal.get("requested_information") or ""
         ).strip()
@@ -216,6 +246,7 @@ class SimilarAnswerService:
             "CONTEXT_POLICY_REJECTED": 0,
             "REDACTION_TOKEN_CONTAMINATED": 0,
             "SEMANTIC_GOAL_MISMATCH": 0,
+            "ORDER_SCOPE_MISMATCH": 0,
         }
         compatibility_diagnostics: list[dict[str, Any]] = []
         type_mismatch_count = 0
@@ -237,6 +268,28 @@ class SimilarAnswerService:
             if contamination_reason(item.get("final_answer")) is not None:
                 rejection_counts["REDACTION_TOKEN_CONTAMINATED"] += 1
                 continue
+            # "주문 전인데 배송일 지정 되나요?" and "제 주문 언제 와요?" share
+            # every delivery word, so an approved answer written for the second
+            # ranked top for the first and the customer -- who had just said
+            # they had not ordered -- was asked for an order number. Only the
+            # semantic understanding can tell these apart, and when it says
+            # this sub-question needs no customer-specific order evidence, an
+            # answer that exists to collect an order number cannot answer it.
+            if order_evidence_required is False:
+                order_scope = order_identifier_request_reason(
+                    item.get("final_answer")
+                )
+                if order_scope is not None:
+                    rejection_counts["ORDER_SCOPE_MISMATCH"] += 1
+                    if len(compatibility_diagnostics) < 40:
+                        compatibility_diagnostics.append({
+                            "learning_id": int(item["id"]),
+                            "eligible": False,
+                            "similarity": None,
+                            "reject_reason": "ORDER_SCOPE_MISMATCH",
+                            "order_scope_marker": order_scope,
+                        })
+                    continue
             if inquiry_type and item.get("inquiry_type") != inquiry_type:
                 # Inquiry type is intentionally a relevance signal, not a hard
                 # equality filter. Taxonomies differ between old and new data.
@@ -319,10 +372,15 @@ class SimilarAnswerService:
                 rejection_counts["CONTEXT_POLICY_REJECTED"] += 1
                 continue
             candidate_question = str(item["question_normalized"])
-            relevance = max(
+            # Kept before the bonuses below, because the question-match floor
+            # is calibrated on this number alone -- adding product and intent
+            # bonuses first would let an unrelated question clear a bar that
+            # was measured on question similarity.
+            question_relevance = max(
                 self._similarity(variant, candidate_question)
                 for variant in query_variants
             )
+            relevance = question_relevance
             relevance += 0.10 if intent and item.get("intent") == intent else 0
             relevance += 0.08 if product_name and item.get("product_name") == product_name else 0
             relevance += 0.08 if model_code and item.get("model_code") == model_code else 0
@@ -359,6 +417,66 @@ class SimilarAnswerService:
             ):
                 answer_support = max(answer_support, 0.5)
                 support_reason = "SEMANTIC_EXACT_PRODUCT_HUMAN_VERIFIED"
+            elif (
+                required_action
+                # Both sides recorded an action and they are the same one.
+                # Stricter than the floor above, which tolerates a candidate
+                # with no recorded action; looser about product, because a
+                # policy question is not about a product at all.
+                and candidate_action == required_action
+                and human_verified
+                and str(compatibility.topic_match) != "MISMATCH"
+                and self_support >= SUPPORTED_THRESHOLD
+            ):
+                # "포토리뷰 네이버페이 2만원은 언제 받나요?" and the approved
+                # answer "포토리뷰 네이버페이 포인트는 ... 익월 중 지급됩니다"
+                # share two words out of five: 보상/받다 and 포인트/지급 are the
+                # same thing said differently, and lexical overlap scored 0.40
+                # -- below the bar, so a directly-answering approved policy
+                # answer could not settle the question it was written for.
+                # Closing that with a synonym list would be a per-topic rule;
+                # the understanding already says both are BENEFIT, which is
+                # the same judgement made where it belongs.
+                #
+                # Everything the product gate rejected is already gone by this
+                # point, so this widens what counts as *support*, never what
+                # counts as compatible.
+                answer_support = max(answer_support, SUPPORTED_THRESHOLD)
+                support_reason = "SEMANTIC_ACTION_MATCH_HUMAN_VERIFIED"
+            elif (
+                schedule_scoped is False
+                and question_relevance >= SEMANTIC_QUESTION_MATCH_RELEVANCE
+                and estimation_reason(item.get("final_answer")) is None
+            ):
+                # The stored Learning asks the same question. Its answer is
+                # therefore an answer to this one.
+                #
+                # Answer-support measures how much of the question's wording
+                # reappears in the answer, which is a proxy for "does this
+                # answer address the question" and a poor one: a good answer
+                # restates the fact in different words. Measured over the 40
+                # real inquiries, *none* of the 15 Learnings the independent
+                # evaluator called correct reached the 0.5 support bar -- not
+                # one -- so a legacy row could essentially never become
+                # evidence for a decomposed inquiry however well it matched.
+                #
+                # Question-to-question similarity is the signal that was being
+                # thrown away, and the bar is high: 0.60 against a retrieval
+                # threshold of 0.24. On the non-schedule inquiries in that
+                # corpus it separated cleanly -- 8 correct above the bar and 0
+                # incorrect, unchanged anywhere between 0.55 and 0.70, so the
+                # value is the middle of a flat region rather than a number
+                # tuned to a result.
+                #
+                # ``schedule_scoped`` is what keeps it clean. Every incorrect
+                # candidate above the bar was a delivery-schedule question,
+                # where a near-identical past question carries *another
+                # customer's* date and must never be reused. Those are held by
+                # policy or deferred to DPS, and this floor never sees them.
+                # A hedged answer is excluded for the reason it always is: it
+                # commits to nothing.
+                answer_support = max(answer_support, SUPPORTED_THRESHOLD)
+                support_reason = "SEMANTIC_QUESTION_MATCH"
             relevance += 0.6 * answer_support
             if required_action and candidate_action == required_action:
                 relevance += 0.12
@@ -402,6 +520,8 @@ class SimilarAnswerService:
                 "customer_goal": required_action or None,
                 "requested_information": requested_information or None,
                 "atomic_question": atomic_question or None,
+                "order_evidence_required": order_evidence_required,
+                "schedule_scoped": schedule_scoped,
             },
             "product": product_name,
             "inquiry_type": inquiry_type,

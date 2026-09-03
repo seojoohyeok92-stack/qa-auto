@@ -94,18 +94,30 @@ def test_B_production_case_classifies_as_a_schedule_inquiry():
 
 # ------------------------------------------------- C. no order number at all
 def test_C_missing_order_number_keeps_the_existing_request_policy():
-    analysis = _analyze("배송일정을 알 수 있을까요?")
+    # 구매 사실이 확인되는 문의여야 주문번호 요청 정책이 적용된다. 구매 상태가
+    # 확인되지 않으면 요청 대신 보류되는 것이 현재 정책이다.
+    analysis = _analyze("주문했는데 배송일정을 알 수 있을까요?")
     assert analysis.order_id_status.value == "MISSING"
     assert analysis.order_id_validated is False
     assert analysis.answer_strategy.value == "REQUEST_ORDER_ID"
 
 
 def test_C_unlabelled_digits_stay_a_candidate_not_a_validated_order():
-    """A bare 16-digit run could be a card or a tracking number."""
+    """A bare 16-digit run could be a card or a tracking number.
+
+    The number must never be promoted to a validated order, and nothing may be
+    looked up or published on the strength of it. It used to reach the
+    order-number request; asking "이거 맞나요?" alongside makes this a compound
+    the classifier cannot resolve, so it is held for staff instead -- a
+    stricter outcome, and the same guarantee about the digits.
+    """
 
     analysis = _analyze(f"{ORDER_ID} 이거 맞나요? 배송일정 알려주세요")
     assert analysis.order_id_validated is False
-    assert analysis.answer_strategy.value == "REQUEST_ORDER_ID"
+    assert analysis.order_id_status.value != "VALIDATED"
+    assert analysis.requires_order_lookup is False
+    assert analysis.requires_dps_lookup is False
+    assert analysis.manual_review_required is True
 
 
 def test_C_two_labelled_numbers_stay_ambiguous():

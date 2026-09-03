@@ -97,19 +97,24 @@ def test_single_question_is_not_split() -> None:
 # ------------------------------------------------------------- CASE G
 
 # The exact production reproduction: both original symptoms must be gone.
-def test_case_g_six_part_inquiry_generates_draft_and_keeps_dps() -> None:
+def test_case_g_six_part_inquiry_generates_draft_and_is_held() -> None:
     analysis = analyze(SIX_PART)
     # Symptom 1: a Program Answer must now be possible.
     assert analysis.can_generate_answer is True
-    # Symptom 2: the 설치예정일 sub-question keeps the DPS requirement alive.
-    assert analysis.requires_dps_lookup is True
-    assert analysis.requires_order_lookup is True
+    # Symptom 2 was "the 설치예정일 sub-question keeps the DPS requirement
+    # alive", which was how the sub-question proved it had not been dropped.
+    # It proves it differently now: the inquiry never says an order exists, so
+    # the purchase-state policy holds it and suppresses order/DPS rather than
+    # letting a schedule be reported for an order nobody has confirmed.
+    assert analysis.requires_dps_lookup is False
+    assert analysis.requires_order_lookup is False
     # And it is still held for staff, with the compatibility reason kept.
     assert analysis.manual_review_required is True
     assert analysis.detected_intent == "PRODUCT_COMPATIBILITY"
 
     result = evaluate(SIX_PART)
     assert result.safe is False
+    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" in result.reasons
 
 
 # --------------------------------------------------- per-case aggregation
@@ -168,31 +173,63 @@ def test_one_hard_subquestion_blocks_the_whole_inquiry(
 
 # CASE E -- a schedule sub-question keeps order/DPS requirements even when
 # the representative intent is something else.
-def test_case_e_schedule_subquestion_keeps_dps_requirement() -> None:
+def test_case_e_schedule_subquestion_is_not_dropped_from_a_compound() -> None:
+    """The schedule sub-question still decides the compound's outcome.
+
+    It used to prove that by keeping order/DPS alive. With no order stated
+    anywhere in the inquiry the purchase-state policy holds it instead, which
+    is the same sub-question still being noticed -- an A/S-and-installation
+    compound without it is auto-postable (CASE A).
+    """
+
     analysis = analyze(
         "A/S는 어디서 받나요? 설치는 기사님이 해주시나요? "
         "설치예정일은 언제인가요?"
     )
-    assert analysis.requires_dps_lookup is True
-    assert analysis.requires_order_lookup is True
-    assert analysis.manual_review_required is False
+    assert analysis.detected_intent == "INSTALLATION_DATE"
+    assert analysis.requires_dps_lookup is False
+    assert analysis.requires_order_lookup is False
+    assert analysis.manual_review_required is True
 
 
 # CASE I -- a schedule change must not be mistaken for a lookup just because
 # a lookup sits next to it.
 def test_case_i_change_request_survives_next_to_a_lookup() -> None:
     analysis = analyze(
-        "설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요."
+        "어제 주문했는데 설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요."
     )
     assert analysis.manual_review_required is True
     assert analysis.detected_intent == "SCHEDULE_CHANGE"
 
 
+def test_case_i_change_request_is_still_held_without_a_stated_order() -> None:
+    """The lookup half is held on its own, and the change request with it."""
+
+    analysis = analyze(
+        "설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요."
+    )
+    assert analysis.manual_review_required is True
+    assert evaluate(
+        "설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요."
+    ).safe is False
+
+
 # CASE J -- ORDER_ID_REQUEST policy is untouched by aggregation.
-def test_case_j_order_requirement_survives_in_a_compound() -> None:
+def test_case_j_delivery_subquestion_holds_the_whole_compound() -> None:
+    """Aggregation does not dilute the delivery sub-question's policy.
+
+    This asserted the ORDER_ID_REQUEST route survived aggregation. The route
+    for a delivery question with no order stated is now the hold, and the
+    property being checked is the same one: the compound takes the delivery
+    sub-question's outcome rather than the safe A/S half's.
+    """
+
     analysis = analyze("A/S는 어디서 받나요? 배송은 언제 오나요?")
-    assert analysis.requires_order_lookup is True
-    assert analysis.manual_review_required is False
+    assert analysis.detected_intent == "DELIVERY_DATE"
+    assert analysis.requires_order_lookup is False
+    assert analysis.requires_dps_lookup is False
+    assert analysis.manual_review_required is True
+    assert evaluate("A/S는 어디서 받나요? 배송은 언제 오나요?").safe is False
 
 
 # CASE L -- single-question behaviour must be unchanged.
@@ -207,7 +244,8 @@ def test_case_j_order_requirement_survives_in_a_compound() -> None:
         # a question, so it falls to UNCLASSIFIED and is held for staff.
         ("구매내역서 발급해주세요", True),
         ("폐가전 수거 가능한가요?", False),
-        ("설치 예정일이 언제인가요?", False),
+        # Nothing says an order exists, so the schedule question is held.
+        ("설치 예정일이 언제인가요?", True),
     ],
 )
 def test_case_l_single_question_regression(question: str, manual: bool) -> None:
