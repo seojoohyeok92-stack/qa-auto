@@ -56,6 +56,11 @@ from answer.providers.provider_factory import create_gpt_provider
 from services.gpt_semantic_analyzer_service import (
     GptSemanticAnalyzerService,
 )
+from services.requested_attribute_coverage import (
+    DETERMINISTIC_ROUTES as ATTRIBUTE_DETERMINISTIC_ROUTES,
+    METADATA_KEY as ATTRIBUTE_COVERAGE_KEY,
+    record as attribute_coverage_record,
+)
 from services.semantic_action_support import (
     evaluate as evaluate_action_support,
 )
@@ -501,6 +506,65 @@ class AnswerService:
                 details={"error_type": type(error).__name__},
             )
 
+    def _record_requested_attribute_coverage(
+        self,
+        inquiry_id: int,
+        result: AnswerResult,
+        semantic: Any,
+    ) -> None:
+        """Record whether the property the customer asked for was answered.
+
+        The action gate above compares what the customer wanted *done* against
+        what the answer addresses. This compares something narrower and, on the
+        measured corpus, decisive: which *property* of that subject was asked.
+
+            "사다리차가 필요하면 비용은 누가 내나요?"  ← "사다리차는 유상입니다"
+            "설치 기사님 안 부르고 받아만 볼 수 있나요?" ← "기사님이 배송 후 설치합니다"
+
+        Both stored answers are about the right product and the right subject,
+        and both leave the asked property -- who bears the cost, whether
+        declining is allowed -- unstated. Four selector designs accepted them.
+
+        Nothing here decides publication. Like the action gate, it is written
+        down and read later by eligibility, which can only add a hold. A fault
+        of any kind leaves no record, and no record holds nothing: this
+        measurement must never be the reason a customer goes unanswered.
+        """
+
+        try:
+            atoms = getattr(semantic, "atomic_questions", ()) or ()
+            if not atoms:
+                return
+            # Nothing upstream establishes which property each piece of
+            # evidence supports yet, so the mismatch test has no input and the
+            # recorder is told so. Only the two conclusions that need no
+            # evidence are drawn. When a verification stage does supply it,
+            # this call is where it arrives.
+            route = str(result.metadata.get("selected_answer_route") or "").upper()
+            payload = attribute_coverage_record(
+                [
+                    {
+                        "atom_id": str(index),
+                        "requested_attribute": item.requested_attribute,
+                        "evidence": (),
+                    }
+                    for index, item in enumerate(atoms)
+                ],
+                evidence_attributes_available=False,
+                # An exact Template, a confirmed RULE and the product catalogue
+                # answered from a source settled before this gate existed. They
+                # keep their precedence untouched.
+                uses_learning_evidence=route not in ATTRIBUTE_DETERMINISTIC_ROUTES,
+            )
+            result.metadata[ATTRIBUTE_COVERAGE_KEY] = payload
+        except Exception:  # noqa: BLE001 - a measurement never blocks an answer
+            self.logs.record_inquiry(
+                inquiry_id,
+                "REQUESTED_ATTRIBUTE_COVERAGE_FAILED",
+                "요구 속성 충족 검사를 기록하지 못했습니다. 답변 처리는 계속합니다.",
+                level="WARNING",
+            )
+
     def _record_semantic_action_support(
         self,
         inquiry_id: int,
@@ -556,6 +620,9 @@ class AnswerService:
                     result.metadata["semantic_action_support"] = support.to_dict()
                     payload["support"] = support.to_dict()
             result.metadata["semantic_analysis"] = payload
+            self._record_requested_attribute_coverage(
+                inquiry_id, result, semantic,
+            )
             self.logs.record_inquiry(
                 inquiry_id,
                 "SEMANTIC_ROUTING_RECORDED",

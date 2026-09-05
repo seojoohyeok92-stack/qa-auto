@@ -7,6 +7,14 @@ from typing import Any
 
 from answer.source_adapter import answer_request_from_inquiry
 from answer.text_utils import is_delivery_deadline_question
+from services.evidence_verification_service import (
+    REASON_CODE as EVIDENCE_NOT_VERIFIED,
+    decision_from_metadata as evidence_verification_decision,
+)
+from services.requested_attribute_coverage import (
+    REASON_CODE as REQUESTED_ATTRIBUTE_NOT_COVERED,
+    decision_from_metadata as requested_attribute_decision,
+)
 from services.semantic_action_support import (
     REASON_CODE as SEMANTIC_ACTION_MISMATCH,
     decision_from_metadata as semantic_action_decision,
@@ -488,6 +496,23 @@ class AutoProcessingEligibilityService:
         action_support = semantic_action_decision(metadata)
         if action_support.mismatched:
             reasons.append(SEMANTIC_ACTION_MISMATCH)
+
+        # The same shape one level narrower: not which action was asked, but
+        # which *property* of it. "비용은 누가 내나요" answered by "유상입니다"
+        # passes every gate above -- right product, right subject, right
+        # action -- and never says who pays. Read from what generation
+        # recorded, never re-derived here; no record holds nothing.
+        attribute_hold, _why = requested_attribute_decision(metadata)
+        if attribute_hold:
+            reasons.append(REQUESTED_ATTRIBUTE_NOT_COVERED)
+
+        # Stored Learning was offered as the grounds and nothing verified.
+        # "사다리차는 유상입니다" against "비용은 누가 내나요" is the shape: right
+        # subject, wrong relation, and every label-level check passes it. The
+        # verdict is read from what generation recorded; no record holds nothing.
+        evidence_hold, _reason = evidence_verification_decision(metadata)
+        if evidence_hold:
+            reasons.append(EVIDENCE_NOT_VERIFIED)
 
         # A date the customer named, which nothing here can promise.
         #

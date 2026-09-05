@@ -123,6 +123,43 @@ PURCHASE_STATES: frozenset[str] = frozenset({
     PRE_PURCHASE, CURRENT_ORDER, UNKNOWN_PURCHASE_STATE,
 })
 
+# Which *property* of the subject the customer wants, as distinct from the
+# subject itself.
+#
+# ``requested_information`` already names the missing fact, and that separated
+# three gift-certificate questions that share one action. It does not separate
+# a question from an answer about the same fact under a different property.
+# Two measured cases:
+#
+#   "사다리차가 필요하면 비용은 누가 내나요?"  answered by "사다리차는 유상입니다"
+#   "설치 기사님 안 부르고 받아만 볼 수 있나요?" answered by "기사님이 배송 후 설치합니다"
+#
+# Both stored answers are about exactly the right subject, and both leave the
+# asked property unstated -- who bears the cost, and whether declining is
+# allowed. Every selector built against topic or subject accepted them.
+#
+# Splitting the question into more facts does not help and costs recall: the
+# subject is already single. What is missing is the property being asked, so
+# evidence stating a *neighbouring* property of the same subject can be told
+# apart from evidence stating the asked one. UNKNOWN is the honest default and
+# never licenses an answer on its own.
+UNKNOWN_ATTRIBUTE = "UNKNOWN"
+REQUESTED_ATTRIBUTES: frozenset[str] = frozenset({
+    "EXISTENCE_OR_CAPABILITY",   # 있는지 / 되는지 / 지원하는지
+    "PERMISSION_OR_OPTION",      # 해도 되는지 / 안 해도 되는지 / 선택 가능한지
+    "ACTOR",                     # 누가 하는지 / 누가 부담하는지
+    "AMOUNT_OR_COST",            # 얼마인지
+    "TIMING",                    # 언제 / 얼마나 걸리는지
+    "METHOD_OR_PROCEDURE",       # 어떻게 하는지
+    "LOCATION_OR_CONTACT",       # 어디서 / 어디에 문의하는지
+    "SPEC_VALUE",                # 규격 / 수치 / 입력값
+    "COMPATIBILITY",             # 호환되는지
+    "INCLUSION",                 # 포함되는지 / 같이 오는지
+    "DIFFERENCE",                # 무엇이 다른지
+    "ACTION_EXECUTION",          # 대신 처리해 달라 (정보 요구가 아니다)
+    UNKNOWN_ATTRIBUTE,
+})
+
 
 class SemanticAnalysisError(ValueError):
     """The model returned something this pipeline cannot safely act on."""
@@ -153,12 +190,17 @@ class AtomicQuestion:
     text: str
     action: str
     requested_information: str = ""
+    # Which property of the requested fact is being asked. Additive: a model
+    # that does not emit it leaves UNKNOWN, and every existing consumer that
+    # reads text/action/requested_information is unaffected.
+    requested_attribute: str = UNKNOWN_ATTRIBUTE
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "text": self.text,
             "action": self.action,
             "requested_information": self.requested_information,
+            "requested_attribute": self.requested_attribute,
         }
 
 
@@ -502,9 +544,15 @@ def parse(raw: object) -> SemanticAnalysis:
         text = _text(item.get("text"), 160)
         if not text:
             continue
+        # Unrecognised or absent reads as UNKNOWN rather than raising: the
+        # field is additive and an older model response must keep parsing.
+        attribute = str(item.get("requested_attribute") or "").strip().upper()
+        if attribute not in REQUESTED_ATTRIBUTES:
+            attribute = UNKNOWN_ATTRIBUTE
         atomic.append(AtomicQuestion(
             text=text, action=action,
             requested_information=_text(item.get("requested_information"), 80),
+            requested_attribute=attribute,
         ))
 
     try:

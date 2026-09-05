@@ -36,6 +36,7 @@ from services.semantic_analysis import (
     OBJECT_STATES,
     PURCHASE_STATES,
     REQUEST_TYPES,
+    REQUESTED_ATTRIBUTES,
     SemanticAnalysis,
     SemanticAnalysisError,
     parse,
@@ -54,10 +55,18 @@ MINIMUM_CONFIDENCE = 0.7
 # 1101 with every sentence of policy prose removed; the rules for
 # purchase_state, asks_delivery_schedule and asks_delivery_outcome -- the three
 # fields the purchase-state safety policy reads -- cannot be stated in what is
-# left under a smaller number. Measured length is 2272, so this leaves 128
+# left under a smaller number. Measured length was 2272, so 2400 left 128
 # characters: enough for another ACTION or two, not enough to explain anything
 # twice. Raise it only with the same kind of measurement.
-PROMPT_BUDGET = 2400
+#
+# Raised once, on measurement. requested_attribute adds a twelve-value closed
+# vocabulary and the one rule that makes it usable; the vocabulary alone is 244
+# characters and cannot be shortened without losing the distinctions it exists
+# to draw. Measured length after the addition is stated by the shadow test.
+# This is the field that separates "누가 부담하는가" from "유상이다" -- two
+# measured auto-posts of evidence that answered a neighbouring property of the
+# right subject. Nothing else in the prompt was lengthened.
+PROMPT_BUDGET = 2800
 
 # The prompt is the contract. No examples, no prose, no "explain your
 # reasoning" -- every token here is paid on every semantic call, and the output
@@ -69,8 +78,10 @@ STATE={states}
 primary_action: one ACTION; secondary_actions: ACTION list, may be []
 request_type: {request_types}
 objects: [{{"type": noun, "states": STATE subset}}]
+ATTR={attributes}
 atomic_questions: [{{"text": str, "action": ACTION,
-  "requested_information": noun phrase naming the fact wanted}}], keep every one
+  "requested_information": noun phrase naming the fact wanted,
+  "requested_attribute": ATTR}}], keep every one
 deadline: date/period the customer requires, else null
 constraints: str list, may be []
 negation, conditional, requires_order_context, requires_delivery_schedule: bool
@@ -90,7 +101,10 @@ delivery or installation is performed, its cost, or what is included.
 해주시나요?" both false.
 
 requested_information is the missing fact, not the topic ("신청 방법" vs
-"지급 시점"). Action is what customer wants, not object state: broken-TV
+"지급 시점"). requested_attribute is which property of it is asked, not the
+subject: "비용은 누가 내나요"=ACTOR not AMOUNT_OR_COST; "안 부르고 받을 수
+있나요"=PERMISSION_OR_OPTION not METHOD_OR_PROCEDURE; "대신 넣어주세요"=
+ACTION_EXECUTION. UNKNOWN when the property is not clear. Action is what customer wants, not object state: broken-TV
 pickup=COLLECTION. Requesting a date=SCHEDULE_REQUEST; asking an existing
 date=INSTALLATION_SCHEDULE or DELIVERY_STATUS. Campaign is context. Order
 ID/other item=ORDER_IDENTIFICATION (requires_order_context=true). A
@@ -134,6 +148,7 @@ class GptSemanticAnalyzerService:
             request_types="|".join(sorted(REQUEST_TYPES)),
             states="|".join(sorted(OBJECT_STATES)),
             purchase_states="|".join(sorted(PURCHASE_STATES)),
+            attributes="|".join(sorted(REQUESTED_ATTRIBUTES)),
             question=" ".join(str(question or "").split())[:1200],
         )
 
