@@ -25,6 +25,11 @@ from answer.exceptions import GenerationSkippedError
 from services import learning_evidence_policy
 from services.learning_evidence_policy import usable_as_factual_evidence
 from services.gpt_understanding_service import GptUnderstandingService
+from services.evidence_verification_service import (
+    METADATA_KEY as EVIDENCE_VERIFICATION_KEY,
+    EvidenceVerificationService,
+    verify_context,
+)
 from services.pre_generation_gate import PreGenerationGate
 from services.product_knowledge_service import required_fact_groups
 from services.self_review_service import SelfReviewService
@@ -292,6 +297,32 @@ class HybridAnswerService:
         knowledge = request.metadata.get("product_knowledge")
         evidence = getattr(knowledge, "evidence_text", None)
         return evidence() if callable(evidence) else ""
+
+    def _verify_evidence(
+        self, request: AnswerRequest, learning_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Check the stored answers this generation is about to lean on.
+
+        Uses the same provider the rest of the pipeline already holds, so no
+        second semantic pass is made and no Learning row is re-derived. A
+        fault here returns nothing rather than raising: the verifier exists to
+        withhold automation, and it must never be the reason an inquiry fails
+        to produce a draft at all. Withholding then falls to the gate, which
+        reads a required-but-absent record as a hold.
+        """
+
+        try:
+            semantic = request.metadata.get("_semantic_routing_value")
+            if semantic is None:
+                return None
+            return verify_context(
+                EvidenceVerificationService(self.provider),
+                learning_context,
+                semantic,
+                product=str(request.product_name or ""),
+            )
+        except Exception:  # noqa: BLE001 - never blocks a draft
+            return None
 
     @staticmethod
     def _evidence_texts(learning_context: dict[str, Any]) -> str:
@@ -676,6 +707,7 @@ class HybridAnswerService:
                 )
             )
             learning_context: dict[str, Any] = {}
+            evidence_verification: dict[str, Any] | None = None
             if (
                 analysis is not None
                 and analysis.answer_strategy
@@ -752,6 +784,20 @@ class HybridAnswerService:
                         reasons=evidence_gate.reasons,
                         stage=evidence_gate.stage,
                     )
+                # EVIDENCE VERIFICATION -- the last thing before the model is
+                # asked to write, and the first point at which both halves are
+                # in hand: the atomic question the customer asked, and the
+                # exact stored rows retrieval chose to settle it with.
+                #
+                # It runs here rather than downstream because downstream has
+                # only ids. Verifying a re-fetched candidate set would judge
+                # rows the model never read; these are the ones it is about to
+                # be given. Nothing is filtered out of the prompt on the
+                # verdict -- generation is unchanged, and the verdict is
+                # written down for the auto-post gate to read.
+                evidence_verification = self._verify_evidence(
+                    request, learning_context,
+                )
                 draft = self.drafts.generate(
                     facts,
                     intent,
@@ -1066,6 +1112,12 @@ class HybridAnswerService:
                 "analysis": analysis.to_dict() if analysis else {},
                 "selected_facts": selected_facts.to_dict(),
             }
+            # Written at the top level, beside the other gate records, because
+            # eligibility reads the draft's metadata root. Absent when there
+            # was nothing to verify; absent-when-required is what the gate
+            # treats as a hold.
+            if evidence_verification is not None:
+                metadata[EVIDENCE_VERIFICATION_KEY] = evidence_verification
             product_facts_context = self._product_facts_context(request)
             metadata["hybrid"] = {
                 "enabled": True,

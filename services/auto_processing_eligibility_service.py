@@ -510,7 +510,12 @@ class AutoProcessingEligibilityService:
         # "사다리차는 유상입니다" against "비용은 누가 내나요" is the shape: right
         # subject, wrong relation, and every label-level check passes it. The
         # verdict is read from what generation recorded; no record holds nothing.
-        evidence_hold, _reason = evidence_verification_decision(metadata)
+        # ``route`` is what separates "nothing to verify" from "should have
+        # been verified and was not". Without it the gate cannot tell the two
+        # apart, which is how the producer stayed missing for a whole release.
+        evidence_hold, _reason = evidence_verification_decision(
+            metadata, route=normalized_route,
+        )
         if evidence_hold:
             reasons.append(EVIDENCE_NOT_VERIFIED)
 

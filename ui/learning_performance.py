@@ -47,6 +47,66 @@ CORRECTION_LABELS = {
 }
 
 
+VERDICT_LABELS = {
+    "SUPPORTED": "근거 확인됨",
+    "PARTIALLY_SUPPORTED": "일부만 해당",
+    "NOT_SUPPORTED": "질문에 답하지 않음",
+    "CONTEXT_INCOMPATIBLE": "상황이 다름",
+}
+
+
+def _verdict_by_reference(metadata: dict) -> dict[int, str]:
+    """Which stored answers the verifier accepted for this draft, by row id.
+
+    Verdicts are keyed by the candidate id the verifier was given, which is a
+    ``learning_example_id`` for one kind of row and a ``historical_case_id``
+    for the other. Those come from different tables and can collide, and a
+    verdict shown against the wrong source is worse than no verdict at all --
+    so a colliding id is dropped rather than guessed.
+    """
+
+    payload = metadata.get("evidence_verification")
+    if not isinstance(payload, dict):
+        return {}
+    verdicts: dict[int, str] = {}
+    collisions: set[int] = set()
+    for item in payload.get("verified") or ():
+        if not isinstance(item, dict) or item.get("candidate_id") is None:
+            continue
+        try:
+            identifier = int(item["candidate_id"])
+        except (TypeError, ValueError):
+            continue
+        verdict = str(item.get("verdict") or "")
+        if identifier in verdicts and verdicts[identifier] != verdict:
+            collisions.add(identifier)
+        verdicts[identifier] = verdict
+    for identifier in collisions:
+        verdicts.pop(identifier, None)
+    return verdicts
+
+
+ANSWER_PREVIEW_LIMIT = 60
+
+
+def _answer_preview(answer: str | None) -> str:
+    """One scannable line per source; the full text lives in the expander below.
+
+    Stored answers are Korean support replies that open with the same greeting
+    and run several lines, so a raw cell makes the table unreadable and hides
+    the columns beside it. Newlines collapse to spaces because a dataframe cell
+    renders them as one run anyway, and a cut is marked with a trailing
+    ellipsis so nobody mistakes a truncated answer for a short one.
+    """
+
+    text = " ".join(str(answer or "").split())
+    if not text:
+        return "-"
+    if len(text) <= ANSWER_PREVIEW_LIMIT:
+        return text
+    return text[:ANSWER_PREVIEW_LIMIT] + "…"
+
+
 def _percent(value: float | None) -> str:
     return "측정 데이터 부족" if value is None else f"{value:.1f}%"
 
@@ -338,6 +398,8 @@ def render_answer_learning_provenance(
             "PENDING": "기존 기록 미평가",
         }
         display = []
+        full_texts: list[dict[str, Any]] = []
+        verdicts = _verdict_by_reference(metadata)
         for row in rows:
             is_historical = row["reference_kind"] == "HISTORICAL"
             reference_id = (
@@ -365,6 +427,9 @@ def render_answer_learning_provenance(
                     or row.get("historical_external_inquiry_id")
                 )
                 question_snippet = str(row.get("historical_question") or "")
+                # What the prompt reads for a Historical case; see
+                # learning_context_service's ``answer_reference``.
+                stored_answer = str(row.get("historical_answer") or "")
                 product_name = row.get("historical_product_name") or "-"
                 attached_signals = signals_repo.for_historical_case(reference_id)
             else:
@@ -383,6 +448,9 @@ def render_answer_learning_provenance(
                     or row.get("learning_external_inquiry_id")
                 )
                 question_snippet = str(row.get("learning_question") or "")
+                # What the prompt reads for a Learning row; see
+                # learning_context_service's candidate ``final_answer``.
+                stored_answer = str(row.get("learning_answer") or "")
                 product_name = row.get("learning_product_name") or "-"
                 attached_signals = signals_repo.for_learning_example(reference_id)
             reference_label = (
@@ -398,9 +466,21 @@ def render_answer_learning_provenance(
                 )
                 or "-"
             )
+            full_texts.append({
+                "유형": "Historical" if is_historical else "Learning",
+                "참고 자료": reference_label,
+                "상품명": product_name,
+                "문의": question_snippet.strip(),
+                "기존 답변": stored_answer.strip(),
+                "사용": used,
+            })
             display.append({
                 "유형": "Historical" if is_historical else "Learning",
                 "참고 자료": reference_label,
+                "기존 답변": _answer_preview(stored_answer),
+                "근거 검증": VERDICT_LABELS.get(
+                    verdicts.get(reference_id, ""), "검증 안 함"
+                ),
                 "상품명": product_name,
                 "내부 ID": internal_label,
                 "유사도": round(float(row.get("relevance") or 0), 2),
@@ -471,6 +551,10 @@ def render_answer_learning_provenance(
             display.append({
                 "유형": "Feedback Signal",
                 "참고 자료": reference_label,
+                # A feedback signal carries a correction note, not a stored
+                # answer of its own; the column exists to keep one table shape.
+                "기존 답변": "-",
+                "근거 검증": "-",
                 "상품명": product_name,
                 "내부 ID": internal_label,
                 "유사도": round(float(row.get("relevance") or 0), 2)
@@ -502,5 +586,21 @@ def render_answer_learning_provenance(
         st.caption(
             "실제 답변 생성 Prompt Context에 포함된 자료만 표시합니다. "
             "'참고 자료'는 원본 플랫폼 문의번호를 우선 표시하며, 내부 PK는 "
-            "'내부 ID' 열에 그대로 보존됩니다."
+            "'내부 ID' 열에 그대로 보존됩니다. '기존 답변'은 Prompt에 실제로 "
+            "전달된 본문이며, 표에서는 앞부분만 보여줍니다."
         )
+        # The preview answers "did retrieval find something plausible"; the full
+        # text answers "does it actually settle the question", and only the
+        # second one tells an operator whether retrieval or the stored answer is
+        # at fault. Never truncated away -- the whole text is one click below.
+        for index, item in enumerate(full_texts, 1):
+            header = (
+                f"{index}. [{item['유형']}] {item['참고 자료']}"
+                f"{' · 답변 근거 사용' if item['사용'] else ''}"
+            )
+            with st.expander(header, expanded=False):
+                st.caption(f"상품: {item['상품명']}")
+                st.markdown("**당시 문의**")
+                st.text(item["문의"] or "(문의 원문이 저장되어 있지 않습니다)")
+                st.markdown("**당시 답변**")
+                st.text(item["기존 답변"] or "(저장된 답변이 없습니다)")

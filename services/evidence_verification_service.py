@@ -163,9 +163,18 @@ class EvidenceVerificationService:
             return cached
 
         try:
+            # The production JsonGptProvider takes (task, prompt, context);
+            # there is no separate system channel, so the instructions ride at
+            # the head of the prompt the way every other task here does. The
+            # earlier shape was the proof harness's, and against a real
+            # provider it raised TypeError on every call -- which the service
+            # would have swallowed as NOT_SUPPORTED and held every answer.
             payload = self.provider.generate_json(
-                task=TASK, system=SYSTEM,
-                prompt=self.build_prompt(atom=atom, candidate=candidate))
+                task=TASK,
+                prompt="\n\n".join((
+                    SYSTEM, self.build_prompt(atom=atom, candidate=candidate),
+                )),
+                context={})
             self.call_count += 1
         except Exception as error:  # noqa: BLE001 - a fault never publishes
             return unverified(candidate_id, "PROVIDER_%s" % type(error).__name__)
@@ -207,13 +216,70 @@ def record(verifications: Iterable[Verification]) -> dict[str, Any]:
     }
 
 
-def decision_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[bool, str]:
-    """(hold, why). A draft with nothing recorded holds nothing."""
+# An exact Template, a confirmed RULE and the product catalogue answer from
+# sources settled before this gate existed. They are never verified and never
+# held by it.
+DETERMINISTIC_ROUTES = frozenset({"TEMPLATE", "SAFE_RULE", "PRODUCT_DB"})
+
+ANSWERABLE = "ANSWERABLE"
+
+
+def verification_required(
+    metadata: Mapping[str, Any] | None, *, route: str | None,
+) -> bool:
+    """Is stored Learning being offered as the grounds for some atom here?
+
+    Read from what generation already wrote down: retrieval's own per-atom
+    verdict (``subquestion_evidence``), which names the very Learning and
+    Historical rows it chose to settle each sub-question. An atom marked
+    ANSWERABLE with rows attached is a factual claim resting on stored text,
+    and that is the only situation this verifier exists for.
+
+    Everything else answers no. A deterministic route settled the inquiry from
+    a source that predates this gate; a PRE_PURCHASE or AMBIGUOUS inquiry is
+    already going to a person; an atom with no rows attached has no stored
+    answer to check. None of them should cost a call.
+    """
+
+    if str(route or "").strip().upper() in DETERMINISTIC_ROUTES:
+        return False
+    metadata = metadata or {}
+    hybrid = metadata.get("hybrid")
+    hybrid = hybrid if isinstance(hybrid, Mapping) else {}
+    for item in hybrid.get("subquestion_evidence") or ():
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "").upper() != ANSWERABLE:
+            continue
+        if item.get("learning_ids") or item.get("historical_case_ids"):
+            return True
+    return False
+
+
+def decision_from_metadata(
+    metadata: Mapping[str, Any] | None, *, route: str | None = None,
+) -> tuple[bool, str]:
+    """(hold, why). A draft with nothing recorded holds nothing -- unless it
+    was supposed to have something recorded.
+
+    The gate shipped once with its consumer wired and its producer missing.
+    Nothing failed, because "no record" and "nothing to check" were the same
+    answer, and every test stayed green while the verifier was never called on
+    a single live inquiry. So the two are separated here: an inquiry that never
+    needed verifying is untouched, and one that needed it and has no verdict is
+    held. Silence on a route that requires an answer is not consent.
+
+    ``route`` is optional only so callers predating this argument keep their
+    behaviour; eligibility passes it, and without it the fail-closed branch
+    cannot fire.
+    """
 
     metadata = metadata or {}
     value = metadata.get(METADATA_KEY)
     if not isinstance(value, Mapping):
-        return False, "NOT_RECORDED"
+        if verification_required(metadata, route=route):
+            return True, "VERIFICATION_REQUIRED_BUT_NOT_RECORDED"
+        return False, "VERIFICATION_NOT_REQUIRED"
     if not value.get("holds_auto_post"):
         return False, "NO_HOLD"
     verdicts = sorted({
@@ -222,3 +288,137 @@ def decision_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[bool, st
         if isinstance(item, Mapping)
     })
     return True, "NO_USABLE_EVIDENCE:%s" % "/".join(verdicts)
+
+
+def _atom_payload(atom: Any, *, product: str) -> dict[str, Any]:
+    """The customer's question as the verifier needs to see it."""
+
+    return {
+        "text": str(getattr(atom, "text", "") or ""),
+        "requested_information": str(
+            getattr(atom, "requested_information", "") or ""
+        ),
+        # The closed property enum the semantic pass already produced. It is
+        # context for the judgement, not the judgement: a label alone was
+        # measured and does not settle these cases.
+        "requested_attribute": str(
+            getattr(atom, "requested_attribute", "") or "UNKNOWN"
+        ),
+        "product": product,
+        "purchase_state": str(getattr(atom, "purchase_state", "") or "UNKNOWN"),
+        "requires_order_context": bool(
+            getattr(atom, "requires_order_context", False)
+        ),
+    }
+
+
+def pairs_from_context(
+    learning_context: Mapping[str, Any] | None,
+    semantic: Any,
+    *,
+    product: str = "",
+) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    """Each atom that stored Learning is settling, with the rows chosen for it.
+
+    Deliberately reads the context generation already built rather than
+    searching again. A second retrieval would be a second candidate set, and
+    the verifier would then be judging rows the model never saw while the rows
+    it did see went unchecked.
+
+    The join is retrieval's own ``subquestion_evidence``: it names the Learning
+    and Historical ids per sub-question, and the candidate lists carry the
+    question and answer text under the same keys the prompt reads
+    (``final_answer`` for Learning, ``seller_answer`` for Historical).
+    """
+
+    learning_context = learning_context or {}
+    atoms = list(getattr(semantic, "atomic_questions", ()) or ())
+    if not atoms:
+        return []
+    by_text = {
+        " ".join(str(getattr(item, "text", "") or "").split()): item
+        for item in atoms
+    }
+    learning_rows = {
+        int(item["learning_example_id"]): item
+        for item in (learning_context.get("similar_approved_answers") or ())
+        if isinstance(item, Mapping) and item.get("learning_example_id") is not None
+    }
+    historical_rows = {
+        int(item["historical_case_id"]): item
+        for item in (learning_context.get("historical_cases") or ())
+        if isinstance(item, Mapping) and item.get("historical_case_id") is not None
+    }
+
+    pairs: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for entry in learning_context.get("subquestion_evidence") or ():
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("status") or "").upper() != ANSWERABLE:
+            continue
+        text = " ".join(str(entry.get("subquestion") or "").split())
+        atom = by_text.get(text)
+        if atom is None:
+            # The deterministic split, not the semantic one. There is no
+            # requested_attribute to give the verifier and no atom to hold, so
+            # this sub-question is left to the gates that already cover it.
+            continue
+        candidates: list[dict[str, Any]] = []
+        for identifier in entry.get("learning_ids") or ():
+            row = learning_rows.get(int(identifier))
+            if row is None:
+                continue
+            candidates.append({
+                "id": int(identifier),
+                "kind": "LEARNING",
+                "question": row.get("question"),
+                "answer": row.get("answer"),
+                "product": row.get("product_name") or product,
+                "answer_kind": row.get("learning_source"),
+                "supported_information": (
+                    (row.get("semantic_goal") or {}).get("supported_information")
+                    if isinstance(row.get("semantic_goal"), Mapping) else None
+                ) or (),
+            })
+        for identifier in entry.get("historical_case_ids") or ():
+            row = historical_rows.get(int(identifier))
+            if row is None:
+                continue
+            candidates.append({
+                "id": int(identifier),
+                "kind": "HISTORICAL",
+                "question": row.get("question"),
+                "answer": row.get("answer_reference"),
+                "product": product,
+                "answer_kind": row.get("source"),
+                "supported_information": (),
+            })
+        if candidates:
+            pairs.append((_atom_payload(atom, product=product), candidates))
+    return pairs
+
+
+def verify_context(
+    service: EvidenceVerificationService,
+    learning_context: Mapping[str, Any] | None,
+    semantic: Any,
+    *,
+    product: str = "",
+) -> dict[str, Any] | None:
+    """Run the verifier over one generation's own evidence and write it down.
+
+    Returns ``None`` when there was nothing to verify, which is how a
+    deterministic answer and an inquiry with no stored grounds stay free of
+    both the call and the record.
+    """
+
+    pairs = pairs_from_context(learning_context, semantic, product=product)
+    if not pairs:
+        return None
+    verifications = []
+    for atom, candidates in pairs:
+        verifications.extend(service.verify_all(atom=atom, candidates=candidates))
+    payload = record(verifications)
+    payload["atom_count"] = len(pairs)
+    payload["call_count"] = service.call_count
+    return payload

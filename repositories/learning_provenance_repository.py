@@ -198,13 +198,23 @@ class LearningProvenanceRepository:
         return len(rows)
 
     def for_draft(self, draft_id: int) -> list[dict[str, Any]]:
-        """Include each reference's original-platform inquiry number.
+        """Include each reference's original inquiry number and stored answer.
 
         Internal PKs (``learning_example_id``/``historical_case_id``) are
         preserved untouched for DB/debug traceability; these extra columns
         only let the Dashboard *display* the original Naver inquiry number
         instead, since operators track sources by that number, not by
         internal row id (many Learning rows have no order number to show).
+
+        The answers are here because the Dashboard listed which sources were
+        selected and what they were asked, and never what they answered. An
+        operator checking a retrieval could see that a bracket-compatibility
+        inquiry pulled two plausible-looking sources, and could not tell
+        whether retrieval had gone wrong or the stored answers simply did not
+        settle the question. The columns are the ones the prompt itself reads:
+        ``final_answer`` for Learning (learning_context_service) and
+        ``seller_answer`` for Historical, so what an operator reads is what the
+        model was given.
         """
 
         with self.database.connection() as connection:
@@ -213,10 +223,12 @@ class LearningProvenanceRepository:
                 SELECT p.*,
                        le.learning_source, le.metadata_json AS learning_metadata,
                        le.question_original_masked AS learning_question,
+                       le.final_answer AS learning_answer,
                        le.product_name AS learning_product_name,
                        li.external_inquiry_id AS learning_external_inquiry_id,
                        li.source_question_id AS learning_source_question_id,
                        hc.question AS historical_question,
+                       hc.seller_answer AS historical_answer,
                        hc.product_name AS historical_product_name,
                        hc.external_inquiry_id AS historical_external_inquiry_id,
                        hi.source_question_id AS historical_source_question_id

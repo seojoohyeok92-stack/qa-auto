@@ -33,7 +33,10 @@ class FakeProvider:
         self.calls = 0
         self.prompts = []
 
-    def generate_json(self, *, task, system, prompt, **_kwargs):
+    def generate_json(self, *, task, prompt, context, **_kwargs):
+        # The production JsonGptProvider signature. This mock previously took a
+        # ``system`` keyword the real provider does not have, so it agreed with
+        # the service about an interface neither shared with Production.
         self.calls += 1
         self.prompts.append(prompt)
         if not self.replies:
@@ -161,7 +164,13 @@ def test_a_failure_is_not_cached_and_may_be_retried():
 
 # --------------------------------------------------------------- 기록과 hold
 def test_nothing_recorded_holds_nothing():
-    assert decision_from_metadata({}) == (False, "NOT_RECORDED")
+    """Still no hold; the reason now says *why* there is nothing to hold.
+
+    "NOT_RECORDED" conflated "nothing to check" with "should have been checked
+    and was not", which is how a missing producer went unnoticed for a
+    release. The hold itself is unchanged.
+    """
+    assert decision_from_metadata({}) == (False, "VERIFICATION_NOT_REQUIRED")
 
 
 def test_offered_learning_with_nothing_verified_holds():
