@@ -504,7 +504,15 @@ def test_coverage_gate_blocks_only_clear_production_mismatches(
         assert on_coverage is not None, f"{label}: telemetry not recorded"
     if on_coverage and on_coverage["status"] in {FAIL, PARTIAL}:
         assert on_decisions["auto_post"] is False, label
-        assert on_decisions["review_status"] == "REVIEW_REQUIRED", label
+        # A held draft is written as NEEDS_REVIEW: ``answer_repository`` derives
+        # review_status from AnswerStatus, whose only non-publishable member is
+        # NEEDS_REVIEW, so REVIEW_REQUIRED -- the eligibility and validator
+        # vocabulary -- is not a value a draft row can carry. This branch was
+        # unreachable until the deferral fix made a case score PARTIAL here,
+        # which is why the wrong constant went unnoticed. The safety assertion
+        # is the line above; this one names the state that goes with it.
+        assert on_decisions["review_status"] == "NEEDS_REVIEW", label
+        assert on_decisions["eligibility_decision"] == "REVIEW_REQUIRED", label
     else:
         assert off_decisions == on_decisions, label
 

@@ -72,6 +72,8 @@ from services.semantic_analysis import (
     route as semantic_route,
 )
 from services.semantic_coverage_service import (
+    FAIL as COVERAGE_FAIL,
+    PARTIAL as COVERAGE_PARTIAL,
     SemanticCoverageService,
     is_enabled as semantic_coverage_enabled,
 )
@@ -844,6 +846,66 @@ class AnswerService:
             ).get("template_match_kind"),
         })
         return safe
+
+    def _deterministic_answer_settles_inquiry(
+        self, request: AnswerRequest, answer: str,
+    ) -> bool:
+        """May this one deterministic answer stand as the whole reply?
+
+        A keyword rule and an exact template each return a single answer for
+        the whole inquiry and say nothing about which part of it they
+        addressed. For one question that is exactly right, and it is left
+        alone here. For a compound one it decided the inquiry was finished on
+        the strength of a substring: in 687718601 "스탠드형 비즈니스 tv" and
+        "2026년 출시형 모델" matched a rule about which generation an Overnic
+        stand is, and the two questions actually asked -- which TV line suits
+        OTT viewing, and which model to pick -- left the pipeline entirely,
+        with Learning, the product catalogue and generation never called.
+
+        So the shortcut keeps its precedence only where it earns it: the
+        semantic pass already decomposed this inquiry, and the coverage
+        evaluator is asked, on this very text, whether anything the customer
+        raised is still unanswered. If something is, the inquiry carries on
+        down the path it would have taken anyway, with the rule answer handed
+        to generation as context. No new engine, no second provider call, and
+        the same evaluator that guards publication decides.
+
+        Semantics are required, not assumed: with no analysis, or with one
+        atomic question, the answer is yes and every existing route is
+        untouched. A fault is also yes -- this may withhold the shortcut,
+        never invent one.
+        """
+
+        try:
+            semantic = request.metadata.get("_semantic_routing_value")
+            if semantic is None or not getattr(semantic, "usable", False):
+                return True
+            atoms = [
+                str(getattr(item, "text", "") or "").strip()
+                for item in (getattr(semantic, "atomic_questions", ()) or ())
+            ]
+            atoms = [text for text in atoms if text]
+            if len(atoms) < 2:
+                return True
+            if not semantic_coverage_enabled() or not str(answer or "").strip():
+                return True
+            # The atom list says *that* this is compound; it is deliberately
+            # not passed as the sub-questions. An atom is a clause lifted out
+            # of the sentence and read on its own -- "비즈니스tv와 사이니지tv 중
+            # 뭐가 낫나요" -- and the coverage anchors, which are calibrated on
+            # whole inquiries, recognise less in it than in the text it came
+            # from: both atoms of 687718601 score QUESTION_TOPIC_UNRECOGNISED
+            # while the inquiry itself scores PARTIAL. Each side is asked what
+            # it is good at: the semantic pass whether there is more than one
+            # question, the evaluator whether any of them went unanswered.
+            coverage = self.semantic_coverage.evaluate(
+                question=str(request.question or ""),
+                answer=str(answer),
+                route="",
+            )
+            return coverage.status not in {COVERAGE_FAIL, COVERAGE_PARTIAL}
+        except Exception:  # noqa: BLE001 - a measurement never blocks a route
+            return True
 
     def _record_semantic_coverage(
         self,
@@ -2537,7 +2599,13 @@ class AnswerService:
                     if prefer_template
                     else "BYPASSED"
                 )
-                if prefer_template and template_failure is None:
+                if (
+                    prefer_template
+                    and template_failure is None
+                    and self._deterministic_answer_settles_inquiry(
+                        request, base_rule_result.answer
+                    )
+                ):
                     product_db_result = _is_product_db_result(
                         base_rule_result
                     )

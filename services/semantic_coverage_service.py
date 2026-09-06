@@ -142,6 +142,13 @@ TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
         r"벽걸이", r"타공", r"스탠드",
         r"자가설치", r"설치방법", r"어떻게설치", r"설치가능",
         rf"{_INSTALL}[^?!.]{{0,10}}(?:해주|하나요|해주시|설치도)",
+        # The anchors above are shaped like the question -- 해주/하나요 -- so a
+        # reply that answers it in the declarative registered nothing: "설치는
+        # 전문 기사가 방문하여 진행합니다" carried no installation topic at all.
+        # The gap was invisible while the completion pass's deferral supplied
+        # the topic instead; removing that exposed it, and a safe compound
+        # inquiry answered in full was being held for review.
+        rf"{_INSTALL}[^?!.]{{0,10}}(?:진행합니다|진행해드|진행됩니다)",
         r"호환",
     ),
     "PACKAGE_CONTENTS": (
@@ -340,6 +347,66 @@ def topics_of(text: str) -> frozenset[str]:
     return frozenset(found)
 
 
+# The sentence ``atomic_completeness_service`` appends when a topic the customer
+# raised went unanswered. It is generated, not written: a fixed frame around one
+# of that module's own topic labels.
+#
+# It exists to report a gap -- "문의하신 배송비 부분은 담당자 확인 후
+# 안내드리겠습니다." -- so staff and customer can both see what was missed. But
+# naming the topic put the topic into the answer, and this module counted a
+# topic in the answer as a topic addressed, so the sentence written to report
+# the gap closed it. Inquiry 687718601 scored PARTIAL on the rule answer alone
+# and PASS once the sentence was appended, and auto-posted with one of two
+# questions unanswered. All eighteen labels behaved the same way, which put the
+# coverage gate out of action for exactly the population it exists to catch.
+#
+# Only this generated frame is excluded, and deliberately nothing else. A
+# person or the model writing "설치 일정 변경은 담당자 확인이 필요합니다" has
+# said something true about the subject, and this evaluator has always counted
+# that as a response -- admitting a limit is a response; only silence is not.
+# Widening the exclusion to every mention of a check would withdraw that.
+#
+# The frame lives here, below the module that appends it, so both read the same
+# constant and a change to the wording cannot leave the two disagreeing.
+COMPLETION_DEFERRAL_PREFIX = "문의하신 "
+COMPLETION_DEFERRAL_SUFFIX = " 부분은 담당자 확인 후 안내드리겠습니다."
+
+# Matched against ``compact()``, which strips spaces and lowercases. The
+# trailing full stop is dropped from the pattern because ``_SENTENCE_SPLIT``
+# has already consumed it by the time a sentence reaches here.
+_COMPLETION_DEFERRAL = re.compile(
+    "%s.{1,40}%s" % (
+        re.escape(compact(COMPLETION_DEFERRAL_PREFIX)),
+        re.escape(compact(COMPLETION_DEFERRAL_SUFFIX).rstrip(".!?")),
+    )
+)
+
+
+def is_completion_deferral(sentence: str) -> bool:
+    """Is this the completion pass's own gap report rather than an answer?"""
+
+    return bool(_COMPLETION_DEFERRAL.search(compact(sentence)))
+
+
+def answered_topics_of(text: str) -> frozenset[str]:
+    """The subjects an *answer* actually settles.
+
+    The same anchors as :func:`topics_of`, minus the completion pass's own
+    deferral sentences. Used for the answer side alone: a question defers
+    nothing, and filtering one would delete the very topic being asked about.
+    """
+
+    body = str(text or "")
+    if not compact(body):
+        return frozenset()
+    found: set[str] = set()
+    for sentence in _SENTENCE_SPLIT.split(body):
+        if is_completion_deferral(sentence):
+            continue
+        found |= _sentence_topics(sentence)
+    return frozenset(found)
+
+
 @dataclass(frozen=True)
 class SubquestionCoverage:
     question: str
@@ -413,7 +480,7 @@ class SemanticCoverageService:
                 return SemanticCoverageResult(UNKNOWN, "EMPTY_QUESTION")
             parts = [single]
 
-        answer_topics = topics_of(answer_text)
+        answer_topics = answered_topics_of(answer_text)
         normalized_route = str(route or "").upper()
         information_request = normalized_route in INFORMATION_REQUEST_ROUTES
 

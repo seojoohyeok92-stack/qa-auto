@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from services.semantic_coverage_service import (
+    COMPLETION_DEFERRAL_PREFIX,
+    COMPLETION_DEFERRAL_SUFFIX,
     RESPONSIVE_TOPICS,
     topics_of,
 )
@@ -71,8 +73,12 @@ TOPIC_LABELS: dict[str, str] = {
     "STORE_PICKUP": "방문수령",
 }
 
-_DEFERRAL_PREFIX = "문의하신 "
-_DEFERRAL_SUFFIX = " 부분은 담당자 확인 후 안내드리겠습니다."
+# Defined in ``semantic_coverage_service`` and imported rather than repeated:
+# that module has to recognise this exact sentence to keep it from counting as
+# an answer to the question it names, and two copies could drift apart into a
+# wording the coverage gate no longer recognises.
+_DEFERRAL_PREFIX = COMPLETION_DEFERRAL_PREFIX
+_DEFERRAL_SUFFIX = COMPLETION_DEFERRAL_SUFFIX
 _GENERIC_LABEL = "일부 내용"
 
 

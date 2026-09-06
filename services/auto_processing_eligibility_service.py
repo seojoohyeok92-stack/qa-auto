@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from answer.source_adapter import answer_request_from_inquiry
 from answer.text_utils import is_delivery_deadline_question
@@ -113,6 +113,26 @@ def delivery_period_claim(answer: object) -> str | None:
 
     found = _DELIVERY_PERIOD_CLAIM.search(str(answer or ""))
     return found.group(0) if found else None
+
+
+# Appended when the coverage evaluator found a question the answer left
+# unanswered. Deliberately absent from SOFT_REASONS: unresolved substantive
+# questions are the thing auto-post must not publish over.
+SEMANTIC_COVERAGE_INCOMPLETE = "SEMANTIC_COVERAGE_INCOMPLETE"
+
+# The two verdicts that mean "a recognised question went unanswered". UNKNOWN
+# stays observational, exactly as it is inside the coverage evaluator: an
+# unfamiliar but safe question must not become a false hold.
+_COVERAGE_HOLD_STATUSES = frozenset({"FAIL", "PARTIAL"})
+
+
+def _coverage_incomplete(metadata: Mapping[str, Any] | None) -> bool:
+    """Did the coverage evaluator find an unanswered substantive question?"""
+
+    coverage = (metadata or {}).get("semantic_coverage")
+    if not isinstance(coverage, Mapping):
+        return False
+    return str(coverage.get("status") or "").upper() in _COVERAGE_HOLD_STATUSES
 
 
 class AutoProcessingEligibilityService:
@@ -245,6 +265,7 @@ class AutoProcessingEligibilityService:
         validation_status: str,
         validator: dict[str, Any],
         route: str = "",
+        coverage_metadata: Mapping[str, Any] | None = None,
     ) -> bool:
         """Whether post-generation evidence resolved a classifier-only hold.
 
@@ -260,6 +281,11 @@ class AutoProcessingEligibilityService:
             not cls._current_analysis_clears_review(inquiry)
             or not cls._validator_cleared(validation_status, validator)
             or bool(plan.get("is_high_risk"))
+            # An unanswered question is not a classifier-only hold, so there is
+            # nothing here for post-generation evidence to resolve. The hard
+            # reason above already blocks; this keeps the reported reason
+            # honest rather than showing the hold as resolved.
+            or _coverage_incomplete(coverage_metadata)
         ):
             return False
         # Rendered templates are validated by the route-specific template
@@ -354,6 +380,7 @@ class AutoProcessingEligibilityService:
                 validation_status=validation_status,
                 validator=validator,
                 route=normalized_route,
+                coverage_metadata=metadata,
             )
         )
         # "the validator rejected this" and "the validator passed but asked
@@ -518,6 +545,18 @@ class AutoProcessingEligibilityService:
         )
         if evidence_hold:
             reasons.append(EVIDENCE_NOT_VERIFIED)
+
+        # A substantive question the customer asked that the reply never
+        # answers. The coverage evaluator measured this on the finished text
+        # and generation already set ``requires_manual_review`` from it -- but
+        # that flag is one another branch here can downgrade to a soft reason,
+        # and did: a compound inquiry scored PARTIAL, carried the flag, and
+        # auto-posted anyway because the TEMPLATE route resolves the hold
+        # without ever consulting coverage. A measurement that cannot stop a
+        # publish is telemetry, so the verdict is read here directly and is a
+        # hard blocker no other resolver can lift.
+        if _coverage_incomplete(metadata):
+            reasons.append(SEMANTIC_COVERAGE_INCOMPLETE)
 
         # A date the customer named, which nothing here can promise.
         #
