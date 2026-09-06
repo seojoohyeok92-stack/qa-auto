@@ -2800,6 +2800,26 @@ class AnswerService:
                                             base_rule_result
                                         )
                                     )
+                                    # We are here because the deterministic
+                                    # answer did not settle the inquiry. Handing
+                                    # it on as ``rule.answer`` contradicts that:
+                                    # it arrives among the selected facts, and
+                                    # the model reads it as the rule to follow.
+                                    #
+                                    # Measured on 325584049 with the live
+                                    # provider. Its own learning_usage came back
+                                    # {"learning_id": 314283,
+                                    #  "answer_supported": false,
+                                    #  "reason": "학습 근거는 참고 가능하나,
+                                    #   제공된 확인 안내 규칙을 우선 적용했습니다"}
+                                    # -- the approved answer saying collection is
+                                    # free was in the prompt and was passed over
+                                    # for a rule answer that only asked for the
+                                    # facts to be checked. A reply that settles
+                                    # nothing is not grounding.
+                                    or not self._deterministic_answer_settles_inquiry(
+                                        request, base_rule_result.answer
+                                    )
                                 )
                             )
                             else base_rule_result

@@ -550,3 +550,62 @@ def test_a_single_semantic_atom_is_used_as_the_retrieval_query():
     source = inspect.getsource(LearningContextService.build)
     # 되돌림은 semantic atom 이 아예 없을 때로 한정되어야 한다.
     assert "if not semantic_atomic and len(questions) <= 1:" in source
+
+
+# ================= 해결하지 못한 deterministic 답변은 generation 근거가 아니다
+#
+# 325584049 는 continuation 이 붙은 뒤에도 근거를 쓰지 않았다. 실제 provider 가
+# 그 이유를 스스로 적어 돌려주었다:
+#
+#   learning_usage: [{"learning_id": 314283, "answer_supported": false,
+#     "reason": "학습 근거는 참고 가능하나, 제공된 확인 안내 규칙을 우선
+#      적용했습니다."}]
+#
+# 폐가전 수거가 무료라는 승인 답변이 prompt 안에 있었는데, 같은 prompt 의
+# facts["rule.answer"] 에 "정확한 정보 확인이 필요합니다" 라는 rule 답변이
+# 함께 실려 있었고 모델은 그쪽을 규칙으로 읽었다. 아무것도 해결하지 못해서
+# 계속 진행하기로 한 답변을, 근거로 다시 건네고 있었던 셈이다.
+def test_an_answer_that_did_not_settle_the_inquiry_is_not_passed_as_grounding():
+    """continuation 으로 넘어간 rule 답변은 중립화되어야 한다."""
+    import inspect
+
+    source = inspect.getsource(AnswerService.generate_for_inquiry)
+    assert "_neutral_gpt_context" in source
+    # 중립화 조건에 "해결하지 못했다" 가 포함되어야 한다.
+    assert "not self._deterministic_answer_settles_inquiry(" in source
+
+
+def test_the_neutral_context_carries_no_answer_body():
+    """중립화된 context 는 근거로 쓰일 본문을 갖지 않는다."""
+    from answer.models import AnswerResult, AnswerStatus
+    from services.answer_service import _neutral_gpt_context
+
+    deferral = AnswerResult(
+        status=AnswerStatus.NEEDS_REVIEW,
+        category="확인필요",
+        reason="추가정보 필요",
+        answer="문의주신 내용은 정확한 정보 확인이 필요합니다.",
+        provider="rules",
+        auto_answerable=False,
+        needs_review=True,
+    )
+    neutral = _neutral_gpt_context(
+        deferral, template_failure="NOT_FOUND", category="상품",
+    )
+    assert neutral.answer == ""
+    assert neutral.auto_answerable is False
+
+
+def test_a_settling_deterministic_answer_still_grounds_generation():
+    """해결한 답변까지 중립화하면 안 된다 -- 게이트가 True 면 조건이 꺼진다."""
+    payload = semantic_payload(
+        atom("배송비는 얼마인가요", action="DELIVERY_POLICY",
+             attribute="AMOUNT_OR_COST"),
+        atom("브라켓도 같이 오나요", action="PACKAGE_CONTENTS",
+             attribute="INCLUSION"),
+    )
+    assert _gate(
+        "배송비는 얼마인가요?\n브라켓도 같이 오나요?",
+        "배송비는 무료입니다. 벽걸이 브라켓은 구성품에 포함되어 함께 발송됩니다.",
+        payload,
+    ) is True
