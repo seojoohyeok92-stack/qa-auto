@@ -72,8 +72,7 @@ from services.semantic_analysis import (
     route as semantic_route,
 )
 from services.semantic_coverage_service import (
-    FAIL as COVERAGE_FAIL,
-    PARTIAL as COVERAGE_PARTIAL,
+    PASS as COVERAGE_PASS,
     SemanticCoverageService,
     is_enabled as semantic_coverage_enabled,
 )
@@ -903,7 +902,18 @@ class AnswerService:
                 answer=str(answer),
                 route="",
             )
-            return coverage.status not in {COVERAGE_FAIL, COVERAGE_PARTIAL}
+            # For a compound inquiry the shortcut has to be earned, so the
+            # evaluator has to say the answer covered what was asked -- not
+            # merely fail to say otherwise. UNKNOWN means the anchors did not
+            # recognise the reply, which is what an "확인이 필요합니다" answer
+            # scores, and 325584049 ended on exactly that: a safe rule saying
+            # it needed more information closed a two-part inquiry while the
+            # store held 63 approved answers about the second part.
+            #
+            # This asymmetry is deliberate. A single question is untouched
+            # above, so an unrecognised reply to one question keeps its route;
+            # only a compound one has to show it settled everything.
+            return coverage.status == COVERAGE_PASS
         except Exception:  # noqa: BLE001 - a measurement never blocks a route
             return True
 
@@ -2683,6 +2693,14 @@ class AnswerService:
                     prefer_template
                     and _is_safe_rule_result(base_rule_result)
                     and not product_fact_guard.sensitive
+                    # The same question the template branch above asks. A safe
+                    # rule answers the whole inquiry too, and 325584049 --
+                    # "tv설지하고 페가전 수거해주시는거죠?" -- ended here with
+                    # learning_search_called False, so the collection question
+                    # never reached the 63 approved answers that address it.
+                    and self._deterministic_answer_settles_inquiry(
+                        request, base_rule_result.answer
+                    )
                 ):
                     result = _apply_safe_rule_metadata(
                         base_rule_result,

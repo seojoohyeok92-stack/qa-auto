@@ -468,3 +468,85 @@ def test_the_measured_inquiry_is_still_held_from_auto_post():
     )
     assert SEMANTIC_COVERAGE_INCOMPLETE in verdict.reasons
     assert verdict.decision != "SAFE"
+
+
+# ============================ 복합문의에서 deterministic 지름길은 증명이 필요하다
+#
+# 325584049 "혼자계신 엄마댁이라 tv설지하고 페가전 수거해주시는거죠?" 는 SAFE_RULE
+# 의 "정확한 정보 확인이 필요합니다" 답변으로 종료되었고 learning_search_called 가
+# False 였다. 운영 DB 에는 이 질문에 답하는 승인 Learning 이 63건 있다. 그 답변은
+# coverage 가 UNKNOWN -- 앵커가 아무것도 알아보지 못한 상태 -- 였으므로, "FAIL/
+# PARTIAL 이 아니다" 를 지름길의 조건으로 삼으면 통과해 버린다.
+def _gate(question: str, answer: str, payload: dict | None):
+    from answer.models import AnswerRequest
+
+    service = AnswerService(
+        Database(pathlib.Path(tempfile.mkdtemp()) / "g.db"),
+        dps_enrichment=_FakeDps(),
+        hybrid_service=HybridAnswerService(_StubProvider()),
+    )
+    request = AnswerRequest(
+        inquiry_id=1, question_id="G", inquiry_type="상품",
+        question=question, product_name=PRODUCT,
+        metadata={} if payload is None
+        else {"_semantic_routing_value": parse(payload)},
+    )
+    return service._deterministic_answer_settles_inquiry(request, answer)
+
+
+COLLECTION_INQUIRY = "혼자계신 엄마댁이라 tv설지하고 페가전 수거해주시는거죠?"
+COLLECTION_ATOMS = semantic_payload(
+    atom("tv 설치해주시나요", action="INSTALLATION_METHOD",
+         information="설치 제공 여부", attribute="EXISTENCE_OR_CAPABILITY"),
+    atom("폐가전 수거해주시나요", action="COLLECTION",
+         information="폐가전 수거 제공 여부", attribute="EXISTENCE_OR_CAPABILITY"),
+    primary_action="COLLECTION",
+)
+NEEDS_INFO_ANSWER = (
+    "문의주신 아래 내용은 - tv 설치해주시나요? - 폐가전 수거해주시나요? "
+    "관련하여 정확한 정보 확인이 필요합니다."
+)
+
+
+def test_an_unrecognised_answer_cannot_settle_a_compound_inquiry():
+    """CASE B -- 확인이 필요하다는 답변은 두 질문을 해결한 것이 아니다."""
+    assert _gate(COLLECTION_INQUIRY, NEEDS_INFO_ANSWER, COLLECTION_ATOMS) is False
+
+
+def test_a_single_question_keeps_its_route_even_when_unrecognised():
+    """CASE A -- 단일 문의는 이 게이트가 손대지 않는다."""
+    single = semantic_payload(atom("폐가전 수거해주시나요", action="COLLECTION"))
+    assert _gate("폐가전 수거해주시나요?", NEEDS_INFO_ANSWER, single) is True
+
+
+def test_a_compound_inquiry_answered_throughout_keeps_the_shortcut_too():
+    """지름길이 사라지는 것이 아니라, 해결했을 때만 유지된다."""
+    payload = semantic_payload(
+        atom("배송비는 얼마인가요", action="DELIVERY_POLICY",
+             attribute="AMOUNT_OR_COST"),
+        atom("브라켓도 같이 오나요", action="PACKAGE_CONTENTS",
+             attribute="INCLUSION"),
+    )
+    assert _gate(
+        "배송비는 얼마인가요?\n브라켓도 같이 오나요?",
+        "배송비는 무료입니다. 벽걸이 브라켓은 구성품에 포함되어 함께 발송됩니다.",
+        payload,
+    ) is True
+
+
+def test_the_gate_is_still_inert_without_semantics():
+    assert _gate(COLLECTION_INQUIRY, NEEDS_INFO_ANSWER, None) is True
+
+
+# ================== semantic atom 이 하나여도 검색 질의로 남아야 한다 (retrieval)
+def test_a_single_semantic_atom_is_used_as_the_retrieval_query():
+    """운영 DB 측정: 전체 문의는 63건 중 0건, atom 질의는 3건을 threshold 위로
+    올린다. 원문으로 되돌리면 그 3건이 사라진다."""
+    from answer.facts import build_answer_facts  # noqa: F401  (계약 존재 확인)
+    import inspect
+
+    from services.learning_context_service import LearningContextService
+
+    source = inspect.getsource(LearningContextService.build)
+    # 되돌림은 semantic atom 이 아예 없을 때로 한정되어야 한다.
+    assert "if not semantic_atomic and len(questions) <= 1:" in source

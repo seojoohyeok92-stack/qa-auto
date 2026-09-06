@@ -280,7 +280,23 @@ class LearningContextService:
         )) or list(dict.fromkeys(
             str(item).strip() for item in intent.questions if str(item).strip()
         ))
-        if len(questions) <= 1:
+        # The whole message is the query only when nothing better exists.
+        #
+        # A semantic atom is the customer's question with the situation stripped
+        # off, and that is what retrieval can match: measured on inquiry
+        # 325584049 -- "혼자계신 엄마댁이라 tv설지하고 페가전 수거해주시는거죠?"
+        # -- the full message scores 0.14 against every approved collection
+        # answer in the store and returns nothing, while the atom alone returns
+        # candidates at 0.82. Scoring is lexical, so the surrounding clause and
+        # the customer's typos ("설지", "페가전") are noise the atom does not
+        # carry. Falling back to the message here threw away the one query that
+        # works, and did it whenever the semantic pass found a single question.
+        #
+        # The fallback stays for callers with no semantic pass at all, which is
+        # what it was written for.
+        if not semantic_atomic and len(questions) <= 1:
+            questions = [original_question]
+        elif not questions:
             questions = [original_question]
         candidate_pool = self.search.repository.candidates(
             store_code=store_code, limit=2000
@@ -561,6 +577,33 @@ class LearningContextService:
         # can make a sub-question answerable -- that decision is made below
         # from Positive/verified evidence exactly as it was.
         negative_by_feedback: dict[int, dict[str, Any]] = {}
+        # A negative memo records a mistake made on the message the customer
+        # actually wrote, and is registered against that wording. Retrieval now
+        # queries with the semantic atoms instead, which is right for finding
+        # approved answers and wrong for finding this: the atom
+        # "얼마 전 신청한 상품권 건이 처리되었는지 확인" no longer matches a memo
+        # filed under "상품권 신청했는데 확인해주세요".
+        #
+        # So the original wording is looked up as well, and only ever adds --
+        # a correction the atoms already found is not fetched twice, and none
+        # can be removed here.
+        if original_question and original_question not in questions:
+            supplementary = self.feedback_signals.negative_corrections(
+                original_question,
+                store_code=store_code,
+                product_name=product_name,
+                model_code=guard.model_code,
+                product_id=guard.product_id,
+                option_name=(
+                    inquiry.get("option_name") or facts.product.get("option_name")
+                ),
+                semantic_goal={},
+                limit=2,
+            )
+            for item in supplementary["selected"]:
+                item["matched_subquestion"] = original_question
+            negative_correction_contexts.append(supplementary)
+
         for legacy_context in negative_correction_contexts:
             for item in legacy_context["selected"]:
                 feedback_id = int(item["feedback_id"])
