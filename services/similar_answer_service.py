@@ -114,6 +114,17 @@ def _normalized_answer(value: object) -> str:
     return re.sub(r"\s+", "", str(value or ""))
 
 
+def _semantic_rank_bonus(rank: int) -> float:
+    """A semantic neighbour's floor, decreasing with its rank.
+
+    Deliberately tiny. It exists to clear ``minimum_relevance`` so the
+    candidate is scored at all; ordering among real matches stays with the
+    lexical signal and the answer-support re-ranking after it.
+    """
+
+    return max(0.0, 0.02 - 0.001 * max(int(rank) - 1, 0))
+
+
 class SimilarAnswerService:
     def __init__(self, repository: LearningRepository) -> None:
         self.repository = repository
@@ -195,8 +206,14 @@ class SimilarAnswerService:
         candidate_pool: list[dict[str, Any]] | None = None,
         candidate_diagnostics: dict[str, int] | None = None,
         semantic_goal: dict[str, Any] | None = None,
+        semantic_ranks: dict[int, int] | None = None,
     ) -> list[dict[str, Any]]:
         query = normalize_learning_question(self.privacy.mask(question))
+        # Meaning-based neighbours of this query, by rank, from the derived
+        # embedding index. Empty whenever the index is absent or the query
+        # could not be embedded, and the search is then exactly the lexical one
+        # that shipped before.
+        semantic_ranks = dict(semantic_ranks or {})
         semantic_goal = semantic_goal or {}
         # Tri-state on purpose. ``False`` is the semantic understanding
         # actively saying this sub-question does not depend on the customer's
@@ -380,6 +397,23 @@ class SimilarAnswerService:
                 self._similarity(variant, candidate_question)
                 for variant in query_variants
             )
+            # Recall, not ranking. Korean is agglutinative and the concept
+            # table has eight entries, so two ways of asking the same thing
+            # routinely share no tokens: measured over 195 approved rows whose
+            # answers are identical -- different customers, same reply -- the
+            # lexical scorer put a sibling in the top 20 for 58.5% of them and
+            # the union with meaning-based neighbours for 68.2%.
+            #
+            # A semantic neighbour is lifted to the floor so it can be
+            # considered at all, never above a candidate the lexical scorer
+            # actually liked. Whether it answers the question is decided after
+            # this, by compatibility, answer-support and the verifier.
+            semantic_rank = semantic_ranks.get(int(item["id"]))
+            if semantic_rank is not None:
+                question_relevance = max(
+                    question_relevance,
+                    minimum_relevance + _semantic_rank_bonus(semantic_rank),
+                )
             relevance = question_relevance
             relevance += 0.10 if intent and item.get("intent") == intent else 0
             relevance += 0.08 if product_name and item.get("product_name") == product_name else 0

@@ -126,6 +126,66 @@ SEMANTIC_COVERAGE_INCOMPLETE = "SEMANTIC_COVERAGE_INCOMPLETE"
 _COVERAGE_HOLD_STATUSES = frozenset({"FAIL", "PARTIAL"})
 
 
+# Appended when a question the customer asked has no factual source behind it.
+# Absent from SOFT_REASONS: publishing a factual claim with nothing supporting
+# it is the thing this gate exists to stop.
+EVIDENCE_NOT_SUFFICIENT = "EVIDENCE_NOT_SUFFICIENT"
+
+# Retrieval's own verdict when it found nothing for a sub-question. The other
+# statuses -- NEEDS_DPS, DELIVERY_SCHEDULE_REVIEW, CONFLICT -- already carry
+# their own review paths and are not re-judged here.
+_NO_SOURCE_STATUS = "NO_RELIABLE_SOURCE"
+
+# Routes whose answer comes from a source settled before retrieval ran, so an
+# empty retrieval verdict says nothing about them. ORDER_ID_REQUEST is the safe
+# "please send your order number" reply, which asserts no fact at all.
+_EVIDENCE_EXEMPT_ROUTES = frozenset({
+    "TEMPLATE", "SAFE_RULE", "PRODUCT_DB", "ORDER_ID_REQUEST",
+})
+
+
+def _evidence_insufficient(
+    metadata: Mapping[str, Any] | None, *, route: str | None,
+) -> bool:
+    """Is there a question here that nothing factual stands behind?
+
+    Coverage asks whether the reply addresses what was asked. That is a
+    different question from whether anything supports it, and the two came
+    apart: a four-part inquiry with no retrieved evidence at all was answered
+    "현재 확인 가능한 정보가 없어 각각 확인 후 안내가 필요합니다", every topic
+    was named, coverage scored PASS, and eligibility returned SAFE with no
+    reasons. Nothing was wrong with the sentence; there was simply nothing
+    behind it, and the pipeline had no way to say so.
+
+    Writing that a fact needs checking is not a factual source. So the source
+    verdict retrieval already recorded per sub-question is read here directly:
+    an atom it marked NO_RELIABLE_SOURCE has nothing behind it, and an answer
+    containing one cannot publish itself.
+
+    Deterministic routes are exempt because their answer predates retrieval --
+    a template that settles the inquiry never needed a Learning row, and its
+    empty ``subquestion_evidence`` is silence rather than absence.
+    """
+
+    if str(route or "").strip().upper() in _EVIDENCE_EXEMPT_ROUTES:
+        return False
+    metadata = metadata or {}
+    hybrid = metadata.get("hybrid")
+    hybrid = hybrid if isinstance(hybrid, Mapping) else {}
+    entries = hybrid.get("subquestion_evidence") or ()
+    if not entries:
+        # Nothing recorded at all -- a draft from before this stage existed, or
+        # a route that never built a context. Untouched, as every other gate
+        # here treats an absent record.
+        return False
+    for item in entries:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("status") or "").upper() == _NO_SOURCE_STATUS:
+            return True
+    return False
+
+
 def _coverage_incomplete(metadata: Mapping[str, Any] | None) -> bool:
     """Did the coverage evaluator find an unanswered substantive question?"""
 
@@ -557,6 +617,12 @@ class AutoProcessingEligibilityService:
         # hard blocker no other resolver can lift.
         if _coverage_incomplete(metadata):
             reasons.append(SEMANTIC_COVERAGE_INCOMPLETE)
+
+        # A question with no factual source behind it. Read from retrieval's
+        # own per-sub-question verdict, so a reply that names the gap in
+        # fluent Korean cannot pass for one that answered it.
+        if _evidence_insufficient(metadata, route=normalized_route):
+            reasons.append(EVIDENCE_NOT_SUFFICIENT)
 
         # A date the customer named, which nothing here can promise.
         #

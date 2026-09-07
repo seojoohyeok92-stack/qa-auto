@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import re
 import uuid
@@ -229,17 +230,72 @@ def _order_evidence_required(
     )
 
 
+_UNSET = object()
+
+# How many meaning-based neighbours a sub-question may bring in. Recall is the
+# point, and everything after this stage filters; the benchmark that chose the
+# hybrid union measured its gain at rank 20.
+SEMANTIC_NEIGHBOUR_LIMIT = 20
+
+
 class LearningContextService:
     """GPT에 제공할 비사실성 참고 문맥만 구성한다."""
 
     def __init__(self, database: Database) -> None:
         self.inquiries = InquiryRepository(database)
         self.search = SimilarAnswerService(LearningRepository(database))
+        # One index and one embedding client per service, so a compound
+        # inquiry does not reload 1,000 vectors per sub-question.
+        self._index_cache: Any = _UNSET
+        self._embed_cache: Any = None
         self.logs = LogRepository(database)
         self.historical = HistoricalCaseService(database)
         self.provenance = LearningProvenanceRepository(database)
         self.feedback_signals = LearningSignalService(database)
         self.feedback_signal_provenance = FeedbackSignalProvenanceRepository(database)
+
+    def _semantic_ranks(self, question: str) -> dict[int, int]:
+        """Meaning-based neighbours of this sub-question, by rank.
+
+        Returns nothing at all when the derived index is missing or the
+        embedding call fails, and retrieval is then the lexical search that
+        shipped before this existed. A retrieval aid may widen the candidate
+        pool; it may never be the reason an inquiry produces no context.
+        """
+
+        try:
+            # The key is checked before the index is touched: without it the
+            # embedding call cannot happen, and loading tens of megabytes to
+            # then fail would slow every offline run for nothing.
+            if not os.environ.get("QNA_GPT_API_KEY"):
+                return {}
+            index = self._semantic_index()
+            if index is None or not index.available:
+                return {}
+            vector = self._embedding_client().embed([str(question or "")[:400]])[0]
+            return {
+                identifier: rank
+                for rank, (identifier, _score) in enumerate(
+                    index.similar(vector, limit=SEMANTIC_NEIGHBOUR_LIMIT), start=1
+                )
+            }
+        except Exception:  # noqa: BLE001 - never blocks retrieval
+            return {}
+
+    def _semantic_index(self):
+        if self._index_cache is _UNSET:
+            from services.learning_semantic_index import LearningSemanticIndex
+
+            loaded = LearningSemanticIndex.load_cached()
+            self._index_cache = loaded if loaded.available else None
+        return self._index_cache
+
+    def _embedding_client(self):
+        if self._embed_cache is None:
+            from services.learning_semantic_index import EmbeddingClient
+
+            self._embed_cache = EmbeddingClient()
+        return self._embed_cache
 
     def build(
         self,
@@ -407,6 +463,7 @@ class LearningContextService:
             )
             item_context = self.search.context(
                 question,
+                semantic_ranks=self._semantic_ranks(question),
                 store_code=store_code,
                 intent=intent_data.get("category") or intent_data.get("primary_intent"),
                 product_name=product_name,
@@ -944,6 +1001,17 @@ class LearningContextService:
                     "evidence_coverage": evidence_coverage,
                 }
             )
+        # What the semantic pass understood, kept where generation can read it.
+        #
+        # ``requested_attribute`` -- which property of the subject was asked --
+        # was produced for every atom, recorded for the coverage gate and read
+        # by the verifier, and then reached the drafting prompt not once. The
+        # model was told which questions to answer and never which property of
+        # each one, so nothing in the contract held it to the property asked.
+        # It is surfaced here rather than rebuilt: the same objects retrieval
+        # already used, at the top level instead of nested inside a per-question
+        # diagnostic.
+        context["semantic_atoms"] = [item.to_dict() for item in semantic_atomic]
         context["subquestion_evidence"] = evidence_map
         context["subquestion_answer_policy"] = {
             "ANSWERABLE": "Answer directly from the mapped evidence.",

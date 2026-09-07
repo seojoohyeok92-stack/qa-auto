@@ -25,10 +25,12 @@ from answer.exceptions import GenerationSkippedError
 from services import learning_evidence_policy
 from services.learning_evidence_policy import usable_as_factual_evidence
 from services.gpt_understanding_service import GptUnderstandingService
+from services.evidence_selection_service import EvidenceSelectionService
 from services.evidence_verification_service import (
     METADATA_KEY as EVIDENCE_VERIFICATION_KEY,
     EvidenceVerificationService,
-    verify_context,
+    record,
+    selected_pairs_from_context,
 )
 from services.pre_generation_gate import PreGenerationGate
 from services.product_knowledge_service import required_fact_groups
@@ -315,12 +317,28 @@ class HybridAnswerService:
             semantic = request.metadata.get("_semantic_routing_value")
             if semantic is None:
                 return None
-            return verify_context(
-                EvidenceVerificationService(self.provider),
-                learning_context,
-                semantic,
+            # The selector decides which retrieved candidates are worth a
+            # verifier call; the verifier still decides which of them may be
+            # used. Whatever the deterministic ladder already chose is kept
+            # either way, so a selector fault costs nothing.
+            selector = EvidenceSelectionService(self.provider)
+            pairs = selected_pairs_from_context(
+                learning_context, semantic, selector,
                 product=str(request.product_name or ""),
             )
+            verifier = EvidenceVerificationService(self.provider)
+            verifications = []
+            for atom, candidates in pairs:
+                verifications.extend(
+                    verifier.verify_all(atom=atom, candidates=candidates)
+                )
+            if not verifications:
+                return None
+            payload = record(verifications)
+            payload["atom_count"] = len(pairs)
+            payload["call_count"] = verifier.call_count
+            payload["selector_calls"] = selector.call_count
+            return payload
         except Exception:  # noqa: BLE001 - never blocks a draft
             return None
 

@@ -422,3 +422,92 @@ def verify_context(
     payload["atom_count"] = len(pairs)
     payload["call_count"] = service.call_count
     return payload
+
+
+def selected_pairs_from_context(
+    learning_context: Mapping[str, Any] | None,
+    semantic: Any,
+    selector: Any,
+    *,
+    product: str = "",
+) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    """The pairs to verify, widened by the selector but never narrowed by it.
+
+    ``pairs_from_context`` returns what the deterministic ladder already calls
+    ANSWERABLE. That ladder gates on a lexical answer-support score, and a
+    candidate whose wording differs from the question fails it before any model
+    reads either -- measured on 325584049, the cost atom retrieved sixteen
+    candidates and none of them reached the verifier.
+
+    So the selector is asked which of the *retrieved* candidates could state
+    the fact being asked for, and those are added. Everything the ladder chose
+    is kept regardless of what the selector says: the selector may add work for
+    the verifier, never remove a candidate the pipeline already trusted enough
+    to consider. A selector fault leaves exactly the old pair set.
+    """
+
+    base = pairs_from_context(learning_context, semantic, product=product)
+    outcomes: list[Any] = []
+    if selector is None:
+        return base
+
+    learning_context = learning_context or {}
+    atoms = list(getattr(semantic, "atomic_questions", ()) or ())
+    if not atoms:
+        return base
+
+    by_atom = {
+        " ".join(str(atom.get("text") or "").split()): (atom, list(candidates))
+        for atom, candidates in base
+    }
+    rows = [
+        {
+            "id": int(item["learning_example_id"]),
+            "kind": "LEARNING",
+            "question": item.get("question"),
+            "answer": item.get("answer"),
+            "product": item.get("product_name") or product,
+            "answer_kind": item.get("learning_source"),
+            "supported_information": (),
+        }
+        for item in (learning_context.get("similar_approved_answers") or ())
+        if isinstance(item, Mapping) and item.get("learning_example_id") is not None
+    ] + [
+        {
+            "id": int(item["historical_case_id"]),
+            "kind": "HISTORICAL",
+            "question": item.get("question"),
+            "answer": item.get("answer_reference"),
+            "product": product,
+            "answer_kind": item.get("source"),
+            "supported_information": (),
+        }
+        for item in (learning_context.get("historical_cases") or ())
+        if isinstance(item, Mapping) and item.get("historical_case_id") is not None
+    ]
+    if not rows:
+        return base
+
+    for item in atoms:
+        text = " ".join(str(getattr(item, "text", "") or "").split())
+        if not text:
+            continue
+        payload = _atom_payload(item, product=product)
+        try:
+            outcome = selector.select(atom=payload, candidates=rows)
+        except Exception:  # noqa: BLE001 - selection never blocks verification
+            continue
+        outcomes.append(outcome)
+        if not outcome.selected_ids:
+            continue
+        chosen = [row for row in rows if row["id"] in set(outcome.selected_ids)]
+        existing_atom, existing = by_atom.get(text, (payload, []))
+        seen = {candidate["id"] for candidate in existing}
+        merged = list(existing) + [
+            candidate for candidate in chosen if candidate["id"] not in seen
+        ]
+        by_atom[text] = (existing_atom, merged)
+
+    widened = [(atom, candidates) for atom, candidates in by_atom.values()
+               if candidates]
+    return widened or base

@@ -88,15 +88,30 @@ def _atomic_question_payload(
             key = str(item.get("subquestion") or "").strip()
             if key:
                 evidence_by_question[key] = item
+    # The property each question asked about, from the semantic pass that
+    # produced these questions in the first place. Joined by the question text
+    # the two sides already share.
+    attribute_by_question: dict[str, dict[str, Any]] = {}
+    for item in (learning_context.get("semantic_atoms") or []):
+        if isinstance(item, dict):
+            key = str(item.get("text") or "").strip()
+            if key:
+                attribute_by_question[key] = item
 
     payload: list[dict[str, Any]] = []
     for index, record in enumerate(records, start=1):
         question = str(record.get("question") or "").strip()
         evidence = evidence_by_question.get(question) or {}
         review_required = bool(record.get("manual_review_required"))
+        atom = attribute_by_question.get(question) or {}
         payload.append({
             "index": index,
             "question": question,
+            # The fact the customer is missing, and which property of it they
+            # asked for. Answering a different property of the same subject is
+            # how "설치해 주시나요" turns into an answer about the cost.
+            "requested_information": atom.get("requested_information") or None,
+            "requested_attribute": atom.get("requested_attribute") or None,
             "inquiry_subtype": record.get("inquiry_subtype"),
             "detected_intent": record.get("detected_intent"),
             "answerable": not review_required,
@@ -123,6 +138,13 @@ ATOMIC_QUESTION_INSTRUCTIONS = (
     "review_required 또는 근거가 없는 질문은 추측하지 않고 확인이 필요하다고만 안내한다.",
     "확인이 필요한 질문 때문에 답변 가능한 다른 질문까지 회피하지 않는다.",
     "각 질문의 근거는 그 질문에 연결된 evidence만 사용한다.",
+    # The contract that was missing. Without it the model may answer a
+    # neighbouring property of the same subject -- cost instead of whether the
+    # service is performed -- and the answer reads as responsive while telling
+    # the customer about something they did not raise.
+    "각 질문은 requested_attribute 가 가리키는 속성만 답한다.",
+    "고객이 묻지 않은 속성(비용, 시점, 부담 주체 등)을 새로 만들어 답하거나"
+    " 확인이 필요하다고 언급하지 않는다.",
 )
 
 

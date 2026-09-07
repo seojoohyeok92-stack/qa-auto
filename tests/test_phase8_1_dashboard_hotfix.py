@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from app import dashboard_work_items_from_database
@@ -14,6 +15,25 @@ from services.uat_order_service import UatOrderService
 from ui.dashboard import _state_matches_filter
 from ui.review_workspace import inquiry_list_summary, truncate_single_line
 from workflow.models import StepCode
+
+
+@pytest.fixture(autouse=True)
+def manual_sync_unlocked(monkeypatch):
+    """Manual sync is locked unless the deployment turns it on.
+
+    ``config.NaverConfig`` reads ``NAVER_SYNC_ENABLED`` with ``default=False``,
+    and the dashboard renders a "잠겨 있습니다" caption instead of running a
+    sync when it is off. Two tests here click the sync button and assert on
+    what it produced, so they were only ever green on a machine whose shell
+    happened to export the flag -- the repository's own ``.env`` sets it, but
+    that value does not reach this process, and the same two tests failed on a
+    clean checkout for the same reason.
+
+    The lock is deliberate production behaviour and is left alone. The tests
+    that depend on it now say so.
+    """
+
+    monkeypatch.setenv("NAVER_SYNC_ENABLED", "true")
 
 
 def run(code: str) -> AppTest:
