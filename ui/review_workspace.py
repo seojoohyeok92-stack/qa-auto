@@ -2267,10 +2267,31 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 )
                 st.session_state.pop(pending_success_key, None)
                 if generation_mode == "GPT_FALLBACK":
-                    st.success(
-                        "적용 가능한 기존 템플릿이 없어 GPT로 새 답변을 "
-                        f"생성했습니다. Draft ID: {int(draft['id'])}"
-                    )
+                    # ``GPT_FALLBACK`` is the route the GPT-first pipeline
+                    # normally takes, so calling it a fallback told operators an
+                    # outage had happened on every ordinary answer. The route
+                    # value is left alone (the publishing gate keys on it); the
+                    # sentence reads the pipeline marker instead, and only says
+                    # "fallback" when the provider actually fell back.
+                    hybrid_meta = metadata.get("hybrid")
+                    hybrid_meta = hybrid_meta if isinstance(hybrid_meta, dict) else {}
+                    if hybrid_meta.get("fallback_used"):
+                        st.success(
+                            "GPT 생성에 실패해 검증된 Rule 답변으로 대체했습니다. "
+                            f"Draft ID: {int(draft['id'])}"
+                        )
+                    elif hybrid_meta.get("answer_pipeline") == (
+                        "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+                    ):
+                        st.success(
+                            "GPT가 문의를 이해하고 검색된 근거를 검토해 답변을 "
+                            f"생성했습니다. Draft ID: {int(draft['id'])}"
+                        )
+                    else:
+                        st.success(
+                            "적용 가능한 기존 템플릿이 없어 GPT로 새 답변을 "
+                            f"생성했습니다. Draft ID: {int(draft['id'])}"
+                        )
                 elif generation_mode == "TEMPLATE":
                     st.success(
                         "기존 템플릿으로 답변을 생성했습니다. "

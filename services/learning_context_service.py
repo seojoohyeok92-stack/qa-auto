@@ -147,6 +147,14 @@ def apply_prompt_budget(
 # 했는데" was asked for their order number.
 _VALID_ORDER_ID = re.compile(r"\d{16}")
 
+# Actions whose answer is a property of one identified product. A stored
+# answer written for a different model is wrong for these however well it
+# matches otherwise, so identity is enforced strictly when GPT ① labels an
+# atom with one of them.
+PRODUCT_FACT_ACTIONS: frozenset[str] = frozenset({
+    "PRODUCT_SPEC", "PRODUCT_CONCEPT", "PACKAGE_CONTENTS",
+})
+
 _ORDER_SCOPED_ACTIONS: frozenset[str] = frozenset({
     "ORDER_IDENTIFICATION",
     "DELIVERY_STATUS",
@@ -479,7 +487,17 @@ class LearningContextService:
                 option_name=(
                     inquiry.get("option_name") or facts.product.get("option_name")
                 ),
-                product_fact_sensitive=question_guard.sensitive,
+                # Whether the customer asked for a specification, which is
+                # what makes another model's answer unusable rather than merely
+                # off-topic. The keyword guard misses plain phrasings -- "이
+                # 제품 해상도가 4K UHD 맞나요?" carries no marker it recognises
+                # -- and GPT ① has already read the question and labelled the
+                # atom PRODUCT_SPEC. Either saying yes is enough; the two
+                # disagree only in the direction of more caution.
+                product_fact_sensitive=(
+                    question_guard.sensitive
+                    or (atomic is not None and atomic.action in PRODUCT_FACT_ACTIONS)
+                ),
                 limit=2 if len(questions) > 1 else 3,
                 candidate_pool=candidate_pool,
                 candidate_diagnostics=candidate_diagnostics,
@@ -733,6 +751,9 @@ class LearningContextService:
                 ),
                 inquiry_type=inquiry_type,
                 limit=2 if len(questions) > 1 else 3,
+                # The same contract the Learning search runs under: hard
+                # validity removes, lexical concept overlap only ranks.
+                hard_conflicts_only=self.hard_conflicts_only,
             )
             historical_traces.append({
                 key: value for key, value in detailed.items()

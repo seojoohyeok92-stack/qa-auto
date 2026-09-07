@@ -40,6 +40,12 @@ STRICT_PRODUCT_TOPICS = {
 
 GENERIC_TOPICS = {"OTHER", "GENERAL_POLICY", "PRODUCT_SPEC"}
 
+# What a topic/attribute mismatch costs a candidate now that it no longer
+# removes one. Large enough that an on-topic candidate outranks an off-topic
+# one at equal similarity, small enough that a strong match still survives --
+# the ordering is the point, not a second threshold.
+TOPIC_MISMATCH_PENALTY = -0.20
+
 # Topics say what an answer is *about*; these say what is being asked *of* it.
 #
 # A customer asked which seller name to enter on the 온누리 rebate form after
@@ -536,7 +542,25 @@ class LearningCompatibilityService:
         candidate_product: ProductIdentity,
         candidate_metadata: Mapping[str, Any] | None = None,
         authority: str = "AUTO",
+        query_is_product_fact: bool = False,
     ) -> CompatibilityDecision:
+        """Whether this candidate may stand beside this inquiry, and how well.
+
+        ``query_is_product_fact`` says the *customer* asked for a specification.
+        Strictness was read only off the candidate's own text before, so a
+        candidate that reads like general guidance was judged leniently even
+        when the question was "이 제품 해상도가 4K UHD 맞나요?" -- and a
+        43-inch panel's answer could sit beside a 50-inch listing. The topic
+        gate happened to remove most of those, which is why it went unnoticed;
+        with that gate demoted to a ranking signal, identity has to be the
+        thing that holds, and it needs to know what was asked.
+
+        The caller already computes this (``classify_product_fact`` in
+        ``learning_context_service``) and has been passing it into ``search``
+        as ``product_fact_sensitive`` where nothing read it. This connects the
+        existing signal rather than deriving a new one.
+        """
+
         metadata = candidate_metadata or {}
         query_topics = classify_topics(current_question)
         profile = profile_knowledge(
@@ -564,15 +588,26 @@ class LearningCompatibilityService:
             topic_ok = False
             topic_match = "MISMATCH"
             topic_reason = f"ATTRIBUTE_MISMATCH_{asked}_VS_{offered}"
-        if not topic_ok:
-            return CompatibilityDecision(
-                False, True, topic_reason, 0.0, profile.scope,
-                "NOT_EVALUATED", "TOPIC_REJECTED_FIRST", query_topics,
-                profile.topics, topic_match, topic_reason,
-                current_product, candidate_product,
-            )
-
-        strict = profile.strict_product_fact
+        # A topic or attribute mismatch no longer returns here.
+        #
+        # Both are read off anchor tables over the customer's wording, so they
+        # answer "do these two texts look like they are about the same thing" --
+        # a judgement about meaning, made lexically. Returning
+        # ``hard_reject=True`` made them survive the ``hard_conflicts_only``
+        # filter in ``SimilarAnswerService``, and they then removed candidates
+        # before GPT ② could read them: 499 of 561 safe candidates on one
+        # measured inquiry, for a question whose answer was in the store.
+        #
+        # Returning early was also what made the ordering wrong. The identity
+        # checks below are the ones that must never be skipped -- a different
+        # model's specification is wrong however relevant it reads -- and they
+        # sat *after* the topic gate, so softening the gate in place would have
+        # let a cross-model candidate through on a topic it happened to miss.
+        # Identity is settled first now, and the topic finding is carried into
+        # whatever that decides: a hard reject keeps its reason, and an eligible
+        # candidate keeps the mismatch as a ranking penalty and a recorded
+        # label for GPT ② to read.
+        strict = profile.strict_product_fact or bool(query_is_product_fact)
         variant = profile.variant_sensitive or profile.scope in {"MODEL", "VARIANT"}
         current = current_product
         candidate = candidate_product
@@ -582,6 +617,33 @@ class LearningCompatibilityService:
                 False, True, reason, 0.0, profile.scope, "MISMATCH",
                 product_reason, query_topics, profile.topics, topic_match,
                 topic_reason, current, candidate,
+            )
+
+        def accept(
+            product_match: str,
+            product_reason: str,
+            adjustment: float,
+        ) -> CompatibilityDecision:
+            """Identity cleared. Report the topic finding without enforcing it.
+
+            A topic or attribute mismatch still makes the candidate ineligible,
+            so the legacy path -- which removes anything ineligible -- behaves
+            exactly as it did. What changes is ``hard_reject``: the finding is
+            soft, so ``hard_conflicts_only`` (the production retrieval mode)
+            keeps the candidate and lets GPT ② read it.
+            """
+
+            if topic_ok:
+                return CompatibilityDecision(
+                    True, False, None, adjustment, profile.scope,
+                    product_match, product_reason, query_topics,
+                    profile.topics, topic_match, topic_reason,
+                    current, candidate,
+                )
+            return CompatibilityDecision(
+                False, False, topic_reason, adjustment + TOPIC_MISMATCH_PENALTY,
+                profile.scope, product_match, product_reason, query_topics,
+                profile.topics, topic_match, topic_reason, current, candidate,
             )
 
         if strict and current.brand and candidate.brand and current.brand != candidate.brand:
@@ -603,10 +665,8 @@ class LearningCompatibilityService:
                 and current.size_inches != candidate.size_inches
             ):
                 return reject("PRODUCT_VARIANT_MISMATCH", "EXPLICIT_SIZE_MISMATCH")
-            return CompatibilityDecision(
-                True, False, None, topic_adjustment, profile.scope,
-                "EXACT_MODEL", "EXPLICIT_MODEL_CODE_MATCH", query_topics,
-                profile.topics, topic_match, topic_reason, current, candidate,
+            return accept(
+                "EXACT_MODEL", "EXPLICIT_MODEL_CODE_MATCH", topic_adjustment,
             )
         if current.product_id and candidate.product_id:
             if current.product_id == candidate.product_id:
@@ -616,10 +676,8 @@ class LearningCompatibilityService:
                     and current.size_inches != candidate.size_inches
                 ):
                     return reject("PRODUCT_VARIANT_MISMATCH", "EXPLICIT_SIZE_MISMATCH")
-                return CompatibilityDecision(
-                    True, False, None, topic_adjustment, profile.scope,
-                    "EXACT_PRODUCT", "SOURCE_PRODUCT_ID_MATCH", query_topics,
-                    profile.topics, topic_match, topic_reason, current, candidate,
+                return accept(
+                    "EXACT_PRODUCT", "SOURCE_PRODUCT_ID_MATCH", topic_adjustment,
                 )
             if strict:
                 return reject("MODEL_MISMATCH", "SOURCE_PRODUCT_ID_MISMATCH")
@@ -630,11 +688,9 @@ class LearningCompatibilityService:
             and DISTINCTIVE_PRODUCT_TOKEN.search(current.product_name or "")
         )
         if exact_distinctive_name:
-            return CompatibilityDecision(
-                True, False, None, topic_adjustment - 0.02, profile.scope,
+            return accept(
                 "EXACT_NAME", "DISTINCTIVE_NORMALIZED_PRODUCT_NAME_MATCH",
-                query_topics, profile.topics, topic_match, topic_reason,
-                current, candidate,
+                topic_adjustment - 0.02,
             )
         if strict:
             return reject(
@@ -655,11 +711,7 @@ class LearningCompatibilityService:
         elif current.normalized_name and current.normalized_name == candidate.normalized_name:
             product_match = "EXACT_NAME"
             product_reason = "NORMALIZED_PRODUCT_NAME_MATCH"
-        return CompatibilityDecision(
-            True, False, None, adjustment, profile.scope, product_match,
-            product_reason, query_topics, profile.topics, topic_match,
-            topic_reason, current, candidate,
-        )
+        return accept(product_match, product_reason, adjustment)
 
     def answer_relevance(
         self, *, questions: Iterable[object], answer: object

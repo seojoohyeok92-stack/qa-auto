@@ -370,6 +370,9 @@ class SimilarAnswerService:
                 candidate_product=candidate_product,
                 candidate_metadata=metadata,
                 authority="APPROVED" if human_verified else "AUTO",
+                # Already computed by the caller from the customer's question;
+                # until now it arrived here and was never read.
+                query_is_product_fact=bool(product_fact_sensitive),
             )
             diagnostic = {
                 "learning_id": int(item["id"]),

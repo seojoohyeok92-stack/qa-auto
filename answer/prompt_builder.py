@@ -110,10 +110,40 @@ class PromptBuilder:
         "근거가 실제로 말하지 않는 것을 확장하지 않는다."
         " 예: installation_method=PROFESSIONAL_TECHNICIAN_REQUIRED 는"
         " '전문 기사 설치'까지만 말하며, 기사의 소속 브랜드는 말하지 않는다.",
+        "검색 결과는 후보이며 코드가 관련성을 보증하지 않는다. 각 후보를 직접"
+        " 읽고 현재 atomic question 에 실제로 도움이 되는 것만 사용한다.",
+        "후보가 검색됐다는 이유만으로 사용하지 않는다.",
+        "다른 모델/상품의 사양을 현재 상품의 사실로 전환하지 않는다.",
+        "LISTING METADATA(판매 페이지 표기)와 VERIFIED PRODUCT CATALOG FACTS"
+        "(검증 사양)를 구분한다. product_information_tiers 를 따른다.",
         "사용한 후보와 사용하지 않은 후보를 모두 이유와 함께 보고한다.",
         "어떤 질문에 대해 쓸 수 있는 근거가 없으면 그 질문만 unresolved로"
         " 남기고, 답할 수 있는 다른 질문까지 회피하지 않는다.",
     )
+
+    # What each product block in ``input`` means, and how far each may be
+    # trusted. Keys match the block names the retrieval side emits.
+    PRODUCT_TIER_RULES: dict[str, str] = {
+        "listing_metadata": (
+            "allowed_facts.product 은 현재 네이버 판매 페이지에 표시된 상품"
+            " 정보입니다. 어떤 상품에 대한 문의인지 이해하는 데 사용하고,"
+            " 판매 페이지 표기 자체를 인용할 수는 있으나(예: '판매 페이지에는"
+            " 4K UHD로 표기되어 있습니다'), 검증된 사양과 같은 신뢰도로"
+            " 단정하지 마세요."
+        ),
+        "product_catalog": (
+            "현재 상품과 안전하게 식별된 Product Catalog 의 검증 사양입니다."
+            " 확정 사실로 사용할 수 있습니다."
+        ),
+        "product_candidates": (
+            "정확한 상품 identity 가 확정되지 않아 남은 후보 모델입니다."
+            " 다른 모델의 사양을 현재 상품의 확정 사실로 전환하지 마세요."
+        ),
+        "precedence": (
+            "product_catalog > listing_metadata > product_candidates."
+            " 서로 어긋나면 확정하지 말고 unresolved 로 남기세요."
+        ),
+    }
 
     OUTPUT_CONTRACTS: dict[str, dict[str, Any]] = {
         "UNDERSTANDING": {
@@ -284,6 +314,18 @@ class PromptBuilder:
                 "answer_supported_parts_even_if_other_parts_are_missing": True,
             },
             "customer_inquiry": facts.inquiry.get("question"),
+            # Three tiers of product information, deliberately not merged.
+            #
+            # The listing is what the seller wrote on the page the customer is
+            # reading; the catalogue is what the operator verified for one
+            # identified model. They are usually consistent and occasionally
+            # not, and the difference matters to the customer -- so the model is
+            # told which is which rather than being handed one blended block.
+            #
+            # The listing tier exists because withholding it produced worse
+            # answers than showing it: an inquiry whose catalogue lookup failed
+            # was left with no idea which product was being asked about at all.
+            "product_information_tiers": dict(self.PRODUCT_TIER_RULES),
             "inquiry_analysis": (
                 analysis.to_dict() if analysis is not None else {}
             ),

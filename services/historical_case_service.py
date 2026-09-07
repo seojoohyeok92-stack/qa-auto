@@ -39,6 +39,12 @@ DEFINITE = re.compile(r"(?:반드시|무조건|확실히|100%|틀림없이|보�
 AUTO_REFERENCE_MIN_QUALITY = 0.50
 
 
+# What a concept mismatch costs a historical candidate now that it no longer
+# removes one. Same reasoning as the Learning side: keep the ordering, drop the
+# veto.
+CONCEPT_MISMATCH_PENALTY = -0.20
+
+
 def _seller_answer(value: Any) -> str:
     keys = {"selleranswer", "answercontent", "commentcontent", "replycontent", "answer"}
     if isinstance(value, dict):
@@ -493,7 +499,17 @@ class HistoricalCaseService:
         product_id: str | None = None, model_code: str | None = None,
         option_name: str | None = None,
         limit: int = 4, include_risky: bool = False,
+        hard_conflicts_only: bool = False,
     ) -> dict[str, Any]:
+        """Historical cases worth showing for this question.
+
+        ``hard_conflicts_only`` mirrors the flag the Learning search already
+        takes, and means the same thing: remove what is invalid, rank the rest,
+        and leave the question of whether a case *answers this inquiry* to the
+        reader downstream. The concept gates below are anchor-table overlap
+        between two texts -- a lexical proxy for meaning -- so under this flag
+        they price a candidate rather than withhold it.
+        """
         query = normalize_learning_question(self.privacy.mask(question))
         ranked: list[tuple[float, dict[str, Any]]] = []
         candidates = self.repository.candidates(store_code=store_code)
@@ -575,7 +591,10 @@ class HistoricalCaseService:
             # Keyword overlap alone cannot attach a semantically incompatible
             # case.  Inquiry type and exact product remain ranking signals,
             # never hard equality gates.
-            if query_concepts and candidate_concepts and concept_overlap == 0:
+            no_shared_concept = bool(
+                query_concepts and candidate_concepts and concept_overlap == 0
+            )
+            if no_shared_concept and not hard_conflicts_only:
                 rejection_counts["LOW_RELEVANCE"] = (
                     rejection_counts.get("LOW_RELEVANCE", 0) + 1
                 )
@@ -597,15 +616,18 @@ class HistoricalCaseService:
             relevance, answer_support = apply_answer_support(
                 relevance, query, item.get("seller_answer")
             )
+            if no_shared_concept:
+                relevance += CONCEPT_MISMATCH_PENALTY
             concept_compatible = bool(
-                not query_concepts
+                hard_conflicts_only
+                or not query_concepts
                 or not candidate_concepts
                 or concept_overlap >= 0.34
             )
             minimum_relevance = (
                 0.20 if query_concepts and candidate_concepts else 0.15
             )
-            if relevance >= minimum_relevance and concept_compatible:
+            if (hard_conflicts_only or relevance >= minimum_relevance) and concept_compatible:
                 value = dict(item)
                 value["relevance"] = round(relevance, 4)
                 value["answer_support"] = round(answer_support, 4)

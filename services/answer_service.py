@@ -1197,6 +1197,115 @@ class AnswerService:
             understanding.get("need_order") or understanding.get("need_dps")
         )
 
+    @staticmethod
+    def _record_pipeline_trace(
+        request: AnswerRequest, result: AnswerResult,
+    ) -> None:
+        """One place an operator can read why an answer came out as it did.
+
+        The existing records are spread across ``hybrid``, ``phase9`` and the
+        retrieval traces, and answering "why could GPT not answer this?" meant
+        opening three of them and knowing which. This gathers the counts each
+        stage actually produced -- what was understood, what was found, what
+        was used -- into a flat block beside them.
+
+        Counts, statuses and identifiers only. No prompt text, no candidate
+        bodies, no customer data: this is read from dashboards and pasted into
+        tickets.
+
+        ``selected_answer_route`` is deliberately untouched. It reads
+        ``GPT_FALLBACK`` on the GPT-first path, which is historical wording
+        rather than a description, but the value is load-bearing -- the
+        publishing gate's ``AUTO_POSTABLE_ROUTES`` and the validator's route
+        table both key on it. Renaming it would edit a safety set to improve a
+        label, so the accurate name is recorded here instead and the route
+        keeps its meaning.
+        """
+
+        try:
+            hybrid = result.metadata.get("hybrid")
+            hybrid = hybrid if isinstance(hybrid, dict) else {}
+            draft = hybrid.get("draft")
+            draft = draft if isinstance(draft, dict) else {}
+            retrieval = hybrid.get("retrieval")
+            retrieval = retrieval if isinstance(retrieval, dict) else {}
+            learning = retrieval.get("learning")
+            learning = learning if isinstance(learning, dict) else {}
+            understanding = (
+                AnswerService._usable_gpt_understanding(request) or {}
+            )
+            knowledge = request.metadata.get("product_knowledge")
+            templates = request.metadata.get("template_candidates")
+            templates = templates if isinstance(templates, list) else []
+            evidence = hybrid.get("subquestion_evidence")
+            evidence = evidence if isinstance(evidence, list) else []
+            result.metadata["pipeline_trace"] = {
+                "answer_pipeline": hybrid.get("answer_pipeline"),
+                "selected_answer_route": result.metadata.get(
+                    "selected_answer_route"
+                ),
+                "provider_fallback_used": bool(hybrid.get("fallback_used")),
+                "understanding": {
+                    "usable": bool(understanding),
+                    "atomic_question_count": len(
+                        understanding.get("questions") or ()
+                    ),
+                    "need_template": understanding.get("need_template"),
+                    "need_product": understanding.get("need_product"),
+                    "need_learning": understanding.get("need_learning"),
+                    "need_order": understanding.get("need_order"),
+                    "need_dps": understanding.get("need_dps"),
+                    "purchase_state": understanding.get("purchase_state"),
+                },
+                "retrieval": {
+                    "template_candidates": len(templates),
+                    "product_identity_status": getattr(
+                        knowledge, "identity_status", None
+                    ),
+                    "product_candidates": len(
+                        getattr(knowledge, "candidate_models", ()) or ()
+                    ),
+                    "verified_product_facts": len(
+                        getattr(knowledge, "safe_facts", ()) or ()
+                    ),
+                    "learning_pool": learning.get("candidate_count"),
+                    "learning_hard_valid": learning.get("safe_candidate_count"),
+                    "learning_selected": learning.get("selected_count"),
+                    "subquestion_evidence": [
+                        {
+                            "status": item.get("status"),
+                            "source": item.get("source"),
+                            "learning_ids": len(item.get("learning_ids") or ()),
+                            "historical_ids": len(
+                                item.get("historical_case_ids") or ()
+                            ),
+                        }
+                        for item in evidence
+                        if isinstance(item, dict)
+                    ],
+                },
+                "answer": {
+                    "used_template_ids": list(
+                        draft.get("used_template_ids") or ()
+                    ),
+                    "used_product_facts": list(
+                        draft.get("used_product_facts") or ()
+                    ),
+                    "used_learning_ids": list(
+                        draft.get("used_learning_ids") or ()
+                    ),
+                    "used_historical_ids": list(
+                        draft.get("used_historical_ids") or ()
+                    ),
+                    "ignored_evidence": len(draft.get("ignored_evidence") or ()),
+                    "unresolved": len(draft.get("unresolved") or ()),
+                    "requires_review": draft.get("requires_review"),
+                    "can_auto_post": draft.get("can_auto_post"),
+                },
+            }
+        except Exception:  # noqa: BLE001 - observability never blocks an answer
+            result.metadata["pipeline_trace"] = {"status": "TRACE_FAILED"}
+
     def _record_semantic_coverage(
         self,
         inquiry_id: int,
@@ -3651,7 +3760,14 @@ class AnswerService:
                 ),
                 "approved_learning_evidence": dict(learning_evidence),
                 "auto_post_allowed": (
-                    not product_fact_guard.sensitive or current_fact_verified
+                    not product_fact_guard.sensitive
+                    or current_fact_verified
+                    or gpt_understanding_usable
+                ),
+                "enforced_by": (
+                    "GPT_CONTRACT_AND_GROUNDING"
+                    if gpt_understanding_usable
+                    else "KEYWORD_PRODUCT_FACT_GUARD"
                 ),
                 "product_knowledge": product_knowledge.to_dict(),
                 "product_catalog_in_prompt": prompt_included,
@@ -3680,9 +3796,27 @@ class AnswerService:
                         "topics": list(product_knowledge.topics),
                     },
                 )
-            if product_fact_guard.sensitive and not current_fact_verified:
+            if (
+                product_fact_guard.sensitive
+                and not current_fact_verified
+                and not gpt_understanding_usable
+            ):
                 # The draft may still be useful to staff, but no Product DB
                 # miss/GPT route may assert a past model's fact automatically.
+                #
+                # Scoped to the legacy path. ``classify_product_fact`` decides
+                # from the customer's wording whether this is a specification
+                # question, and then holds the answer for a verified fact --
+                # which is the same judgement twice over on the GPT path, made
+                # once by a keyword table and once by GPT ①'s ``need_product``
+                # and GPT ②'s ``used_product_facts``/``unresolved``. Two
+                # readers disagreeing meant the keyword one won.
+                #
+                # Nothing mechanical is lost. An answer that states a figure or
+                # a feature the catalogue does not carry is still caught by
+                # ``ungrounded_claims`` and ``ungrounded_feature_claims``
+                # against that same catalogue, and an item GPT ② could not
+                # settle is still held by GPT_REPORTED_UNRESOLVED.
                 result.status = AnswerStatus.NEEDS_REVIEW
                 result.auto_answerable = False
                 result.needs_review = True
@@ -3806,6 +3940,7 @@ class AnswerService:
                     for key, value in routing.items()
                     if key != "semantic"
                 }
+            self._record_pipeline_trace(request, result)
             dps_metadata = (
                 request.metadata.get("dps")
                 if isinstance(request.metadata.get("dps"), dict)

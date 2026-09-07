@@ -334,10 +334,20 @@ class ProductKnowledgeResult:
     # so a diagnostic can say *why* a fact was withheld without re-deriving it.
     collection_status: str | None = None
     component_subject: bool = False
+    # How confidently this listing was tied to a catalogued model, and -- when
+    # it was not tied to exactly one -- which models it could have meant.
+    # Candidates are carried so a reader downstream can see them as candidates;
+    # nothing here elects one, so they never become verified facts.
+    identity_status: str = "NOT_FOUND"
+    candidate_models: tuple[dict[str, Any], ...] = dataclass_field(default=())
 
     @property
     def has_safe_facts(self) -> bool:
         return bool(self.safe_facts)
+
+    @property
+    def has_candidates(self) -> bool:
+        return bool(self.candidate_models)
 
     def safe_field_keys(self) -> frozenset[str]:
         return frozenset(item.field_key for item in self.safe_facts)
@@ -416,7 +426,30 @@ class ProductKnowledgeResult:
             "unavailable_reason": self.unavailable_reason,
             "collection_status": self.collection_status,
             "component_subject": self.component_subject,
+            "identity_status": self.identity_status,
+            "candidate_count": len(self.candidate_models),
+            "candidate_models": [dict(item) for item in self.candidate_models],
         }
+
+
+def _candidate_summary(key: str, record: dict[str, Any]) -> dict[str, Any]:
+    """One unelected catalog candidate, reduced to what a reader needs.
+
+    The full record is a page of prose; this keeps the identifying fields and
+    the headline specifications so the difference between two candidates is
+    visible without the prompt carrying two pages.
+    """
+
+    return {
+        "model_key": str(key),
+        "model": record.get("model"),
+        "brand": record.get("brand"),
+        "size_inch": record.get("size_inch"),
+        "resolution": record.get("resolution"),
+        "refresh_rate_hz": record.get("hz"),
+        "vesa": record.get("vesa"),
+        "color": record.get("color"),
+    }
 
 
 def _render_value(value: Any) -> str:
@@ -854,10 +887,20 @@ class ProductKnowledgeService:
             model_code=model_code,
         )
         if not match.record or not match.model_key:
+            # AMBIGUOUS carries the models the listing could have meant. They
+            # travel as candidates and never as facts: which of two 85-inch
+            # panels a title means is not something this lookup can settle, and
+            # electing one would put another model's specification into an
+            # answer about this one.
             return ProductKnowledgeResult(
                 product_id=product_id or None, listing_id=None, matched=False,
                 requested_fields=fields, topics=topics,
                 unavailable_reason=match.reason,
+                identity_status=match.status,
+                candidate_models=tuple(
+                    _candidate_summary(key, record)
+                    for key, record in match.candidates
+                ),
             )
         if asks_about_a_bundled_component(combined):
             return ProductKnowledgeResult(
@@ -865,6 +908,7 @@ class ProductKnowledgeService:
                 matched=True, requested_fields=fields, topics=topics,
                 collection_status="CATALOG_JSON", component_subject=True,
                 unavailable_reason="COMPONENT_SUBJECT_UNRESOLVED",
+                identity_status=match.status,
             )
         facts = self._catalog_facts(
             product_id=product_id or match.model_key,
@@ -874,6 +918,7 @@ class ProductKnowledgeService:
             product_id=product_id or match.model_key, listing_id=match.model_key,
             matched=True, requested_fields=fields, topics=topics,
             safe_facts=tuple(facts), collection_status="CATALOG_JSON",
+            identity_status=match.status,
         )
 
     @staticmethod

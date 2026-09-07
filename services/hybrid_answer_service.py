@@ -125,21 +125,49 @@ class HybridAnswerService:
         """
 
         knowledge = request.metadata.get("product_knowledge")
-        block = getattr(knowledge, "prompt_block", None)
-        if not callable(block):
+        if knowledge is None:
             return {}
-        rendered = block()
-        if not rendered:
-            return {}
-        return {
-            "product_catalog": {
-                "instructions": rendered,
-                "facts": [
-                    item.to_dict() for item in knowledge.safe_facts
-                ],
-                "product_id": knowledge.product_id,
+        # Always say how the lookup ended, including when it found nothing.
+        # "The catalogue holds no verified specification for this listing" and
+        # "nobody looked" are different situations for the model: the first
+        # means the listing text is the only product information there is, and
+        # the second would mean something upstream failed.
+        context: dict[str, Any] = {
+            "product_identity": {
+                "status": getattr(knowledge, "identity_status", None),
+                "matched": bool(getattr(knowledge, "matched", False)),
+                "listing_id": getattr(knowledge, "listing_id", None),
+                "reason": getattr(knowledge, "unavailable_reason", None),
             }
         }
+        block = getattr(knowledge, "prompt_block", None)
+        rendered = block() if callable(block) else ""
+        if rendered:
+            context["product_catalog"] = {
+                "instructions": rendered,
+                "facts": [item.to_dict() for item in knowledge.safe_facts],
+                "product_id": knowledge.product_id,
+                "identity_status": getattr(knowledge, "identity_status", None),
+            }
+        # Models the listing could have meant, when it named no single one.
+        # Reported as candidates and labelled as such: two 85-inch panels can
+        # differ in exactly the field being asked about, so a candidate's
+        # specification is not this product's specification until something
+        # says which candidate this is.
+        candidates = tuple(getattr(knowledge, "candidate_models", ()) or ())
+        if candidates:
+            context["product_candidates"] = {
+                "identity_status": getattr(knowledge, "identity_status", None),
+                "models": [dict(item) for item in candidates],
+                "usage": (
+                    "현재 상품이 이 후보들 중 어느 모델인지 확정되지 않았습니다."
+                    " 후보의 사양을 현재 상품의 확정 사실로 answer 에 쓰지"
+                    " 마세요. 후보 전체가 동일한 값을 가진 경우에도 확정"
+                    " 표현 대신 확인이 필요하다고 안내하거나, 판매 페이지"
+                    " 표기를 근거로 삼는 편이 안전합니다."
+                ),
+            }
+        return context
 
     @staticmethod
     def _gpt_judges_evidence(request: AnswerRequest) -> bool:
@@ -649,6 +677,23 @@ class HybridAnswerService:
                 keys=tuple(_available_fact_paths(facts)),
             )
         )
+        # Which listing the customer is writing from is context, not evidence,
+        # and the model needs it to read anything else in the prompt.
+        #
+        # ``FactSelectionService`` picks fact paths from the keyword
+        # classifier's ``answer_strategy``, and MANUAL_REVIEW -- what that
+        # classifier returns whenever no rule matched the wording -- selects
+        # ``rule.answer`` alone. For "이 제품 해상도가 4K UHD 맞나요?" the rule
+        # answer was empty, so the model was handed no product at all: not the
+        # catalogue, not the option, not even the product's name. It could only
+        # say it was unable to confirm.
+        #
+        # A classifier gap is not a reason to hide which product is being asked
+        # about, so with a usable understanding the listing fields are restored
+        # to whatever the selection produced. They are added, never substituted:
+        # every path the strategy chose is still there.
+        if self._gpt_judges_evidence(request):
+            selected_facts = _with_listing_metadata(selected_facts, facts)
         _mark = _stage("facts_and_selection", _mark)
         phase9_metadata = (
             dict(rule_result.metadata.get("phase9"))
@@ -1388,6 +1433,32 @@ class HybridAnswerService:
                     started=generation_started
                 ),
             )
+
+
+# The listing fields that say which product the inquiry came from. Kept to the
+# three the customer's own page shows; nothing here is a catalogued
+# specification, and the prompt labels them separately for that reason.
+_LISTING_FACT_PATHS: tuple[str, ...] = (
+    "product.product_id", "product.name", "product.option_name",
+)
+
+
+def _with_listing_metadata(
+    selected: SelectedFacts, facts: AnswerFacts
+) -> SelectedFacts:
+    """Ensure the current listing is visible, whatever the strategy selected."""
+
+    values = dict(selected.values)
+    keys = list(selected.keys)
+    for path in _LISTING_FACT_PATHS:
+        if path in values:
+            continue
+        value = facts.get_fact(path)
+        if value in (None, "", [], {}, ()):
+            continue
+        values[path] = value
+        keys.append(path)
+    return SelectedFacts(values=values, keys=tuple(keys))
 
 
 def _available_fact_paths(facts: AnswerFacts) -> list[str]:
