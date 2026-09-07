@@ -580,18 +580,25 @@ class AutoProcessingEligibilityService:
         # unlabelled answer, or an understanding the model could not supply all
         # leave this undetermined, and undetermined blocks nothing -- the gate
         # can only ever add a hold.
-        action_support = semantic_action_decision(metadata)
-        if action_support.mismatched:
-            reasons.append(SEMANTIC_ACTION_MISMATCH)
+        hybrid = metadata.get("hybrid")
+        hybrid = hybrid if isinstance(hybrid, dict) else {}
+        gpt_final_pipeline = (
+            hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+        )
+        if not gpt_final_pipeline:
+            action_support = semantic_action_decision(metadata)
+            if action_support.mismatched:
+                reasons.append(SEMANTIC_ACTION_MISMATCH)
 
         # The same shape one level narrower: not which action was asked, but
         # which *property* of it. "비용은 누가 내나요" answered by "유상입니다"
         # passes every gate above -- right product, right subject, right
         # action -- and never says who pays. Read from what generation
         # recorded, never re-derived here; no record holds nothing.
-        attribute_hold, _why = requested_attribute_decision(metadata)
-        if attribute_hold:
-            reasons.append(REQUESTED_ATTRIBUTE_NOT_COVERED)
+        if not gpt_final_pipeline:
+            attribute_hold, _why = requested_attribute_decision(metadata)
+            if attribute_hold:
+                reasons.append(REQUESTED_ATTRIBUTE_NOT_COVERED)
 
         # Stored Learning was offered as the grounds and nothing verified.
         # "사다리차는 유상입니다" against "비용은 누가 내나요" is the shape: right
@@ -615,13 +622,15 @@ class AutoProcessingEligibilityService:
         # without ever consulting coverage. A measurement that cannot stop a
         # publish is telemetry, so the verdict is read here directly and is a
         # hard blocker no other resolver can lift.
-        if _coverage_incomplete(metadata):
+        if not gpt_final_pipeline and _coverage_incomplete(metadata):
             reasons.append(SEMANTIC_COVERAGE_INCOMPLETE)
 
         # A question with no factual source behind it. Read from retrieval's
         # own per-sub-question verdict, so a reply that names the gap in
         # fluent Korean cannot pass for one that answered it.
-        if _evidence_insufficient(metadata, route=normalized_route):
+        if not gpt_final_pipeline and _evidence_insufficient(
+            metadata, route=normalized_route,
+        ):
             reasons.append(EVIDENCE_NOT_SUFFICIENT)
 
         # A date the customer named, which nothing here can promise.

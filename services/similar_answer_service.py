@@ -207,6 +207,7 @@ class SimilarAnswerService:
         candidate_diagnostics: dict[str, int] | None = None,
         semantic_goal: dict[str, Any] | None = None,
         semantic_ranks: dict[int, int] | None = None,
+        hard_conflicts_only: bool = False,
     ) -> list[dict[str, Any]]:
         query = normalize_learning_question(self.privacy.mask(question))
         # Meaning-based neighbours of this query, by rank, from the derived
@@ -326,7 +327,12 @@ class SimilarAnswerService:
             # evidence for this one.  Missing legacy metadata remains
             # retrievable, but must still pass the answer-support sufficiency
             # gate below; this avoids throwing away valid old Positive Learning.
-            if required_action and candidate_action and candidate_action != required_action:
+            if (
+                not hard_conflicts_only
+                and required_action
+                and candidate_action
+                and candidate_action != required_action
+            ):
                 rejection_counts["SEMANTIC_GOAL_MISMATCH"] += 1
                 diagnostic = {
                     "learning_id": int(item["id"]),
@@ -371,7 +377,9 @@ class SimilarAnswerService:
                 "human_verified": human_verified,
                 **compatibility.to_dict(),
             }
-            if not compatibility.eligible:
+            if not compatibility.eligible and not (
+                hard_conflicts_only and not compatibility.hard_reject
+            ):
                 reason = str(compatibility.reject_reason or "COMPATIBILITY_REJECTED")
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 diagnostic.update({
@@ -385,7 +393,11 @@ class SimilarAnswerService:
             candidate_concepts = self._semantic_concepts(
                 str(item["question_normalized"])
             )
-            if required_context and not required_context.issubset(candidate_concepts):
+            if (
+                not hard_conflicts_only
+                and required_context
+                and not required_context.issubset(candidate_concepts)
+            ):
                 rejection_counts["CONTEXT_POLICY_REJECTED"] += 1
                 continue
             candidate_question = str(item["question_normalized"])
@@ -514,7 +526,7 @@ class SimilarAnswerService:
             relevance += 0.6 * answer_support
             if required_action and candidate_action == required_action:
                 relevance += 0.12
-            if relevance >= minimum_relevance:
+            if hard_conflicts_only or relevance >= minimum_relevance:
                 safe = dict(item)
                 safe["relevance"] = round(relevance, 4)
                 safe["answer_support"] = round(answer_support, 4)

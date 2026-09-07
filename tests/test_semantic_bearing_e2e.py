@@ -299,13 +299,21 @@ STAND_QUESTION = "오베닉 스탠드는 몇 세대인가요?"
 STAND_COMPOUND = "오베닉 스탠드는 몇 세대인가요?\n배송비는 얼마인가요?"
 
 
-def test_one_atom_fully_covered_keeps_the_deterministic_route():
-    """The rule shortcut must survive. This is the control for the next test."""
+def test_one_atom_fully_covered_reaches_gpt_without_partial_coverage():
+    """A complete single atom stays answerable on the GPT-centered route.
+
+    The former assertion named the legacy deterministic shortcut.  The
+    production path now deliberately sends a usable GPT understanding through
+    retrieval and GPT draft generation instead.  What this control protects is
+    unchanged: a rule-supported single atom must not be misclassified as a
+    partial compound answer or disappear before a final answer is produced.
+    """
     outcome = run(STAND_QUESTION,
                   semantic_payload(atom(STAND_QUESTION)), label="r1")
 
-    assert outcome["route"] in {"TEMPLATE", "PRODUCT_DB", "SAFE_RULE"}
+    assert outcome["route"] == "GPT_FALLBACK"
     assert outcome["coverage"] != "PARTIAL"
+    assert outcome["answer"].strip()
 
 
 def test_a_compound_inquiry_the_rule_only_half_answers_does_not_take_the_route():

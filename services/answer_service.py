@@ -338,6 +338,47 @@ def _neutral_gpt_context(
     )
 
 
+def _template_candidate_payload(
+    result: AnswerResult,
+    *,
+    source: str,
+) -> dict[str, Any] | None:
+    """Return an existing rule/Phase9 result as non-binding GPT evidence.
+
+    ``AnswerEngine`` and Phase9 already own the rendered wording and its
+    provenance.  The GPT path must not turn that one result into the whole
+    answer, but it may show the model the candidate alongside Product and
+    Learning evidence.  Keep this deliberately small and serialisable: this
+    is a reuse of the existing result, not a second template system.
+    """
+
+    answer = str(result.answer or "").strip()
+    if not answer:
+        return None
+    metadata = dict(result.metadata or {})
+    return {
+        "kind": "PHASE9" if source == "PHASE9" else "RULE_TEMPLATE",
+        "source": source,
+        "template_id": result.matched_rule or metadata.get("template_id"),
+        "category": result.category,
+        "reason": result.reason,
+        "answer": answer,
+        "template_match_kind": metadata.get("template_match_kind"),
+        "requires_review": bool(result.needs_review),
+        "auto_answerable": bool(result.auto_answerable),
+        "metadata": {
+            key: metadata[key]
+            for key in (
+                "answer_source",
+                "answer_type",
+                "template_variables",
+                "delivery_context",
+            )
+            if key in metadata
+        },
+    }
+
+
 # What staff are told when the pipeline declines to draft. The message has to
 # name the actual policy: a missing shipment shown as "고위험·분쟁" sends the
 # reader looking for a dispute that is not there.
@@ -590,6 +631,18 @@ class AnswerService:
         this measurement must never be the reason a customer goes unanswered.
         """
 
+        hybrid = result.metadata.get("hybrid")
+        if (
+            isinstance(hybrid, dict)
+            and hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+        ):
+            result.metadata["legacy_semantic_action_support"] = (
+                "PRODUCTION_PATH_UNUSED"
+            )
+            result.metadata["legacy_requested_attribute_coverage"] = (
+                "PRODUCTION_PATH_UNUSED"
+            )
+            return
         prepared = request.metadata.get("semantic_routing")
         prepared_value = request.metadata.get("_semantic_routing_value")
         if isinstance(prepared, dict):
@@ -791,11 +844,73 @@ class AnswerService:
         payload.update({
             "called": True,
             "semantic": semantic.to_dict(),
+            "understanding": self._understanding_contract(semantic),
             "trace": dict(analyzer.last_trace),
             "usable": semantic.usable,
             "fallback": None if semantic.usable else "DETERMINISTIC_UNUSABLE",
         })
         return semantic, payload
+
+    @staticmethod
+    def _understanding_contract(semantic: SemanticAnalysis | None) -> dict[str, Any]:
+        """Compact GPT ① execution contract, derived from its existing result.
+
+        This deliberately adds no classifier or second semantic model.  The
+        contract makes the already-usable understanding consumable by code:
+        retrieval services read the source requests and the processing plan
+        reads only the Order/DPS execution requests.  A non-usable result is
+        explicitly a fallback signal, never an alternative opinion.
+        """
+
+        if semantic is None or not semantic.usable:
+            return {
+                "usable": False,
+                "source": "DETERMINISTIC_FALLBACK",
+                "need_template": None,
+                "need_product": None,
+                "need_learning": None,
+                "need_order": None,
+                "need_dps": None,
+                "purchase_state": None,
+                "questions": [],
+            }
+        actions = {str(value).upper() for value in semantic.actions}
+        product_actions = {"PRODUCT_SPEC", "PRODUCT_CONCEPT", "PACKAGE_CONTENTS"}
+        template_actions = {
+            "DELIVERY_STATUS", "DELIVERY_POLICY", "SCHEDULE_REQUEST",
+            "SCHEDULE_CHANGE", "INSTALLATION_METHOD", "INSTALLATION_SCHEDULE",
+        }
+        current_order = semantic.purchase_state == "CURRENT_ORDER"
+        need_dps = bool(
+            current_order and semantic.requires_delivery_schedule
+        )
+        need_order = bool(
+            current_order and (
+                semantic.requires_order_context or need_dps
+            )
+        )
+        return {
+            "usable": True,
+            "source": "GPT_UNDERSTAND",
+            "need_template": bool(actions & template_actions),
+            "need_product": bool(actions & product_actions),
+            # Learning is recall-oriented context.  It is intentionally
+            # requested for all non-current-schedule questions so GPT ②,
+            # rather than a keyword gate, decides whether it is useful.
+            "need_learning": not need_dps,
+            "need_order": need_order,
+            "need_dps": need_dps,
+            "purchase_state": semantic.purchase_state,
+            "questions": [
+                {
+                    "text": item.text,
+                    "action": item.action,
+                    "requested_information": item.requested_information,
+                    "requested_attribute": item.requested_attribute,
+                }
+                for item in semantic.atomic_questions
+            ],
+        }
 
     @staticmethod
     def _attach_semantic_routing(
@@ -804,6 +919,9 @@ class AnswerService:
         payload: dict[str, Any],
     ) -> None:
         request.metadata["semantic_routing"] = dict(payload)
+        request.metadata["gpt_understanding"] = dict(
+            payload.get("understanding") or {}
+        )
         # In-memory only: never serialised directly, and used to prevent a
         # second provider call after the answer has been rendered.
         request.metadata["_semantic_routing_value"] = semantic
@@ -917,6 +1035,116 @@ class AnswerService:
         except Exception:  # noqa: BLE001 - a measurement never blocks a route
             return True
 
+    @staticmethod
+    def _usable_gpt_understanding(request: AnswerRequest) -> dict[str, Any] | None:
+        """Return the persisted GPT① contract when it is authoritative."""
+
+        value = request.metadata.get("gpt_understanding")
+        if isinstance(value, dict) and value.get("usable") is True:
+            return value
+        semantic = request.metadata.get("_semantic_routing_value")
+        if semantic is not None and getattr(semantic, "usable", False):
+            return AnswerService._understanding_contract(semantic)
+        return None
+
+    @classmethod
+    def _template_candidate_retrieval_requested(
+        cls, request: AnswerRequest, *, prefer_template: bool,
+    ) -> bool:
+        """Whether GPT① requested semantic Template/RULE evidence.
+
+        Legacy deterministic routing remains the fallback if GPT① is absent
+        or invalid.  With usable understanding, ``need_template`` is the
+        source request; a keyword rule must not independently re-open that
+        semantic decision.
+        """
+
+        if not prefer_template:
+            return False
+        understanding = cls._usable_gpt_understanding(request)
+        return True if understanding is None else bool(
+            understanding.get("need_template")
+        )
+
+    @classmethod
+    def _deterministic_shortcut_allowed(cls, request: AnswerRequest) -> bool:
+        """Allow a final fixed reply only for a fully self-contained request.
+
+        A usable GPT① contract turns deterministic answers into candidates by
+        default.  The retained shortcut is intentionally narrow: exactly one
+        question, Template requested, and no Product/Learning/Order/DPS
+        evidence requested.  Legacy behaviour is preserved only when GPT① is
+        unavailable or invalid.
+        """
+
+        understanding = cls._usable_gpt_understanding(request)
+        if understanding is None:
+            return True
+        questions = [
+            item for item in understanding.get("questions", ())
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        return (
+            len(questions) == 1
+            and bool(understanding.get("need_template"))
+            and not bool(understanding.get("need_product"))
+            and not bool(understanding.get("need_learning"))
+            and not bool(understanding.get("need_order"))
+            and not bool(understanding.get("need_dps"))
+        )
+
+    @staticmethod
+    def _record_template_candidate(
+        request: AnswerRequest,
+        result: AnswerResult,
+        *,
+        source: str,
+    ) -> None:
+        payload = _template_candidate_payload(result, source=source)
+        if payload is None:
+            return
+        candidates = request.metadata.setdefault("template_candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+            request.metadata["template_candidates"] = candidates
+        identity = (payload.get("source"), payload.get("template_id"), payload["answer"])
+        if not any(
+            isinstance(item, dict)
+            and (item.get("source"), item.get("template_id"), item.get("answer"))
+            == identity
+            for item in candidates
+        ):
+            candidates.append(payload)
+
+    @staticmethod
+    def _phase9_shortcut_allowed(request: AnswerRequest) -> bool:
+        """Whether Phase9 may finish the *entire* customer inquiry.
+
+        Phase9 owns reliable order/DPS actions and confirmed schedule text.  It
+        does not own the meaning of a compound inquiry.  In particular, a
+        pre-purchase delivery clause must not discard product or Learning
+        evidence requested by another clause.  The semantic understanding
+        produced before planning is the source of truth when it is usable;
+        legacy deterministic routing remains the safe fallback when it is not.
+        """
+
+        semantic = request.metadata.get("_semantic_routing_value")
+        if semantic is None or not getattr(semantic, "usable", False):
+            return True
+        questions = [
+            str(getattr(item, "text", "") or "").strip()
+            for item in (getattr(semantic, "atomic_questions", ()) or ())
+        ]
+        if len([item for item in questions if item]) > 1:
+            return False
+        # Phase9 may still complete a genuine current-order workflow (missing
+        # order number / confirmed DPS facts).  A pre-purchase policy answer
+        # is semantic evidence for GPT②, not an early final response.
+        understanding = AnswerService._understanding_contract(semantic)
+        return bool(
+            understanding.get("need_order") or understanding.get("need_dps")
+        )
+
     def _record_semantic_coverage(
         self,
         inquiry_id: int,
@@ -931,6 +1159,13 @@ class AnswerService:
         answered, so publishing the otherwise polished draft would be unsafe.
         """
 
+        hybrid = result.metadata.get("hybrid")
+        if (
+            isinstance(hybrid, dict)
+            and hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+        ):
+            result.metadata["legacy_semantic_coverage"] = "PRODUCTION_PATH_UNUSED"
+            return
         if not semantic_coverage_enabled():
             return
         try:
@@ -1970,8 +2205,30 @@ class AnswerService:
             elif plan.is_delivery:
                 request.metadata["order_lookup_status"] = (
                     plan.order_lookup_status
-                )
+            )
             is_delivery_schedule = plan.is_delivery
+            template_candidate_requested = (
+                self._template_candidate_retrieval_requested(
+                    request, prefer_template=prefer_template,
+                )
+            )
+            request.metadata["template_candidate_retrieval"] = {
+                "requested": template_candidate_requested,
+                "source": (
+                    "GPT_UNDERSTAND"
+                    if self._usable_gpt_understanding(request) is not None
+                    else "DETERMINISTIC_FALLBACK"
+                ),
+            }
+            # Keep current-order actions (Order/DPS) on the delivery plan, but
+            # only let Phase9 render the final reply when the semantic
+            # understanding says this is one question.  A delivery clause in
+            # a compound inquiry is evidence/policy context, not a licence to
+            # terminate product or Learning retrieval for the whole inquiry.
+            phase9_shortcut = (
+                is_delivery_schedule
+                and self._phase9_shortcut_allowed(request)
+            )
             # Classify product-fact sensitivity before choosing a general
             # answer route. A non-authoritative SAFE_RULE used to skip
             # Approved Learning retrieval and was then rejected by this same
@@ -2102,6 +2359,15 @@ class AnswerService:
                     base_rule_result = self._exclude_semantic_rule_mismatch(
                         base_rule_result, routing_semantic, request,
                     )
+                    # A usable GPT understanding requested Template evidence.
+                    # The ordinary (non-delivery) branch used to render this
+                    # deterministic candidate but then discard it before the
+                    # common GPT path.  Preserve it as evidence just as the
+                    # delivery branch does; it is not a final shortcut here.
+                    if template_candidate_requested:
+                        self._record_template_candidate(
+                            request, base_rule_result, source="ANSWER_ENGINE",
+                        )
                 except Exception as template_error:
                     self.logs.record_inquiry(
                         inquiry_id,
@@ -2160,6 +2426,45 @@ class AnswerService:
                         "selected_answer_route": "GPT_DIRECT",
                     },
                 )
+            if (
+                is_delivery_schedule
+                and not phase9_shortcut
+                and template_candidate_requested
+            ):
+                # The delivery action above may already have populated Order
+                # or DPS evidence.  Retrieve the deterministic candidate as
+                # one input to the common GPT path rather than returning the
+                # delivery placeholder as the whole answer.
+                try:
+                    base_rule_result = self.engine.generate(request)
+                    base_rule_result = self._exclude_semantic_rule_mismatch(
+                        base_rule_result, routing_semantic, request,
+                    )
+                    if template_candidate_requested:
+                        self._record_template_candidate(
+                            request, base_rule_result, source="ANSWER_ENGINE",
+                        )
+                    self._record_template_candidate(
+                        request, base_rule_result, source="ANSWER_ENGINE",
+                    )
+                except Exception as template_error:
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "TEMPLATE_RENDER_FAILED",
+                        "Template candidate rendering failed; continuing with evidence retrieval.",
+                        level="WARNING",
+                        details={"error_type": template_error.__class__.__name__},
+                    )
+                    base_rule_result = AnswerResult(
+                        status=AnswerStatus.NOT_SUPPORTED,
+                        category=phase9_analysis.inquiry_type.value,
+                        reason="TEMPLATE_RENDER_FAILED",
+                        answer="",
+                        provider="rules",
+                        auto_answerable=False,
+                        needs_review=True,
+                        metadata={"template_error": "RENDER_FAILED"},
+                    )
             latest_dps = dps_outcome.lookup_row
             if (
                 latest_dps is None
@@ -2289,7 +2594,21 @@ class AnswerService:
                         "correlation_id": correlation_id,
                     },
                 )
-            if is_delivery_schedule:
+            if (
+                is_delivery_schedule
+                and not phase9_shortcut
+                and template_candidate_requested
+            ):
+                # Phase9 still renders its authoritative workflow/policy text,
+                # but for a usable GPT① semantic route it is evidence for
+                # GPT② rather than the whole inquiry's final answer.
+                phase9_candidate = apply_phase9_rule_policy(
+                    request, base_rule_result, phase9_analysis,
+                )
+                self._record_template_candidate(
+                    request, phase9_candidate, source="PHASE9",
+                )
+            if phase9_shortcut:
                 rule_result = apply_phase9_rule_policy(
                     request,
                     base_rule_result,
@@ -2606,12 +2925,13 @@ class AnswerService:
                     _template_unavailable_reason(
                         base_rule_result, request, self.validator
                     )
-                    if prefer_template
+                    if template_candidate_requested
                     else "BYPASSED"
                 )
                 if (
-                    prefer_template
+                    template_candidate_requested
                     and template_failure is None
+                    and self._deterministic_shortcut_allowed(request)
                     and self._deterministic_answer_settles_inquiry(
                         request, base_rule_result.answer
                     )
@@ -2690,7 +3010,7 @@ class AnswerService:
                         },
                     )
                 elif (
-                    prefer_template
+                    template_candidate_requested
                     and _is_safe_rule_result(base_rule_result)
                     and not product_fact_guard.sensitive
                     # The same question the template branch above asks. A safe
@@ -2698,6 +3018,7 @@ class AnswerService:
                     # "tv설지하고 페가전 수거해주시는거죠?" -- ended here with
                     # learning_search_called False, so the collection question
                     # never reached the 63 approved answers that address it.
+                    and self._deterministic_shortcut_allowed(request)
                     and self._deterministic_answer_settles_inquiry(
                         request, base_rule_result.answer
                     )
@@ -2747,7 +3068,7 @@ class AnswerService:
                         },
                     )
                 else:
-                    if prefer_template:
+                    if template_candidate_requested:
                         event_code = (
                             "TEMPLATE_VALIDATION_FAILED"
                             if template_failure == "VALIDATION_FAILED"
@@ -2788,7 +3109,7 @@ class AnswerService:
                                 category=phase9_analysis.inquiry_type.value,
                             )
                             if (
-                                prefer_template
+                                template_candidate_requested
                                 and (
                                     not is_valid_draft(
                                         base_rule_result.answer

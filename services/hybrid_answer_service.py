@@ -71,6 +71,7 @@ class HybridAnswerService:
         validator: AnswerValidator | None = None,
         fact_selection: FactSelectionService | None = None,
         learning_context_provider: Callable[..., dict[str, Any]] | None = None,
+        legacy_evidence_verification: bool = True,
     ) -> None:
         self.provider = provider or create_gpt_provider()
         self.understanding = GptUnderstandingService(self.provider)
@@ -82,6 +83,9 @@ class HybridAnswerService:
         self.validator = validator or AnswerValidator()
         self.fact_selection = fact_selection or FactSelectionService()
         self._learning_context_provider = learning_context_provider
+        # Retained only for direct compatibility diagnostics.  Production
+        # construction explicitly disables this extra selector/verifier pass.
+        self._legacy_evidence_verification = legacy_evidence_verification
         self._stage_seconds: dict[str, float] = {}
 
     def _provider_telemetry(
@@ -777,6 +781,22 @@ class HybridAnswerService:
                 # facts carry this product's verified specification. Both
                 # reach the prompt; neither overwrites the other.
                 learning_context.update(self._product_facts_context(request))
+                # AnswerEngine and Phase9 candidates are rendered by existing
+                # deterministic code, but a usable GPT① route does not let
+                # either one terminate a compound inquiry.  Carry their
+                # compact provenance into the same evidence context as
+                # Product and Learning so GPT② can choose, combine or reject
+                # them.  This is intentionally metadata reuse, not a second
+                # template selector.
+                template_candidates = request.metadata.get(
+                    "template_candidates"
+                )
+                if isinstance(template_candidates, list):
+                    learning_context["template_candidates"] = [
+                        dict(item)
+                        for item in template_candidates
+                        if isinstance(item, dict)
+                    ]
                 # ...and they are evidence, not just prompt text. Applied
                 # before the conflict pass below so a product fact that
                 # contradicts an approved Learning answer is still resolved
@@ -797,25 +817,34 @@ class HybridAnswerService:
                 evidence_gate = PreGenerationGate.evaluate_evidence(
                     learning_context
                 )
-                if evidence_gate.skip_generation:
+                if (
+                    evidence_gate.skip_generation
+                    and self._legacy_evidence_verification
+                ):
                     raise GenerationSkippedError(
                         reasons=evidence_gate.reasons,
                         stage=evidence_gate.stage,
                     )
-                # EVIDENCE VERIFICATION -- the last thing before the model is
-                # asked to write, and the first point at which both halves are
-                # in hand: the atomic question the customer asked, and the
-                # exact stored rows retrieval chose to settle it with.
-                #
-                # It runs here rather than downstream because downstream has
-                # only ids. Verifying a re-fetched candidate set would judge
-                # rows the model never read; these are the ones it is about to
-                # be given. Nothing is filtered out of the prompt on the
-                # verdict -- generation is unchanged, and the verdict is
-                # written down for the auto-post gate to read.
-                evidence_verification = self._verify_evidence(
-                    request, learning_context,
-                )
+                if evidence_gate.skip_generation:
+                    # In the GPT-understand/retrieve/answer production path a
+                    # conflict holds publication, not composition.  GPT② must
+                    # still see the retrieved evidence and leave the disputed
+                    # claim unresolved; otherwise one disputed atom erases
+                    # independently grounded Product/Template answers.
+                    learning_context["legacy_pre_generation_evidence_gate"] = {
+                        "status": "PRODUCTION_PATH_UNUSED",
+                        **evidence_gate.to_dict(),
+                    }
+                # The draft provider is the one final evidence reader in the
+                # production path.  The former selector/verifier pair made
+                # additional semantic provider calls after retrieval and
+                # before drafting, without changing the prompt.  They remain
+                # available for historical diagnostics, but no longer decide
+                # whether retrieved candidates reach GPT ANSWER.
+                if self._legacy_evidence_verification:
+                    evidence_verification = self._verify_evidence(
+                        request, learning_context,
+                    )
                 draft = self.drafts.generate(
                     facts,
                     intent,
@@ -1139,6 +1168,16 @@ class HybridAnswerService:
             product_facts_context = self._product_facts_context(request)
             metadata["hybrid"] = {
                 "enabled": True,
+                "answer_pipeline": (
+                    "LEGACY_SELECTOR_VERIFIER"
+                    if self._legacy_evidence_verification
+                    else "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+                ),
+                "legacy_evidence_selector_verifier": (
+                    "ACTIVE_COMPATIBILITY_MODE"
+                    if self._legacy_evidence_verification
+                    else "PRODUCTION_PATH_UNUSED"
+                ),
                 "provider": self.provider.name,
                 "fallback_used": False,
                 # Recorded from the context that was actually built for this
@@ -1152,6 +1191,22 @@ class HybridAnswerService:
                 "approved_learning_evidence": dict(
                     learning_context.get("approved_learning_evidence") or {}
                 ),
+                # One compact, persisted retrieval trace answers the operator
+                # question "why was Learning not used?" without re-running a
+                # selector.  Candidate selection remains the responsibility
+                # of GPT ANSWER; this is provenance only.
+                "retrieval": {
+                    "learning": dict(
+                        learning_context.get("learning_retrieval") or {}
+                    ),
+                    "product_catalog": {
+                        "requested": bool(product_facts_context),
+                        "fact_count": len(
+                            product_facts_context.get("product_catalog", {})
+                            .get("facts", [])
+                        ),
+                    },
+                },
                 "product_fact_fields": sorted(
                     str(item.get("field_key") or "")
                     for item in (

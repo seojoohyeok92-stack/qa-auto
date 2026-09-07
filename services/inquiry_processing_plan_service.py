@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import dataclasses
 from typing import Any
 
 from answer.inquiry_processing_plan import InquiryProcessingPlan
@@ -94,6 +95,28 @@ class InquiryProcessingPlanService:
             if deterministic_analysis is not None
             else self.analysis.analyze(request, semantic=semantic_analysis)
         )
+        # A usable GPT ① result is the meaning authority.  This service still
+        # performs mechanical plan work (identifier validation, cache state
+        # and workflow actions), but it must not independently rediscover
+        # whether customer-specific Order/DPS evidence was requested.
+        understanding = (
+            (semantic_routing or {}).get("understanding")
+            if isinstance(semantic_routing, dict)
+            else None
+        )
+        understanding = understanding if isinstance(understanding, dict) else {}
+        gpt_understanding_usable = bool(understanding.get("usable") is True)
+        if gpt_understanding_usable:
+            analysis = dataclasses.replace(
+                analysis,
+                requires_order_lookup=bool(understanding.get("need_order")),
+                requires_dps_lookup=bool(understanding.get("need_dps")),
+                requires_order_id=bool(understanding.get("need_order")),
+                purchase_confirmed=(
+                    str(understanding.get("purchase_state") or "")
+                    == "CURRENT_ORDER"
+                ),
+            )
         inquiry_id = int(inquiry["id"])
         order_id = str(request.order_id or "").strip()
         product_order_id = str(request.product_order_id or "").strip()

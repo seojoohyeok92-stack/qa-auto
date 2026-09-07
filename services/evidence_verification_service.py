@@ -246,6 +246,12 @@ def verification_required(
     metadata = metadata or {}
     hybrid = metadata.get("hybrid")
     hybrid = hybrid if isinstance(hybrid, Mapping) else {}
+    # GPT ANSWER now receives the retrieved candidates directly and records
+    # its final answer in the same generation.  Do not resurrect the retired
+    # selector/verifier as an implicit second semantic decision in eligibility.
+    # Legacy drafts have no marker and retain their historical behaviour.
+    if hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER":
+        return False
     for item in hybrid.get("subquestion_evidence") or ():
         if not isinstance(item, Mapping):
             continue

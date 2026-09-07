@@ -241,9 +241,15 @@ SEMANTIC_NEIGHBOUR_LIMIT = 20
 class LearningContextService:
     """GPT에 제공할 비사실성 참고 문맥만 구성한다."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, *, hard_conflicts_only: bool = False,
+    ) -> None:
         self.inquiries = InquiryRepository(database)
         self.search = SimilarAnswerService(LearningRepository(database))
+        # Production GPT Answer receives recall-oriented candidates.  This
+        # flag preserves the old precision-oriented context for direct legacy
+        # callers while limiting production pre-GPT removal to hard conflicts.
+        self.hard_conflicts_only = hard_conflicts_only
         # One index and one embedding client per service, so a compound
         # inquiry does not reload 1,000 vectors per sub-question.
         self._index_cache: Any = _UNSET
@@ -478,6 +484,7 @@ class LearningContextService:
                 candidate_pool=candidate_pool,
                 candidate_diagnostics=candidate_diagnostics,
                 semantic_goal=semantic_goal,
+                hard_conflicts_only=self.hard_conflicts_only,
             )
             for key in ("similar_approved_answers", "seller_style_examples"):
                 for item in item_context[key]:

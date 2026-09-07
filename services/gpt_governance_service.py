@@ -444,10 +444,13 @@ class GovernedHybridAnswerService:
                 clock=self.clock,
             )
         try:
-            learning_context = LearningContextService(self.database)
+            learning_context = LearningContextService(
+                self.database, hard_conflicts_only=True,
+            )
             hybrid = HybridAnswerService(
                 provider,
                 learning_context_provider=learning_context.build,
+                legacy_evidence_verification=False,
             ).generate(
                 request, rule_result
             )
