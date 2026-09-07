@@ -286,13 +286,24 @@ def test_lg09_product_fact_contradicting_learning_blocks() -> None:
     assert verdict.reason == "PRODUCT_FACT_VS_LEARNING_CONFLICT"
 
 
-def test_lg10_retrieved_but_unrelated_learning_is_not_evidence() -> None:
-    """Retrieval finding something is not the same as it answering this."""
+def test_lg10_a_low_wording_overlap_no_longer_disqualifies_learning() -> None:
+    """Retrieval finding something is still not the same as it answering this.
+
+    What changed is who decides. ``answer_support`` counts how much of the
+    question's wording reappears in the answer, so a correct answer phrased
+    differently scores near zero -- which is how an approved
+    "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다." was refused as
+    evidence for "삼성기사분이 설치하러 오시나요". The score still travels with
+    the candidate; it no longer withholds it.
+
+    What this policy can settle is unchanged and still enforced: approval,
+    exact product identity, and a definite claim -- see LG-08 and LG-12.
+    """
 
     verdict = decide([learning_item(answer_support=0.1)])
 
-    assert verdict.usable is False
-    assert verdict.reason == "NO_QUALIFYING_APPROVED_LEARNING"
+    assert verdict.usable is True
+    assert 1 in verdict.learning_ids
 
 
 def test_lg11_same_model_stand_learning_grounds_without_product_fact() -> None:
@@ -338,7 +349,10 @@ def test_lg13_conflicting_airplay_learning_blocks() -> None:
 
 def test_lg14_verified_hdmi_fact_answers_its_own_question() -> None:
     class _Request:
-        metadata = {"product_knowledge": knowledge(fact("hdmi_port_count", 3, "개"))}
+        metadata = {
+            "product_knowledge": knowledge(fact("hdmi_port_count", 3, "개")),
+            "gpt_understanding": {"usable": True, "need_product": True},
+        }
 
     item = {
         "subquestion": "이 제품 HDMI 단자가 몇 개 있나요?",
@@ -351,20 +365,30 @@ def test_lg14_verified_hdmi_fact_answers_its_own_question() -> None:
         _Request(), {"subquestion_evidence": [item]}
     )
 
-    assert item["status"] == "ANSWERABLE"
+    # CANDIDATE rather than ANSWERABLE: the catalogue row is offered and GPT ②
+    # reports whether it used it. The row is the same row.
+    assert item["status"] == "CANDIDATE"
     assert item["source"] == "VERIFIED_PRODUCT_FACT"
     assert item["product_fact_fields"] == ["hdmi_port_count"]
 
 
-def test_lg15_unrelated_verified_fact_does_not_answer_the_question() -> None:
-    """Screen size is verified; it says nothing about AirPlay."""
+def test_lg15_a_fact_the_catalogue_lacks_is_never_supplied() -> None:
+    """Screen size is verified; it says nothing about AirPlay.
+
+    Deciding in advance which catalogued rows a question may see was the
+    keyword judgement that moved to GPT ②. What did not move is the catalogue's
+    contents: there is no ``airplay_support`` row, the offered fields are
+    exactly the two that exist, and an answer asserting AirPlay support is
+    caught by ``ungrounded_feature_claims`` against this same corpus.
+    """
 
     class _Request:
         metadata = {
             "product_knowledge": knowledge(
                 fact("screen_size", {"inch": 43}),
                 fact("wifi_standard", "802.11ac"),
-            )
+            ),
+            "gpt_understanding": {"usable": True, "need_product": True},
         }
 
     item = {
@@ -378,7 +402,14 @@ def test_lg15_unrelated_verified_fact_does_not_answer_the_question() -> None:
         _Request(), {"subquestion_evidence": [item]}
     )
 
-    assert item["status"] == "NO_RELIABLE_SOURCE"
+    assert set(item["product_fact_fields"]) == {"screen_size", "wifi_standard"}
+    assert "airplay_support" not in item["product_fact_fields"]
+
+    from answer.answer_validator import ungrounded_feature_claims
+
+    assert ungrounded_feature_claims(
+        "네, 에어플레이를 지원합니다.", "screen_size:43 wifi_standard:802.11ac",
+    )
 
 
 # ==========================================================================

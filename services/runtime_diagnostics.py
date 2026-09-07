@@ -14,6 +14,9 @@ RUNTIME_STARTED_AT = datetime.now().astimezone().isoformat(timespec="seconds")
 RUNTIME_LOG_PATH = Path("logs") / "streamlit_runtime.log"
 
 
+from services.semantic_analysis import is_enabled as semantic_analyzer_enabled
+
+
 def _runtime_logger() -> logging.Logger:
     logger = logging.getLogger("qna.streamlit_runtime")
     if not any(
@@ -89,4 +92,11 @@ def runtime_snapshot(
         "heartbeat_at": datetime.now().astimezone().isoformat(
             timespec="seconds"
         ),
+        # Whether GPT ① is running. The pipeline is built around it -- it
+        # decides what the question means and which evidence to fetch -- and
+        # with it off every route falls back to the keyword classifier. That
+        # fallback still drafts for staff, but it can no longer publish on its
+        # own (UNDERSTANDING_UNAVAILABLE), so an operator needs to be able to
+        # see the state rather than infer it from a hold reason.
+        "gpt_understanding_enabled": semantic_analyzer_enabled(),
     }

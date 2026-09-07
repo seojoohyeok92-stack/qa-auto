@@ -385,13 +385,28 @@ def test_a_hedged_approved_answer_is_not_a_verified_fact(answer):
     ).usable is False
 
 
-def test_weakly_supporting_learning_is_not_evidence():
+def test_a_low_lexical_overlap_no_longer_disqualifies_learning():
+    """``answer_support`` is a retrieval hint, not a permission any more.
+
+    It counts how much of the question's wording reappears in the answer, so a
+    correct answer phrased differently scores near zero -- which is how an
+    approved "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다." scored
+    0.000 against "삼성기사분이 설치하러 오시나요" and was refused as evidence
+    for the question it was written to answer.
+
+    Everything this function can actually settle still holds: approval, exact
+    product identity, and a definite (unhedged) claim. Only the wording test
+    left, and it left because it was answering a question about meaning.
+    """
+
     from services.learning_evidence_policy import evaluate
 
-    assert evaluate(
+    decision = evaluate(
         learning_context=learning(approved(11, STAND_YES, support=0.1)),
         safe_facts=(),
-    ).usable is False
+    )
+    assert decision.usable is True
+    assert decision.learning_ids == (11,)
 
 
 def test_learning_not_mapped_to_answerable_evidence_is_not_used():
@@ -722,8 +737,27 @@ def test_the_policy_reuses_the_existing_conflict_detector():
     assert learning_evidence_policy.facts_conflict is facts_conflict
 
 
-def test_the_policy_reuses_the_existing_support_threshold():
-    from answer.evidence_support import SUPPORTED_THRESHOLD
-    from services.learning_evidence_policy import SUPPORTED_THRESHOLD as used
+def test_the_policy_no_longer_gates_on_the_support_threshold():
+    """The threshold still exists; this module no longer decides with it.
 
-    assert used is SUPPORTED_THRESHOLD
+    ``SUPPORTED_THRESHOLD`` remains where retrieval uses it -- to rank and to
+    label a candidate for the operator -- and the identity, approval and
+    hedging checks here are untouched. What is gone is this module importing it
+    to refuse evidence, which is the wording test the pipeline stopped applying.
+    """
+
+    import inspect
+
+    from services import learning_evidence_policy
+
+    assert not hasattr(learning_evidence_policy, "SUPPORTED_THRESHOLD")
+    source = inspect.getsource(learning_evidence_policy._qualifying)
+    # Comments still explain why the floor went; the code no longer reads the
+    # score, so the check is on executable lines only.
+    code = chr(10).join(
+        line for line in source.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert 'item.get("answer_support")' not in code
+    # The checks that remain are the ones a table of rows can settle.
+    assert "APPROVED" in code and "is_hedged" in code

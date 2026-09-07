@@ -937,9 +937,18 @@ def test_L_subquestion_not_answerable_blocks():
     assert "POLICY_OR_HIGH_RISK_REVIEW" in verdict.reasons
 
 
-def test_M_subquestion_not_supported_blocks():
+def test_M_a_subquestion_with_no_source_at_all_blocks():
+    """The hold now keys on the absence of a source, not on wording overlap.
+
+    ``evidence_coverage`` is the lexical answer-support label. Holding an
+    ANSWERABLE item because that label came back PARTIAL asked whether the
+    candidate repeated the question's words, which a correct paraphrase does
+    not -- so this now checks the finding the case is actually about: a
+    sub-question retrieval found nothing for.
+    """
+
     verdict = _evaluate(draft=_stale_with(
-        evidence=_evidence(coverage="PARTIAL"),
+        evidence=_evidence(status="NO_RELIABLE_SOURCE", coverage="UNSUPPORTED"),
     ))
     assert verdict.decision == "REVIEW_REQUIRED"
 

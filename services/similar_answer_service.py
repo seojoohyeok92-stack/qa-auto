@@ -625,6 +625,19 @@ class SimilarAnswerService:
                 ),
                 "compatibility": item.get("compatibility") or {},
                 "semantic_goal": item.get("semantic_goal") or {},
+                # Provenance the model needs to judge reuse for itself. The
+                # question this answer was written for is the single most
+                # useful field: it is what separates stable product knowledge
+                # from a reply about one customer's order, and the pipeline
+                # used to decide that on the model's behalf with a lexical
+                # score.
+                "source_question": item["question_original_masked"],
+                "source_product_name": item.get("product_name"),
+                "source_model_code": item.get("model_code"),
+                "source_date": item.get("created_at"),
+                "validity_type": item.get("validity_type"),
+                "valid_from": item.get("valid_from"),
+                "valid_to": item.get("valid_to"),
             }
             # An answer that says outright it is unsure -- "8월 둘째 주 이후로
             # 예상됩니다", "전날 연락드릴 것으로 보입니다" -- was reaching the

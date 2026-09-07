@@ -120,6 +120,18 @@ def delivery_period_claim(answer: object) -> str | None:
 # questions are the thing auto-post must not publish over.
 SEMANTIC_COVERAGE_INCOMPLETE = "SEMANTIC_COVERAGE_INCOMPLETE"
 
+# GPT ②'s own findings about the answer it just wrote. Deliberately absent from
+# SOFT_REASONS: an item the model could not settle, or an answer it declined to
+# publish, is the finding that used to be inferred from anchor tables, and it is
+# now made by the reader that saw the evidence.
+GPT_REPORTED_UNRESOLVED = "GPT_REPORTED_UNRESOLVED"
+GPT_WITHHELD_AUTO_POST = "GPT_WITHHELD_AUTO_POST"
+
+# No usable understanding of the question. Automatic publication requires that
+# GPT ① read the inquiry; the keyword classifier is a routing fallback, not a
+# licence to answer a customer unattended.
+UNDERSTANDING_UNAVAILABLE = "UNDERSTANDING_UNAVAILABLE"
+
 # The two verdicts that mean "a recognised question went unanswered". UNKNOWN
 # stays observational, exactly as it is inside the coverage evaluator: an
 # unfamiliar but safe question must not become a false hold.
@@ -223,10 +235,19 @@ class AutoProcessingEligibilityService:
         for item in evidence:
             if not isinstance(item, dict):
                 return False
-            if str(item.get("status") or "").upper() != "ANSWERABLE":
+            # CANDIDATE means retrieval attached sources and GPT ② judged them;
+            # ANSWERABLE means a deterministic source settled it. Either is an
+            # evidence base. NEEDS_DPS, CONFLICT, DELIVERY_SCHEDULE_REVIEW and
+            # NO_RELIABLE_SOURCE are not, and still return False here.
+            if str(item.get("status") or "").upper() not in {
+                "ANSWERABLE", "CANDIDATE",
+            }:
                 return False
-            if str(item.get("evidence_coverage") or "").upper() != "SUPPORTED":
-                return False
+            # ``evidence_coverage`` is no longer consulted. It is the lexical
+            # answer-support label, and requiring SUPPORTED here re-imposed the
+            # wording test that the retrieval ladder no longer applies -- the
+            # gate would have gone on holding answers for the exact reason the
+            # pipeline stopped withholding evidence.
         return True
 
     @staticmethod
@@ -423,6 +444,8 @@ class AutoProcessingEligibilityService:
         validator = validator_value if isinstance(validator_value, dict) else {}
         hybrid_value = metadata.get("hybrid")
         hybrid = hybrid_value if isinstance(hybrid_value, dict) else {}
+        draft_value = hybrid.get("draft")
+        gpt_draft = draft_value if isinstance(draft_value, dict) else {}
         review_status = str(draft.get("review_status") or "").upper()
         has_preliminary_review = bool(
             metadata.get("requires_manual_review")
@@ -526,10 +549,18 @@ class AutoProcessingEligibilityService:
         # template (the catalog's own verified accessory rules, or a Product
         # DB fact) may answer it; anything composed by the model without such
         # a source may be drafted for staff but not published.
+        # Compatibility is a fact the customer buys on, and the rule stands.
+        # What changed is what counts as a verified source: the keyword
+        # classifier raising PRODUCT_COMPATIBILITY was blocking every route but
+        # two, including one where GPT ② had read the catalogue rows and named
+        # the ones it used. That is a verified source, so it is accepted beside
+        # the fixed template and the Product DB. An answer that names no product
+        # fact is still held.
         if (
             str(analysis.get("detected_intent") or "").upper()
             == "PRODUCT_COMPATIBILITY"
             and normalized_route not in {"TEMPLATE", "PRODUCT_DB"}
+            and not gpt_draft.get("used_product_facts")
         ):
             reasons.append("PRODUCT_COMPATIBILITY_NOT_VERIFIED")
         if review_status == "IN_REVIEW":
@@ -633,6 +664,48 @@ class AutoProcessingEligibilityService:
         ):
             reasons.append(EVIDENCE_NOT_SUFFICIENT)
 
+        # GPT ②'s own verdicts on the answer it wrote. These are the findings
+        # the removed anchor-table rules were standing in for, reported by the
+        # party that read both the question and the evidence, so they are hard
+        # blockers rather than advisory.
+        #
+        # ``can_auto_post`` is tri-state on the draft: absent means the provider
+        # never learned the field, and only an explicit false withholds.
+        if gpt_draft.get("unresolved"):
+            reasons.append(GPT_REPORTED_UNRESOLVED)
+        if gpt_draft.get("can_auto_post") is False:
+            reasons.append(GPT_WITHHELD_AUTO_POST)
+
+        # An answer GPT ② composed, for a question GPT ① never read.
+        #
+        # That combination is the GPT-centred pipeline running on one engine.
+        # GPT ① is what decides how the inquiry decomposes and which evidence to
+        # fetch; without it, retrieval falls back to the keyword splitter and
+        # the model composes from whatever that found, with no one having
+        # established what was asked. A draft is still written and staff can
+        # still send it -- only the automatic path closes.
+        #
+        # Scoped to the GPT-composed pipeline on purpose. A deterministic route
+        # (a fixed template, a Product DB fact, an order-number request) does
+        # not compose anything and is judged by the gates it always had, which
+        # this release leaves untouched wherever GPT ① is absent -- see
+        # ``HybridAnswerService._gpt_judges_evidence`` and the validator rules
+        # that key on it.
+        #
+        # Legacy drafts predating this record are untouched: the marker has to
+        # be present and say the understanding was unusable.
+        semantic_routing = metadata.get("semantic_routing")
+        semantic_routing = (
+            semantic_routing if isinstance(semantic_routing, Mapping) else None
+        )
+        if gpt_final_pipeline and semantic_routing is not None:
+            understanding = semantic_routing.get("understanding")
+            understanding = (
+                understanding if isinstance(understanding, Mapping) else {}
+            )
+            if understanding.get("usable") is not True:
+                reasons.append(UNDERSTANDING_UNAVAILABLE)
+
         # A date the customer named, which nothing here can promise.
         #
         # "오늘 주문하면 9일까지 받아볼 수 있을까요?" was answered with the
@@ -674,8 +747,6 @@ class AutoProcessingEligibilityService:
             except (TypeError, ValueError):
                 reasons.append("INTENT_CONFIDENCE_UNKNOWN")
 
-        draft_value = hybrid.get("draft")
-        gpt_draft = draft_value if isinstance(draft_value, dict) else {}
         gpt_confidence = gpt_draft.get("confidence")
         if gpt_confidence is not None:
             try:

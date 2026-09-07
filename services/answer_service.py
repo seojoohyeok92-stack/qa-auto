@@ -463,6 +463,22 @@ class AnswerService:
         reasons. A fault here can never fail an answer that was ready to save.
         """
 
+        hybrid = result.metadata.get("hybrid")
+        if (
+            isinstance(hybrid, dict)
+            and hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+        ):
+            # The anchors decide this from the customer's wording and the
+            # draft's, and they recognise neither side of an inquiry they have
+            # no entry for: "삼성기사분이 설치하러 오시나요" and the confirmed
+            # answer to it both reduce to no topics at all. Appending a
+            # deferral sentence off that reading would tell a customer their
+            # answered question still needs a person. GPT ② reports the same
+            # finding as ``unresolved``, on questions it actually read.
+            result.metadata["legacy_atomic_completeness"] = (
+                "PRODUCTION_PATH_UNUSED"
+            )
+            return result.answer
         body = extract_answer_body(result.answer)
         try:
             completeness = self.completeness.evaluate(
@@ -1094,7 +1110,29 @@ class AnswerService:
         )
 
     @staticmethod
+    def _append_template_candidate(
+        request: AnswerRequest, payload: dict[str, Any],
+    ) -> None:
+        candidates = request.metadata.setdefault("template_candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+            request.metadata["template_candidates"] = candidates
+        identity = (
+            payload.get("source"),
+            payload.get("template_id"),
+            payload.get("answer"),
+        )
+        if not any(
+            isinstance(item, dict)
+            and (item.get("source"), item.get("template_id"), item.get("answer"))
+            == identity
+            for item in candidates
+        ):
+            candidates.append(payload)
+
+    @classmethod
     def _record_template_candidate(
+        cls,
         request: AnswerRequest,
         result: AnswerResult,
         *,
@@ -1103,18 +1141,32 @@ class AnswerService:
         payload = _template_candidate_payload(result, source=source)
         if payload is None:
             return
-        candidates = request.metadata.setdefault("template_candidates", [])
-        if not isinstance(candidates, list):
-            candidates = []
-            request.metadata["template_candidates"] = candidates
-        identity = (payload.get("source"), payload.get("template_id"), payload["answer"])
-        if not any(
-            isinstance(item, dict)
-            and (item.get("source"), item.get("template_id"), item.get("answer"))
-            == identity
-            for item in candidates
-        ):
-            candidates.append(payload)
+        cls._append_template_candidate(request, payload)
+
+    def _record_template_candidates(self, request: AnswerRequest) -> int:
+        """Ask the rule engine for everything that could apply to this product.
+
+        The rule engine used to be asked for *the* answer, and a miss produced
+        nothing at all -- not even a candidate -- because
+        ``_template_candidate_payload`` drops a result with an empty body. So an
+        inquiry whose wording missed the substring table left GPT ② with no
+        Template evidence whatever, while the store's confirmed sentence about
+        that exact product sat unrendered in the engine.
+
+        ``candidates`` answers the question the engine can actually answer --
+        which of our standing statements are about this product -- and GPT ②
+        does the rest. Never raises: no candidates is a normal outcome.
+        """
+
+        try:
+            found = self.engine.candidates(request)
+        except Exception:  # noqa: BLE001 - retrieval never blocks generation
+            return 0
+        for item in found:
+            if isinstance(item, dict) and str(item.get("answer") or "").strip():
+                self._append_template_candidate(request, dict(item))
+        value = request.metadata.get("template_candidates")
+        return len(value) if isinstance(value, list) else 0
 
     @staticmethod
     def _phase9_shortcut_allowed(request: AnswerRequest) -> bool:
@@ -1768,6 +1820,16 @@ class AnswerService:
             # safe facts in the prompt and in the validator's evidence.
             # Sub-questions are passed separately so a compound inquiry keeps
             # the fields each part asks about.
+            # With a usable GPT ① the catalogue is offered whole: the model
+            # asked for product evidence, and which rows bear on the question is
+            # a judgement GPT ② makes from the rows themselves. Without one, the
+            # keyword topic filter remains the only way to keep an unrelated
+            # specification out of a delivery prompt.
+            understanding = self._usable_gpt_understanding(request)
+            product_evidence_requested = bool(
+                understanding is not None
+                and understanding.get("need_product")
+            )
             product_knowledge = self.product_knowledge.facts_for_inquiry(
                 product_id=request.metadata.get("product_id"),
                 questions=split_subquestions(request.question),
@@ -1775,6 +1837,7 @@ class AnswerService:
                 model_code=extract_model_code(request.product_name),
                 product_name=request.product_name,
                 option_name=request.metadata.get("option_name"),
+                include_all_catalog_fields=product_evidence_requested,
             )
             request.metadata["product_knowledge"] = product_knowledge
             self.logs.record_inquiry(
@@ -2368,6 +2431,7 @@ class AnswerService:
                         self._record_template_candidate(
                             request, base_rule_result, source="ANSWER_ENGINE",
                         )
+                        self._record_template_candidates(request)
                 except Exception as template_error:
                     self.logs.record_inquiry(
                         inquiry_id,
@@ -2444,9 +2508,7 @@ class AnswerService:
                         self._record_template_candidate(
                             request, base_rule_result, source="ANSWER_ENGINE",
                         )
-                    self._record_template_candidate(
-                        request, base_rule_result, source="ANSWER_ENGINE",
-                    )
+                        self._record_template_candidates(request)
                 except Exception as template_error:
                     self.logs.record_inquiry(
                         inquiry_id,
@@ -3536,6 +3598,9 @@ class AnswerService:
             # this question, unhedged, and contradicted by nothing -- and the
             # validator must still have cleared the answer that was written
             # from it. See ``learning_evidence_policy``.
+            gpt_understanding_usable = (
+                self._usable_gpt_understanding(request) is not None
+            )
             learning_evidence = (
                 hybrid_metadata.get("approved_learning_evidence")
                 if isinstance(
@@ -3549,9 +3614,29 @@ class AnswerService:
                 and not learning_evidence.get("conflict")
                 and validator_cleared
             )
+            # A fourth way, and on the GPT path the one that means what the
+            # others were reaching for. ``knowledge_verified`` asks
+            # ``supports_question`` -- a keyword read of the customer's wording
+            # -- whether the catalogue covers the claim. GPT ② was given the
+            # catalogue rows and reports which ones it actually used, which is
+            # the same question answered by the party that read both. Still
+            # requires the validator to have cleared the finished answer, so
+            # this widens what counts as verified, never what counts as safe.
+            gpt_draft_metadata = (
+                hybrid_metadata.get("draft")
+                if isinstance(hybrid_metadata.get("draft"), dict)
+                else {}
+            )
+            gpt_fact_verified = bool(
+                product_fact_guard.sensitive
+                and gpt_understanding_usable
+                and gpt_draft_metadata.get("used_product_facts")
+                and prompt_included
+                and validator_cleared
+            )
             current_fact_verified = bool(
                 product_fact_guard.sensitive and final_route == "PRODUCT_DB"
-            ) or knowledge_verified or learning_verified
+            ) or knowledge_verified or learning_verified or gpt_fact_verified
             guard_metadata = {
                 **product_fact_guard.to_dict(),
                 "current_fact_verified": current_fact_verified,
@@ -3560,7 +3645,9 @@ class AnswerService:
                     if product_fact_guard.sensitive
                     and final_route == "PRODUCT_DB"
                     else "PRODUCT_CATALOG_JSON" if knowledge_verified
-                    else "APPROVED_LEARNING" if learning_verified else None
+                    else "APPROVED_LEARNING" if learning_verified
+                    else "GPT_SELECTED_PRODUCT_FACT" if gpt_fact_verified
+                    else None
                 ),
                 "approved_learning_evidence": dict(learning_evidence),
                 "auto_post_allowed": (
@@ -3707,6 +3794,18 @@ class AnswerService:
             self._record_semantic_action_support(
                 inquiry_id, request, result, phase9_analysis,
             )
+            # Persisted on the draft, not only on the in-memory request, so the
+            # publishing gate can see whether GPT ① actually read this inquiry.
+            # Automatic publication now requires that it did, and a gate that
+            # cannot tell would have to guess -- which is how a keyword-only run
+            # would quietly keep auto-posting if the semantic stage were off.
+            routing = request.metadata.get("semantic_routing")
+            if isinstance(routing, dict):
+                result.metadata["semantic_routing"] = {
+                    key: value
+                    for key, value in routing.items()
+                    if key != "semantic"
+                }
             dps_metadata = (
                 request.metadata.get("dps")
                 if isinstance(request.metadata.get("dps"), dict)

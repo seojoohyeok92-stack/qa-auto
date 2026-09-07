@@ -231,8 +231,13 @@ def test_validator_pass_with_advisory_warning_remains_safe() -> None:
             {"evidence_status": "NO_RELIABLE_SOURCE", "evidence_coverage": "SUPPORTED"},
             "ANSWER_REQUIRES_MANUAL_REVIEW",
         ),
+        # ``evidence_coverage`` was dropped from this list deliberately: it is
+        # the lexical answer-support label, and holding an ANSWERABLE item on it
+        # is the wording test the pipeline stopped applying. The genuine
+        # post-generation signals below are untouched, and a sub-question with
+        # no source at all is covered by ``evidence_status`` further down.
         (
-            {"evidence_status": "ANSWERABLE", "evidence_coverage": "UNSUPPORTED"},
+            {"evidence_status": "NO_RELIABLE_SOURCE"},
             "ANSWER_REQUIRES_MANUAL_REVIEW",
         ),
         ({"generated_requires_review": True}, "DRAFT_REVIEW_REQUIRED"),

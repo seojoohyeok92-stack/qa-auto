@@ -95,6 +95,145 @@ class AnswerEngine:
             )
         return self._apply_dps_context(request, result)
 
+    # Standing operational statements this store makes about a product, and
+    # the objective condition under which each one is about *this* product.
+    #
+    # These are the same sentences ``_install_extra_paragraphs`` and
+    # ``_old_appliance_pickup`` already render; nothing here is new wording and
+    # nothing is a new template system. What changed is which question the
+    # table answers. It used to be asked "does the customer's sentence contain
+    # 설치기사님 / 기사님이오 / 기사님오 / 설치해주시?", and "삼성기사분이 설치하러
+    # 오시나요" contains none of them -- so the store's own confirmed answer,
+    # "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다.", was not merely
+    # unselected but never rendered at all, and could not be offered to GPT ②
+    # even as a candidate.
+    #
+    # Now it is asked only what a product predicate can actually settle: is
+    # this an installed product, a parcel product, and so on. Which of the
+    # resulting candidates answers the customer is a question about meaning,
+    # and GPT ② is the one that reads them.
+    _PRODUCT_SCOPED_STATEMENTS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+        (
+            "설치상품/공통안내",
+            "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다.",
+            "INSTALL_PRODUCT",
+            ("INSTALLATION_METHOD", "PRODUCT_CONCEPT"),
+        ),
+        (
+            "설치상품/공통안내",
+            "제품 사용 중 고장이나 불량이 의심되는 경우 삼성전자 고객센터"
+            " 1588-3366으로 문의해 A/S 접수해 주시면 됩니다.",
+            "INSTALL_PRODUCT",
+            ("REPAIR",),
+        ),
+        (
+            "설치상품/공통안내",
+            "문의하신 제품은 삼성전자 정품입니다.",
+            "INSTALL_PRODUCT",
+            ("PRODUCT_CONCEPT",),
+        ),
+    )
+
+    def candidates(self, request: AnswerRequest) -> list[dict[str, object]]:
+        """Template/RULE answers that could apply to *this product*.
+
+        Retrieval, not selection. Every candidate is rendered from the existing
+        rule assets and handed to GPT ② beside Product, Learning and Historical
+        evidence; none of them is an answer until the model picks it.
+
+        Two sources feed it, in this order:
+
+        * the rule engine's own verdict on this inquiry, when it produced one.
+          A rule that matched still knows something worth showing, and it
+          arrives with its ``template_match_kind`` intact so the model can see
+          how it was found.
+        * the standing statements above, gated on the product alone.
+
+        A failure inside either source yields fewer candidates, never an
+        exception: an empty candidate list is a normal outcome that leaves GPT ②
+        working from Product and Learning, and a raise here would take the whole
+        inquiry down.
+        """
+
+        product = str(request.product_name or "")
+        found: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(
+            *,
+            template_id: str,
+            answer: str,
+            trigger_reason: str,
+            supported_actions: tuple[str, ...],
+            metadata: dict[str, object] | None = None,
+        ) -> None:
+            body = str(answer or "").strip()
+            if not body:
+                return
+            key = (template_id, re.sub(r"\s+", "", body))
+            if key in seen:
+                return
+            seen.add(key)
+            found.append({
+                "kind": "RULE_TEMPLATE",
+                "source": "ANSWER_ENGINE",
+                "template_id": template_id,
+                "category": template_id,
+                "answer": body,
+                "trigger_reason": trigger_reason,
+                "supported_actions": list(supported_actions),
+                "metadata": dict(metadata or {}),
+            })
+
+        try:
+            rendered = self._generate_with_rules(request)
+        except Exception:  # noqa: BLE001 - a candidate source never blocks
+            rendered = None
+        if rendered is not None and str(rendered.answer or "").strip():
+            add(
+                template_id=str(rendered.matched_rule or rendered.category or ""),
+                answer=rendered.answer,
+                trigger_reason="RULE_ENGINE_MATCH",
+                supported_actions=(),
+                metadata={
+                    "template_match_kind": (rendered.metadata or {}).get(
+                        "template_match_kind"
+                    ),
+                    "rule_status": str(rendered.status),
+                    "rule_reason": rendered.reason,
+                },
+            )
+
+        try:
+            install_product = self._is_install_product(product)
+        except Exception:  # noqa: BLE001
+            install_product = False
+        for template_id, answer, scope, actions in self._PRODUCT_SCOPED_STATEMENTS:
+            if scope == "INSTALL_PRODUCT" and not install_product:
+                continue
+            add(
+                template_id=template_id,
+                answer=answer,
+                trigger_reason=scope,
+                supported_actions=actions,
+                metadata={"template_match_kind": "PRODUCT_SCOPED_STATEMENT"},
+            )
+
+        try:
+            if install_product:
+                add(
+                    template_id="폐가전수거",
+                    answer=str(
+                        self.config.shipping["old_appliance_pickup_answer"]
+                    ),
+                    trigger_reason="INSTALL_PRODUCT",
+                    supported_actions=("COLLECTION",),
+                    metadata={"template_match_kind": "PRODUCT_SCOPED_STATEMENT"},
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        return found
+
     def _apply_dps_context(
         self,
         request: AnswerRequest,

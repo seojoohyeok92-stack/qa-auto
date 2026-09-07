@@ -344,8 +344,8 @@ def _evidence(context, question: str) -> dict:
     raise AssertionError(f"no evidence row for {question!r}")
 
 
-def test_reusable_does_not_mean_it_answers_this_question(database) -> None:
-    """SAFE_REUSABLE 은 "다시 써도 되는가"에 대한 답이지 "이 질문에 답하는가"가 아니다.
+def test_a_weakly_matching_historical_case_is_offered_not_forbidden(database) -> None:
+    """"다시 써도 되는가"와 "이 질문에 답하는가"는 여전히 다른 질문이다.
 
     COHORT_1 에서 두 건이 같은 자리에서 새어 나왔다. "무타공설치비용
     문의합니다" 는 다른 상품의 택배배송 안내로 ANSWERABLE 이 되었고, "쿠폰
@@ -371,9 +371,20 @@ def test_reusable_does_not_mean_it_answers_this_question(database) -> None:
     )
     evidence = _evidence(context, question)
 
-    assert evidence["status"] == "NO_RELIABLE_SOURCE", evidence
-    assert evidence["source"] == "SAFE_HISTORICAL_LEARNING_INSUFFICIENT_EVIDENCE"
-    assert evidence["historical_case_ids"] == []
+    # 이 판정의 주체가 바뀌었다. 예전에는 answer_support 가 0.5 에 못 미치면
+    # 코드가 NO_RELIABLE_SOURCE 로 강등하고 historical_case_ids 를 비웠다.
+    # 그 측정은 어휘 겹침이라, "삼성기사분이 설치하러 오시나요" 와 그 질문의
+    # 승인 답변처럼 같은 사실을 다르게 표현한 짝을 0.000 으로 읽어 정답까지
+    # 함께 버렸다. 이제 후보는 후보로 전달되고, 이 과거 답변이 이 질문에
+    # 답하는지는 GPT② 가 판단한다.
+    #
+    # 측정 자체는 남는다. UNSUPPORTED 라는 관측은 후보에 그대로 붙어 가고,
+    # 그것이 이 테스트가 지키는 것이다 -- 판단 근거는 사라지지 않고 판단
+    # 주체만 옮겨졌다.
+    assert evidence["status"] == "CANDIDATE", evidence
+    assert evidence["source"] == "SAFE_HISTORICAL_LEARNING"
+    assert evidence["evidence_coverage"] == "UNSUPPORTED", evidence
+    assert evidence["historical_case_ids"], evidence
 
 
 def test_a_covering_historical_case_is_still_evidence(database) -> None:
@@ -394,8 +405,10 @@ def test_a_covering_historical_case_is_still_evidence(database) -> None:
     )
     evidence = _evidence(context, question)
 
-    assert evidence["status"] == "ANSWERABLE", evidence
+    assert evidence["status"] == "CANDIDATE", evidence
     assert evidence["source"] == "SAFE_HISTORICAL_LEARNING"
+    # 어휘가 겹치는 짝은 여전히 SUPPORTED 로 측정된다. 달라진 것은 이 값이
+    # 사용 허가가 아니라 GPT② 에게 주는 참고 신호라는 점이다.
     assert evidence["evidence_coverage"] == "SUPPORTED"
     assert evidence["historical_case_ids"]
 

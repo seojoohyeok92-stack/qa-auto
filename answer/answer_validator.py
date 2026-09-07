@@ -132,7 +132,9 @@ def _sentences(answer: str) -> list[str]:
     ]
 
 
-def ungrounded_claims(answer: str, evidence: str) -> list[str]:
+def ungrounded_claims(
+    answer: str, evidence: str, *, lexical_claims: bool = True
+) -> list[str]:
     """Assertions in the answer that the supplied evidence does not support.
 
     Evidence is every text the pipeline actually gave the model: the selected
@@ -161,19 +163,24 @@ def ungrounded_claims(answer: str, evidence: str) -> list[str]:
                 findings.append(
                     f"근거 없는 수치·기간을 확정했습니다: {quantity}"
                 )
-        compatibility = _COMPATIBILITY_CLAIM.search(sentence)
-        # The evidence has to support the claim the answer actually made.
-        # This asked for the literal word "호환" whatever the claim was, so an
-        # approved answer stating "스탠드 탈부착 가능합니다" could not ground an
-        # answer saying exactly that -- the evidence said 부착, the check
-        # wanted 호환. Looking for the term the claim itself used is both
-        # narrower (a 호환 claim still needs 호환) and correct.
-        if compatibility and compatibility.group(1) not in haystack:
-            findings.append("근거 없는 호환 여부를 확정했습니다.")
-        if _BENEFIT_CLAIM.search(sentence) and not re.search(
-            r"할인|혜택|무이자|캐시백|적립", haystack
-        ):
-            findings.append("근거 없는 혜택·할인을 확정했습니다.")
+        # ``lexical_claims`` covers the two checks that look for a *word* in
+        # the evidence rather than a value. Both were written for a pipeline
+        # that had no reader between retrieval and the answer: requiring the
+        # evidence to repeat the claim's own term is a paraphrase test, and it
+        # fails a correct answer whose source said the same thing differently
+        # -- the evidence says 부착, the check wants 호환. Where GPT ② has read
+        # the candidates and reported which it used, that reader exists.
+        #
+        # Quantities and dates above are unconditional in both modes: those
+        # compare a value against the evidence, not a wording against a wording.
+        if lexical_claims:
+            compatibility = _COMPATIBILITY_CLAIM.search(sentence)
+            if compatibility and compatibility.group(1) not in haystack:
+                findings.append("근거 없는 호환 여부를 확정했습니다.")
+            if _BENEFIT_CLAIM.search(sentence) and not re.search(
+                r"할인|혜택|무이자|캐시백|적립", haystack
+            ):
+                findings.append("근거 없는 혜택·할인을 확정했습니다.")
     return list(dict.fromkeys(findings))
 
 
@@ -625,7 +632,23 @@ class AnswerValidator:
         selected_facts: SelectedFacts | None = None,
         subquestion_evidence: list[dict] | None = None,
         evidence_texts: str | None = None,
+        gpt_judged_evidence: bool = False,
     ) -> ValidationResult:
+        """Validate one generated answer.
+
+        ``gpt_judged_evidence`` says whether GPT ② read the retrieved candidates
+        and reported which it used. When it did, three rules below stand down:
+        topic relevance, sub-question coverage and question/answer alignment all
+        ask, in slightly different words, whether the answer is *about* what was
+        asked -- and each answers it from anchor tables over the customer's
+        wording. Asking a keyword table to overrule a model that has just read
+        the same evidence adds no safety and costs real answers; the model
+        reports the same finding directly, as ``unresolved``.
+
+        Everything measurable stands in both modes: dates against the confirmed
+        schedule, quantities against the evidence corpus, facts against the
+        resolved fact paths, personal data, secrets, internal terms.
+        """
         errors: list[str] = []
         # Free-form notes emitted by the GPT draft/self-review steps. They are
         # surfaced to staff, but a model's stylistic remark is not evidence of
@@ -787,7 +810,11 @@ class AnswerValidator:
             )
             if part
         )
-        errors.extend(ungrounded_claims(draft.answer, corpus))
+        errors.extend(
+            ungrounded_claims(
+                draft.answer, corpus, lexical_claims=not gpt_judged_evidence,
+            )
+        )
         errors.extend(ungrounded_feature_claims(draft.answer, corpus))
         if not review.answered_all_questions and intent.questions:
             review_signals.append("복합 질문 일부의 답변 누락 가능성이 있습니다.")
@@ -808,11 +835,15 @@ class AnswerValidator:
         )
         relevance_rule = ValidationRuleResult(
             "ANSWER_TOPIC_RELEVANCE",
-            relevance.status,
+            # Recorded either way; only its authority is conditional. WARN keeps
+            # the observation in ``warnings`` for staff without holding a safe
+            # answer, which is what the topic anchors are actually good for.
+            "WARN" if gpt_judged_evidence and relevance.status != "PASS"
+            else relevance.status,
             relevance.reason,
         )
         coverage_rules: tuple[ValidationRuleResult, ...] = ()
-        if len(questions) > 1 and draft.subquestion_results:
+        if not gpt_judged_evidence and len(questions) > 1 and draft.subquestion_results:
             answered = {
                 str(item.get("subquestion") or "").strip()
                 for item in draft.subquestion_results
@@ -830,7 +861,7 @@ class AnswerValidator:
                 ),
             )
         alignment_rules: tuple[ValidationRuleResult, ...] = ()
-        if subquestion_evidence:
+        if not gpt_judged_evidence and subquestion_evidence:
             # Only what the answer *asserts* counts as leaking into an
             # unsupported sub-question. Matching the whole answer's topics
             # could not tell "배송은 보통 2주 걸립니다" -- an invented fact --

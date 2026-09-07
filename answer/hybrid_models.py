@@ -48,6 +48,23 @@ class DraftResult:
     feedback_signal_usage: tuple[dict[str, Any], ...] = ()
     subquestion_results: tuple[dict[str, Any], ...] = ()
     learning_recovery_used: bool = False
+    # What GPT ② decided about each candidate it was shown, and what it could
+    # not settle. These are the model's own answers to questions the pipeline
+    # used to decide for it with a lexical score, so they are recorded exactly
+    # as reported and never re-derived here.
+    evidence_decisions: tuple[dict[str, Any], ...] = ()
+    used_template_ids: tuple[str, ...] = ()
+    used_product_facts: tuple[str, ...] = ()
+    used_learning_ids: tuple[int, ...] = ()
+    used_historical_ids: tuple[int, ...] = ()
+    ignored_evidence: tuple[dict[str, Any], ...] = ()
+    unresolved: tuple[str, ...] = ()
+    # Tri-state on purpose: ``None`` means the provider said nothing, which is
+    # not the same as saying no. A legacy provider that never learned this
+    # field keeps the behaviour it had, and only an explicit ``false`` is read
+    # downstream as the model withholding publication.
+    can_auto_post: bool | None = None
+    reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -56,7 +73,10 @@ class DraftResult:
             "required_missing_information", "optional_missing_information",
             "missing_information_details", "warnings",
             "learning_usage", "historical_usage", "feedback_signal_usage",
-            "subquestion_results",
+            "subquestion_results", "evidence_decisions",
+            "used_template_ids", "used_product_facts",
+            "used_learning_ids", "used_historical_ids", "ignored_evidence",
+            "unresolved",
         ):
             result[key] = list(result[key])
         return result

@@ -87,6 +87,34 @@ class PromptBuilder:
         "Approved Positive 근거가 맞다면 그 사실은 유지하고, 잘못된 "
         "부분만 corrections에 따라 바로잡는다.",
     )
+    # What to check before leaning on a retrieved candidate. These are
+    # questions, not a ranking: retrieval already ranked, and its score is a
+    # measure of wording overlap rather than of whether the candidate answers
+    # this customer. Each rule names something the candidate's own provenance
+    # can settle -- which question it was written for, which product, when,
+    # and whether the claim it carries is tied to one order or holds for the
+    # product generally.
+    EVIDENCE_JUDGEMENT_RULES: tuple[str, ...] = (
+        "retrieval이 가져온 후보는 '검토 대상'이지 '승인된 근거'가 아니다.",
+        "각 후보의 relevance/answer_support/rank는 검색 신호이며,"
+        " 낮다고 해서 사용 금지를 뜻하지 않는다. 표현이 달라도 같은 사실을"
+        " 말하는 후보는 사용할 수 있다.",
+        "후보의 source_question(그 답변이 원래 어떤 질문에 쓰였는지)과"
+        " source_product를 읽고, 지금 질문과 지금 상품에 적용되는지 판단한다.",
+        "시간에 의존하는 사실(특정 주문의 배송일·설치일·처리 상태)은"
+        " 다른 주문에 재사용하지 않는다. 그 값은 현재 Order/DPS 결과에서만 온다.",
+        "상품에 대해 일반적으로 성립하는 안정적 운영 지식(설치 방식, A/S 절차,"
+        " 상시 정책)은 과거 문의에서 나왔더라도 현재 상품에 적용되면 사용할 수 있다.",
+        "만료되었거나 다른 모델/변형을 가리키는 후보는 사용하지 않는다.",
+        "후보들이 서로 충돌하면 한쪽을 고르지 말고 unresolved로 남긴다.",
+        "근거가 실제로 말하지 않는 것을 확장하지 않는다."
+        " 예: installation_method=PROFESSIONAL_TECHNICIAN_REQUIRED 는"
+        " '전문 기사 설치'까지만 말하며, 기사의 소속 브랜드는 말하지 않는다.",
+        "사용한 후보와 사용하지 않은 후보를 모두 이유와 함께 보고한다.",
+        "어떤 질문에 대해 쓸 수 있는 근거가 없으면 그 질문만 unresolved로"
+        " 남기고, 답할 수 있는 다른 질문까지 회피하지 않는다.",
+    )
+
     OUTPUT_CONTRACTS: dict[str, dict[str, Any]] = {
         "UNDERSTANDING": {
             "category": "string",
@@ -151,6 +179,36 @@ class PromptBuilder:
                     "answered": "boolean",
                 }
             ],
+            # Which candidates were actually leaned on, and which were read and
+            # put aside. Both halves matter: the dashboard used to show "6
+            # selected / 0 used" whenever the code had emptied the evidence map,
+            # so an operator could not tell a model that found nothing useful
+            # from a pipeline that had forbidden everything.
+            "evidence_decisions": [
+                {
+                    "kind": {
+                        "enum": [
+                            "TEMPLATE", "PRODUCT_FACT", "LEARNING",
+                            "HISTORICAL", "FEEDBACK_SIGNAL",
+                        ]
+                    },
+                    "id": "string or integer identifying the candidate",
+                    "decision": {"enum": ["USED", "IGNORED"]},
+                    "matched_subquestion": "string",
+                    "reason": "string",
+                }
+            ],
+            "used_template_ids": ["template id string"],
+            "used_product_facts": ["product fact field_key string"],
+            "used_learning_ids": ["integer"],
+            "used_historical_ids": ["integer"],
+            "ignored_evidence": [
+                {"kind": "string", "id": "string or integer",
+                 "reason": "string"}
+            ],
+            "unresolved": ["subquestion string with no usable evidence"],
+            "can_auto_post": "boolean",
+            "reason": "string",
         },
         "SELF_REVIEW": {
             "passed": "boolean",
@@ -272,11 +330,27 @@ class PromptBuilder:
                 "safe_historical_learning_allowed_for_stable_knowledge": True,
                 "historical_learning_forbidden_for_current_order_facts": True,
                 "partial_answer_required_for_supported_subquestions": True,
-                "subquestion_evidence_is_binding": True,
+                # Retrieval hands over candidates, not verdicts. The scores
+                # beside each one (relevance, answer_support, rank) measure how
+                # a search engine found it; they are lexical, so a correct
+                # answer worded differently from the question scores zero and a
+                # wrong answer sharing the question's words scores well.
+                # Reading them as permission is what stopped an approved
+                # "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다." from
+                # answering "삼성기사분이 설치하러 오시나요". Whether a candidate
+                # answers *this* question is a judgement, and it is made here.
+                "retrieval_candidates_are_not_approved_evidence": True,
+                "relevance_and_answer_support_are_hints_not_permission": True,
+                "you_decide_which_candidates_apply": True,
                 "answerable_items_must_not_be_replaced_by_blanket_uncertainty": True,
                 "report_each_learning_id_actually_used": True,
                 "report_each_historical_case_id_actually_used": True,
+                "report_ignored_candidates_with_reason": True,
             },
+            # How to read a candidate. Each one carries its own provenance
+            # (source_question, source_product, validity, scope); these say what
+            # to check, never which candidate to pick.
+            "evidence_judgement_rules": list(self.EVIDENCE_JUDGEMENT_RULES),
             "feedback_signal_policy": {
                 "verified_facts_and_corrections_are_factual_evidence": True,
                 "corrections_supersede_older_or_conflicting_learning_answers": True,

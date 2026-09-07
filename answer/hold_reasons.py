@@ -54,6 +54,17 @@ REASON_LABELS: dict[str, str] = {
         "주문이 확인되지 않았는데 답변이 배송 기간을 안내하고 있습니다."
     ),
     "SEMANTIC_ACTION_MISMATCH": "고객이 요청한 내용과 답변이 다루는 내용이 서로 다릅니다.",
+    # GPT ②가 자기 답변에 대해 직접 보고한 결과
+    "GPT_REPORTED_UNRESOLVED": (
+        "답변이 해결하지 못한 문항이 있어 직원 확인이 필요합니다."
+    ),
+    "GPT_WITHHELD_AUTO_POST": (
+        "답변 생성 단계에서 자동 등록하지 않도록 판단했습니다."
+    ),
+    "UNDERSTANDING_UNAVAILABLE": (
+        "문의 의미 분석(GPT①)을 사용할 수 없어 자동 등록하지 않고 "
+        "직원 검토로 넘깁니다."
+    ),
     # Recorded but not blocking
     "ORDER_ID_REQUESTED_FROM_CUSTOMER": "고객에게 주문번호를 요청하는 답변입니다.",
     "INTENT_CONFIDENCE_LOW": "문의 분류 신뢰도가 낮게 측정되었습니다.",
@@ -161,6 +172,10 @@ STAFF_REASON_LABELS: dict[str, str] = {
     "DELIVERY_DEADLINE_NOT_CONFIRMABLE": "지정 날짜 확정 불가",
     "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD": "주문 미확인 배송기간",
     "SEMANTIC_ACTION_MISMATCH": "요청과 답변 불일치",
+    # GPT ② / GPT ① 상태
+    "GPT_REPORTED_UNRESOLVED": "미해결 문항 있음",
+    "GPT_WITHHELD_AUTO_POST": "자동등록 보류 판단",
+    "UNDERSTANDING_UNAVAILABLE": "문의 분석 불가",
     # Recorded but not blocking
     "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": "문의 유형 불명확",
     "INTENT_CONFIDENCE_LOW": "분류 신뢰도 낮음",

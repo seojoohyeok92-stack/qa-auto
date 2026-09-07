@@ -33,7 +33,8 @@ from services.evidence_verification_service import (
     selected_pairs_from_context,
 )
 from services.pre_generation_gate import PreGenerationGate
-from services.product_knowledge_service import required_fact_groups
+# ``required_fact_groups`` is no longer consulted here: see _product_fact_fields.
+from services.product_knowledge_service import SUBJECT_SENSITIVE_FIELDS
 from services.self_review_service import SelfReviewService
 
 
@@ -141,60 +142,48 @@ class HybridAnswerService:
         }
 
     @staticmethod
-    def _product_fact_support(
-        knowledge: Any, subquestion: object
-    ) -> tuple[str, ...]:
-        """The verified fields that answer ``subquestion``, or ().
+    def _gpt_judges_evidence(request: AnswerRequest) -> bool:
+        """Whether GPT ② is the reader deciding what the evidence supports.
 
-        Three things must all hold, and each rules out a different way a
-        product fact could be the wrong evidence:
-
-        1. the sub-question makes a claim the fact model *names* -- otherwise
-           a delivery or refund question, or a spec nobody has modelled, would
-           be "supported" by whatever happens to be catalogued;
-        2. every named claim has a safe (VERIFIED, this product, ACTIVE
-           provenance) field -- a catalogued screen size may not vouch for a
-           question about weight, and one answered claim in a two-claim
-           question is not an answer;
-        3. nothing in the catalogue contradicts it, which is
-           ``supports_question``'s own test.
-
-        Requirement 1 is why ``required_fact_groups`` is consulted directly
-        instead of ``supports_question``: that method answers "is anything
-        contradicting this?" and falls back to ``has_safe_facts`` for a
-        question it has no model for, which is the right default when the
-        question is merely being *shown* facts. Promoting evidence is a
-        stronger claim, and under that fallback a topic match was enough --
-        "USB-C로 65W 충전이 가능한가요?" matched the USB topic and would have
-        been answered by ``usb_port_count``, which says nothing about
-        charging. An unmodelled claim now stays unsupported and goes to staff.
-
-        Retrieval breadth is deliberately not enough on its own: only the
-        intersection of "relevant to this sub-question" and "verified for this
-        exact product" counts.
+        True exactly when GPT ① produced a usable understanding, which is also
+        the condition under which retrieval hands over candidates instead of
+        verdicts. The two have to agree: gates that exist to catch an
+        unsupervised answer must keep their authority on the legacy path, where
+        no model reads the candidates at all.
         """
 
-        required = required_fact_groups(subquestion)
-        if not required:
-            return ()
+        return bool(
+            getattr(
+                request.metadata.get("_semantic_routing_value"),
+                "usable",
+                False,
+            )
+        )
+
+    @staticmethod
+    def _product_fact_fields(knowledge: Any) -> tuple[str, ...]:
+        """Every verified field this product has, as candidate evidence.
+
+        This replaced ``_product_fact_support``, which answered a different
+        question: *may* a product fact settle this sub-question. It answered it
+        from ``required_fact_groups``, a table keyed on the customer's wording
+        -- and that table has no installation branch at all, so no phrasing of
+        "누가 설치하나요" could ever be settled by ``installation_method``, and a
+        wording it did model still had to match its keywords exactly.
+
+        Naming which rows exist for this product is something code can settle;
+        which of them answers the customer is not. The rows travel to GPT ②
+        with their field keys and raw values, and the model reports the ones it
+        used.
+        """
+
         safe_keys = getattr(knowledge, "safe_field_keys", None)
         if not callable(safe_keys):
             return ()
-        safe = safe_keys()
-        if not all(safe.intersection(group) for group in required):
+        try:
+            return tuple(sorted(safe_keys()))
+        except Exception:  # noqa: BLE001 - evidence assembly never blocks
             return ()
-        if not knowledge.supports_question(subquestion):
-            return ()
-        # Report the fields that actually settled the question, not every
-        # field its topic could have touched: the trace is what a person
-        # reads to decide whether the auto-post was justified, and listing
-        # the stand's carton weight beside a body-weight answer would make a
-        # correct decision look like the wrong one.
-        return tuple(
-            field
-            for group in required
-            for field in sorted(safe.intersection(group))
-        )
 
     @classmethod
     def _apply_product_fact_evidence(
@@ -229,26 +218,47 @@ class HybridAnswerService:
         evidence = learning_context.get("subquestion_evidence")
         if not isinstance(evidence, list):
             return learning_context
+        covering = cls._product_fact_fields(knowledge)
+        if not covering:
+            return learning_context
+        # Whether this inquiry is about the product at all. Asked of GPT ①,
+        # which read the question, rather than of the keyword topic table --
+        # that table is what made "삼성기사분이 설치하러 오시나요" match nothing
+        # and lose its catalogue rows. With no usable understanding the answer
+        # is no, so a delivery-only inquiry never drags a screen size into its
+        # prompt on either path.
+        understanding = request.metadata.get("gpt_understanding")
+        product_requested = bool(
+            isinstance(understanding, dict)
+            and understanding.get("usable") is True
+            and understanding.get("need_product")
+        )
+        if not product_requested:
+            return learning_context
+        # Which subject a measurement belongs to is a scope fact, and it stays.
+        # A listing weighs the panel and the stand's carton separately, and
+        # ``SUBJECT_SENSITIVE_FIELDS`` are exactly the rows where the field name
+        # alone cannot say which one was asked about. The knowledge service
+        # already decided that from the question's subject; a row it let through
+        # on that basis is offered, but one of them on its own does not turn a
+        # sub-question into an answerable one -- 25.3kg of packaging is not the
+        # television, however confidently it is catalogued.
+        promotable = bool(
+            set(covering) - SUBJECT_SENSITIVE_FIELDS
+            or getattr(knowledge, "component_subject", False)
+        )
         for item in evidence:
             if not isinstance(item, dict):
                 continue
             status = str(item.get("status") or "")
-            if status not in {"NO_RELIABLE_SOURCE", "ANSWERABLE"}:
-                continue
-            covering = cls._product_fact_support(
-                knowledge, item.get("subquestion")
-            )
-            if not covering:
+            # NEEDS_DPS still defers to the current order, CONFLICT still needs
+            # a person, and DELIVERY_SCHEDULE_REVIEW is a policy hold. Those are
+            # deterministic and a catalogue row does not lift them.
+            if status not in {"NO_RELIABLE_SOURCE", "ANSWERABLE", "CANDIDATE"}:
                 continue
             item["product_fact_fields"] = list(covering)
-            # An item retrieval already answered keeps the source it earned;
-            # the verified fact is recorded beside it and settles coverage.
-            # Learning that merely paraphrases the question scores partial
-            # answer-support, and that partial score was enough to hold an
-            # answer the Product DB can prove outright.
-            item["evidence_coverage"] = "SUPPORTED"
-            if status == "NO_RELIABLE_SOURCE":
-                item["status"] = "ANSWERABLE"
+            if status == "NO_RELIABLE_SOURCE" and promotable:
+                item["status"] = "CANDIDATE"
                 item["source"] = "VERIFIED_PRODUCT_FACT"
                 item["answer_required"] = True
         return learning_context
@@ -422,19 +432,40 @@ class HybridAnswerService:
         facts: AnswerFacts,
         analysis: InquiryAnalysis | None,
         rule_result: AnswerResult,
+        semantic: Any = None,
     ) -> IntentResult:
-        """Derive the intent without spending a provider call on it.
+        """The understanding GPT ② works from.
 
-        The UNDERSTANDING round trip re-derived what the Python analysis had
-        already decided, and the only field anything downstream depends on is
-        `questions` -- used for coverage, topic relevance and per-sub-question
-        evidence. split_subquestions produces that deterministically, so the
-        call bought a second opinion on a decision that was already made while
-        adding a network round trip to every generation. Emotion, urgency and
-        confidence were only ever written to a diagnostic event.
+        No UNDERSTANDING round trip is made: GPT ① already read this inquiry
+        before routing, and asking a second model to re-read it bought a second
+        opinion on a decision that was already made.
+
+        Which decomposition to carry forward is the part that mattered. Two
+        existed side by side -- GPT ①'s ``atomic_questions`` and
+        ``split_subquestions``, a splitter keyed on sentence enders and list
+        punctuation -- and the pipeline retrieved evidence against the first
+        while handing the second to drafting, coverage and topic relevance. So
+        one half of the pipeline was answering questions the other half had not
+        asked. A usable GPT ① is now the single source.
+
+        ``requires_review`` moved for the same reason. It came from
+        ``analysis.manual_review_required``, which the keyword classifier
+        raises whenever no rule matched the wording: "삼성기사분이 설치하러
+        오시나요" scores UNCLASSIFIED at confidence 0.45 and carried a review
+        hold no answer could clear, whatever GPT ② found. A classifier gap is
+        not a safety finding, and the finding it stands in for -- did this
+        answer leave something unresolved -- is one GPT ② reports directly.
+        With no usable understanding the legacy signal is kept exactly as it
+        was, because then it is the only reading of the inquiry there is.
         """
 
-        questions = split_subquestions(facts.inquiry.get("question"))
+        atoms = tuple(
+            str(getattr(item, "text", "") or "").strip()
+            for item in (getattr(semantic, "atomic_questions", ()) or ())
+        ) if getattr(semantic, "usable", False) else ()
+        atoms = tuple(dict.fromkeys(item for item in atoms if item))
+        usable_understanding = bool(atoms)
+        questions = atoms or split_subquestions(facts.inquiry.get("question"))
         return IntentResult(
             category=(
                 (analysis.inquiry_subtype if analysis else "")
@@ -445,12 +476,20 @@ class HybridAnswerService:
             emotion=Emotion.NORMAL,
             urgency="NORMAL",
             confidence=float(analysis.confidence) if analysis else 1.0,
-            requires_review=bool(
-                analysis.manual_review_required
-                if analysis is not None
-                else rule_result.needs_review
+            requires_review=(
+                False
+                if usable_understanding
+                else bool(
+                    analysis.manual_review_required
+                    if analysis is not None
+                    else rule_result.needs_review
+                )
             ),
-            reason="결정적 분석으로 문의를 분해했습니다.",
+            reason=(
+                "GPT① 이해 결과로 문의를 분해했습니다."
+                if usable_understanding
+                else "결정적 분석으로 문의를 분해했습니다."
+            ),
         )
 
     @staticmethod
@@ -713,7 +752,12 @@ class HybridAnswerService:
                     details={"provider": self.provider.name},
                 )
             )
-            intent = self._deterministic_intent(facts, analysis, rule_result)
+            intent = self._deterministic_intent(
+                facts,
+                analysis,
+                rule_result,
+                request.metadata.get("_semantic_routing_value"),
+            )
             _mark = _stage("intent", _mark)
             events.append(
                 HybridEvent(
@@ -851,6 +895,7 @@ class HybridAnswerService:
                     analysis=analysis,
                     selected_facts=selected_facts,
                     learning_context=learning_context,
+                    gpt_judged_evidence=self._gpt_judges_evidence(request),
                 )
             events.append(
                 HybridEvent(
@@ -987,6 +1032,7 @@ class HybridAnswerService:
                     self._evidence_texts(learning_context),
                     self._product_facts_evidence(request),
                 ),
+                gpt_judged_evidence=self._gpt_judges_evidence(request),
             )
             _mark = _stage("validation", _mark)
             events.append(
@@ -1095,6 +1141,7 @@ class HybridAnswerService:
                     self._evidence_texts(learning_context),
                     self._product_facts_evidence(request),
                 ),
+                    gpt_judged_evidence=self._gpt_judges_evidence(request),
                 )
                 events.append(
                     HybridEvent(
@@ -1141,12 +1188,34 @@ class HybridAnswerService:
                         started=generation_started
                     ),
                 )
+            # Whose verdict holds an answer back.
+            #
+            # ``rule_result`` is the keyword engine's attempt at this inquiry.
+            # Once GPT ① is understanding the question, that attempt is one
+            # candidate among several and its failure to match is not a finding
+            # about the answer GPT ② wrote: "삼성기사분이 설치하러 오시나요"
+            # renders 기타/직원확인 with ``needs_review=True`` purely because no
+            # substring matched, and that flag held every answer downstream.
+            # Where GPT ① is unusable the rule result is the only reading of
+            # the inquiry there is, so it keeps its authority untouched.
+            #
+            # GPT ②'s own findings are added here instead: an item it could not
+            # resolve, or an explicit refusal to publish.
+            gpt_understanding_usable = bool(
+                getattr(
+                    request.metadata.get("_semantic_routing_value"),
+                    "usable",
+                    False,
+                )
+            )
             requires_review = bool(
-                rule_result.needs_review
+                (rule_result.needs_review and not gpt_understanding_usable)
                 or intent.requires_review
                 or draft.requires_review
                 or review.requires_review
                 or draft.has_required_missing_information
+                or draft.unresolved
+                or draft.can_auto_post is False
                 or validation.status == "REVIEW_REQUIRED"
             )
             status = (

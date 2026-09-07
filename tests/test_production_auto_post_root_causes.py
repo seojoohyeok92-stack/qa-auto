@@ -85,9 +85,27 @@ def _evidence(subquestion: str, **overrides: Any) -> dict[str, Any]:
     return item
 
 
-def _promote(knowledge: ProductKnowledgeResult, *items: dict[str, Any]) -> list[dict]:
+def _promote(
+    knowledge: ProductKnowledgeResult,
+    *items: dict[str, Any],
+    need_product: bool = True,
+) -> list[dict]:
+    """Run the promotion the way the pipeline does.
+
+    ``need_product`` is GPT ①'s answer to "is this inquiry about the product",
+    and it is what now decides whether catalogue rows are offered at all. It
+    replaced ``required_fact_groups``, a table over the customer's wording that
+    had no installation entry of any kind -- so no phrasing of "누가 설치하나요"
+    could ever be answered from ``installation_method``.
+    """
+
     context = HybridAnswerService._apply_product_fact_evidence(
-        _Request({"product_knowledge": knowledge}),
+        _Request({
+            "product_knowledge": knowledge,
+            "gpt_understanding": {
+                "usable": True, "need_product": need_product,
+            },
+        }),
         {"subquestion_evidence": list(items)},
     )
     return context["subquestion_evidence"]
@@ -109,9 +127,12 @@ def test_verified_product_fact_answers_its_own_subquestion() -> None:
 
     (item,) = _promote(knowledge, _evidence(question))
 
-    assert item["status"] == "ANSWERABLE"
+    # CANDIDATE, not ANSWERABLE: the rows are offered and GPT ② reports which
+    # of them it used. ``evidence_coverage`` is no longer overwritten to
+    # SUPPORTED either -- that label is the lexical answer-support measure, and
+    # asserting a proven fact by rewriting a wording score was always a proxy.
+    assert item["status"] == "CANDIDATE"
     assert item["source"] == "VERIFIED_PRODUCT_FACT"
-    assert item["evidence_coverage"] == "SUPPORTED"
     assert item["answer_required"] is True
     assert set(item["product_fact_fields"]) == {
         "screen_size", "display_size_cm", "resolution", "resolution_class",
@@ -141,35 +162,56 @@ def test_verified_fact_settles_coverage_for_partially_supported_learning() -> No
         ),
     )
 
-    assert item["evidence_coverage"] == "SUPPORTED"
-    # The retrieval source it earned is preserved, not overwritten.
+    # The retrieval source it earned is preserved, not overwritten, and the
+    # verified field is recorded beside it.
+    assert item["status"] == "ANSWERABLE"
     assert item["source"] == "ACTIVE_POSITIVE_LEARNING"
     assert item["product_fact_fields"] == ["weight_without_stand_kg"]
+    # A partial wording score no longer holds anything back on its own: the
+    # publishing gate stopped reading ``evidence_coverage``, so there is
+    # nothing left for a rewrite of it to fix.
+    assert item["evidence_coverage"] == "PARTIALLY_SUPPORTED"
 
 
-def test_missing_fact_is_left_unsupported() -> None:
-    """No verified VESA fact means the hold stays, product match or not."""
+def test_a_fact_the_catalogue_does_not_hold_is_still_not_asserted() -> None:
+    """The catalogue is offered whole; it cannot invent the row it lacks.
+
+    Deciding in advance that a screen size may not be shown beside a VESA
+    question is the keyword judgement that moved. What has not moved is that
+    there is no VESA row: the fields offered are exactly the ones that exist,
+    the model reports which it used, and an answer stating a VESA figure has
+    nothing behind it -- the quantity check in the validator still measures
+    that against this same corpus.
+    """
 
     knowledge = _knowledge(_fact("screen_size", {"inch": 43}))
 
     (item,) = _promote(knowledge, _evidence("이 제품 베사홀 규격이 어떻게 되나요?"))
 
-    assert item["status"] == "NO_RELIABLE_SOURCE"
-    assert item["evidence_coverage"] == "UNSUPPORTED"
-    assert "product_fact_fields" not in item
+    assert item["product_fact_fields"] == ["screen_size"]
+    assert "vesa_mm" not in item["product_fact_fields"]
 
 
-def test_unrelated_facts_never_support_a_non_product_question() -> None:
-    """A catalogued specification is not evidence about a delivery date."""
+def test_a_non_product_inquiry_is_never_shown_the_catalogue() -> None:
+    """A catalogued specification is not evidence about a delivery date.
+
+    GPT ① answers this now instead of a topic table: an inquiry it did not mark
+    ``need_product`` gets no catalogue rows at all, so a screen size cannot
+    drift into a delivery prompt. With no usable understanding the answer is
+    also no, which is the conservative default the topic table provided.
+    """
 
     knowledge = _knowledge(
         _fact("screen_size", {"inch": 43}),
         _fact("resolution_class", "4K UHD"),
     )
 
-    (item,) = _promote(knowledge, _evidence("배송 언제 되나요?"))
+    (item,) = _promote(
+        knowledge, _evidence("배송 언제 되나요?"), need_product=False,
+    )
 
     assert item["status"] == "NO_RELIABLE_SOURCE"
+    assert "product_fact_fields" not in item
 
 
 def test_conflict_and_dps_statuses_are_never_overruled() -> None:

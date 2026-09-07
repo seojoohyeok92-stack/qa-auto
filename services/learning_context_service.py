@@ -921,72 +921,57 @@ class LearningContextService:
                     ),
                     default=0.0,
                 ))
-            elif approved_for_question and (
-                not semantic_atomic or coverage_label(max(
-                (float(item.get("answer_support") or 0)
-                 for item in approved_for_question),
-                default=0.0,
-            )) == "SUPPORTED"):
-                status = "ANSWERABLE"
+            elif approved_for_question or historical_for_question:
+                # Retrieval found candidates for this sub-question. That is all
+                # this ladder is entitled to say about them.
+                #
+                # It used to say more: unless ``answer_support`` -- the share of
+                # the question's word stems reappearing in the candidate's
+                # answer -- reached 0.5, the candidate was demoted to
+                # NO_RELIABLE_SOURCE and its id was stripped out, while its text
+                # stayed in the prompt. The measure is lexical, so "삼성기사분이
+                # 설치하러 오시나요" scored 0.000 against the approved answer
+                # "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다.": no
+                # shared stem, same fact. The pipeline showed the model the
+                # answer and forbade it in the same breath, and the customer was
+                # told their question needed a person.
+                #
+                # Whether a candidate answers this question is a judgement about
+                # meaning, and it is GPT ② that makes it now. The scores travel
+                # with each candidate as hints; ``evidence_coverage`` still
+                # records what the lexical measure saw, because an operator
+                # reading the trace afterwards wants to know.
+                #
+                # Only where a semantic understanding exists, because that is
+                # the run where GPT ② is given the candidates to judge. With no
+                # understanding there is no reader downstream, so the legacy
+                # ladder keeps its own verdict exactly as it was.
+                status = "CANDIDATE" if semantic_atomic else "ANSWERABLE"
                 evidence_ids = [
                     int(item["learning_example_id"])
                     for item in approved_for_question
                 ]
-                source = "ACTIVE_POSITIVE_LEARNING"
-                evidence_coverage = coverage_label(max(
-                    (float(item.get("answer_support") or 0)
-                     for item in approved_for_question),
-                    default=0.0,
-                ))
-            elif approved_for_question and semantic_atomic:
-                # Retrieval is deliberately broader than evidence.  A related
-                # Positive Learning may teach tone, but it cannot settle an
-                # unspecified registration/application field (or any other
-                # requested fact) unless its own answer covers the atomic
-                # question strongly enough.  Keep the candidate in retrieval
-                # provenance and send the customer question to staff instead
-                # of inferring a field value from topical similarity.
-                status = "NO_RELIABLE_SOURCE"
-                evidence_ids = []
-                source = "ACTIVE_POSITIVE_LEARNING_INSUFFICIENT_EVIDENCE"
-                historical_ids = []
-                evidence_coverage = "UNSUPPORTED"
-            elif historical_for_question and (
-                not semantic_atomic or coverage_label(max(
-                (float(item.get("answer_support") or 0)
-                 for item in historical_for_question),
-                default=0.0,
-            )) == "SUPPORTED"):
-                status = "ANSWERABLE"
-                evidence_ids = []
                 historical_ids = [
                     int(item["id"]) for item in historical_for_question
                 ]
-                source = "SAFE_HISTORICAL_LEARNING"
+                source = (
+                    "ACTIVE_POSITIVE_LEARNING"
+                    if approved_for_question
+                    else "SAFE_HISTORICAL_LEARNING"
+                )
                 evidence_coverage = coverage_label(max(
-                    (float(item.get("answer_support") or 0)
-                     for item in historical_for_question),
+                    (
+                        float(item.get("answer_support") or 0)
+                        for item in (
+                            *approved_for_question, *historical_for_question
+                        )
+                    ),
                     default=0.0,
                 ))
-            elif historical_for_question and semantic_atomic:
-                # The same test Positive Learning has to pass, applied to the
-                # historical shelf, which was exempt from it.
-                #
-                # ``SAFE_REUSABLE`` answers one question -- may this past
-                # answer be reused at all -- and the ladder was reading it as
-                # the answer to a different one: does it answer *this*
-                # sub-question. So "무타공설치비용 문의합니다" was settled by a
-                # past reply about another product's courier delivery, and
-                # "쿠폰 1만원 보냈는지 확인해주세요" was answered verbatim with a
-                # 온누리 상품권 application guide. Both cases are genuinely
-                # reusable; neither is an answer to what was asked, and the
-                # coverage recorded alongside the promotion already said so.
-                status = "NO_RELIABLE_SOURCE"
-                evidence_ids = []
-                historical_ids = []
-                source = "SAFE_HISTORICAL_LEARNING_INSUFFICIENT_EVIDENCE"
-                evidence_coverage = "UNSUPPORTED"
             else:
+                # Retrieval genuinely found nothing for this sub-question. This
+                # is the one remaining NO_RELIABLE_SOURCE, and it states an
+                # absence rather than a judgement about meaning.
                 status = "NO_RELIABLE_SOURCE"
                 evidence_ids = []
                 source = None
@@ -1000,7 +985,7 @@ class LearningContextService:
                     "learning_ids": evidence_ids,
                     "historical_case_ids": historical_ids,
                     "feedback_signal_ids": feedback_signal_ids,
-                    "answer_required": status == "ANSWERABLE",
+                    "answer_required": status in {"ANSWERABLE", "CANDIDATE"},
                     # Question -> Evidence Coverage: retrieval finding a
                     # candidate is not the same as that candidate's answer
                     # actually supporting this sub-question (see
@@ -1020,10 +1005,23 @@ class LearningContextService:
         # diagnostic.
         context["semantic_atoms"] = [item.to_dict() for item in semantic_atomic]
         context["subquestion_evidence"] = evidence_map
+        # What each status means to the model. CANDIDATE is the ordinary case
+        # and says nothing about whether the candidates apply -- that judgement
+        # moved to GPT ②. The remaining statuses are the deterministic ones: an
+        # absence, a pending external lookup, a policy hold, and a contradiction
+        # nobody may resolve by picking a side.
         context["subquestion_answer_policy"] = {
+            "CANDIDATE": (
+                "Retrieved candidates are attached for this item. Read them, "
+                "decide which ones actually answer it for this product, and "
+                "answer from those. If none of them does, say so for this item "
+                "only."
+            ),
             "ANSWERABLE": "Answer directly from the mapped evidence.",
             "NEEDS_DPS": "Do not use Learning as the current order date.",
-            "NO_RELIABLE_SOURCE": "Only this item may request confirmation.",
+            "NO_RELIABLE_SOURCE": (
+                "Retrieval found no candidate at all for this item."
+            ),
             "CONFLICT": "Do not choose between conflicting sources.",
             "DELIVERY_SCHEDULE_REVIEW": (
                 "No order is confirmed to exist. Do not state a delivery "
@@ -1140,6 +1138,15 @@ class LearningContextService:
                 "attached_to_prompt": True,
                 "source": item.get("reference_strength")
                 or "HISTORICAL_VERIFIED_LEARNING",
+                # What this past reply was written for. The model reads it to
+                # tell a one-off order fact ("9월 3일 배송 예정입니다") from
+                # standing product knowledge ("삼성 기사님이 방문하여 설치하는
+                # 상품입니다") -- the distinction the lexical support score
+                # could never make.
+                "source_question": item.get("question"),
+                "source_product_name": item.get("product_name"),
+                "source_date": item.get("inquiry_created_at")
+                or item.get("source_created_at"),
             }
             for item in historical
         ]

@@ -100,8 +100,15 @@ def test_case_c_low_similarity_without_fact_claim_is_auto_postable():
         )
     )
     assert result.safe is True
-    # The low confidence is still recorded, just not blocking.
-    assert "GPT_CONFIDENCE_LOW" in result.soft_reasons
+    # The confidence reason is no longer even recorded here. It is suppressed
+    # when the evidence base is complete, and completeness stopped requiring
+    # ``evidence_coverage == SUPPORTED`` -- that label is the lexical
+    # answer-support measure, which says how much of the question's wording the
+    # answer repeats rather than whether it is grounded.
+    #
+    # The claim the case is named for is unchanged and asserted above: a weak
+    # similarity score with no fact assertion still auto-posts.
+    assert "GPT_CONFIDENCE_LOW" not in result.soft_reasons
 
 
 # CASE D -- a soft validator/provider warning must not block, but is kept.

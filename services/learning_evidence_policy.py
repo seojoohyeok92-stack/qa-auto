@@ -38,7 +38,6 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable, Mapping
 
 from answer.answer_format import extract_answer_body
-from answer.evidence_support import SUPPORTED_THRESHOLD
 from answer.learning_signal import detect_polarity, facts_conflict
 from services.auto_post_validation_service import INTERNAL_PLACEHOLDER
 
@@ -520,12 +519,13 @@ def _qualifying(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             not in EXACT_PRODUCT_MATCHES
         ):
             continue
-        try:
-            support = float(item.get("answer_support") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if support < SUPPORTED_THRESHOLD:
-            continue
+        # ``answer_support`` -- how much of the question's wording reappears in
+        # the answer -- used to be a floor here. It measures lexical overlap,
+        # and a correct answer phrased differently from the question scores
+        # zero, so the floor rejected exactly the evidence a paraphrase should
+        # have supplied. Approval, exact product identity and definiteness are
+        # what this function can judge; whether the answer is on point is a
+        # judgement about meaning and belongs to GPT ②.
         if is_hedged(item.get("answer")):
             continue
         kept.append(dict(item))
@@ -637,12 +637,17 @@ def _supported_subquestions(context: Mapping[str, Any]) -> frozenset[str]:
     evidence = context.get("subquestion_evidence")
     if not isinstance(evidence, list):
         return frozenset()
+    # A sub-question that retrieval attached approved Learning to. The coverage
+    # label is no longer required: it is the same lexical measure the floor in
+    # ``_qualifying`` used, and requiring it here would have re-imposed exactly
+    # what was removed there. The deterministic statuses (NEEDS_DPS, CONFLICT,
+    # DELIVERY_SCHEDULE_REVIEW) are still excluded, because for those the answer
+    # comes from the current order or from a person, never from a past one.
     return frozenset(
         str(item.get("subquestion") or "")
         for item in evidence
         if isinstance(item, Mapping)
-        and str(item.get("status") or "").upper() == "ANSWERABLE"
-        and str(item.get("evidence_coverage") or "").upper() == "SUPPORTED"
+        and str(item.get("status") or "").upper() in {"ANSWERABLE", "CANDIDATE"}
         and str(item.get("source") or "").upper() == "ACTIVE_POSITIVE_LEARNING"
     )
 

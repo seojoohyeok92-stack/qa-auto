@@ -40,6 +40,20 @@ _OPERATIONAL_COMMITMENT_DETAIL = re.compile(
 )
 
 
+def _int_ids(value: Any) -> tuple[int, ...]:
+    """Identifiers the provider reported, keeping only the ones that are ids."""
+
+    if not isinstance(value, list):
+        return ()
+    found: list[int] = []
+    for item in value:
+        try:
+            found.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return tuple(dict.fromkeys(found))
+
+
 def _all_subquestions_answered(value: Any) -> bool:
     """Whether the draft reported answering every sub-question it was given.
 
@@ -169,6 +183,7 @@ class DraftGenerationService:
         selected_facts: SelectedFacts | None = None,
         learning_context: dict[str, Any] | None = None,
         retry_feedback: dict[str, Any] | None = None,
+        gpt_judged_evidence: bool = False,
     ) -> DraftResult:
         if selected_facts is None:
             context = {
@@ -252,8 +267,68 @@ class DraftGenerationService:
         )
         raw = self._validate_historical_usage(raw, learning_context)
         raw = self._validate_feedback_signal_usage(raw, learning_context)
-        raw = self._classify_missing_information(raw, intent)
+        # ``missing_information`` is the model listing what it does not know.
+        # Sorting those entries into "blocking" and "safe to defer" used to be
+        # done here by regex, which is a judgement about meaning made from
+        # wording. Where GPT ② reports ``unresolved`` directly it has already
+        # answered the same question about the same text, so the regex pass is
+        # skipped and its verdict comes from the model.
+        raw = (
+            self._apply_reported_resolution(raw)
+            if gpt_judged_evidence
+            else self._classify_missing_information(raw, intent)
+        )
         return self.parse(raw)
+
+    @staticmethod
+    def _apply_reported_resolution(raw: dict[str, Any]) -> dict[str, Any]:
+        """Read the model's own unresolved list instead of classifying prose.
+
+        Same output shape as ``_classify_missing_information`` so every
+        downstream reader (``has_required_missing_information``, the publishing
+        gate, the dashboard) is unchanged -- only the source of the verdict
+        moved. An item the model named as unresolved is required; anything else
+        it merely could not confirm is optional, which is what "I answered this
+        and here is what I could not know" has always meant.
+        """
+
+        if not isinstance(raw, dict):
+            return raw
+        values = raw.get("missing_information")
+        missing = [
+            str(item).strip()
+            for item in (values if isinstance(values, list) else [])
+            if str(item).strip()
+        ]
+        unresolved = {
+            str(item).strip()
+            for item in (raw.get("unresolved") or [])
+            if str(item).strip()
+        }
+        required = [item for item in missing if item in unresolved]
+        optional = [item for item in missing if item not in unresolved]
+        copied = dict(raw)
+        copied["provider_requires_review"] = bool(raw.get("requires_review"))
+        copied["missing_information_details"] = [
+            {
+                "text": item,
+                "severity": (
+                    "REQUIRED_FOR_SAFE_ANSWER"
+                    if item in unresolved
+                    else "OPTIONAL_DETAIL"
+                ),
+            }
+            for item in missing
+        ]
+        copied["required_missing_information"] = required
+        copied["optional_missing_information"] = optional
+        # The model's own verdicts are authoritative in both directions here:
+        # an unresolved item requires review, and an answer it reported as
+        # complete is not held back by a note about what it could not know.
+        copied["requires_review"] = bool(
+            raw.get("requires_review") or unresolved
+        )
+        return copied
 
     @staticmethod
     def _classify_missing_information(
@@ -496,15 +571,21 @@ class DraftGenerationService:
         evidence = list(
             learning_context.get("subquestion_evidence") or []
         )
+        # Sub-questions the model may answer from attached candidates. CANDIDATE
+        # is the ordinary retrieval outcome now; ANSWERABLE remains for the
+        # deterministic sources (verified signals, confirmed DPS).
         answerable = [
             item for item in evidence
-            if item.get("status") == "ANSWERABLE"
+            if item.get("status") in {"ANSWERABLE", "CANDIDATE"}
             and (item.get("learning_ids") or item.get("historical_case_ids"))
         ]
         if not approved:
-            # Provider-reported IDs are never authoritative.  A Learning that
-            # was rejected before prompt attachment cannot be resurrected as
-            # "actually used" merely because a model emitted its ID.
+            # An id the model emitted for a row that was never attached to the
+            # prompt cannot be "used": there was nothing there to read. This is
+            # an attachment check, not a judgement about relevance -- the
+            # validation loop below keeps every reported id that matches a row
+            # the prompt actually carried. Historical is unaffected and is
+            # validated by ``_validate_historical_usage``.
             raw = {**raw, "learning_usage": []}
         if (not approved and not historical) or not answerable:
             return {**raw, "learning_usage": []}
@@ -583,12 +664,26 @@ class DraftGenerationService:
         if not blanket_avoidance:
             return raw
 
+        # Rewriting the model's answer is a last resort, and it stays scoped to
+        # the deterministic statuses it was written for. CANDIDATE means
+        # retrieval found something and GPT ② was asked to judge it; if the
+        # model read those candidates and concluded none of them applies -- to
+        # this model, this order, this date -- that conclusion is the whole
+        # point of moving the judgement, and a marker list must not overturn it
+        # by pasting the first candidate in as the reply.
+        recoverable = [
+            item for item in answerable
+            if item.get("status") == "ANSWERABLE"
+        ]
+        if not recoverable:
+            return raw
+
         answer_parts: list[str] = []
         usage: list[dict[str, Any]] = []
         historical_usage: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
         answered_questions: set[str] = set()
-        for item in answerable:
+        for item in recoverable:
             question = str(item.get("subquestion") or "").strip()
             selected = next(
                 (
@@ -762,4 +857,40 @@ class DraftGenerationService:
             learning_recovery_used=bool(
                 raw.get("learning_recovery_used")
             ),
+            evidence_decisions=tuple(
+                dict(item)
+                for item in (raw.get("evidence_decisions") or [])
+                if isinstance(item, dict)
+            ),
+            used_template_ids=tuple(
+                str(item)
+                for item in (raw.get("used_template_ids") or [])
+                if str(item or "").strip()
+            ),
+            used_product_facts=tuple(
+                str(item)
+                for item in (raw.get("used_product_facts") or [])
+                if str(item or "").strip()
+            ),
+            used_learning_ids=_int_ids(raw.get("used_learning_ids")),
+            used_historical_ids=_int_ids(raw.get("used_historical_ids")),
+            ignored_evidence=tuple(
+                dict(item)
+                for item in (raw.get("ignored_evidence") or [])
+                if isinstance(item, dict)
+            ),
+            unresolved=tuple(
+                str(item)
+                for item in (raw.get("unresolved") or [])
+                if str(item or "").strip()
+            ),
+            # Absent stays absent. ``bool(None)`` would silently read a legacy
+            # provider's silence as "must not publish" and hold every answer it
+            # writes.
+            can_auto_post=(
+                None
+                if raw.get("can_auto_post") is None
+                else bool(raw.get("can_auto_post"))
+            ),
+            reason=str(raw.get("reason") or ""),
         )

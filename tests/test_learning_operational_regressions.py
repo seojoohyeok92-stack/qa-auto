@@ -419,7 +419,12 @@ def test_2_review_reward_timing_prefers_the_payout_timing_learning(
         "같은 이벤트 주제라도 requested information 이 다르면 근거가 아니다"
     )
     evidence = evidence_for(context, REVIEW_ATOMIC[0]["text"])
-    assert evidence["status"] == "ANSWERABLE"
+    # CANDIDATE: retrieval attached this Learning and GPT ② decides whether it
+    # answers the question. The id is what matters here and it survives -- the
+    # ladder used to empty it whenever the lexical answer-support score fell
+    # short, which is how a correct answer worded differently from the question
+    # was withheld from the model that could have read it.
+    assert evidence["status"] == "CANDIDATE"
     assert evidence["source"] == "ACTIVE_POSITIVE_LEARNING"
     assert evidence["evidence_coverage"] == "SUPPORTED"
     assert evidence["learning_ids"] == [timing]
@@ -573,7 +578,12 @@ def test_5_collection_uses_the_positive_fact_and_the_correction_together(
     assert any("맞음" in text for text in corrections[0]["good_patterns"])
 
     evidence = evidence_for(context, COLLECTION_ATOMIC[0]["text"])
-    assert evidence["status"] == "ANSWERABLE"
+    # CANDIDATE: retrieval attached this Learning and GPT ② decides whether it
+    # answers the question. The id is what matters here and it survives -- the
+    # ladder used to empty it whenever the lexical answer-support score fell
+    # short, which is how a correct answer worded differently from the question
+    # was withheld from the model that could have read it.
+    assert evidence["status"] == "CANDIDATE"
     assert evidence["source"] == "ACTIVE_POSITIVE_LEARNING"
     assert evidence["learning_ids"] == [positive]
 

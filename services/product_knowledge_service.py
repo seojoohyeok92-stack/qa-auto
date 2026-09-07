@@ -454,6 +454,31 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
+# Every field the model catalogue can actually produce a value for. Kept beside
+# ``_catalog_facts``, which is the only place these keys are filled in.
+#
+# ``fields_for_question`` narrows a lookup to the topics the customer's wording
+# names. That is the right question to ask when deciding what to *show*, and the
+# wrong one when the wording is the thing under suspicion: "삼성기사분이 설치하러
+# 오시나요" matches no entry in FIELD_TOPICS, so the lookup returned no fields and
+# the product's verified specification never reached the prompt at all. With a
+# usable GPT ① the catalogue is offered whole instead, and the model decides
+# which rows bear on the question.
+#
+# SUBJECT_SENSITIVE_FIELDS are deliberately not in this set. Those are the
+# quantities a listing measures twice -- the panel's weight and the stand's, the
+# display's VESA pattern and the bracket's -- where the customer's wording is
+# what says which subject was asked about. That is a scope fact, not a guess
+# about meaning, so it keeps its keyword path: such a field is offered only when
+# the question actually named its subject.
+CATALOG_BACKED_FIELDS: frozenset[str] = frozenset({
+    "screen_size", "resolution", "refresh_rate", "speaker_present",
+    "brand", "model_name", "color",
+    "hdmi_present", "usb_present", "ethernet_present", "rf_terminal",
+    "bluetooth_present", "wifi_present", "stand_spacing",
+})
+
+
 def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """(fields, matched topic labels) relevant to one question.
 
@@ -710,8 +735,15 @@ class ProductKnowledgeService:
         model_code: object = None,
         product_name: object = "",
         option_name: object = "",
+        include_all_catalog_fields: bool = False,
     ) -> ProductKnowledgeResult:
-        """Verified facts for the fields this inquiry actually asks about."""
+        """Verified facts this inquiry may be answered from.
+
+        ``include_all_catalog_fields`` is set when GPT ① asked for product
+        evidence. The catalogue is then offered whole rather than filtered
+        through the customer's wording -- see ``CATALOG_BACKED_FIELDS`` for why,
+        and for the one class of field that keeps its keyword path.
+        """
 
         key = str(product_id or "").strip()
         texts = [str(item) for item in (questions or ()) if str(item).strip()]
@@ -719,6 +751,10 @@ class ProductKnowledgeService:
             texts.append(str(question))
         combined = " ".join(texts)
         fields, topics = fields_for_question(combined)
+        if include_all_catalog_fields:
+            fields = tuple(dict.fromkeys(
+                (*fields, *sorted(CATALOG_BACKED_FIELDS))
+            ))
 
         if self.repository is None:
             return self._catalog_facts_for_inquiry(

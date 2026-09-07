@@ -98,6 +98,33 @@ class LearningProvenanceRepository:
                 if not isinstance(item, dict) or item.get(identifier) is None:
                     continue
                 usage[(kind, int(item[identifier]))] = item
+        # GPT ② reports every candidate it read, used or not, with a reason.
+        # That is the record an operator wants when the dashboard says "6
+        # selected, 0 used" -- it separates a model that found nothing useful
+        # from a pipeline that had forbidden everything, which is what the
+        # count used to mean. Merged rather than replacing: it fills in the
+        # rows the per-kind lists above do not mention, and never overwrites a
+        # usage entry those lists already carry.
+        for item in (generated.get("evidence_decisions") or []):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").upper()
+            if kind not in {"LEARNING", "HISTORICAL"}:
+                continue
+            try:
+                reference_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            key = (kind, reference_id)
+            if key in usage:
+                continue
+            usage[key] = {
+                "answer_supported": (
+                    str(item.get("decision") or "").upper() == "USED"
+                ),
+                "matched_subquestion": item.get("matched_subquestion"),
+                "reason": item.get("reason"),
+            }
         with self.database.transaction() as connection:
             rows = connection.execute(
                 """
