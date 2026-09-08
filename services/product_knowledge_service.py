@@ -498,17 +498,26 @@ def _is_empty(value: Any) -> bool:
 # usable GPT ① the catalogue is offered whole instead, and the model decides
 # which rows bear on the question.
 #
-# SUBJECT_SENSITIVE_FIELDS are deliberately not in this set. Those are the
-# quantities a listing measures twice -- the panel's weight and the stand's, the
-# display's VESA pattern and the bracket's -- where the customer's wording is
-# what says which subject was asked about. That is a scope fact, not a guess
-# about meaning, so it keeps its keyword path: such a field is offered only when
-# the question actually named its subject.
+# ``vesa_mm`` and ``weight_catalog`` are in this set even though they appear in
+# SUBJECT_SENSITIVE_FIELDS. That list exists because a *package listing* records
+# some quantities twice -- the panel's weight and the bundled stand's, the
+# display's VESA pattern and the bracket's -- and only the customer's wording
+# says which subject was asked about. The model catalogue records no accessory
+# at all (see ``_catalog_facts``: every key it fills is the base device), so on
+# this path there is no second subject for either field to be confused with, and
+# withholding them bought nothing.
+#
+# What it cost was measurable: "벽에 걸 수 있나요?" names no word the VESA topic
+# table recognises, so a listing whose VESA pattern was catalogued reached the
+# model without it, while "벽걸이 브라켓 규격은?" -- the same question -- got it.
+# Which field answers a question is the judgement that moved to GPT ②; these two
+# were still being decided by wording.
 CATALOG_BACKED_FIELDS: frozenset[str] = frozenset({
     "screen_size", "resolution", "refresh_rate", "speaker_present",
     "brand", "model_name", "color",
     "hdmi_present", "usb_present", "ethernet_present", "rf_terminal",
     "bluetooth_present", "wifi_present", "stand_spacing",
+    "vesa_mm", "weight_catalog",
 })
 
 

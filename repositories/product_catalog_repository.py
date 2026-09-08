@@ -60,6 +60,14 @@ MIN_IDENTIFYING_LENGTH = 5
 # separates "LH43B" from "50" or "UHD".
 _MODEL_TOKEN = re.compile(r"(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{4,}")
 
+# Where one word ends and the next begins, before normalisation removes the
+# evidence. ``normalize_model`` strips every separator, so running the token
+# scan over an already-normalised title collapsed the whole thing into a single
+# run: "삼성 오디세이 G5 LS32FG500 80.1cm(32인치) … 180Hz" became
+# "G5LS32FG500801CM32180HZ", one token, ending in HZ and therefore discarded as
+# a measurement. The model code was in the title and the scan could not see it.
+_WORD_SPLIT = re.compile(r"[^0-9A-Za-z]+")
+
 # Units that make a token a measurement rather than a model code. A listing
 # says "107.9CM" and "43인치"; neither identifies a model, and both would
 # otherwise satisfy the letters-and-digits shape above.
@@ -148,7 +156,9 @@ class ProductCatalogRepository:
         # carry a truncated one -- "LH43B" for LH43BEDHLGFXKR -- and the whole
         # store's 43-inch business TVs share that stem, so this narrows and
         # then reports rather than choosing.
-        partial = self._partial_key_candidates(normalized_catalog, haystack)
+        partial = self._partial_key_candidates(
+            normalized_catalog, f"{product_name} {option_name}",
+        )
         if len(partial) == 1:
             key = next(iter(partial))
             return CatalogMatch(key, dict(catalog[key]), status=UNIQUE_MATCH)
@@ -177,27 +187,33 @@ class ProductCatalogRepository:
         )
 
     @staticmethod
-    def _model_tokens(haystack: str) -> set[str]:
-        """Model-code-shaped tokens in a normalised listing title.
+    def _model_tokens(text: object) -> set[str]:
+        """Model-code-shaped words in a listing title.
 
-        Structural only: a run of letters and digits containing at least one of
+        Structural only: a word of letters and digits containing at least one of
         each. Measurements are dropped because "107.9CM" and "300HZ" satisfy
         that shape and identify nothing.
+
+        Split on the original text, not the normalised one. Normalisation
+        removes the separators, and the scan then sees one run spanning the
+        whole title -- which is both too long to be a model code and liable to
+        end in a unit from the last word, so every title failed.
         """
 
         found = set()
-        for match in _MODEL_TOKEN.finditer(haystack):
-            token = match.group()
+        for word in _WORD_SPLIT.split(str(text or "")):
+            token = normalize_model(word)
             if len(token) < MIN_IDENTIFYING_LENGTH:
                 continue
             if token.endswith(_MEASUREMENT_SUFFIX):
                 continue
-            found.add(token)
+            if _MODEL_TOKEN.fullmatch(token):
+                found.add(token)
         return found
 
     @classmethod
     def _partial_key_candidates(
-        cls, normalized_catalog: dict[str, str], haystack: str
+        cls, normalized_catalog: dict[str, str], text: object
     ) -> set[str]:
         """Catalog keys a truncated model code in the listing could name.
 
@@ -207,7 +223,7 @@ class ProductCatalogRepository:
         would let one model's digits vouch for another's.
         """
 
-        tokens = cls._model_tokens(haystack)
+        tokens = cls._model_tokens(text)
         if not tokens:
             return set()
         return {
