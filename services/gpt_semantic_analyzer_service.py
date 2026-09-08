@@ -66,7 +66,14 @@ MINIMUM_CONFIDENCE = 0.7
 # This is the field that separates "누가 부담하는가" from "유상이다" -- two
 # measured auto-posts of evidence that answered a neighbouring property of the
 # right subject. Nothing else in the prompt was lengthened.
-PROMPT_BUDGET = 2800
+#
+# Raised once more, on measurement. ``retrieval_queries`` is what turns one
+# search into several, and the instruction has to say three things that cannot
+# be shortened: describe the answer's content, vary the angle rather than the
+# wording, and return nothing when nothing stored would help. The measured
+# length after the addition is stated by the shadow test. Nothing else in the
+# prompt grew.
+PROMPT_BUDGET = 3200
 
 # The prompt is the contract. No examples, no prose, no "explain your
 # reasoning" -- every token here is paid on every semantic call, and the output
@@ -81,7 +88,13 @@ objects: [{{"type": noun, "states": STATE subset}}]
 ATTR={attributes}
 atomic_questions: [{{"text": str, "action": ACTION,
   "requested_information": noun phrase naming the fact wanted,
-  "requested_attribute": ATTR}}], keep every one
+  "requested_attribute": ATTR,
+  "retrieval_queries": 1-3 str}}], keep every one
+retrieval_queries describe the CONTENT of a past answer that would settle this
+atom, one per distinct angle -- not the customer's wording, not keywords, not a
+category name. Write them as a stored answer would be summarised: "기사 방문
+설치로 진행되는 상품인지에 대한 안내". Two angles beat two rewordings; use one
+when the atom has one. [] when nothing stored could answer it.
 deadline: date/period the customer requires, else null
 constraints: str list, may be []
 negation, conditional, requires_order_context, requires_delivery_schedule: bool

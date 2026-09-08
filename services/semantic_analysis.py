@@ -194,6 +194,23 @@ class AtomicQuestion:
     # that does not emit it leaves UNKNOWN, and every existing consumer that
     # reads text/action/requested_information is unaffected.
     requested_attribute: str = UNKNOWN_ATTRIBUTE
+    # What to go and look for, in the model's own words.
+    #
+    # The atom is the customer's question; these are descriptions of the
+    # *content* that would answer it. The distinction is what retrieval was
+    # missing. Lexical scoring compares the query against a stored question,
+    # and a customer who writes "쓰던 티비 가져가 주시나요?" shares almost no
+    # token with "기존 폐가전도 무료로 수거해 주시나요?", though either would
+    # be answered by the same reply. Measured over 25 such questions against
+    # the live corpus, counting only the ones whose evidence survives product
+    # safety: the answer was in the top six for 68.2% of them on the
+    # customer's sentence alone, and 90.9% once these were searched too.
+    #
+    # Nothing here classifies anything. They are additional query strings for
+    # the same search, ranked by the same scorer, and an empty tuple -- a
+    # model that omits the field, a fallback, a parse that dropped it --
+    # leaves retrieval exactly as it was.
+    retrieval_queries: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -201,6 +218,7 @@ class AtomicQuestion:
             "action": self.action,
             "requested_information": self.requested_information,
             "requested_attribute": self.requested_attribute,
+            "retrieval_queries": list(self.retrieval_queries),
         }
 
 
@@ -472,6 +490,45 @@ def _states(value: object) -> tuple[str, ...]:
     )
 
 
+# How many search directions one atom may contribute, and how long each may be.
+#
+# Both are ceilings on cost, not on meaning. Each query is scored against the
+# whole candidate pool, so it is paid per sub-question: measured on 880 live
+# candidates, 0.26s with none, 0.36s with one and 0.46s with two. The recall it
+# buys saturates well before the ceiling -- one query already reaches 90.9% in
+# the top six and the second one buys the top of the list rather than the tail
+# (81.8% at rank one against 68.2%) -- so three is headroom for a genuinely
+# many-sided atom, not a target. The length cap is the same reasoning: a
+# retrieval query names the fact wanted, and one that runs past a line has
+# started restating the whole message, which is the query that already fails.
+MAX_RETRIEVAL_QUERIES = 3
+MAX_RETRIEVAL_QUERY_LENGTH = 80
+
+
+def _retrieval_queries(value: object) -> tuple[str, ...]:
+    """Search directions from the model, or nothing at all.
+
+    Deliberately forgiving where the rest of ``parse`` is strict. A malformed
+    action means the caller cannot tell what the customer wanted; a malformed
+    retrieval query means one search runs on the customer's own words, which
+    is what every search did before this field existed. Refusing the whole
+    understanding over it would trade a working answer for a missing one.
+    """
+
+    if not isinstance(value, list):
+        return ()
+    queries: list[str] = []
+    for item in value:
+        text = _text(item, MAX_RETRIEVAL_QUERY_LENGTH)
+        # A one-word query matches everything and ranks nothing.
+        if len(text) < 4 or text in queries:
+            continue
+        queries.append(text)
+        if len(queries) >= MAX_RETRIEVAL_QUERIES:
+            break
+    return tuple(queries)
+
+
 def _purchase_state(value: object) -> str:
     """Read the reported state, defaulting to the one that grants nothing.
 
@@ -553,6 +610,7 @@ def parse(raw: object) -> SemanticAnalysis:
             text=text, action=action,
             requested_information=_text(item.get("requested_information"), 80),
             requested_attribute=attribute,
+            retrieval_queries=_retrieval_queries(item.get("retrieval_queries")),
         ))
 
     try:

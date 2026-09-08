@@ -242,11 +242,24 @@ class SimilarAnswerService:
         # not independent keyword expansions.  Ranking uses the best match,
         # allowing a verified older Learning written in different words to be
         # found without letting unrelated topic neighbours accumulate score.
+        #
+        # What GPT ① said to look for, if it said anything. These are the same
+        # kind of thing as the two above -- another way of naming the goal --
+        # and they are scored by the same scorer against the same candidates.
+        # No branch reads them as a category, and an empty list leaves the
+        # variant set exactly as it was.
+        retrieval_queries = semantic_goal.get("retrieval_queries") or ()
+        if isinstance(retrieval_queries, str):
+            retrieval_queries = (retrieval_queries,)
         query_variants = list(dict.fromkeys(
             value for value in (
                 query,
                 normalize_learning_question(self.privacy.mask(requested_information)),
                 normalize_learning_question(self.privacy.mask(atomic_question)),
+                *(
+                    normalize_learning_question(self.privacy.mask(item))
+                    for item in retrieval_queries
+                ),
             ) if value
         ))
         required_action = str(semantic_goal.get("customer_goal") or "").upper()
@@ -569,6 +582,7 @@ class SimilarAnswerService:
                 "customer_goal": required_action or None,
                 "requested_information": requested_information or None,
                 "atomic_question": atomic_question or None,
+                "retrieval_queries": list(retrieval_queries),
                 "order_evidence_required": order_evidence_required,
                 "schedule_scoped": schedule_scoped,
             },

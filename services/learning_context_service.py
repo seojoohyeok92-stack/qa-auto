@@ -53,6 +53,18 @@ _HISTORICAL_CASE_PROMPT_DROP: frozenset[str] = frozenset(
     {"answer_style_reference"}
 )
 
+# What GPT ① went looking for is not something GPT ② may answer from.
+#
+# A retrieval query names a fact in the affirmative -- "기존 폐가전을 무상으로
+# 수거해 주는지에 대한 안내" -- because that is the shape that matches a stored
+# answer. Put in front of a model reading for evidence, a sentence like that is
+# one careless step from being read as the answer, and it is not evidence at
+# all: it is a description of what we hoped to find. Whether anything was found
+# is already said by the candidates themselves and by the sub-question's
+# status. So it stays in the context, where the dashboard and the operator can
+# see what was searched, and out of the prompt.
+_SEMANTIC_ATOM_PROMPT_DROP: frozenset[str] = frozenset({"retrieval_queries"})
+
 
 def prompt_context(context: dict[str, Any]) -> dict[str, Any]:
     """The part of the learning context the model actually answers from.
@@ -72,6 +84,18 @@ def prompt_context(context: dict[str, Any]) -> dict[str, Any]:
                     field: item[field]
                     for field in item
                     if field not in _HISTORICAL_CASE_PROMPT_DROP
+                }
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+            continue
+        if key == "semantic_atoms" and isinstance(value, list):
+            projected[key] = [
+                {
+                    field: item[field]
+                    for field in item
+                    if field not in _SEMANTIC_ATOM_PROMPT_DROP
                 }
                 if isinstance(item, dict)
                 else item
@@ -268,15 +292,29 @@ class LearningContextService:
         self.feedback_signals = LearningSignalService(database)
         self.feedback_signal_provenance = FeedbackSignalProvenanceRepository(database)
 
-    def _semantic_ranks(self, question: str) -> dict[int, int]:
+    def _semantic_ranks(self, question: str, *queries: str) -> dict[int, int]:
         """Meaning-based neighbours of this sub-question, by rank.
 
         Returns nothing at all when the derived index is missing or the
         embedding call fails, and retrieval is then the lexical search that
         shipped before this existed. A retrieval aid may widen the candidate
         pool; it may never be the reason an inquiry produces no context.
+
+        Extra queries are the search directions GPT ① named for this atom.
+        Each is embedded and looked up the same way, and a row found by more
+        than one keeps its best rank -- the bonus this feeds is a floor, so
+        merging on the minimum is merging on "how sure was the closest
+        match". All of them travel in one request: the endpoint takes a batch,
+        so three directions cost three vectors and one round trip, not three.
         """
 
+        texts = list(dict.fromkeys(
+            str(item or "")[:400]
+            for item in (question, *queries)
+            if str(item or "").strip()
+        ))
+        if not texts:
+            return {}
         try:
             # The key is checked before the index is touched: without it the
             # embedding call cannot happen, and loading tens of megabytes to
@@ -286,13 +324,14 @@ class LearningContextService:
             index = self._semantic_index()
             if index is None or not index.available:
                 return {}
-            vector = self._embedding_client().embed([str(question or "")[:400]])[0]
-            return {
-                identifier: rank
+            merged: dict[int, int] = {}
+            for vector in self._embedding_client().embed(texts):
                 for rank, (identifier, _score) in enumerate(
                     index.similar(vector, limit=SEMANTIC_NEIGHBOUR_LIMIT), start=1
-                )
-            }
+                ):
+                    if rank < merged.get(identifier, rank + 1):
+                        merged[identifier] = rank
+            return merged
         except Exception:  # noqa: BLE001 - never blocks retrieval
             return {}
 
@@ -444,7 +483,13 @@ class LearningContextService:
                 (item for item in semantic_atomic if item.text.strip() == question),
                 None,
             )
+            # The atom's own search directions, or nothing. Empty is the
+            # ordinary case for a model that omitted the field and for every
+            # deterministic caller, and it leaves the search running on the
+            # customer's own words -- which is what it ran on before.
+            atom_queries = tuple(atomic.retrieval_queries) if atomic is not None else ()
             semantic_goal = {
+                "retrieval_queries": list(atom_queries),
                 "customer_goal": (
                     atomic.action if atomic is not None
                     else (semantic_analysis.primary_action if semantic_analysis else None)
@@ -477,7 +522,7 @@ class LearningContextService:
             )
             item_context = self.search.context(
                 question,
-                semantic_ranks=self._semantic_ranks(question),
+                semantic_ranks=self._semantic_ranks(question, *atom_queries),
                 store_code=store_code,
                 intent=intent_data.get("category") or intent_data.get("primary_intent"),
                 product_name=product_name,
