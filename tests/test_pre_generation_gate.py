@@ -134,15 +134,17 @@ def calls(provider: FakeGptProvider) -> int:
 
 
 # =========================================================== gate unit
-def test_gate_skips_only_what_no_answer_could_clear():
-    skip = PreGenerationGate.evaluate_plan(
+def test_gate_keeps_legacy_high_risk_metadata_out_of_generation_authority():
+    """A legacy label is telemetry; GPT②/evidence and workflow decide later."""
+
+    decision = PreGenerationGate.evaluate_plan(
         analysis={"manual_review_required": True,
                   "manual_review_sources": ["HIGH_RISK_OR_DISPUTE"],
                   "inquiry_subtype": "HIGH_RISK_OR_DISPUTE"},
         plan={"needs_staff_review": True, "is_high_risk": True},
     )
-    assert skip.skip_generation is True
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in skip.reasons
+    assert decision.skip_generation is False
+    assert decision.reasons == ()
 
 
 def test_gate_never_skips_a_classifier_gap():
@@ -187,15 +189,15 @@ def test_gate_only_skips_on_conflict_not_on_a_gap(status):
 
 
 # ================================================= A. hard review, no provider
-def test_A_staff_action_inquiry_never_reaches_the_provider():
+def test_A_legacy_staff_action_label_does_not_suppress_evidence_generation():
     request = request_for("배송 중 파손되면 어떻게 하나요?",
                           plan={"needs_staff_review": True, "is_high_risk": True})
     provider = provider_for("무엇이든 답변")
-    with pytest.raises(GenerationSkippedError) as raised:
-        run(request, provider, rule(), learning())
-    assert calls(provider) == 0
-    assert raised.value.stage == "PROCESSING_PLAN"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in raised.value.reasons
+    outcome, _ = run(request, provider, rule(), learning())
+    assert calls(provider) >= 1
+    # The legacy label did not decide publication.  The resulting status is
+    # owned by the selected evidence/answer contract, not the plan metadata.
+    assert outcome.result.status is AnswerStatus.GENERATED
 
 
 # ====================== B. no product fact + approved learning -> still answers
@@ -267,16 +269,15 @@ def test_D_verified_fact_contradicting_learning_is_a_conflict():
     assert decision.reason == "PRODUCT_FACT_VS_LEARNING_CONFLICT"
 
 
-def test_D_learning_never_silently_overwrites_a_verified_fact():
+def test_D_verified_fact_conflict_reaches_gpt_and_remains_explicit():
     request = request_for(STAND_Q)
     provider = provider_for(STAND_YES)
     request.metadata["product_knowledge"] = _Knowledge(
         [_Fact("stand_detachable", "false")]
     )
-    with pytest.raises(GenerationSkippedError) as raised:
-        run(request, provider, rule(), learning(approved(11, STAND_YES)))
-    assert calls(provider) == 0
-    assert raised.value.reasons == ("EVIDENCE_CONFLICT",)
+    _, hybrid = run(request, provider, rule(), learning(approved(11, STAND_YES)))
+    assert calls(provider) >= 1
+    assert hybrid["approved_learning_evidence"]["conflict"] is True
 
 
 class _Knowledge:
@@ -308,13 +309,14 @@ def test_E_two_approved_answers_that_disagree_are_never_picked_between():
     assert decision.learning_ids == ()
 
 
-def test_E_conflicting_learning_skips_generation_entirely():
+def test_E_conflicting_learning_reaches_gpt_without_being_selected_by_code():
     request = request_for(STAND_Q)
     provider = provider_for(STAND_YES)
-    with pytest.raises(GenerationSkippedError):
-        run(request, provider,
-            rule(), learning(approved(11, STAND_YES), approved(12, STAND_NO)))
-    assert calls(provider) == 0
+    _, hybrid = run(
+        request, provider, rule(), learning(approved(11, STAND_YES), approved(12, STAND_NO))
+    )
+    assert calls(provider) >= 1
+    assert hybrid["approved_learning_evidence"]["conflict"] is True
 
 
 def test_E_agreeing_answers_are_not_a_conflict():
@@ -331,7 +333,7 @@ def test_E_agreeing_answers_are_not_a_conflict():
 
 
 # ========================================================= K. AirPlay conflict
-def test_K_contradicting_airplay_learning_is_not_answered_automatically():
+def test_K_contradicting_airplay_learning_is_exposed_to_gpt_as_conflict():
     """지원/미지원 both approved, no verified fact -- a person decides."""
 
     question = "아이폰 데이터로 미러링하면 인터넷 연결 없이 가능한가요?"
@@ -342,10 +344,9 @@ def test_K_contradicting_airplay_learning_is_not_answered_automatically():
     )
     request = request_for(question)
     provider = provider_for("가능합니다.")
-    with pytest.raises(GenerationSkippedError) as raised:
-        run(request, provider, rule(), context)
-    assert calls(provider) == 0
-    assert raised.value.reasons == ("EVIDENCE_CONFLICT",)
+    _, hybrid = run(request, provider, rule(), context)
+    assert calls(provider) >= 1
+    assert hybrid["approved_learning_evidence"]["conflict"] is True
 
 
 # ============================================== governance / authority tiers
@@ -529,8 +530,8 @@ def test_J_a_schedule_change_request_with_no_order_is_still_drafted():
     assert decision.skip_generation is False
 
 
-def test_J_a_schedule_change_request_with_an_order_still_skips():
-    """The order number makes it a real lookup, and the skip saves that call."""
+def test_J_a_schedule_change_request_with_an_order_reaches_workflow_gate():
+    """Generation is not the action; the post-generation workflow owns it."""
 
     analysis = _analysis_for("설치일 변경 가능한가요?")
     analysis = {
@@ -541,11 +542,11 @@ def test_J_a_schedule_change_request_with_an_order_still_skips():
     decision = PreGenerationGate.evaluate_plan(
         analysis=analysis, plan={"needs_staff_review": True}
     )
-    assert decision.skip_generation is True
-    assert "PROCESSING_PLAN_REQUIRES_REVIEW" in decision.reasons
+    assert decision.skip_generation is False
+    assert decision.reasons == ()
 
 
-def test_J_a_classifier_gap_is_generated_and_then_held_by_the_real_gate():
+def test_J_a_classifier_gap_is_generated_without_legacy_publish_veto():
     """"배송 좀 땡겨주실 수 없나요?" is UNCLASSIFIED, not a named risk.
 
     The gate lets it through -- an answer plus a clean validator is allowed to
@@ -583,8 +584,8 @@ def test_J_a_classifier_gap_is_generated_and_then_held_by_the_real_gate():
                    "hybrid": {"validation": passed}}},
         route="GPT_FALLBACK",
     )
-    assert verdict.decision == "REVIEW_REQUIRED"
-    assert verdict.reasons, "held with no hard reason to show the operator"
+    assert verdict.decision == "SAFE"
+    assert not verdict.reasons
 
 
 def test_the_gate_and_the_publishing_gate_share_their_vocabulary():
@@ -653,13 +654,8 @@ def test_without_qualifying_learning_the_product_fact_hold_stays():
     assert verdict.decision == "REVIEW_REQUIRED"
 
 
-def test_the_learning_route_does_not_unlock_compatibility_claims():
-    """A different rule, deliberately left alone.
-
-    PRODUCT_COMPATIBILITY still needs an exact template or Product DB fact.
-    Approved Learning satisfying the product-fact requirement must not be
-    read as satisfying that one too.
-    """
+def test_legacy_compatibility_metadata_cannot_override_resolved_gpt_evidence():
+    """Exact product provenance is safety; legacy intent is not authority."""
 
     verdict = _gate_verdict({
         "sensitive": True, "current_fact_verified": True,
@@ -679,15 +675,24 @@ def test_the_learning_route_does_not_unlock_compatibility_claims():
                "validator_result_json": passed, "posted": 0,
                "metadata_json": {
                    "selected_answer_route": "GPT_FALLBACK",
-                   "processing_plan": {
-                       "analysis": {"detected_intent": "PRODUCT_COMPATIBILITY"}},
+                    "semantic_routing": {"understanding": {"usable": True}},
+                    "processing_plan": {
+                        "analysis": {"detected_intent": "PRODUCT_COMPATIBILITY"}},
                    "product_fact_guard": {
                        "sensitive": True, "current_fact_verified": True,
                        "current_fact_source": "APPROVED_LEARNING"},
-                   "hybrid": {"validation": passed}}},
+                    "hybrid": {
+                        "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                        "validation": passed,
+                        "draft": {
+                            "unresolved": [], "can_auto_post": True,
+                            "used_product_facts": ["current_product"],
+                        },
+                    }}},
         route="GPT_FALLBACK",
     )
-    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" in compat.reasons
+    assert compat.decision == "SAFE"
+    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" not in compat.reasons
 
 
 # ============================ authority tiers and validity stay as they were

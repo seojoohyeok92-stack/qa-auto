@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from services.auto_processing_eligibility_service import (
-    EVIDENCE_NOT_SUFFICIENT,
+    GPT_REPORTED_UNRESOLVED,
     AutoProcessingEligibilityService,
     _evidence_insufficient,
 )
@@ -44,12 +44,23 @@ def evidence(*statuses: str) -> list[dict]:
 
 def verdict_for(*, route: str, entries, answer: str = DEFERRAL_ANSWER,
                 coverage: str = "PASS", extra: dict | None = None):
+    unresolved = (
+        route not in {"SAFE_RULE", "PRODUCT_DB", "ORDER_ID_REQUEST"}
+        and any(
+            str(item.get("status") or "").upper() == "NO_RELIABLE_SOURCE"
+            for item in entries
+        )
+    )
     metadata = {
         "selected_answer_route": route,
         "semantic_coverage": {"status": coverage},
-        "hybrid": {"subquestion_evidence": entries,
-                   "draft": {"learning_usage": [], "requires_review": False,
-                             "missing_information": []},
+        "semantic_routing": {"understanding": {"usable": True}},
+        "hybrid": {"answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "subquestion_evidence": entries,
+                    "draft": {"learning_usage": [], "requires_review": False,
+                              "missing_information": [],
+                              "unresolved": (["source missing"] if unresolved else []),
+                              "can_auto_post": not unresolved},
                    "self_review": {"requires_review": False}},
     }
     metadata.update(extra or {})
@@ -68,7 +79,7 @@ def test_a_factual_question_with_no_source_cannot_auto_post():
         route="GPT_FALLBACK",
         entries=evidence(*(["NO_RELIABLE_SOURCE"] * 4)))
 
-    assert EVIDENCE_NOT_SUFFICIENT in result.reasons
+    assert GPT_REPORTED_UNRESOLVED in result.reasons
     assert result.decision != "SAFE"
 
 
@@ -83,10 +94,10 @@ def test_naming_the_gap_fluently_does_not_substitute_for_evidence():
 def test_a_verified_learning_answer_still_publishes():
     result = verdict_for(route="GPT_HYBRID", entries=evidence("ANSWERABLE"),
                          answer=GROUNDED_ANSWER)
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
-@pytest.mark.parametrize("route", ["TEMPLATE", "SAFE_RULE", "PRODUCT_DB"])
+@pytest.mark.parametrize("route", ["SAFE_RULE", "PRODUCT_DB"])
 def test_a_deterministic_route_is_never_held_by_this_gate(route):
     """Template/RULE/Catalog 의 답은 검색보다 먼저 정해진다.
 
@@ -95,7 +106,15 @@ def test_a_deterministic_route_is_never_held_by_this_gate(route):
     """
     result = verdict_for(route=route,
                          entries=evidence(*(["NO_RELIABLE_SOURCE"] * 2)))
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
+
+
+def test_a_generic_template_requires_the_persisted_gpt2_evidence_verdict():
+    """A template is candidate text, not a semantic final authority."""
+    result = verdict_for(
+        route="TEMPLATE", entries=evidence("NO_RELIABLE_SOURCE", "NO_RELIABLE_SOURCE")
+    )
+    assert GPT_REPORTED_UNRESOLVED in result.reasons
 
 
 # =========================================== E. compound 부분 근거는 차단
@@ -105,7 +124,7 @@ def test_two_supported_and_one_unsupported_still_blocks():
         route="GPT_HYBRID",
         entries=evidence("ANSWERABLE", "ANSWERABLE", "NO_RELIABLE_SOURCE"))
 
-    assert EVIDENCE_NOT_SUFFICIENT in result.reasons
+    assert GPT_REPORTED_UNRESOLVED in result.reasons
     assert result.decision != "SAFE"
 
 
@@ -114,7 +133,7 @@ def test_every_atom_supported_is_not_held():
         route="GPT_HYBRID",
         entries=evidence("ANSWERABLE", "ANSWERABLE", "ANSWERABLE"),
         answer=GROUNDED_ANSWER)
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
 # ======================================== F~G. 기존에 허용된 경로는 보존
@@ -122,7 +141,7 @@ def test_the_safe_order_number_request_is_untouched():
     """주문번호를 물어보는 답변은 어떤 사실도 주장하지 않는다."""
     result = verdict_for(route="ORDER_ID_REQUEST",
                          entries=evidence("NO_RELIABLE_SOURCE"))
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
 @pytest.mark.parametrize("status", ["NEEDS_DPS", "DELIVERY_SCHEDULE_REVIEW",
@@ -155,4 +174,4 @@ def test_the_gate_adds_nothing_to_an_already_reviewed_draft():
         entries=evidence("DELIVERY_SCHEDULE_REVIEW"),
         extra={"requires_manual_review": True})
     assert result.decision != "SAFE"
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons

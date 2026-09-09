@@ -61,10 +61,14 @@ REASON_LABELS: dict[str, str] = {
     "GPT_WITHHELD_AUTO_POST": (
         "답변 생성 단계에서 자동 등록하지 않도록 판단했습니다."
     ),
+    "ELIGIBILITY_EVALUATION_FAILED": (
+        "자동등록 안전조건 확인 중 시스템 오류가 발생해 직원 확인이 필요합니다."
+    ),
     "UNDERSTANDING_UNAVAILABLE": (
         "문의 의미 분석(GPT①)을 사용할 수 없어 자동 등록하지 않고 "
         "직원 검토로 넘깁니다."
     ),
+    "DPS_LOOKUP_DISABLED": "현재 DPS 일정 조회 기능이 운영상 일시 중지되어 직원 확인이 필요합니다.",
     # Recorded but not blocking
     "ORDER_ID_REQUESTED_FROM_CUSTOMER": "고객에게 주문번호를 요청하는 답변입니다.",
     "INTENT_CONFIDENCE_LOW": "문의 분류 신뢰도가 낮게 측정되었습니다.",
@@ -176,6 +180,7 @@ STAFF_REASON_LABELS: dict[str, str] = {
     "GPT_REPORTED_UNRESOLVED": "미해결 문항 있음",
     "GPT_WITHHELD_AUTO_POST": "자동등록 보류 판단",
     "UNDERSTANDING_UNAVAILABLE": "문의 분석 불가",
+    "ELIGIBILITY_EVALUATION_FAILED": "자동등록 판단 오류",
     # Recorded but not blocking
     "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": "문의 유형 불명확",
     "INTENT_CONFIDENCE_LOW": "분류 신뢰도 낮음",
@@ -190,6 +195,8 @@ STAFF_REASON_LABELS: dict[str, str] = {
 # was *lifted*, and ORDER_ID_REQUESTED_FROM_CUSTOMER describes what the answer
 # says rather than what stopped it. Hidden from the message only -- both are
 # still produced, still recorded, and still shown on the dashboard.
+STAFF_REASON_LABELS["DPS_LOOKUP_DISABLED"] = "DPS 일정 조회 중지"
+
 STAFF_HIDDEN_REASONS = frozenset({
     "PRELIMINARY_REVIEW_RESOLVED",
     "ORDER_ID_REQUESTED_FROM_CUSTOMER",

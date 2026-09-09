@@ -15,6 +15,7 @@ from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.answer_service import AnswerService
+from services.dps_lookup_policy import DpsLookupPolicy
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.phase9_answer_policy import (
     DELIVERY_DATE_ANSWER,
@@ -65,6 +66,7 @@ class FakeDpsEnrichment:
     def __init__(self, metadata: dict | None = None) -> None:
         self.metadata = metadata
         self.calls: list[str] = []
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.calls.append(request.order_id)

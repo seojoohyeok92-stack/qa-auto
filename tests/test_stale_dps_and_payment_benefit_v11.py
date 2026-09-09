@@ -74,7 +74,8 @@ def facts_for(installation_date: str, *, registered_at: str = INQUIRY_DATE):
     return build_answer_facts(request, _rule_result())
 
 
-def evaluate(*, route: str, plan: dict, answer: str = "안내드립니다."):
+def evaluate(*, route: str, plan: dict, answer: str = "안내드립니다.",
+             unresolved: tuple[str, ...] = ()):
     return ELIGIBILITY.evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
         draft={
@@ -82,7 +83,15 @@ def evaluate(*, route: str, plan: dict, answer: str = "안내드립니다."):
             "validation_status": "PASSED",
             "validator_result_json": None,
             "review_status": "",
-            "metadata_json": {"processing_plan": plan},
+            "metadata_json": {
+                "processing_plan": plan,
+                "semantic_routing": {"understanding": {"usable": True}},
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {"unresolved": list(unresolved),
+                              "can_auto_post": not bool(unresolved)},
+                },
+            },
             "posted": False,
             "id": 1,
         },
@@ -273,9 +282,10 @@ def test_case_f_past_learning_does_not_confirm_current_benefit() -> None:
         route="GPT_DIRECT",
         plan={"analysis": {"manual_review_required": True}},
         answer="네, 적용됩니다.",
+        unresolved=("현재 적용 가능한 카드 혜택",),
     )
     assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
 
 
 # ------------------------------------------------- POST is never called

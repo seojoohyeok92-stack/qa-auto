@@ -246,13 +246,13 @@ def test_case_k2_secret_exposure_is_hard_blocked():
     assert result.decision == "BLOCKED"
 
 
-# CASE M -- a policy/high-risk finding remains a hard block.
-def test_case_m_high_risk_stays_blocked():
+# CASE M -- legacy risk metadata cannot become a second publisher.
+def test_case_m_legacy_high_risk_metadata_is_diagnostic_only():
     result = _evaluate(
         _draft(plan={"is_high_risk": True})
     )
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert result.safe is True
+    assert "POLICY_OR_HIGH_RISK_REVIEW" not in result.reasons
 
 
 # CASE R -- a real validator failure remains a hard block.

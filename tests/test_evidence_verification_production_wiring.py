@@ -397,10 +397,15 @@ def test_a_draft_predating_this_gate_is_untouched():
     assert decision_from_metadata({}, route="GPT_HYBRID")[0] is False
 
 
-def test_the_real_eligibility_service_appends_the_reason():
-    """The gate the pipeline actually calls, not a reimplementation."""
+def test_the_real_eligibility_service_uses_the_persisted_gpt_unresolved_verdict():
+    """GPT② evidence insufficiency, not a second semantic verifier, holds."""
     metadata = {
         "hybrid": {
+            "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+            "draft": {
+                "unresolved": [CM18_TEXT],
+                "can_auto_post": False,
+            },
             "subquestion_evidence": [
                 {
                     "subquestion": CM18_TEXT,
@@ -419,4 +424,4 @@ def test_the_real_eligibility_service_appends_the_reason():
         },
         route="GPT_HYBRID",
     )
-    assert REASON_CODE in verdict.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in verdict.reasons

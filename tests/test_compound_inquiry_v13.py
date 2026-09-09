@@ -56,8 +56,18 @@ def analyze(question: str, product: str = "삼성 50인치 TV"):
     )
 
 
-def evaluate(question: str, *, route: str = "GPT_DIRECT"):
+def evaluate(
+    question: str, *, route: str = "GPT_DIRECT",
+    unresolved: tuple[str, ...] = (),
+    workflow_blocks: tuple[str, ...] = (),
+):
+    """Exercise the worker with the persisted GPT-first decision contract.
+
+    Legacy compound/manual flags stay in the plan as hostile telemetry; only
+    GPT② unresolved atoms and closed workflow requirements may hold a draft.
+    """
     analysis = analyze(question)
+    unresolved = tuple(unresolved)
     return ELIGIBILITY.evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
         draft={
@@ -66,7 +76,17 @@ def evaluate(question: str, *, route: str = "GPT_DIRECT"):
             "validator_result_json": None,
             "review_status": "",
             "metadata_json": {
-                "processing_plan": {"analysis": analysis.to_dict()}
+                "processing_plan": {
+                    "analysis": analysis.to_dict(),
+                    "workflow_block_reasons": list(workflow_blocks),
+                },
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {
+                        "unresolved": list(unresolved),
+                        "can_auto_post": not bool(unresolved),
+                    },
+                },
             },
             "posted": False,
             "id": 1,
@@ -112,9 +132,9 @@ def test_case_g_six_part_inquiry_generates_draft_and_is_held() -> None:
     assert analysis.manual_review_required is True
     assert analysis.detected_intent == "PRODUCT_COMPATIBILITY"
 
-    result = evaluate(SIX_PART)
+    result = evaluate(SIX_PART, unresolved=("브라켓 호환 여부",))
     assert result.safe is False
-    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" in result.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
 
 
 # --------------------------------------------------- per-case aggregation
@@ -129,46 +149,46 @@ def test_case_a_all_safe_compound_is_auto_postable() -> None:
 
 
 @pytest.mark.parametrize(
-    ("question", "reason"),
+    ("question", "unresolved"),
     [
         # CASE B -- compatibility
         (
             "A/S는 삼성서비스센터에서 하나요? 집에 있는 브라켓과 호환되나요?",
-            "PRODUCT_COMPATIBILITY_NOT_VERIFIED",
+            "브라켓 호환 여부",
         ),
         # CASE C -- card benefit
         (
             "설치는 기사님이 해주시나요? BC카드 할인도 되나요?",
-            "POLICY_OR_HIGH_RISK_REVIEW",
+            "카드 할인 여부",
         ),
         # CASE D -- damage
         (
             "A/S는 어디서 받나요? 배송 중 파손되면 어떻게 하나요?",
-            "POLICY_OR_HIGH_RISK_REVIEW",
+            "배송 파손 보상 절차",
         ),
         # CASE H -- an exact template must not cover the whole inquiry
         (
             "구매내역서 발급 가능한가요? 배송 중 파손됐는데 보상은 어떻게 되나요?",
-            "POLICY_OR_HIGH_RISK_REVIEW",
+            "파손 보상 절차",
         ),
         # CASE I -- a schedule change alongside a lookup
         (
             "설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요.",
-            "POLICY_OR_HIGH_RISK_REVIEW",
+            "일정 변경 실행",
         ),
         # CASE K -- compatibility, no punctuation
-        (NO_PUNCTUATION, "PRODUCT_COMPATIBILITY_NOT_VERIFIED"),
+        (NO_PUNCTUATION, "브라켓 호환 여부"),
     ],
 )
-def test_one_hard_subquestion_blocks_the_whole_inquiry(
-    question: str, reason: str
+def test_one_unresolved_gpt_atom_blocks_the_whole_inquiry(
+    question: str, unresolved: str,
 ) -> None:
     analysis = analyze(question)
     # The safe part is still draftable for staff to work from.
     assert analysis.can_generate_answer is True
-    result = evaluate(question)
+    result = evaluate(question, unresolved=(unresolved,))
     assert result.safe is False
-    assert reason in result.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
 
 
 # CASE E -- a schedule sub-question keeps order/DPS requirements even when
@@ -210,7 +230,8 @@ def test_case_i_change_request_is_still_held_without_a_stated_order() -> None:
     )
     assert analysis.manual_review_required is True
     assert evaluate(
-        "설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요."
+        "설치예정일이 언제인가요? 그리고 그 날짜를 10일로 변경해주세요.",
+        workflow_blocks=("PRE_PURCHASE_DELIVERY_UNRESOLVED",),
     ).safe is False
 
 
@@ -229,7 +250,10 @@ def test_case_j_delivery_subquestion_holds_the_whole_compound() -> None:
     assert analysis.requires_order_lookup is False
     assert analysis.requires_dps_lookup is False
     assert analysis.manual_review_required is True
-    assert evaluate("A/S는 어디서 받나요? 배송은 언제 오나요?").safe is False
+    assert evaluate(
+        "A/S는 어디서 받나요? 배송은 언제 오나요?",
+        workflow_blocks=("PRE_PURCHASE_DELIVERY_UNRESOLVED",),
+    ).safe is False
 
 
 # CASE L -- single-question behaviour must be unchanged.

@@ -146,12 +146,12 @@ def test_hybrid_speculative_answer_falls_back() -> None:
     assert outcome.result.answer == rule().answer
 
 
-def test_hybrid_never_removes_rule_review_requirement() -> None:
+def test_hybrid_evidence_verdict_is_not_overridden_by_legacy_rule_review() -> None:
     outcome = HybridAnswerService(FakeGptProvider()).generate(
         request(), rule(answer="담당자 확인이 필요합니다.", needs_review=True)
     )
-    assert outcome.result.needs_review is True
-    assert outcome.result.auto_answerable is False
+    assert outcome.result.needs_review is False
+    assert outcome.result.auto_answerable is True
 
 
 def test_hybrid_emits_required_success_events() -> None:

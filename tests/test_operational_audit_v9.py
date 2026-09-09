@@ -120,24 +120,22 @@ def test_ordinary_questions_are_not_high_risk(question: str) -> None:
     assert is_high_risk(question) is False
 
 
-# CASE P -- a fixed template matching the same inquiry must not rescue it.
-# Eligibility reads plan.is_high_risk independently of the route, so even a
-# TEMPLATE route stays blocked.
-def test_case_p_high_risk_beats_a_fixed_template() -> None:
+# CASE P -- old risk metadata is diagnostic, not a template veto.
+def test_case_p_legacy_high_risk_does_not_veto_template() -> None:
     result = evaluate(route="TEMPLATE", plan={"is_high_risk": True})
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert result.safe is True
+    assert "POLICY_OR_HIGH_RISK_REVIEW" not in result.reasons
 
 
-# CASE Q -- a high quality GPT draft must not rescue it either.
-def test_case_q_high_risk_beats_a_good_gpt_draft() -> None:
+# CASE Q -- a resolved GPT draft is not vetoed by old risk metadata.
+def test_case_q_legacy_high_risk_does_not_veto_good_gpt_draft() -> None:
     result = evaluate(
         route="GPT_DIRECT",
         plan={"is_high_risk": True},
         answer="고객님 불편을 드려 죄송합니다. 신속히 도와드리겠습니다.",
     )
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert result.safe is True
+    assert "POLICY_OR_HIGH_RISK_REVIEW" not in result.reasons
 
 
 # The high-risk reason must be HARD, never quietly downgraded to SOFT.

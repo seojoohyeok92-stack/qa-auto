@@ -143,6 +143,9 @@ def test_delivery_sync_automatically_runs_order_dps_and_answer(
             }
 
     class DpsLookup:
+        from services.dps_lookup_policy import DpsLookupPolicy
+        policy = DpsLookupPolicy()
+
         def enrich(self, request, **kwargs):
             sequence.append("DPS_LOOKUP")
             metadata = {

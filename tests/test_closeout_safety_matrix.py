@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from services.auto_processing_eligibility_service import (
-    EVIDENCE_NOT_SUFFICIENT,
+    GPT_REPORTED_UNRESOLVED,
     SEMANTIC_COVERAGE_INCOMPLETE,
     AutoProcessingEligibilityService,
 )
@@ -35,15 +35,21 @@ def entry(status: str, index: int = 1) -> dict:
 def decide(*, route: str, statuses, answer: str = GROUNDED,
            coverage: str = "PASS", metadata_extra: dict | None = None,
            inquiry_extra: dict | None = None):
+    unresolved = (
+        route != "ORDER_ID_REQUEST"
+        and any(status == "NO_RELIABLE_SOURCE" for status in statuses)
+    )
     metadata = {
         "selected_answer_route": route,
         "semantic_coverage": {"status": coverage},
-        "hybrid": {
+        "semantic_routing": {"understanding": {"usable": True}},
+        "hybrid": {"answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
             "subquestion_evidence": [
                 entry(status, index) for index, status in enumerate(statuses, start=1)
             ],
             "draft": {"learning_usage": [], "requires_review": False,
-                      "missing_information": []},
+                      "missing_information": [], "unresolved": (["source missing"] if unresolved else []),
+                      "can_auto_post": not unresolved},
             "self_review": {"requires_review": False},
         },
     }
@@ -62,19 +68,19 @@ def decide(*, route: str, statuses, answer: str = GROUNDED,
 def test_a_template_only_inquiry_publishes_as_before():
     """A. Template 이 문의 전체를 해결한 경우. 기존 동작 그대로."""
     result = decide(route="TEMPLATE", statuses=["ANSWERABLE"])
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
 def test_a_template_beside_verified_learning_publishes():
     """B. Template + Learning. 두 atom 모두 근거가 있다."""
     result = decide(route="TEMPLATE", statuses=["ANSWERABLE", "ANSWERABLE"])
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
 def test_a_product_catalogue_route_publishes():
     """C. Product Catalog 가 해결한 경우."""
     result = decide(route="PRODUCT_DB", statuses=["ANSWERABLE"])
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
 def test_an_unsupported_atom_beside_a_resolved_one_blocks_the_inquiry():
@@ -86,7 +92,7 @@ def test_an_unsupported_atom_beside_a_resolved_one_blocks_the_inquiry():
     result = decide(route="GPT_HYBRID",
                     statuses=["ANSWERABLE", "NO_RELIABLE_SOURCE"])
 
-    assert EVIDENCE_NOT_SUFFICIENT in result.reasons
+    assert GPT_REPORTED_UNRESOLVED in result.reasons
     assert result.decision != "SAFE"
 
 
@@ -99,7 +105,7 @@ def test_three_atoms_with_one_unsupported_block():
 def test_three_atoms_all_supported_do_not_block():
     result = decide(route="GPT_HYBRID",
                     statuses=["ANSWERABLE"] * 3)
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
 
 
 # ================================================ 배송/주문 정책 (종료조건 6)
@@ -133,7 +139,7 @@ def test_a_generic_procedure_answer_needs_no_order_lookup():
     안전을 위해 모든 문의를 조회로 보내지 않는다는 쪽의 계약이다.
     """
     result = decide(route="GPT_HYBRID", statuses=["ANSWERABLE"])
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons
     assert SEMANTIC_COVERAGE_INCOMPLETE not in result.reasons
 
 
@@ -142,7 +148,7 @@ def test_an_inquiry_with_no_source_at_all_is_held():
     result = decide(route="GPT_HYBRID",
                     statuses=["NO_RELIABLE_SOURCE"] * 4,
                     answer="확인 후 안내드리겠습니다.")
-    assert EVIDENCE_NOT_SUFFICIENT in result.reasons
+    assert GPT_REPORTED_UNRESOLVED in result.reasons
     assert result.decision != "SAFE"
 
 
@@ -151,4 +157,4 @@ def test_the_safe_order_number_request_still_publishes():
     result = decide(route="ORDER_ID_REQUEST",
                     statuses=["NO_RELIABLE_SOURCE"],
                     answer="주문번호를 알려주시면 확인해 드리겠습니다.")
-    assert EVIDENCE_NOT_SUFFICIENT not in result.reasons
+    assert GPT_REPORTED_UNRESOLVED not in result.reasons

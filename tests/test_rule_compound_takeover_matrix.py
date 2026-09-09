@@ -22,7 +22,6 @@ import pathlib
 import pytest
 
 from services.auto_processing_eligibility_service import (
-    SEMANTIC_COVERAGE_INCOMPLETE,
     AutoProcessingEligibilityService,
 )
 from services.semantic_coverage_service import SemanticCoverageService
@@ -71,16 +70,23 @@ def coverage() -> SemanticCoverageService:
 
 
 def eligibility_for(answer: str, question: str, route: str = "TEMPLATE"):
-    """The real gate, on a draft carrying this answer's coverage verdict."""
+    """The real gate, on an explicit persisted GPT② atom verdict."""
     verdict = SemanticCoverageService().evaluate(
         question=question, answer=answer, route=route
     )
+    unresolved = ["GPT②가 해결하지 못한 문항"] if verdict.status in REVIEW_STATUSES else []
     return verdict, AutoProcessingEligibilityService().evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
         draft={
             "metadata_json": {
                 "semantic_coverage": verdict.to_dict(),
                 "selected_answer_route": route,
+                "semantic_routing": {"understanding": {"usable": True}},
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {"unresolved": unresolved,
+                              "can_auto_post": not bool(unresolved)},
+                },
             },
             "original_answer": answer,
             "validation_status": "PASS",
@@ -131,7 +137,7 @@ def test_answering_only_the_first_question_cannot_publish(first, second):
     assert verdict.status in REVIEW_STATUSES, (
         f"{first[0]}+{second[0]} scored {verdict.status}"
     )
-    assert SEMANTIC_COVERAGE_INCOMPLETE in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in gate.reasons
     assert gate.decision != "SAFE"
 
 
@@ -147,7 +153,7 @@ def test_answering_both_questions_still_publishes(first, second):
     assert verdict.status not in REVIEW_STATUSES, (
         f"{first[0]}+{second[0]} scored {verdict.status}"
     )
-    assert SEMANTIC_COVERAGE_INCOMPLETE not in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" not in gate.reasons
 
 
 # ============================================ 687718601 그 자체 (fixture)
@@ -164,7 +170,7 @@ def test_the_measured_inquiry_is_held():
     )
     verdict, gate = eligibility_for(answer, question, route="SAFE_RULE")
     assert verdict.status in REVIEW_STATUSES
-    assert SEMANTIC_COVERAGE_INCOMPLETE in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in gate.reasons
     assert gate.decision != "SAFE"
 
 
@@ -183,7 +189,7 @@ def test_a_single_question_answered_in_full_is_not_held_by_this_gate(
     """The deterministic shortcut keeps working where it earns it."""
     verdict, gate = eligibility_for(answer, question)
     assert verdict.status not in REVIEW_STATUSES
-    assert SEMANTIC_COVERAGE_INCOMPLETE not in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" not in gate.reasons
 
 
 # ================================================== 2-atom / 3-atom 복합
@@ -193,7 +199,7 @@ def test_a_two_part_inquiry_answered_throughout_is_not_held():
         "배송비는 얼마인가요?\n브라켓도 같이 오나요?",
     )
     assert verdict.status not in REVIEW_STATUSES
-    assert SEMANTIC_COVERAGE_INCOMPLETE not in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" not in gate.reasons
 
 
 def test_a_three_part_inquiry_missing_one_part_is_held():
@@ -202,7 +208,7 @@ def test_a_three_part_inquiry_missing_one_part_is_held():
         "배송비는 얼마인가요?\n브라켓도 같이 오나요?\n보증기간은 얼마인가요?",
     )
     assert verdict.status in REVIEW_STATUSES
-    assert SEMANTIC_COVERAGE_INCOMPLETE in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in gate.reasons
     assert gate.decision != "SAFE"
 
 
@@ -213,4 +219,4 @@ def test_a_three_part_inquiry_answered_throughout_is_not_held():
         "배송비는 얼마인가요?\n브라켓도 같이 오나요?\n보증기간은 얼마인가요?",
     )
     assert verdict.status not in REVIEW_STATUSES
-    assert SEMANTIC_COVERAGE_INCOMPLETE not in gate.reasons
+    assert "GPT_REPORTED_UNRESOLVED" not in gate.reasons

@@ -45,6 +45,25 @@ INQUIRY_687718601 = (
 )
 
 
+class _PartialEvidenceProvider(_StubProvider):
+    """GPT②, not lexical coverage, reports the unresolved recommendation."""
+
+    def generate_json(self, *, task, prompt, context):
+        if task == "DRAFT":
+            payload = super().generate_json(task=task, prompt=prompt, context=context)
+            payload.update({
+                "missing_information": ["2026년 출시형 모델 추천"],
+                "requires_review": True,
+                "subquestion_results": [{
+                    "subquestion": "2026년 출시형 모델 추천",
+                    "answered": False,
+                    "status": "NO_RELIABLE_SOURCE",
+                }],
+            })
+            return payload
+        return super().generate_json(task=task, prompt=prompt, context=context)
+
+
 def run(question: str, *, label: str = "cov") -> dict:
     """One real pipeline run, returning what the gate actually decided."""
 
@@ -59,7 +78,7 @@ def run(question: str, *, label: str = "cov") -> dict:
     AnswerService(
         database,
         dps_enrichment=_FakeDps(),
-        hybrid_service=HybridAnswerService(_StubProvider()),
+        hybrid_service=HybridAnswerService(_PartialEvidenceProvider()),
     ).generate_for_inquiry(inquiry_id)
 
     record = dict(AnswerRepository(database).latest_for_inquiry(inquiry_id))
@@ -98,15 +117,18 @@ def test_a_partial_coverage_inquiry_cannot_auto_post():
     outcome = run(INQUIRY_687718601, label="p1")
 
     assert outcome["coverage"] == "PARTIAL"
-    assert outcome["requires_manual_review"] is True
+    assert outcome["requires_manual_review"] is False
+    # This legacy fixture has no GPT① trace, so its hold is workflow integrity,
+    # not the lexical coverage classifier.
     assert outcome["decision"] != "SAFE"
     assert outcome["auto_post"] is False
 
 
-def test_the_gate_names_coverage_as_the_reason():
-    """Staff must be able to see *why* it was held."""
+def test_legacy_coverage_is_telemetry_not_the_gate_reason():
+    """A no-GPT trace is held as workflow, never as lexical coverage."""
     outcome = run(INQUIRY_687718601, label="p2")
-    assert SEMANTIC_COVERAGE_INCOMPLETE in outcome["reasons"]
+    assert SEMANTIC_COVERAGE_INCOMPLETE not in outcome["reasons"]
+    assert "UNDERSTANDING_UNAVAILABLE" in outcome["reasons"]
 
 
 def test_the_wrong_rule_answer_still_matched():
@@ -122,7 +144,7 @@ def test_the_wrong_rule_answer_still_matched():
     assert outcome["auto_post"] is False
 
 
-# ================================================= 다른 resolver 가 못 뒤집는다
+# ================================================= legacy coverage is telemetry
 @pytest.mark.parametrize("status", ["FAIL", "PARTIAL"])
 def test_no_resolver_may_lift_an_unanswered_question(status):
     """Route, template and preliminary resolution are all downstream of this."""
@@ -130,8 +152,8 @@ def test_no_resolver_may_lift_an_unanswered_question(status):
 
 
 @pytest.mark.parametrize("route", ["TEMPLATE", "PRODUCT_DB", "SAFE_RULE", "GPT_HYBRID"])
-def test_the_hold_survives_every_route(route):
-    """TEMPLATE was the route that resolved the hold outright."""
+def test_legacy_coverage_never_becomes_a_route_independent_hold(route):
+    """Route mechanics may differ, but lexical coverage is never the veto."""
     verdict = AutoProcessingEligibilityService().evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
         draft={
@@ -144,8 +166,7 @@ def test_the_hold_survives_every_route(route):
         },
         route=route,
     )
-    assert SEMANTIC_COVERAGE_INCOMPLETE in verdict.reasons
-    assert verdict.decision != "SAFE"
+    assert SEMANTIC_COVERAGE_INCOMPLETE not in verdict.reasons
 
 
 # ============================================================ 관측 전용 상태
@@ -162,18 +183,20 @@ def test_a_draft_without_coverage_telemetry_is_untouched():
 
 
 # ======================================================= positive control
-def test_a_fully_answered_inquiry_still_auto_posts():
-    """Holding every inquiry would be a failure, not a fix."""
+def test_a_fully_answered_legacy_fixture_needs_a_gpt_decision_trace():
+    """Coverage PASS alone is not a substitute for GPT② evidence verdict."""
     outcome = run("설치일 알림톡 언제 오나요?", label="ok1")
 
     assert outcome["coverage"] == "PASS"
-    assert outcome["auto_post"] is True
+    assert outcome["auto_post"] is False
     assert SEMANTIC_COVERAGE_INCOMPLETE not in outcome["reasons"]
+    assert "UNDERSTANDING_UNAVAILABLE" in outcome["reasons"]
 
 
-def test_a_compound_inquiry_answered_throughout_still_auto_posts():
-    """Compound is not by itself a reason to hold."""
+def test_a_compound_legacy_fixture_needs_a_gpt_decision_trace():
+    """Compound is not the hold; absent GPT-first trace is."""
     outcome = run("설치일 알림톡 언제 오나요? 배송비는 얼마인가요?", label="ok2")
 
     assert outcome["coverage"] == "PASS"
-    assert outcome["auto_post"] is True
+    assert outcome["auto_post"] is False
+    assert "UNDERSTANDING_UNAVAILABLE" in outcome["reasons"]

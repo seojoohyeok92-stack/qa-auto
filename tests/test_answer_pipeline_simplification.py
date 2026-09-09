@@ -165,7 +165,13 @@ def test_blank_lines_never_create_ghost_subquestions(content: str) -> None:
 def test_six_part_inquiry_keeps_its_partial_answer_in_one_call() -> None:
     request = request_for(SIX_PART)
     outcome, hybrid, telemetry = run(
-        request, provider_for(SIX_PART_PARTIAL), rule()
+        request,
+        provider_for(
+            SIX_PART_PARTIAL,
+            unresolved=("브라켓 호환", "설치예정일", "카드 할인", "배송 파손"),
+            can_auto_post=False,
+        ),
+        rule(),
     )
     validation = hybrid.get("validation") or {}
     answer = outcome.result.answer
@@ -314,7 +320,13 @@ def test_case_f_manual_review_subquestion_does_not_erase_the_others() -> None:
     analysis = ANALYSIS.analyze(request)
     assert analysis.manual_review_required is True
 
-    outcome, hybrid, _ = run(request, provider_for(answer), rule())
+    outcome, hybrid, _ = run(
+        request,
+        provider_for(
+            answer, unresolved=("카드 할인 여부",), can_auto_post=False,
+        ),
+        rule(),
+    )
     assert hybrid["fallback_used"] is False
     assert "서비스센터" in outcome.result.answer
     assert "전문 기사" in outcome.result.answer

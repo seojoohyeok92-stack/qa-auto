@@ -12,7 +12,10 @@ from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.inquiry_analysis_service import InquiryAnalysisService
-from services.semantic_analysis import SemanticAnalysis
+from services.semantic_analysis import (
+    SemanticAnalysis,
+    delivery_schedule_needs_review,
+)
 from answer.inquiry_analysis import InquiryAnalysis
 from services.phase9_answer_policy import build_delivery_answer_context
 from workflow.models import StepCode
@@ -128,6 +131,18 @@ class InquiryProcessingPlanService:
             order_id_status = "AMBIGUOUS_PRODUCT_ORDER_ONLY"
         else:
             order_id_status = "MISSING"
+        # This is a workflow invariant, not a legacy topic/subtype verdict:
+        # GPT① established that the question asks for a delivery outcome but
+        # the inquiry establishes no current order.  There is therefore no
+        # customer-specific schedule that Q&A may complete or publish.  Keep
+        # the fact in the immutable plan so the post-persistence worker reads
+        # the same decision rather than reclassifying wording later.
+        workflow_block_reasons: tuple[str, ...] = ()
+        if delivery_schedule_needs_review(
+            semantic_analysis,
+            order_id_validated=(order_id_status == "VALID"),
+        ):
+            workflow_block_reasons = ("PRE_PURCHASE_DELIVERY_UNRESOLVED",)
         # A preserved identifier is not an execution requirement.  When the
         # semantic-aware plan says external order evidence is unnecessary,
         # every order-state field must say the same thing so no downstream
@@ -245,12 +260,13 @@ class InquiryProcessingPlanService:
         else:
             dps_action = "FETCH"
 
+        # Retain the legacy label for telemetry only.  It is a semantic
+        # classifier result, so it cannot suppress GPT retrieval/generation or
+        # select a publish-blocking route.  GPT①/② decide evidence sufficiency;
+        # deterministic order/DPS/action requirements below remain workflow.
         is_high_risk = analysis.inquiry_subtype == "HIGH_RISK_OR_DISPUTE"
-        can_generate = bool(request.question.strip()) and not is_high_risk
-        if is_high_risk:
-            route = "BLOCKED_REVIEW_REQUIRED"
-            reason = "HIGH_RISK_BLOCKED"
-        elif not analysis.delivery_question:
+        can_generate = bool(request.question.strip())
+        if not analysis.delivery_question:
             route = "GPT_FALLBACK" if template_preferred else "GPT_DIRECT"
             reason = "GENERAL_ROUTE_PENDING_CONTENT_MATCH"
         elif not analysis.requires_order_lookup:
@@ -328,9 +344,13 @@ class InquiryProcessingPlanService:
             installation_date_display=context.installation_date_display,
             selected_answer_route=route,
             can_generate_draft=can_generate,
+            # Intent/subtype classification is routing telemetry.  GPT① may
+            # not recognise a wording while GPT② can still resolve every atom
+            # from evidence; that must not become an independent publish veto.
+            # Keep only workflow routes whose missing external state is a
+            # deterministic safety condition.
             needs_staff_review=(
-                analysis.manual_review_required
-                or route in {
+                route in {
                     "ORDER_ID_REQUEST",
                     "ORDER_LOOKUP_FAILED",
                     "DELIVERY_ORDER_NOT_FOUND",
@@ -348,4 +368,5 @@ class InquiryProcessingPlanService:
             correlation_id=correlation_id or str(uuid.uuid4()),
             analysis=analysis,
             semantic_routing=(dict(semantic_routing) if semantic_routing else None),
+            workflow_block_reasons=workflow_block_reasons,
         )

@@ -183,7 +183,9 @@ def passing_review(**overrides) -> SelfReviewResult:
     return SelfReviewResult(**values)
 
 
-def evaluate(question: str, *, route: str = "GPT_DIRECT"):
+def evaluate(
+    question: str, *, route: str = "GPT_DIRECT", unresolved: bool = False,
+):
     analysis = ANALYSIS.analyze(request(question))
     return ELIGIBILITY.evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
@@ -193,7 +195,15 @@ def evaluate(question: str, *, route: str = "GPT_DIRECT"):
             "validator_result_json": None,
             "review_status": "",
             "metadata_json": {
-                "processing_plan": {"analysis": analysis.to_dict()}
+                "processing_plan": {"analysis": analysis.to_dict()},
+                "semantic_routing": {"understanding": {"usable": True}},
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {
+                        "unresolved": ["missing_evidence"] if unresolved else [],
+                        "can_auto_post": not unresolved,
+                    },
+                },
             },
             "posted": False,
             "id": 1,
@@ -414,9 +424,11 @@ def test_case_k_six_part_inquiry_still_produces_a_draft() -> None:
 
 
 def test_case_l_six_part_inquiry_is_not_eligible_for_auto_post() -> None:
-    result = evaluate(SIX_PART)
+    # Compound shape is telemetry only.  GPT② explicitly reports the atom
+    # lacking evidence, which is the sole semantic reason to hold it.
+    result = evaluate(SIX_PART, unresolved=True)
     assert result.safe is False
-    assert result.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
 
 
 def test_case_l_six_part_inquiry_never_reaches_post(

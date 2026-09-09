@@ -45,6 +45,11 @@ class InquiryProcessingPlan:
     # Runtime-only provenance of the semantic understanding that constrained
     # this plan.  Kept in existing metadata JSON; no schema change.
     semantic_routing: dict[str, Any] | None = None
+    # Closed, mechanical workflow requirements derived while GPT①'s
+    # understanding is still available.  The worker may enforce these after
+    # persistence, but must never re-read legacy intent/subtype metadata to
+    # invent a new semantic hold.
+    workflow_block_reasons: tuple[str, ...] = ()
 
     @property
     def delivery_question(self) -> bool:
@@ -172,5 +177,9 @@ class InquiryProcessingPlan:
                 dict(value["semantic_routing"])
                 if isinstance(value.get("semantic_routing"), dict)
                 else None
+            ),
+            workflow_block_reasons=tuple(
+                str(item) for item in value.get("workflow_block_reasons", ())
+                if str(item).strip()
             ),
         )

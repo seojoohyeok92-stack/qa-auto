@@ -305,10 +305,34 @@ class DraftGenerationService:
             for item in (raw.get("unresolved") or [])
             if str(item).strip()
         }
+        # ``requires_review`` used to mean two incompatible things in the
+        # provider contract: an evidence finding, or merely a suggestion that
+        # a person might feel safer checking the answer.  Only the former is a
+        # publish decision.  The answer model has already read every atom and
+        # every candidate, so retain its atom-level evidence verdict rather
+        # than promoting a vague publishing preference into a CODE veto.
+        #
+        # A malformed/older provider can omit ``unresolved`` while still
+        # recording an unanswered atom.  That is still the model's evidence
+        # result, not a second semantic classifier, so canonicalise it here.
+        for item in raw.get("subquestion_results") or []:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").upper()
+            answered = item.get("answered")
+            if answered is False or status in {
+                "NO_RELIABLE_SOURCE", "CONFLICT", "NEEDS_DPS",
+                "DELIVERY_SCHEDULE_REVIEW",
+            }:
+                text = str(item.get("subquestion") or "").strip()
+                if text:
+                    unresolved.add(text)
         required = [item for item in missing if item in unresolved]
         optional = [item for item in missing if item not in unresolved]
         copied = dict(raw)
         copied["provider_requires_review"] = bool(raw.get("requires_review"))
+        copied["provider_can_auto_post"] = raw.get("can_auto_post")
+        copied["unresolved"] = list(unresolved)
         copied["missing_information_details"] = [
             {
                 "text": item,
@@ -322,12 +346,12 @@ class DraftGenerationService:
         ]
         copied["required_missing_information"] = required
         copied["optional_missing_information"] = optional
-        # The model's own verdicts are authoritative in both directions here:
-        # an unresolved item requires review, and an answer it reported as
-        # complete is not held back by a note about what it could not know.
-        copied["requires_review"] = bool(
-            raw.get("requires_review") or unresolved
-        )
+        # GPT②'s publish-facing verdict is evidence sufficiency only.  Keep
+        # the raw provider preference above for diagnosis, but do not let
+        # "a staff check would be nice" turn an otherwise resolved answer into
+        # a review.  Hard safety is deliberately evaluated later by CODE.
+        copied["requires_review"] = bool(unresolved)
+        copied["can_auto_post"] = not bool(unresolved)
         return copied
 
     @staticmethod

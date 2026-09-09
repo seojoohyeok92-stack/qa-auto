@@ -124,6 +124,142 @@ class AnswerStatusView:
         return len(self.advisory) + len(self.review_signals)
 
 
+@dataclass(frozen=True)
+class DecisionTraceView:
+    """Read-only operator view of the persisted GPT-first decision path.
+
+    This deliberately consumes generation/eligibility/post records only.  It
+    never invokes an analyzer or retrieval service, so opening the Dashboard
+    cannot create a second semantic decision path.
+    """
+
+    gpt1: str
+    source: str
+    retrieval: str
+    gpt2: str
+    hard_safety: str
+    auto_post: str
+    root_stage: str
+    root_cause: str
+    root_message: str
+
+
+_TRACE_MESSAGES = {
+    "NONE": "최초 실패 원인이 기록되지 않았습니다.",
+    "TRACE_NOT_RECORDED": "과거 문의에는 처리 진단 기록이 없습니다.",
+    "SOURCE_MISSING": "답변에 필요한 신뢰 가능한 근거가 없습니다.",
+    "RETRIEVAL_MISS": "관련 근거가 존재하지만 GPT 검토 후보에 전달되지 않았습니다.",
+    "EVIDENCE_UNRESOLVED": "GPT가 제공된 근거만으로 질문을 해결할 수 없다고 판단했습니다.",
+    "EVIDENCE_CONFLICT": "제공된 근거 사이에 해결되지 않은 충돌이 있습니다.",
+    "HARD_SAFETY_BLOCK": "자동등록 안전조건을 충족하지 못했습니다.",
+    "WORKFLOW_FAILURE": "주문·배송 등 필수 처리 상태를 충족하지 못했습니다.",
+    "EXECUTION_FAILURE": "자동등록 실행 또는 Naver 등록 과정에서 실패했습니다.",
+}
+
+
+def build_decision_trace(
+    *, inquiry: dict[str, Any], draft: dict[str, Any] | None,
+    eligibility: AutoProcessingEligibility | None = None,
+    route: str = "",
+) -> DecisionTraceView:
+    """Project stored pipeline facts into a closed, operator-facing trace.
+
+    The precedence is causal: source/retrieval/evidence before later holds,
+    and an actual post failure after a successful decision is execution.  A
+    missing historical trace is shown as such instead of guessed from legacy
+    classifier fields.
+    """
+
+    inquiry = _mapping(inquiry)
+    if not draft:
+        return DecisionTraceView(
+            "NOT_RECORDED", "NOT_RECORDED", "NOT_RECORDED", "NOT_RECORDED",
+            "NOT_RECORDED", "NOT_ATTEMPTED", "", "TRACE_NOT_RECORDED",
+            _TRACE_MESSAGES["TRACE_NOT_RECORDED"],
+        )
+    metadata = _mapping(draft.get("metadata_json"))
+    persisted_decision = _mapping(metadata.get("production_decision_trace"))
+    hybrid = _mapping(metadata.get("hybrid"))
+    pipeline = str(hybrid.get("answer_pipeline") or "")
+    routing = _mapping(metadata.get("semantic_routing"))
+    understanding = _mapping(routing.get("understanding"))
+    gpt_draft = _mapping(hybrid.get("draft"))
+    evidence = hybrid.get("subquestion_evidence")
+    evidence_rows = [item for item in evidence or [] if isinstance(item, dict)]
+    statuses = {str(item.get("status") or "").upper() for item in evidence_rows}
+    unresolved = list(gpt_draft.get("unresolved") or [])
+    retrieval = _mapping(hybrid.get("retrieval")).get("learning")
+    retrieval = _mapping(retrieval)
+    source = "UNKNOWN"
+    if evidence_rows:
+        if statuses <= {"NO_RELIABLE_SOURCE"}:
+            source = "NONE"
+        elif "NO_RELIABLE_SOURCE" in statuses:
+            source = "PARTIAL"
+        else:
+            source = "SUFFICIENT"
+    delivered = bool(
+        gpt_draft.get("used_learning_ids") or gpt_draft.get("used_product_facts")
+        or retrieval.get("final_candidate_count") or retrieval.get("candidate_count")
+    )
+    retrieval_state = "DELIVERED" if delivered else "NOT_RECORDED"
+    if source == "SUFFICIENT" and not delivered:
+        retrieval_state = "MISSING"
+    gpt2 = "UNRESOLVED" if unresolved else ("RESOLVED" if gpt_draft else "NOT_RECORDED")
+    if eligibility is None and not persisted_decision:
+        eligibility = AutoProcessingEligibilityService().evaluate(
+            inquiry=inquiry, draft=draft, route=route
+        )
+    post_status = str(inquiry.get("post_status") or "").upper()
+    persisted_reasons = set(persisted_decision.get("blocking_reason_codes") or ())
+    eligibility_reasons = set(eligibility.reasons) if eligibility is not None else persisted_reasons
+    safe = eligibility.safe if eligibility is not None else (
+        str(persisted_decision.get("eligibility") or "").upper() == "SAFE"
+    )
+    auto_post = (
+        "SUCCESS" if post_status == "POSTED" or inquiry.get("source_answered")
+        else "FAILED" if post_status == "POST_FAILED"
+        else str(persisted_decision.get("auto_post") or "")
+        if persisted_decision.get("auto_post") in {"SUCCESS", "BLOCKED", "FAILED"}
+        else "BLOCKED" if not safe else "NOT_ATTEMPTED"
+    )
+    hard_reasons = eligibility_reasons - {
+        "GPT_REPORTED_UNRESOLVED", "GPT_WITHHELD_AUTO_POST",
+        # A successfully posted inquiry evaluates as idempotently blocked on
+        # a later Dashboard read.  That is not the cause of the original
+        # decision and must not turn a success trace into a safety failure.
+        "ALREADY_ANSWERED_OR_POSTED",
+    }
+    hard_safety = "BLOCKED" if hard_reasons else "PASS"
+    root_stage, root_cause = "", "NONE"
+    if auto_post == "FAILED":
+        root_stage, root_cause = "EXECUTION", "EXECUTION_FAILURE"
+    elif pipeline == "GPT_PIPELINE_UNAVAILABLE":
+        root_stage, root_cause = "WORKFLOW", "WORKFLOW_FAILURE"
+    elif source == "NONE":
+        root_stage, root_cause = "SOURCE", "SOURCE_MISSING"
+    elif retrieval_state == "MISSING":
+        root_stage, root_cause = "RETRIEVAL", "RETRIEVAL_MISS"
+    elif "CONFLICT" in statuses:
+        root_stage, root_cause = "GPT_EVIDENCE", "EVIDENCE_CONFLICT"
+    elif gpt2 == "UNRESOLVED":
+        root_stage, root_cause = "GPT_EVIDENCE", "EVIDENCE_UNRESOLVED"
+    elif hard_reasons:
+        workflow = any(
+            "ORDER" in reason or "DPS" in reason or "ROUTE" in reason
+            for reason in hard_reasons
+        )
+        root_stage, root_cause = (
+            ("WORKFLOW", "WORKFLOW_FAILURE") if workflow
+            else ("HARD_SAFETY", "HARD_SAFETY_BLOCK")
+        )
+    return DecisionTraceView(
+        "PASS" if understanding.get("usable") is True else "NOT_RECORDED",
+        source, retrieval_state, gpt2, hard_safety, auto_post,
+        root_stage, root_cause, _TRACE_MESSAGES[root_cause],
+    )
+
+
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 

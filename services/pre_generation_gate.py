@@ -158,25 +158,13 @@ class PreGenerationGate:
         is deliberately left to the real gate.
         """
 
-        analysis = analysis if isinstance(analysis, dict) else {}
-        plan = plan if isinstance(plan, dict) else {}
-        manual = bool(analysis.get("manual_review_required"))
-        staff_review = bool(plan.get("needs_staff_review"))
-        if not (manual or staff_review or plan.get("is_high_risk")):
-            return _CONTINUE
-        if cls._resolvable_by_generation(analysis, plan):
-            return _CONTINUE
-        if cls._answer_still_has_value(analysis, plan):
-            return _CONTINUE
-
-        reasons: list[str] = []
-        if bool(plan.get("is_high_risk")) or manual:
-            reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
-        if staff_review:
-            reasons.append("PROCESSING_PLAN_REQUIRES_REVIEW")
-        return PreGenerationDecision(
-            True, "PROCESSING_PLAN", tuple(dict.fromkeys(reasons))
-        )
+        # The former implementation used intent/subtype/manual-review flags
+        # to decide that GPT② should not see the evidence at all.  They are
+        # semantic legacy telemetry, not a mechanically provable prerequisite.
+        # Keep this facade for persisted trace compatibility, but give it no
+        # publish or generation authority.
+        del cls, analysis, plan
+        return _CONTINUE
 
     @staticmethod
     def evaluate_evidence(
@@ -196,15 +184,8 @@ class PreGenerationGate:
         pending lookup, not a verdict.
         """
 
-        context = learning_context if isinstance(learning_context, dict) else {}
-        evidence = context.get("subquestion_evidence")
-        if not isinstance(evidence, list):
-            return _CONTINUE
-        conflicted = [
-            item for item in evidence
-            if isinstance(item, dict)
-            and str(item.get("status") or "").upper() == "CONFLICT"
-        ]
-        if not conflicted:
-            return _CONTINUE
-        return PreGenerationDecision(True, "EVIDENCE", ("EVIDENCE_CONFLICT",))
+        # Conflict is an evidence interpretation for GPT②.  It may produce
+        # EVIDENCE_CONFLICT / unresolved, but CODE must not suppress the
+        # candidate set or the model call before that judgement.
+        del learning_context
+        return _CONTINUE

@@ -458,9 +458,7 @@ def test_the_measured_inquiry_reaches_the_evidence_pipeline():
 
 def test_the_measured_inquiry_is_still_held_from_auto_post():
     """Continuation must not become a way around the coverage gate."""
-    from services.auto_processing_eligibility_service import (
-        SEMANTIC_COVERAGE_INCOMPLETE, AutoProcessingEligibilityService,
-    )
+    from services.auto_processing_eligibility_service import AutoProcessingEligibilityService
 
     outcome = run(INQUIRY_687718601, _payload_687718601(), label="m3")
     assert outcome["coverage"] == "PARTIAL"
@@ -474,7 +472,8 @@ def test_the_measured_inquiry_is_still_held_from_auto_post():
         },
         route=outcome["route"],
     )
-    assert SEMANTIC_COVERAGE_INCOMPLETE in verdict.reasons
+    assert "SEMANTIC_COVERAGE_INCOMPLETE" not in verdict.reasons
+    assert "UNDERSTANDING_UNAVAILABLE" in verdict.reasons
     assert verdict.decision != "SAFE"
 
 

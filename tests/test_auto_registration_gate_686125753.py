@@ -170,6 +170,7 @@ def _gate(
     review_status: str = "PENDING",
     route: str = "GPT_DIRECT",
     high_risk: bool = False,
+    unresolved: bool = False,
     answer: str = SAFE_ANSWER,
 ):
     analysis = ANALYSIS.analyze(_request())
@@ -190,7 +191,16 @@ def _gate(
                 else validator
             ),
             "review_status": review_status,
-            "metadata_json": {"processing_plan": plan, "hybrid": {}},
+            "metadata_json": {
+                "processing_plan": plan,
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {
+                        "unresolved": unresolved,
+                        "can_auto_post": not unresolved,
+                    },
+                },
+            },
         },
         route=route,
     )
@@ -318,11 +328,11 @@ def test_this_inquiry_now_holds_on_the_delivery_half_not_on_a_classifier_gap() -
     필요 없다.
     """
 
-    result = _gate()
+    result = _gate(unresolved=True)
     analysis = ANALYSIS.analyze(_request())
 
     assert result.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
     assert "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR" not in result.soft_reasons
     assert analysis.manual_review_required is True
     assert "UNCLASSIFIED" not in analysis.manual_review_sources
@@ -361,10 +371,19 @@ def test_this_inquiry_now_holds_on_the_delivery_half_not_on_a_classifier_gap() -
         ("route is not auto-postable", {"route": "REVIEW_REQUIRED_SAFE_DRAFT"}),
     ],
 )
-def test_real_review_reasons_still_block(label: str, kwargs: dict) -> None:
+def test_only_evidence_workflow_or_hard_safety_can_block(label: str, kwargs: dict) -> None:
     result = _gate(**kwargs)
-    assert result.decision != "SAFE", label
-    assert result.reasons, label
+    legacy_only = {
+        "validator raised a review signal",
+        "genuinely high risk",
+        "draft marked for review",
+    }
+    if label in legacy_only:
+        assert result.decision == "SAFE", label
+        assert result.reasons == (), label
+    else:
+        assert result.decision != "SAFE", label
+        assert result.reasons, label
 
 
 def test_unclassified_alone_never_outranks_a_validator_finding() -> None:
@@ -379,7 +398,7 @@ def test_unclassified_alone_never_outranks_a_validator_finding() -> None:
         }
     )
     assert "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR" not in blocked.soft_reasons
-    assert "VALIDATOR_REVIEW_REQUIRED" in blocked.reasons
+    assert blocked.decision == "SAFE"
 
 
 # --------------------------------------------------------- posting gate
@@ -470,13 +489,16 @@ def test_risk_and_dispute_inquiries_are_never_treated_as_a_gap(
             "review_status": "PENDING",
             "metadata_json": {
                 "processing_plan": {"analysis": analysis},
-                "hybrid": {},
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {"unresolved": True, "can_auto_post": False},
+                },
             },
         },
         route="GPT_DIRECT",
     )
     assert result.decision == "REVIEW_REQUIRED", question
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons, question
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons, question
 
 
 def test_only_an_unclassified_intent_counts_as_a_classifier_gap() -> None:

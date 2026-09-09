@@ -294,6 +294,43 @@ class DpsEnrichmentService:
         if not decision.lookup_required:
             request.metadata["dps"] = metadata
             return DpsEnrichmentOutcome(decision, metadata)
+        if not self.settings.automatic_lookup_enabled:
+            disabled = DpsLookupDecision(
+                lookup_required=True,
+                status=DpsLookupStatus.DISABLED,
+                change_request=decision.change_request,
+                order_id=decision.order_id,
+                general_segments=decision.general_segments,
+                dps_segments=decision.dps_segments,
+                reason="DPS automatic lookup is operationally disabled.",
+            )
+            metadata = self._base_metadata(disabled)
+            metadata.update({
+                "source": "DPS_CONFIGURATION",
+                "error_code": "DPS_LOOKUP_DISABLED",
+                "error_message": "현재 DPS 일정 조회 기능이 운영상 일시 중지되어 직원 확인이 필요합니다.",
+                "warnings": ["DPS_LOOKUP_DISABLED"],
+            })
+            request.metadata["dps"] = metadata
+            if inquiry_id is not None:
+                self.workflows.initialize_steps(inquiry_id)
+                step = self.workflows.get_step(inquiry_id, StepCode.DPS_LOOKUP)
+                if StepStatus(step["step_status"]) is StepStatus.PENDING:
+                    self.workflows.mark_needs_review(
+                        inquiry_id,
+                        StepCode.DPS_LOOKUP,
+                        error_code="DPS_LOOKUP_DISABLED",
+                        message=metadata["error_message"],
+                        metadata={"operationally_disabled": True},
+                    )
+                self._record(
+                    inquiry_id,
+                    "DPS_LOOKUP_DISABLED",
+                    "DPS 자동 조회가 운영 설정으로 중지되어 조회하지 않았습니다.",
+                    level="WARNING",
+                    details={"correlation_id": correlation_id},
+                )
+            return DpsEnrichmentOutcome(disabled, metadata)
         if inquiry_id is None:
             raise ValueError("DPS enrichment requires inquiry_id.")
 

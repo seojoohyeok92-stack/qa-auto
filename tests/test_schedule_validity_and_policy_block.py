@@ -280,21 +280,24 @@ def _logs(database, inquiry_id):
     return [dict(row) for row in rows]
 
 
-def test_high_risk_inquiry_still_produces_no_draft(database):
+def test_high_risk_legacy_label_keeps_a_gpt_first_review_draft(database):
     from services.automatic_draft_service import AutomaticDraftService
     from repositories.answer_repository import AnswerRepository
 
     inquiry_id = _high_risk_inquiry(database)
     outcome = AutomaticDraftService(database).ensure_for_inquiry(inquiry_id)
 
-    assert outcome.status == "POLICY_BLOCKED"
-    assert outcome.draft_id is None
-    assert outcome.route == "BLOCKED_REVIEW_REQUIRED"
-    assert outcome.error_code == "AUTO_ANSWER_PROHIBITED"
-    assert AnswerRepository(database).active_for_inquiry(inquiry_id) is None
+    # A legacy high-risk subtype no longer suppresses GPT①/GPT② generation.
+    # The persisted evidence/workflow outcome controls publication, while the
+    # staff still receives an actionable draft.
+    assert outcome.status == "CREATED"
+    assert outcome.draft_id is not None
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    assert draft is not None
+    assert str(draft.get("original_answer") or "").strip()
 
 
-def test_policy_block_is_not_recorded_as_a_system_error(database):
+def test_review_draft_is_not_recorded_as_a_system_error(database):
     from services.automatic_draft_service import AutomaticDraftService
 
     inquiry_id = _high_risk_inquiry(database)
@@ -302,29 +305,22 @@ def test_policy_block_is_not_recorded_as_a_system_error(database):
 
     rows = _logs(database, inquiry_id)
     codes = {row["event_code"] for row in rows}
-    assert "AUTOMATIC_DRAFT_POLICY_BLOCKED" in codes
+    assert "AUTOMATIC_DRAFT_POLICY_BLOCKED" not in codes
     assert "AUTOMATIC_DRAFT_FAILED" not in codes
-    assert "ANSWER_POLICY_BLOCKED" in codes
+    assert "ANSWER_DRAFT_NEEDS_REVIEW" in codes
     assert not [
         row for row in rows
         if row["level"] == "ERROR"
         and row["event_code"].startswith(("AUTOMATIC_DRAFT", "ANSWER_"))
     ]
-    blocked = next(
-        row for row in rows if row["event_code"] == "AUTOMATIC_DRAFT_POLICY_BLOCKED"
-    )
-    details = json.loads(blocked["details_json"])
-    assert details["policy_blocked"] is True
-    assert details["policy_reason"] == "HIGH_RISK_OR_DISPUTE"
 
 
-def test_blocked_inquiry_stays_visible_to_staff(database):
-    """No draft means the queue status is the only thing surfacing it.
+def test_review_draft_stays_visible_to_staff(database):
+    """A persisted held draft must remain visible in the staff queue.
 
     The staff queue selects on
-    ``workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')``. If the policy
-    path stopped setting that, a high-risk inquiry with no draft would sit at
-    NEW and never reach a person -- the opposite of what the block is for.
+    ``workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')``. The GPT-first
+    path keeps that lifecycle guarantee without a legacy pre-generation block.
     """
 
     from repositories.inquiry_repository import InquiryRepository
@@ -335,7 +331,7 @@ def test_blocked_inquiry_stays_visible_to_staff(database):
 
     inquiry = InquiryRepository(database).get(inquiry_id)
     assert inquiry["workflow_status"] in {"REVIEW_PENDING", "NEEDS_ATTENTION"}
-    assert inquiry["phase9_status"] == "MANUAL_REVIEW_REQUIRED"
+    assert inquiry["phase9_status"] == "READY_FOR_REVIEW"
 
 
 def test_auto_answer_prohibited_error_carries_its_reason():
@@ -344,12 +340,8 @@ def test_auto_answer_prohibited_error_carries_its_reason():
     assert error.policy_reason == "HIGH_RISK_OR_DISPUTE"
 
 
-def test_policy_blocked_still_skips_auto_post(database):
-    """The new status must not slip past the auto-post skip branch.
-
-    If POLICY_BLOCKED fell through, a high-risk inquiry would continue into
-    the posting path -- the exact regression this status could introduce.
-    """
+def test_held_review_draft_still_skips_auto_post(database):
+    """A persisted non-SAFE GPT-first draft never reaches execution."""
 
     from services.auto_post_pipeline_service import AutoPostPipelineService
 
@@ -365,8 +357,7 @@ def test_policy_blocked_still_skips_auto_post(database):
     assert outcome.failed_count == 0, "정책 차단은 실패로 집계되면 안 됩니다."
     codes = {row["event_code"] for row in _logs(database, inquiry_id)}
     assert "AUTO_ANSWER_FAILED" not in codes
-    if "AUTO_ANSWER_STARTED" in codes:
-        assert "AUTO_POST_SKIPPED_POLICY_BLOCKED" in codes
+    assert "AUTO_POST_SKIPPED_POLICY_BLOCKED" not in codes
     # Whatever the queue decided, nothing may have been posted.
     with database.connection() as connection:
         posted = connection.execute(

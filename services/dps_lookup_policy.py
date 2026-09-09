@@ -21,6 +21,7 @@ class DpsLookupStatus(str, Enum):
     PARSE_ERROR = "PARSE_ERROR"
     STALE_CACHE = "STALE_CACHE"
     CANCELLED = "CANCELLED"
+    DISABLED = "DISABLED"
 
     def __str__(self) -> str:
         return self.value
@@ -45,6 +46,9 @@ class DpsSettings:
     refresh_interval_minutes: int = 30
     success_ttl_seconds: int = 1_800
     not_found_ttl_seconds: int = 300
+    # Operations may suspend live schedule reads without deleting the DPS
+    # client, workflow, cache, or its ON-state safety tests.
+    automatic_lookup_enabled: bool = False
 
     @classmethod
     def from_environment(cls) -> "DpsSettings":
@@ -52,6 +56,9 @@ class DpsSettings:
             _positive_float("DPS_REFRESH_INTERVAL_MINUTES", 30)
         )
         return cls(
+            automatic_lookup_enabled=os.getenv(
+                "DPS_AUTOMATIC_LOOKUP_ENABLED", "false"
+            ).strip().lower() in {"1", "true", "yes", "on"},
             connect_timeout_seconds=_positive_float(
                 "DPS_CONNECT_TIMEOUT_SECONDS", 7.0
             ),

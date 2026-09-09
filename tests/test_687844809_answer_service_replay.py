@@ -16,6 +16,7 @@ from services.answer_service import AnswerService
 from services.gpt_governance_service import GovernedHybridAnswerService
 from services.gpt_semantic_analyzer_service import GptSemanticAnalyzerService
 from services.product_knowledge_service import ProductKnowledgeService
+from services.dps_lookup_policy import DpsLookupPolicy
 
 
 QUESTION = """안녕하세요.
@@ -70,6 +71,15 @@ class _DraftProvider(FakeGptProvider):
             "confidence": 0.9, "used_facts": [],
             "missing_information": ["벽걸이 추가비용", "현재 신규 주문 배송기간"],
             "requires_review": True, "warnings": [],
+            # GPT②, not the old compound/Phase9 classifier, reports the
+            # unsupported atoms.  This keeps the replay's Review assertion a
+            # real evidence-sufficiency contract.
+            "subquestion_results": [
+                {"subquestion": "UHD 여부", "answered": True, "status": "ANSWERABLE"},
+                {"subquestion": "벽걸이 설치 가능 여부", "answered": True, "status": "ANSWERABLE"},
+                {"subquestion": "벽걸이 추가요금", "answered": False, "status": "NO_RELIABLE_SOURCE"},
+                {"subquestion": "현재 신규 주문 배송기간", "answered": False, "status": "NO_RELIABLE_SOURCE"},
+            ],
         }})
 
 
@@ -90,10 +100,14 @@ class _DpsSpy:
     def __init__(self):
         self.enrich_calls = 0
         self.skip_calls = 0
+        self.policy = DpsLookupPolicy()
 
     def skip_for_phase9(self, request, **_kwargs):
         self.skip_calls += 1
-        return SimpleNamespace(metadata={"lookup_status": "NOT_REQUIRED"}, lookup_row=None)
+        return SimpleNamespace(
+            decision=SimpleNamespace(lookup_required=False),
+            metadata={"lookup_status": "NOT_REQUIRED"}, lookup_row=None,
+        )
 
     def enrich(self, request, **_kwargs):
         self.enrich_calls += 1

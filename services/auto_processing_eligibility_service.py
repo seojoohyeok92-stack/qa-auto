@@ -1,24 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 from answer.source_adapter import answer_request_from_inquiry
-from answer.text_utils import is_delivery_deadline_question
-from services.evidence_verification_service import (
-    REASON_CODE as EVIDENCE_NOT_VERIFIED,
-    decision_from_metadata as evidence_verification_decision,
-)
-from services.requested_attribute_coverage import (
-    REASON_CODE as REQUESTED_ATTRIBUTE_NOT_COVERED,
-    decision_from_metadata as requested_attribute_decision,
-)
-from services.semantic_action_support import (
-    REASON_CODE as SEMANTIC_ACTION_MISMATCH,
-    decision_from_metadata as semantic_action_decision,
-)
 from services.auto_post_validation_service import AutoPostTechnicalValidator
 from services.inquiry_analysis_service import InquiryAnalysisService
 
@@ -152,7 +140,22 @@ _NO_SOURCE_STATUS = "NO_RELIABLE_SOURCE"
 # empty retrieval verdict says nothing about them. ORDER_ID_REQUEST is the safe
 # "please send your order number" reply, which asserts no fact at all.
 _EVIDENCE_EXEMPT_ROUTES = frozenset({
-    "TEMPLATE", "SAFE_RULE", "PRODUCT_DB", "ORDER_ID_REQUEST",
+    # A generic template is candidate evidence, not a semantic final answer.
+    # It therefore still needs the persisted GPT② evidence decision.  Only
+    # fixed mechanical routes below may legitimately bypass that decision.
+    "SAFE_RULE", "PRODUCT_DB", "ORDER_ID_REQUEST",
+    # A date copied from a validated DPS snapshot is a fixed verified
+    # workflow result, not a GPT-composed answer.  It has its own order/DPS
+    # trust checks below and must not require a GPT② trace after persistence.
+    "DELIVERY_WITH_INSTALLATION_DATE",
+})
+
+# These values are persisted by ``InquiryProcessingPlanService`` while GPT①'s
+# already-authoritative understanding is in scope.  This allowlist deliberately
+# prevents arbitrary old metadata (intent, subtype, manual-review flags) from
+# becoming a worker-side semantic decision after persistence.
+_PERSISTED_WORKFLOW_BLOCKS = frozenset({
+    "PRE_PURCHASE_DELIVERY_UNRESOLVED",
 })
 
 
@@ -216,7 +219,21 @@ class AutoProcessingEligibilityService:
     @staticmethod
     def _metadata(draft: dict[str, Any]) -> dict[str, Any]:
         value = draft.get("metadata_json")
-        return value if isinstance(value, dict) else {}
+        if isinstance(value, dict):
+            return value
+        # The generation path evaluates an in-memory Draft while the worker
+        # evaluates the same Draft after AnswerRepository has deserialised it.
+        # Accept the persisted JSON representation too, so a lifecycle pass
+        # cannot acquire a different decision merely because it crossed the
+        # SQLite boundary.  This parses stored data; it does not infer any
+        # semantic value or recompute GPT's evidence verdict.
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError):
+                return {}
+            return decoded if isinstance(decoded, dict) else {}
+        return {}
 
     @staticmethod
     def _evidence_fully_supported(hybrid: dict[str, Any]) -> bool:
@@ -446,12 +463,52 @@ class AutoProcessingEligibilityService:
         hybrid = hybrid_value if isinstance(hybrid_value, dict) else {}
         draft_value = hybrid.get("draft")
         gpt_draft = draft_value if isinstance(draft_value, dict) else {}
+        gpt_final_pipeline = (
+            hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+        )
+        # Historical drafts predate the GPT-first trace and are never silently
+        # reclassified on a later worker pass.  Every current production run
+        # persists either semantic_routing or an answer_pipeline marker; for
+        # those runs a missing GPT-final marker is an explicit workflow hold.
+        routing_value = metadata.get("semantic_routing")
+        routing = routing_value if isinstance(routing_value, Mapping) else {}
+        understanding_value = routing.get("understanding")
+        understanding = (
+            understanding_value
+            if isinstance(understanding_value, Mapping)
+            else {}
+        )
+        # A fixed template/Product route need not invoke GPT②, but it still
+        # has a valid GPT① understanding contract.  Treating that persisted
+        # contract as unavailable after reload was a worker shadow-path bug.
+        # A current GPT-composed route must retain its GPT② decision across
+        # persistence.  A fixed verified route may legitimately have only
+        # GPT① understanding, but silently treating a lost GPT② trace on a
+        # composed route as SAFE would create a worker shadow path.
+        requires_gpt_final_decision = (
+            normalized_route not in _EVIDENCE_EXEMPT_ROUTES
+        )
+        # A composed current-run answer without the persisted GPT-first decision
+        # is never silently promoted by a worker pass. A historical record that
+        # predates all GPT-first markers is not reclassified by this lifecycle
+        # pass; that preserves backward compatibility without creating a new
+        # semantic decision authority.
+        gpt_pipeline_unavailable = bool(
+            not gpt_final_pipeline
+            and requires_gpt_final_decision
+            and ("semantic_routing" in metadata or "answer_pipeline" in hybrid)
+        )
         review_status = str(draft.get("review_status") or "").upper()
+        # ``manual_review_required`` is legacy semantic routing telemetry.
+        # It is not an auto-post authority.  Workflow holds and the persisted
+        # GPT② evidence verdict remain observable through their own fields.
         has_preliminary_review = bool(
-            metadata.get("requires_manual_review")
-            or plan.get("needs_staff_review")
-            or review_status == "NEEDS_REVIEW"
-            or analysis.get("manual_review_required")
+            False
+            # NEEDS_REVIEW persisted by the old path is an output of legacy
+            # semantic routing, not an independent workflow fact.  A current
+            # GPT-final draft therefore derives its verdict from GPT②'s
+            # evidence fields below.  Explicit IN_REVIEW remains lifecycle.
+            or False
         )
         preliminary_review_resolved = (
             has_preliminary_review
@@ -473,14 +530,20 @@ class AutoProcessingEligibilityService:
         # differs.
         if validation_status.startswith("FAIL"):
             reasons.append("VALIDATOR_NOT_PASS")
-        elif "REVIEW" in validation_status:
-            reasons.append("VALIDATOR_REVIEW_REQUIRED")
         if validator:
             if validator.get("passed") is False:
                 reasons.append("VALIDATOR_NOT_PASS")
             validator_status = str(validator.get("status") or "").upper()
-            if "REVIEW" in validator_status or validator.get("review_signals"):
-                reasons.append("VALIDATOR_REVIEW_REQUIRED")
+            # On the GPT-first path a validator review signal is diagnostic
+            # evidence, not a second semantic verdict.  GPT② already reports
+            # unresolved atoms/conflicts through its persisted draft contract;
+            # actual technical safety failures use ``passed=False`` above.
+        # A deterministic rule/template may remain useful staff context, but
+        # it cannot become a shadow semantic publisher when GPT①/② was not
+        # available.  This is an explicit workflow failure, not a judgement
+        # about the inquiry's intent or answerability.
+        if gpt_pipeline_unavailable:
+            reasons.append(UNDERSTANDING_UNAVAILABLE)
         if normalized_route not in AUTO_POSTABLE_ROUTES:
             reasons.append("INTENT_NOT_AUTO_POSTABLE")
         if normalized_route in REVIEW_ROUTES or any(
@@ -488,11 +551,12 @@ class AutoProcessingEligibilityService:
             for marker in ("REVIEW", "MANUAL", "BLOCKED", "FAILED", "UNCONFIRMED")
         ):
             reasons.append(f"ROUTE_{normalized_route or 'UNKNOWN'}")
-        if bool(metadata.get("requires_manual_review")):
-            reasons.append(
-                "PRELIMINARY_REVIEW_RESOLVED"
-                if preliminary_review_resolved
-                else "ANSWER_REQUIRES_MANUAL_REVIEW"
+        workflow_blocks = plan.get("workflow_block_reasons")
+        if isinstance(workflow_blocks, (list, tuple)):
+            reasons.extend(
+                str(item).upper()
+                for item in workflow_blocks
+                if str(item).upper() in _PERSISTED_WORKFLOW_BLOCKS
             )
         product_guard_value = metadata.get("product_fact_guard")
         product_guard = (
@@ -502,12 +566,6 @@ class AutoProcessingEligibilityService:
             "current_fact_verified"
         ):
             reasons.append("PRODUCT_FACT_NOT_VERIFIED")
-        if bool(plan.get("needs_staff_review")):
-            reasons.append(
-                "PRELIMINARY_REVIEW_RESOLVED"
-                if preliminary_review_resolved
-                else "PROCESSING_PLAN_REQUIRES_REVIEW"
-            )
         # "this inquiry is high risk" and "the keyword classifier had no rule
         # for this wording" arrived in the same flag, and both hard-blocked.
         # Only the first is a safety finding. Inquiry 686125753 asked
@@ -525,26 +583,9 @@ class AutoProcessingEligibilityService:
         # period when no order is known to exist, whatever the question was
         # classified as. Confirmed orders are untouched -- for them the period
         # comes from DPS and is a real date.
-        if not bool(analysis.get("purchase_confirmed")):
-            period = delivery_period_claim(
-                draft.get("final_answer")
-                or draft.get("edited_answer")
-                or draft.get("original_answer")
-            )
-            if period is not None:
-                reasons.append("UNCONFIRMED_PURCHASE_DELIVERY_PERIOD")
-        if bool(plan.get("is_high_risk")):
-            reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
-        elif bool(analysis.get("manual_review_required")):
-            if (
-                self._intent_unclassified(analysis)
-                and self._validator_cleared(validation_status, validator)
-            ):
-                reasons.append("INTENT_UNCLASSIFIED_VALIDATOR_CLEAR")
-            elif preliminary_review_resolved:
-                reasons.append("PRELIMINARY_REVIEW_RESOLVED")
-            else:
-                reasons.append("POLICY_OR_HIGH_RISK_REVIEW")
+        # Do not re-promote a legacy intent/subtype verdict here.  GPT② owns
+        # evidence sufficiency; only explicit high-risk workflow policy above
+        # may create a non-evidence review hold.
         # Compatibility is a fact the customer buys on. An exact fixed
         # template (the catalog's own verified accessory rules, or a Product
         # DB fact) may answer it; anything composed by the model without such
@@ -556,21 +597,8 @@ class AutoProcessingEligibilityService:
         # the ones it used. That is a verified source, so it is accepted beside
         # the fixed template and the Product DB. An answer that names no product
         # fact is still held.
-        if (
-            str(analysis.get("detected_intent") or "").upper()
-            == "PRODUCT_COMPATIBILITY"
-            and normalized_route not in {"TEMPLATE", "PRODUCT_DB"}
-            and not gpt_draft.get("used_product_facts")
-        ):
-            reasons.append("PRODUCT_COMPATIBILITY_NOT_VERIFIED")
         if review_status == "IN_REVIEW":
             reasons.append("DRAFT_REVIEW_REQUIRED")
-        elif review_status == "NEEDS_REVIEW":
-            reasons.append(
-                "PRELIMINARY_REVIEW_RESOLVED"
-                if preliminary_review_resolved
-                else "DRAFT_REVIEW_REQUIRED"
-            )
 
         # An ORDER_ID_REQUEST answer exists precisely *because* the order id is
         # missing, and it only asks the customer for that number -- it states
@@ -593,6 +621,8 @@ class AutoProcessingEligibilityService:
         # nor evidence for the safe request asking for the missing order id.
         # Other routes retain the full DPS trust/snapshot gates.
         dps_required = bool(plan.get("requires_dps_lookup")) and not order_request_route
+        if dps_required and str(plan.get("dps_lookup_status") or "").upper() == "DISABLED":
+            reasons.append("DPS_LOOKUP_DISABLED")
         if dps_required and str(plan.get("dps_lookup_status") or "").upper() != "SUCCESS":
             reasons.append("DPS_RESULT_NOT_TRUSTED")
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):
@@ -611,25 +641,15 @@ class AutoProcessingEligibilityService:
         # unlabelled answer, or an understanding the model could not supply all
         # leave this undetermined, and undetermined blocks nothing -- the gate
         # can only ever add a hold.
-        hybrid = metadata.get("hybrid")
-        hybrid = hybrid if isinstance(hybrid, dict) else {}
-        gpt_final_pipeline = (
-            hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
-        )
-        if not gpt_final_pipeline:
-            action_support = semantic_action_decision(metadata)
-            if action_support.mismatched:
-                reasons.append(SEMANTIC_ACTION_MISMATCH)
 
         # The same shape one level narrower: not which action was asked, but
         # which *property* of it. "비용은 누가 내나요" answered by "유상입니다"
         # passes every gate above -- right product, right subject, right
         # action -- and never says who pays. Read from what generation
         # recorded, never re-derived here; no record holds nothing.
-        if not gpt_final_pipeline:
-            attribute_hold, _why = requested_attribute_decision(metadata)
-            if attribute_hold:
-                reasons.append(REQUESTED_ATTRIBUTE_NOT_COVERED)
+        # Attribute coverage is legacy semantic telemetry. GPT② owns answer
+        # sufficiency; deterministic routes are constrained by their verified
+        # source/workflow invariants above, not by a second text classifier.
 
         # Stored Learning was offered as the grounds and nothing verified.
         # "사다리차는 유상입니다" against "비용은 누가 내나요" is the shape: right
@@ -638,11 +658,6 @@ class AutoProcessingEligibilityService:
         # ``route`` is what separates "nothing to verify" from "should have
         # been verified and was not". Without it the gate cannot tell the two
         # apart, which is how the producer stayed missing for a whole release.
-        evidence_hold, _reason = evidence_verification_decision(
-            metadata, route=normalized_route,
-        )
-        if evidence_hold:
-            reasons.append(EVIDENCE_NOT_VERIFIED)
 
         # A substantive question the customer asked that the reply never
         # answers. The coverage evaluator measured this on the finished text
@@ -653,16 +668,12 @@ class AutoProcessingEligibilityService:
         # without ever consulting coverage. A measurement that cannot stop a
         # publish is telemetry, so the verdict is read here directly and is a
         # hard blocker no other resolver can lift.
-        if not gpt_final_pipeline and _coverage_incomplete(metadata):
-            reasons.append(SEMANTIC_COVERAGE_INCOMPLETE)
+        # Legacy lexical coverage remains persisted telemetry only.  It is not
+        # an evidence verdict and cannot become a non-GPT semantic veto here.
 
         # A question with no factual source behind it. Read from retrieval's
         # own per-sub-question verdict, so a reply that names the gap in
         # fluent Korean cannot pass for one that answered it.
-        if not gpt_final_pipeline and _evidence_insufficient(
-            metadata, route=normalized_route,
-        ):
-            reasons.append(EVIDENCE_NOT_SUFFICIENT)
 
         # GPT ②'s own verdicts on the answer it wrote. These are the findings
         # the removed anchor-table rules were standing in for, reported by the
@@ -706,6 +717,16 @@ class AutoProcessingEligibilityService:
             if understanding.get("usable") is not True:
                 reasons.append(UNDERSTANDING_UNAVAILABLE)
 
+        # Confidence remains operator telemetry only.  It is deliberately in
+        # SOFT_REASONS and therefore cannot change publishability.
+        confidence = analysis.get("confidence")
+        if confidence is not None:
+            try:
+                if float(confidence) < 0.8:
+                    reasons.append("INTENT_CONFIDENCE_LOW")
+            except (TypeError, ValueError):
+                reasons.append("INTENT_CONFIDENCE_UNKNOWN")
+
         # A date the customer named, which nothing here can promise.
         #
         # "오늘 주문하면 9일까지 받아볼 수 있을까요?" was answered with the
@@ -720,40 +741,12 @@ class AutoProcessingEligibilityService:
         # land -- there is no basis, and the reply goes to staff rather than
         # to the customer. Checked on every route, because the same
         # unanswerable question also reaches GPT.
-        confirmed_schedule = (
-            str(plan.get("dps_lookup_status") or "").upper() == "SUCCESS"
-            and bool(plan.get("valid_dps_snapshot_available"))
-        )
-        if not confirmed_schedule and is_delivery_deadline_question(
-            " ".join(
-                str(inquiry.get(field) or "")
-                for field in ("title", "content")
-            )
-        ):
-            reasons.append("DELIVERY_DEADLINE_NOT_CONFIRMABLE")
 
         # Evidence + Authority first: a pessimistic confidence number from the
         # provider is not itself a safety finding. When retrieval proved every
         # sub-question answerable from SUPPORTED evidence, and no other reason
         # fired, the confidence score alone must not hold the answer back.
         # An unparseable score is still treated as unknown risk.
-        evidence_supported = self._evidence_fully_supported(hybrid)
-
-        confidence = analysis.get("confidence")
-        if confidence is not None:
-            try:
-                if float(confidence) < 0.8 and not evidence_supported:
-                    reasons.append("INTENT_CONFIDENCE_LOW")
-            except (TypeError, ValueError):
-                reasons.append("INTENT_CONFIDENCE_UNKNOWN")
-
-        gpt_confidence = gpt_draft.get("confidence")
-        if gpt_confidence is not None:
-            try:
-                if float(gpt_confidence) < 0.8 and not evidence_supported:
-                    reasons.append("GPT_CONFIDENCE_LOW")
-            except (TypeError, ValueError):
-                reasons.append("GPT_CONFIDENCE_UNKNOWN")
 
         ordered = tuple(dict.fromkeys(reasons))
         hard = tuple(item for item in ordered if item not in SOFT_REASONS)

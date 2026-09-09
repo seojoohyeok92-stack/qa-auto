@@ -562,6 +562,11 @@ class HybridAnswerService:
         metadata = dict(rule_result.metadata)
         metadata["hybrid"] = {
             "enabled": True,
+            # A provider failure must never hand semantic publish authority
+            # back to the deterministic rule/intent path.  The retained rule
+            # answer is staff context only; the lifecycle records an explicit
+            # workflow failure and keeps it out of Auto Post.
+            "answer_pipeline": "GPT_PIPELINE_UNAVAILABLE",
             "provider": provider_name,
             "fallback_used": True,
             "fallback_reason": reason,
@@ -595,28 +600,13 @@ class HybridAnswerService:
             },
         }
         fallback = AnswerResult(
-            status=(
-                AnswerStatus.NEEDS_REVIEW
-                if reason == "VALIDATION_FAILED"
-                and isinstance(rule_result.metadata.get("phase9"), dict)
-                else rule_result.status
-            ),
+            status=AnswerStatus.NEEDS_REVIEW,
             category=rule_result.category,
             reason=rule_result.reason,
             answer=rule_result.answer,
             provider=rule_result.provider,
-            auto_answerable=(
-                False
-                if reason == "VALIDATION_FAILED"
-                and isinstance(rule_result.metadata.get("phase9"), dict)
-                else rule_result.auto_answerable
-            ),
-            needs_review=(
-                True
-                if reason == "VALIDATION_FAILED"
-                and isinstance(rule_result.metadata.get("phase9"), dict)
-                else rule_result.needs_review
-            ),
+            auto_answerable=False,
+            needs_review=True,
             matched_rule=rule_result.matched_rule,
             warnings=tuple(rule_result.warnings),
             metadata=metadata,
@@ -1233,6 +1223,32 @@ class HybridAnswerService:
                         started=generation_started
                     ),
                 )
+            # The legacy validator still records semantic rule-policy signals
+            # for operator diagnostics.  Once GPT① supplied usable
+            # understanding and GPT② resolved its evidence, those signals are
+            # not an independent publish authority.  Preserve them in
+            # ``warnings``/``review_signals`` but persist a PASS technical
+            # verdict; true technical failures already reached the branch
+            # above with ``passed=False``.
+            if (
+                bool(
+                    getattr(
+                        request.metadata.get("_semantic_routing_value"),
+                        "usable",
+                        False,
+                    )
+                )
+                and validation.status == "REVIEW_REQUIRED"
+            ):
+                validation = ValidationResult(
+                    passed=True,
+                    errors=validation.errors,
+                    warnings=validation.warnings,
+                    checked_facts=validation.checked_facts,
+                    status="PASS",
+                    rules=validation.rules,
+                    review_signals=validation.review_signals,
+                )
             # Whose verdict holds an answer back.
             #
             # ``rule_result`` is the keyword engine's attempt at this inquiry.
@@ -1254,14 +1270,17 @@ class HybridAnswerService:
                 )
             )
             requires_review = bool(
-                (rule_result.needs_review and not gpt_understanding_usable)
-                or intent.requires_review
-                or draft.requires_review
-                or review.requires_review
+                # GPT② is the sole semantic publish authority once GPT①
+                # supplied usable understanding.  Rule/intent/self-review
+                # flags remain diagnostic telemetry; they must not revive as
+                # a second review decision after GPT② resolved every atom.
+                # If GPT① was unavailable, the downstream workflow gate
+                # records UNDERSTANDING_UNAVAILABLE rather than treating a
+                # legacy rule classification as an answer verdict.
+                draft.requires_review
                 or draft.has_required_missing_information
                 or draft.unresolved
                 or draft.can_auto_post is False
-                or validation.status == "REVIEW_REQUIRED"
             )
             status = (
                 AnswerStatus.NEEDS_REVIEW

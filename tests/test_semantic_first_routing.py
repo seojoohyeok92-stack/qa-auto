@@ -184,7 +184,9 @@ def test_compound_purchase_question_keeps_order_evidence_and_review(tmp_path) ->
 
     assert plan.requires_order_lookup is True
     assert plan.requires_dps_lookup is False
-    assert plan.needs_staff_review is True
+    # Compound/manual legacy analysis remains diagnostic only.  The actual
+    # current-order lookup requirement above is the workflow authority.
+    assert plan.needs_staff_review is False
     assert plan.analysis.manual_review_required is True
     assert len(plan.analysis.subquestion_analyses) == 2
 

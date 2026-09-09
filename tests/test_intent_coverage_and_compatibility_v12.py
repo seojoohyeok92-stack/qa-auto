@@ -50,7 +50,10 @@ def analyze(question: str, product: str = "삼성 50인치 TV"):
     )
 
 
-def evaluate(*, route: str, analysis: dict, answer: str = "안내드립니다."):
+def evaluate(
+    *, route: str, analysis: dict, answer: str = "안내드립니다.",
+    unresolved: bool = False,
+):
     return ELIGIBILITY.evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
         draft={
@@ -58,7 +61,17 @@ def evaluate(*, route: str, analysis: dict, answer: str = "안내드립니다.")
             "validation_status": "PASSED",
             "validator_result_json": None,
             "review_status": "",
-            "metadata_json": {"processing_plan": {"analysis": analysis}},
+            "metadata_json": {
+                "processing_plan": {"analysis": analysis},
+                "semantic_routing": {"understanding": {"usable": True}},
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {
+                        "unresolved": ["missing_product_fact"] if unresolved else [],
+                        "can_auto_post": not unresolved,
+                    },
+                },
+            },
             "posted": False,
             "id": 1,
         },
@@ -92,9 +105,8 @@ def test_ordinary_questions_are_classified(question: str) -> None:
     assert analysis.auto_answerable is True
 
 
-# CASE S -- a genuinely unclassifiable question still goes to staff. The fix
-# must not have turned UNCLASSIFIED into an auto-post path.
-def test_case_s_genuinely_unclassifiable_still_requires_review() -> None:
+# CASE S -- classifier telemetry never replaces a GPT② evidence verdict.
+def test_case_s_unclassified_metadata_is_not_publish_authority() -> None:
     analysis = analyze("음...")
     assert analysis.inquiry_subtype == "UNCLASSIFIED"
     assert analysis.manual_review_required is True
@@ -102,14 +114,14 @@ def test_case_s_genuinely_unclassifiable_still_requires_review() -> None:
         route="GPT_DIRECT",
         analysis={"manual_review_required": True},
     )
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert result.safe is True
+    assert "POLICY_OR_HIGH_RISK_REVIEW" not in result.reasons
 
 
 # ----------------------------------------------------------- compatibility
 
-# CASE D -- the real production case: no authoritative fact, so no auto-post.
-def test_case_d_unverified_compatibility_is_blocked() -> None:
+# CASE D -- missing product fact is reported by GPT②, not inferred from intent.
+def test_case_d_unresolved_product_fact_is_blocked() -> None:
     analysis = analyze(BRACKET_QUESTION, "삼성 50인치 TV 스탠드")
     assert analysis.detected_intent == "PRODUCT_COMPATIBILITY"
     # A draft is still allowed; only publishing is withheld.
@@ -119,10 +131,10 @@ def test_case_d_unverified_compatibility_is_blocked() -> None:
         route="GPT_FALLBACK",
         analysis={"detected_intent": "PRODUCT_COMPATIBILITY"},
         answer="현재 제공된 정보만으로 호환 여부를 확인하기 어렵습니다.",
+        unresolved=True,
     )
     assert result.safe is False
-    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" in result.reasons
-    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" not in SOFT_REASONS
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
 
 
 # CASE E -- an exact fixed accessory/Product DB fact may still answer and post.

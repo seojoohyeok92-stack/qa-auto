@@ -58,6 +58,7 @@ from services.draft_generation_service import _atomic_question_payload
 from services.hybrid_answer_service import HybridAnswerService
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.pre_generation_gate import PreGenerationGate
+from services.dps_lookup_policy import DpsLookupPolicy
 
 
 PRODUCT = "삼성 125.7cm(50인치) UHD 4K 1등급 비즈니스TV LH50BEFHLGFXKR 스탠드형"
@@ -116,8 +117,8 @@ def test_case_c_is_no_longer_skipped_before_generation() -> None:
     assert decision.skip_generation is False
 
 
-def test_a_genuinely_unanswerable_inquiry_is_still_skipped() -> None:
-    """The gate did not become a rubber stamp."""
+def test_unanswerable_legacy_subtype_does_not_skip_gpt_generation() -> None:
+    """Evidence insufficiency belongs to GPT②, not the legacy pre-gate."""
 
     decision = PreGenerationGate.evaluate_plan(
         analysis={
@@ -128,10 +129,10 @@ def test_a_genuinely_unanswerable_inquiry_is_still_skipped() -> None:
         plan={"needs_staff_review": True, "is_high_risk": False},
     )
 
-    assert decision.skip_generation is True
+    assert decision.skip_generation is False
 
 
-def test_high_risk_still_skips_even_for_a_delivery_inquiry() -> None:
+def test_high_risk_legacy_metadata_does_not_skip_gpt_generation() -> None:
     decision = PreGenerationGate.evaluate_plan(
         analysis={
             "inquiry_subtype": "SCHEDULE_CHANGE_REQUEST",
@@ -141,7 +142,7 @@ def test_high_risk_still_skips_even_for_a_delivery_inquiry() -> None:
         plan={"needs_staff_review": True, "is_high_risk": True},
     )
 
-    assert decision.skip_generation is True
+    assert decision.skip_generation is False
 
 
 # ==========================================================================
@@ -414,6 +415,11 @@ class _StubProvider:
                 "answer": "무타공 설치가 가능합니다. 카드 할인 적용 여부는 담당자 확인이 필요합니다.",
                 "confidence": 0.9, "used_facts": [],
                 "missing_information": [], "requires_review": False,
+                # GPT② evidence verdict: the card-benefit atom has no
+                # reliable source.  This replaces the retired deterministic
+                # topic-coverage gate as the reason publication is withheld.
+                "unresolved": ["카드 할인도 되나요"],
+                "can_auto_post": False,
                 "warnings": [], "learning_usage": [], "historical_usage": [],
                 "feedback_signal_usage": [],
                 "subquestion_results": [
@@ -435,6 +441,7 @@ class _StubProvider:
 class _FakeDps:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.calls.append(request.order_id)
@@ -595,11 +602,14 @@ def test_already_answered_inquiry_is_still_blocked(tmp_path) -> None:
     assert eligibility.stage == "IDEMPOTENCY"
 
 
-def test_semantic_coverage_blocks_clear_partial_answer_before_auto_post(tmp_path) -> None:
-    """A core sub-question omission must become staff review."""
+def test_gpt_unresolved_partial_answer_is_held_without_legacy_coverage_gate(tmp_path) -> None:
+    """GPT②'s atom verdict, not deterministic topic coverage, owns the hold."""
 
     result, _ = run_pipeline(tmp_path, "soft", CASE_PARTIAL)
-    coverage = result["metadata"].get("semantic_coverage") or {}
+    hybrid = result["metadata"].get("hybrid") or {}
+    gpt_draft = hybrid.get("draft") or {}
 
-    assert coverage.get("phase") == "DETERMINISTIC_COVERAGE_GATE"
-    assert result["draft"]["program_status"] == AnswerStatus.NEEDS_REVIEW.value
+    assert gpt_draft.get("unresolved") == ["카드 할인도 되나요"]
+    assert gpt_draft.get("can_auto_post") is False
+    assert result["eligibility"] == "REVIEW_REQUIRED"
+    assert result["auto_post_allowed"] is False

@@ -369,8 +369,7 @@ def test_gate_unverified_product_fact_still_holds():
 @pytest.mark.parametrize(
     "label,kwargs,expected_reason",
     [
-        ("high risk", {"plan_extra": {"is_high_risk": True}},
-         "POLICY_OR_HIGH_RISK_REVIEW"),
+        ("high risk", {"plan_extra": {"is_high_risk": True}}, None),
         ("dps not trusted",
          {"plan_extra": {"requires_dps_lookup": True,
                          "dps_lookup_status": "FAILED"}},
@@ -390,7 +389,7 @@ def test_gate_unverified_product_fact_still_holds():
          {"validation_status": "PASS_REVIEW_REQUIRED",
           "validator": {"status": "PASS_REVIEW_REQUIRED", "passed": True,
                         "errors": [], "review_signals": ["확인 필요"]}},
-         "VALIDATOR_REVIEW_REQUIRED"),
+         None),
     ],
 )
 def test_gate_verified_product_fact_settles_nothing_else(
@@ -401,8 +400,13 @@ def test_gate_verified_product_fact_settles_nothing_else(
     verdict = _gate(
         {"sensitive": True, "current_fact_verified": True}, **kwargs
     )
-    assert verdict.decision == "REVIEW_REQUIRED", label
-    assert expected_reason in verdict.reasons, (label, verdict.reasons)
+    if expected_reason is None:
+        # Both are legacy semantic/advisory telemetry; neither may override
+        # a verified product fact plus a resolved GPT-first decision.
+        assert verdict.decision == "SAFE", label
+    else:
+        assert verdict.decision == "REVIEW_REQUIRED", label
+        assert expected_reason in verdict.reasons, (label, verdict.reasons)
 
 
 def test_gate_idempotency_beats_a_verified_product_fact():

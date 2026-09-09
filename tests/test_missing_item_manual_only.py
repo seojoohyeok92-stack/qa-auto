@@ -45,6 +45,7 @@ from services.auto_processing_eligibility_service import (
 )
 from services.automatic_draft_service import AutomaticDraftService
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.dps_lookup_policy import DpsLookupPolicy
 
 
 PRODUCT = "삼성 삼탠바이미 스마트 M5 80cm(32인치)IPTV 모니터 화이트+스탠드 2in1거치대"
@@ -157,13 +158,14 @@ def test_an_ordinary_inquiry_keeps_its_own_classification() -> None:
 
 
 # ==========================================================================
-# 3. End to end: no draft, no post, nothing to publish
+# 3. End to end: evidence must decide the hold, never the legacy subtype
 # ==========================================================================
 
 
 class DpsSpy:
     def __init__(self) -> None:
         self.calls = 0
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.calls += 1
@@ -248,31 +250,34 @@ def process(store: Database, inquiry_id: int, recorder: PostRecorder | None = No
     ("사은품을 못 받았습니다", "gift"),
     ("볼트가 누락됐습니다", "bolt"),
 ])
-def test_no_draft_is_produced_and_nothing_is_posted(store, question, key) -> None:
+def test_missing_item_legacy_metadata_does_not_skip_gpt_first_draft(
+    store, question, key,
+) -> None:
+    """A legacy subtype is diagnostic only; an unresolved draft is held."""
     recorder = PostRecorder()
 
     outcome, draft, decision, dps = process(store, ask(store, question, key=key),
                                             recorder)
 
-    assert outcome.status == "POLICY_BLOCKED"
-    assert draft is None, "no wording may be attached to a missing shipment"
-    assert decision is None
+    assert outcome.status == "CREATED"
+    assert draft is not None
+    assert decision is not None
+    assert decision.decision != "SAFE"
     assert recorder.posts == []
     assert dps.calls == 0
 
 
-def test_the_block_is_a_terminal_state_not_a_failure(store) -> None:
+def test_missing_item_is_held_after_generation_not_preemptively_blocked(store) -> None:
     """No exception escapes, and the inquiry is left for a person."""
 
     inquiry_id = ask(store, REPORTED, key="terminal")
 
-    outcome, draft, _, _ = process(store, inquiry_id)
+    outcome, draft, decision, _ = process(store, inquiry_id)
 
-    assert outcome.status == "POLICY_BLOCKED"
-    assert draft is None
-    assert str(
-        InquiryRepository(store).get(inquiry_id).get("phase9_status") or ""
-    ) == "MANUAL_REVIEW_REQUIRED"
+    assert outcome.status == "CREATED"
+    assert draft is not None
+    assert decision is not None and decision.decision != "SAFE"
+    assert str(draft.get("original_answer") or "").strip()
 
 
 def test_staff_are_told_which_policy_blocked_it(store) -> None:
@@ -317,7 +322,7 @@ def test_the_stand_model_answer_still_reaches_the_question_it_is_for(
 # ==========================================================================
 
 
-def test_repeat_processing_never_produces_a_post(store) -> None:
+def test_repeat_processing_never_posts_an_evidence_held_draft(store) -> None:
     """Rerun, retry and regeneration all end with nothing to publish.
 
     The first pass reports POLICY_BLOCKED; later passes report FAILED, because
@@ -334,28 +339,28 @@ def test_repeat_processing_never_produces_a_post(store) -> None:
     for _ in range(3):
         outcome, draft, decision, dps = process(store, inquiry_id, recorder)
         statuses.append(outcome.status)
-        assert draft is None
-        assert decision is None
+        assert draft is not None
+        assert decision is not None and decision.decision != "SAFE"
         assert dps.calls == 0
 
-    assert statuses[0] == "POLICY_BLOCKED"
+    assert statuses[0] == "CREATED"
     assert recorder.posts == []
 
 
-def test_a_direct_generation_attempt_is_refused(store) -> None:
+def test_a_direct_generation_attempt_creates_a_safe_held_draft(store) -> None:
     """Even calling the answer service straight cannot produce wording."""
-
-    from answer.exceptions import AutoAnswerProhibitedError
 
     inquiry_id = ask(store, REPORTED, key="direct")
 
-    with pytest.raises(AutoAnswerProhibitedError) as raised:
-        AnswerService(store, dps_enrichment=DpsSpy()).generate_for_inquiry(
-            inquiry_id
-        )
+    AnswerService(store, dps_enrichment=DpsSpy()).generate_for_inquiry(inquiry_id)
 
-    assert raised.value.policy_reason == SUBTYPE
-    assert draft_for(store, inquiry_id) is None
+    draft = draft_for(store, inquiry_id)
+    assert draft is not None
+    decision = AutoProcessingEligibilityService().evaluate(
+        inquiry=InquiryRepository(store).get(inquiry_id), draft=draft,
+        route=str((draft.get("metadata_json") or {}).get("selected_answer_route") or ""),
+    )
+    assert decision.decision != "SAFE"
 
 
 # ==========================================================================
@@ -380,21 +385,18 @@ def test_a_mixed_batch_processes_every_inquiry(store) -> None:
     repository.save_settings(enabled=True, interval_minutes=10, max_retries=1)
 
     results = []
-    for index, (question, order_id, expected) in enumerate(batch):
+    for index, (question, order_id, _legacy_expected) in enumerate(batch):
         inquiry_id = ask(store, question, key=f"batch-{index}",
                          order_id=order_id)
         outcome, draft, decision, _ = process(store, inquiry_id, recorder)
         results.append((question, outcome.status, draft is not None))
-        assert outcome.status == expected, question
+        # A missing-item legacy subtype cannot skip generation.  Whether a
+        # persisted draft is publishable is decided later by GPT evidence and
+        # actual workflow/hard-safety checks, never by this matrix label.
+        assert outcome.status == "CREATED", question
 
     # Every ordinary inquiry still produced its draft.
-    assert all(
-        drafted for _, status, drafted in results if status == "CREATED"
-    )
-    # No blocked inquiry produced one.
-    assert not any(
-        drafted for _, status, drafted in results if status == "POLICY_BLOCKED"
-    )
+    assert all(drafted for _, _, drafted in results)
     # A blocked inquiry never stops automatic processing.
     assert repository.settings()["enabled"] is True
     assert all(

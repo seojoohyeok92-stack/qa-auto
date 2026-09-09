@@ -97,13 +97,12 @@ def test_schedule_change_always_requires_staff_review(question: str) -> None:
 
 
 # CASE D/E/G/H -- and the resulting plan must be a hard auto-post block.
-def test_schedule_change_is_hard_blocked_from_auto_post() -> None:
+def test_legacy_schedule_change_metadata_is_not_auto_post_authority() -> None:
     result = evaluate(
         route="GPT_DIRECT", plan={"analysis": {"manual_review_required": True}}
     )
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
-    assert "POLICY_OR_HIGH_RISK_REVIEW" not in SOFT_REASONS
+    assert result.safe is True
+    assert "POLICY_OR_HIGH_RISK_REVIEW" not in result.reasons
 
 
 # CASE F -- a plain schedule *lookup* must not be swept up by the change
@@ -214,13 +213,13 @@ def test_case_c_i_j_exact_kinds_keep_authority(kind: str) -> None:
 # CASE L -- a hard review reason still blocks even with the template
 # preference switched on (template_preferred is a generation input, not an
 # auto-post permission).
-def test_case_l_template_preference_does_not_bypass_hard_review() -> None:
+def test_case_l_template_is_not_vetoed_by_legacy_high_risk_metadata() -> None:
     result = evaluate(
         route="TEMPLATE",
         plan={"is_high_risk": True, "template_preferred": True},
     )
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert result.safe is True
+    assert "POLICY_OR_HIGH_RISK_REVIEW" not in result.reasons
 
 
 # ------------------------------------------------------------------ the UI

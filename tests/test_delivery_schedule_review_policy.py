@@ -485,7 +485,10 @@ def test_held_schedule_question_ends_in_review_required_with_a_draft(
     assert dps.calls == 0
     assert draft is not None and str(draft.get("original_answer") or "").strip()
     assert eligibility.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in eligibility.reasons
+    # A no-GPT fallback cannot obtain an unattended publishing licence from
+    # answer wording. It remains a workflow hold until the GPT-first decision
+    # is persisted; legacy period-keyword scanning is not an authority.
+    assert "UNDERSTANDING_UNAVAILABLE" in eligibility.reasons
 
 
 # ==========================================================================
@@ -544,13 +547,23 @@ def test_the_gate_holds_an_unconfirmed_period_answer(database) -> None:
         draft={
             "original_answer": "구매하시면 배송 및 설치까지 약 3~4주 소요될 예정입니다.",
             "validation_status": "PASS",
-            "metadata_json": {"processing_plan": plan.to_dict()},
+            "metadata_json": {
+                "processing_plan": plan.to_dict(),
+                "semantic_routing": {"understanding": {"usable": True}},
+                "hybrid": {
+                    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                    "draft": {
+                        "unresolved": ["delivery schedule is not confirmed"],
+                        "can_auto_post": False,
+                    },
+                },
+            },
         },
         route="GPT_FALLBACK",
     )
 
     assert verdict.decision == "REVIEW_REQUIRED"
-    assert "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD" in verdict.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in verdict.reasons
 
 
 def test_a_confirmed_order_may_still_state_its_real_schedule(database) -> None:

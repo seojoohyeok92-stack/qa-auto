@@ -151,6 +151,32 @@ def _draft(
     if plan:
         resolved_plan.update(plan)
     resolved_validator = _validator() if validator is None else validator
+    resolved_evidence = _evidence() if evidence is None else evidence
+    resolved_generated = (
+        {"requires_review": False, "missing_information": [],
+         "confidence": 0.95, "unresolved": False, "can_auto_post": True}
+        if generated is None else dict(generated)
+    )
+    resolved_self_review = (
+        {"requires_review": False, "answered_all_questions": True}
+        if self_review is None else dict(self_review)
+    )
+    evidence_unresolved = any(
+        str(item.get("status") or "").upper()
+        not in {"ANSWERABLE", "CANDIDATE"}
+        for item in resolved_evidence if isinstance(item, dict)
+    )
+    if (
+        evidence_unresolved
+        or bool(resolved_generated.get("requires_review"))
+        or bool(resolved_generated.get("missing_information"))
+        or bool(resolved_self_review.get("requires_review"))
+    ):
+        # This is deterministic GPT② fixture data: a failed evidence verdict
+        # must be persisted as such, rather than relying on a legacy review
+        # flag for the worker to infer its meaning.
+        resolved_generated["unresolved"] = True
+        resolved_generated["can_auto_post"] = False
     return {
         "id": 10,
         "original_answer": answer,
@@ -168,19 +194,11 @@ def _draft(
                 if product_fact_guard is None else product_fact_guard
             ),
             "hybrid": {
+                "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
                 "validation": resolved_validator,
-                "subquestion_evidence": (
-                    _evidence() if evidence is None else evidence
-                ),
-                "draft": (
-                    {"requires_review": False, "missing_information": [],
-                     "confidence": 0.95}
-                    if generated is None else generated
-                ),
-                "self_review": (
-                    {"requires_review": False, "answered_all_questions": True}
-                    if self_review is None else self_review
-                ),
+                "subquestion_evidence": resolved_evidence,
+                "draft": resolved_generated,
+                "self_review": resolved_self_review,
             },
         },
     }
@@ -238,8 +256,8 @@ def test_B_stale_preliminary_review_resolves_to_safe():
     ))
     assert verdict.decision == "SAFE", verdict.reasons
     assert verdict.reasons == ()
-    # The signal is kept for audit, not thrown away.
-    assert "PRELIMINARY_REVIEW_RESOLVED" in verdict.soft_reasons
+    # The signal is diagnostic only; it is not re-emitted as a publish reason.
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in verdict.soft_reasons
 
 
 def test_B_one_stale_signal_does_not_amplify_into_several_hard_reasons():
@@ -357,10 +375,10 @@ def test_C_one_risky_subquestion_keeps_the_whole_inquiry_held(
 
     verdict = _evaluate(
         inquiry=inquiry,
-        draft=_realistic_draft(
+        draft=_with_gpt_unresolved(_realistic_draft(
             inquiry, route="TEMPLATE",
             plan={"order_id_status": "VALID" if order_id else "MISSING"},
-        ),
+        )),
     )
     assert verdict.decision == "REVIEW_REQUIRED", (content, verdict.reasons)
 
@@ -430,7 +448,7 @@ def test_C_legacy_stored_analysis_without_sources_still_resolves_via_reanalysis(
         ),
     )
     assert verdict.decision == "SAFE", verdict.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" in verdict.soft_reasons
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in verdict.soft_reasons
 
 
 def test_C_empty_question_is_not_a_classifier_gap():
@@ -487,7 +505,10 @@ def test_C2_courtesy_only_inquiry_is_not_auto_postable(text):
 
     inquiry = _inquiry(content=text)
     verdict = _evaluate(
-        inquiry=inquiry, draft=_realistic_draft(inquiry, route="TEMPLATE")
+        inquiry=inquiry,
+        draft=_with_gpt_unresolved(
+            _realistic_draft(inquiry, route="TEMPLATE")
+        ),
     )
     assert verdict.decision == "REVIEW_REQUIRED", (text, verdict.reasons)
 
@@ -530,7 +551,10 @@ def test_C2_courtesy_prefix_never_hides_a_real_finding(text, expected_subtype):
 
     inquiry = _inquiry(content=text)
     verdict = _evaluate(
-        inquiry=inquiry, draft=_realistic_draft(inquiry, route="TEMPLATE")
+        inquiry=inquiry,
+        draft=_with_gpt_unresolved(
+            _realistic_draft(inquiry, route="TEMPLATE")
+        ),
     )
     assert verdict.decision == "REVIEW_REQUIRED", (text, verdict.reasons)
 
@@ -682,8 +706,8 @@ def test_C_schedule_change_still_manual_under_the_channel_enum():
     assert analysis["manual_review_required"] is True
 
 
-def test_C_real_high_risk_plan_keeps_review_required():
-    """If the stored plan says real risk, it stays blocked -- never resolved."""
+def test_C_legacy_high_risk_plan_cannot_override_resolved_gpt_evidence():
+    """A legacy high-risk label is telemetry, never a worker authority."""
 
     risky = _analysis(
         inquiry_subtype="HIGH_RISK_OR_DISPUTE",
@@ -694,12 +718,12 @@ def test_C_real_high_risk_plan_keeps_review_required():
         analysis=risky,
         plan={"analysis": risky, "is_high_risk": True},
     ))
-    assert verdict.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in verdict.reasons
+    assert verdict.decision == "SAFE"
+    assert verdict.reasons == ()
 
 
-def test_C_current_analysis_still_risky_keeps_review_required():
-    """Re-analysis is the arbiter: risky text now means it stays blocked."""
+def test_C_current_legacy_analysis_cannot_override_resolved_gpt_evidence():
+    """Worker re-analysis cannot reclaim semantic publish authority."""
 
     stale = _analysis(manual_review_required=True)
     verdict = _evaluate(
@@ -710,8 +734,8 @@ def test_C_current_analysis_still_risky_keeps_review_required():
             requires_manual_review=True,
         ),
     )
-    assert verdict.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in verdict.reasons
+    assert verdict.decision == "SAFE"
+    assert verdict.reasons == ()
 
 
 # --------------------------------------------------------------------------
@@ -738,8 +762,7 @@ def test_E_product_fact_survives_preliminary_review_resolution():
     ))
     assert verdict.decision == "REVIEW_REQUIRED"
     assert "PRODUCT_FACT_NOT_VERIFIED" in verdict.reasons
-    # The preliminary signal did resolve -- and changed nothing about the fact.
-    assert "PRELIMINARY_REVIEW_RESOLVED" in verdict.soft_reasons
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in verdict.soft_reasons
 
 
 def test_E_verified_product_db_fact_is_allowed():
@@ -754,12 +777,12 @@ def test_E_verified_product_db_fact_is_allowed():
     assert verdict.decision == "SAFE", verdict.reasons
 
 
-def test_F_compatibility_claim_without_verified_source_blocks():
-    verdict = _evaluate(draft=_draft(
+def test_F_compatibility_without_gpt_evidence_verdict_is_held():
+    verdict = _evaluate(draft=_with_gpt_unresolved(_draft(
         analysis=_analysis(detected_intent="PRODUCT_COMPATIBILITY"),
-    ))
+    )))
     assert verdict.decision == "REVIEW_REQUIRED"
-    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" in verdict.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in verdict.reasons
 
 
 @pytest.mark.parametrize("route", ["TEMPLATE", "PRODUCT_DB"])
@@ -825,11 +848,12 @@ def test_H_high_risk_never_resolves_at_the_gate(text):
     inquiry = _inquiry(content=text)
     verdict = _evaluate(
         inquiry=inquiry,
-        draft=_realistic_draft(inquiry, route="GPT_FALLBACK",
-                               requires_manual_review=True),
+        draft=_with_gpt_unresolved(_realistic_draft(
+            inquiry, route="GPT_FALLBACK", requires_manual_review=True,
+        )),
     )
     assert verdict.decision == "REVIEW_REQUIRED", text
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in verdict.reasons, text
+    assert "GPT_REPORTED_UNRESOLVED" in verdict.reasons, text
 
 
 @pytest.mark.parametrize("text", CANCEL_TEXTS)
@@ -873,7 +897,7 @@ def test_H_cancel_with_order_id_stays_manual():
         draft=_realistic_draft(inquiry, route="GPT_FALLBACK"),
     )
     assert verdict.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in verdict.reasons
+    assert "REQUIRED_ORDER_ID_MISSING_OR_INVALID" in verdict.reasons
 
 
 # --------------------------------------------------------------------------
@@ -889,17 +913,17 @@ def test_I_validator_errors_block():
     assert "VALIDATOR_NOT_PASS" in verdict.reasons
 
 
-def test_J_validator_review_signals_block():
+def test_J_validator_review_signals_are_diagnostic_when_gpt_is_resolved():
     verdict = _evaluate(draft=_draft(
         validation_status="PASS_REVIEW_REQUIRED",
         validator=_validator(status="PASS_REVIEW_REQUIRED",
                              review_signals=["복합 질문 일부의 답변 누락 가능성이 있습니다."]),
     ))
-    assert verdict.decision == "REVIEW_REQUIRED"
-    assert "VALIDATOR_REVIEW_REQUIRED" in verdict.reasons
+    assert verdict.decision == "SAFE"
+    assert verdict.reasons == ()
 
 
-def test_K_validator_review_signal_blocks_even_with_stale_review():
+def test_K_validator_review_signal_and_stale_review_are_not_authority():
     """A real validator signal must not be swept up by the stale-hold path."""
 
     stale = _analysis(manual_review_required=True)
@@ -911,8 +935,7 @@ def test_K_validator_review_signal_blocks_even_with_stale_review():
         validator=_validator(status="PASS_REVIEW_REQUIRED",
                              review_signals=["확인이 필요합니다."]),
     ))
-    assert verdict.decision == "REVIEW_REQUIRED"
-    assert "VALIDATOR_REVIEW_REQUIRED" in verdict.reasons
+    assert verdict.decision == "SAFE"
     assert "PRELIMINARY_REVIEW_RESOLVED" not in verdict.soft_reasons
 
 
@@ -934,7 +957,7 @@ def test_L_subquestion_not_answerable_blocks():
         evidence=_evidence(status="NO_RELIABLE_SOURCE"),
     ))
     assert verdict.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in verdict.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in verdict.reasons
 
 
 def test_M_a_subquestion_with_no_source_at_all_blocks():
@@ -996,6 +1019,17 @@ def test_P_missing_hybrid_blocks_non_template_route():
         plan={"analysis": stale, "needs_staff_review": True},
         requires_manual_review=True,
     )
+
+
+def _with_gpt_unresolved(draft: dict[str, Any]) -> dict[str, Any]:
+    """Persist a deterministic GPT② evidence verdict for a held fixture."""
+
+    generated = draft["metadata_json"]["hybrid"].setdefault("draft", {})
+    generated.update({"unresolved": True, "can_auto_post": False})
+    return draft
+    draft["metadata_json"]["semantic_routing"] = {
+        "understanding": {"usable": True},
+    }
     draft["metadata_json"]["hybrid"] = {"validation": _validator()}
     assert _evaluate(draft=draft).decision == "REVIEW_REQUIRED"
 

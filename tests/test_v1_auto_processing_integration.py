@@ -125,8 +125,10 @@ def inquiry() -> dict:
         ),
         (
             "REVIEW_REQUIRED_SAFE_DRAFT",
+            # Legacy plan review telemetry has no worker authority.  The
+            # explicit safe-draft route is the persisted workflow outcome.
             {"needs_staff_review": True},
-            "PROCESSING_PLAN_REQUIRES_REVIEW",
+            "ROUTE_REVIEW_REQUIRED_SAFE_DRAFT",
         ),
     ],
 )

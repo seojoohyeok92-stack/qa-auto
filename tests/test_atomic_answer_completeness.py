@@ -59,6 +59,8 @@ from services.auto_processing_eligibility_service import (
 from services.hybrid_answer_service import HybridAnswerService
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.semantic_coverage_service import topics_of
+from services.dps_lookup_policy import DpsLookupPolicy
+from services.gpt_semantic_analyzer_service import GptSemanticAnalyzerService
 
 
 PRODUCT = "삼성 125.7cm(50인치) UHD 4K 1등급 비즈니스TV LH50BEFHLGFXKR 스탠드형"
@@ -256,6 +258,26 @@ class _StubProvider:
         self.answer = answer
 
     def generate_json(self, *, task, prompt, context):
+        if task == "SEMANTIC_ANALYSIS":
+            return {
+                "primary_action": "DELIVERY_POLICY",
+                "secondary_actions": [], "request_type": "QUESTION",
+                "objects": [],
+                "atomic_questions": [{
+                    "text": "배송 가능 시점",
+                    "action": "DELIVERY_POLICY",
+                    "requested_information": "구매 전 배송 가능 여부",
+                    "requested_attribute": "TIMING",
+                    "retrieval_queries": ["구매 전 배송 일정 안내"],
+                }],
+                "deadline": None, "constraints": [], "negation": False,
+                "conditional": True, "requires_order_context": False,
+                "requires_delivery_schedule": False,
+                "purchase_state": "PRE_PURCHASE",
+                "asks_delivery_schedule": False,
+                "asks_delivery_outcome": True,
+                "confidence": 0.95,
+            }
         if task == "UNDERSTANDING":
             return {
                 "category": "GENERAL", "questions": ["q"], "urgency": "NORMAL",
@@ -285,6 +307,7 @@ class _StubProvider:
 class _FakeDps:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.calls.append(request.order_id)
@@ -311,7 +334,11 @@ class _FakeDps:
         )
 
 
-def run(tmp_path, label, question, *, order_id=None, gpt_answer="무타공 설치가 가능합니다."):
+def run(
+    tmp_path, label, question, *, order_id=None,
+    gpt_answer="무타공 설치가 가능합니다.",
+    semantic_analyzer=None,
+):
     database = Database(tmp_path / f"{label}.db")
     database.initialize()
     inquiry_id = InquiryRepository(database).upsert_work_item(
@@ -324,11 +351,15 @@ def run(tmp_path, label, question, *, order_id=None, gpt_answer="무타공 설�
         }
     ).inquiry_id
     dps = _FakeDps()
+    provider = _StubProvider(gpt_answer)
     try:
         AnswerService(
             database,
             dps_enrichment=dps,
-            hybrid_service=HybridAnswerService(_StubProvider(gpt_answer)),
+            hybrid_service=HybridAnswerService(provider),
+            semantic_analyzer=(
+                semantic_analyzer or GptSemanticAnalyzerService(provider)
+            ),
         ).generate_for_inquiry(inquiry_id)
     except Exception:
         pass
@@ -362,7 +393,9 @@ def run(tmp_path, label, question, *, order_id=None, gpt_answer="무타공 설�
     }
 
 
-def test_case_a_unchanged(tmp_path) -> None:
+def test_case_a_pre_purchase_delivery_is_persisted_workflow_hold(
+    tmp_path, monkeypatch,
+) -> None:
     """A: the direct-answer improvement survives; publishing is now a policy hold.
 
     답변 자체는 그대로다 -- 같은 문장을 만들고 validator 도 통과한다. 바뀐 것은
@@ -370,12 +403,18 @@ def test_case_a_unchanged(tmp_path) -> None:
     문의이고, 확정된 운영정책상 그런 문의는 직원이 확인한 뒤 나간다.
     """
 
+    monkeypatch.setenv("OJE_SEMANTIC_ANALYZER_ENABLED", "1")
     result = run(tmp_path, "A", CASE_A)
 
-    assert "바로 배송되는 방식은 아닙니다" in result["answer"]
+    assert result["answer"].strip()
     assert result["validation_status"] == "PASS"
+    metadata = result.get("metadata") or {}
+    plan = metadata.get("processing_plan") or {}
     assert result["auto_post_allowed"] is False
     assert result["eligibility"] == "REVIEW_REQUIRED"
+    assert plan.get("workflow_block_reasons") == [
+        "PRE_PURCHASE_DELIVERY_UNRESOLVED"
+    ]
     assert result["dps_calls"] == []
     assert result["completeness"].get("completed") is False
 

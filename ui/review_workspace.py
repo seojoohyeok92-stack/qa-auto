@@ -83,6 +83,7 @@ from ui.answer_status_presenter import (
     ELIGIBLE,
     AnswerStatusView,
     build_answer_status,
+    build_decision_trace,
     pipeline_route,
 )
 from ui.rerun_profile import snapshot as rerun_profile_snapshot
@@ -1425,6 +1426,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         draft=draft,
         route=pipeline_route(draft),
     )
+    decision_trace = build_decision_trace(
+        inquiry=inquiry,
+        draft=draft,
+        route=pipeline_route(draft),
+    )
     with analysis_column:
         st.markdown(
             '<div class="compact-analysis-card"><h4>분석 결과</h4>'
@@ -1443,6 +1449,21 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             unsafe_allow_html=True,
         )
         _render_registration_reasons(answer_status)
+        with st.expander("처리 진단", expanded=True):
+            st.markdown(
+                '<div class="compact-analysis-card">'
+                + _field("문제 발생 단계", decision_trace.root_stage or "없음")
+                + _field("Root Cause", decision_trace.root_cause)
+                + _field("설명", decision_trace.root_message)
+                + _field("GPT①", decision_trace.gpt1)
+                + _field("Source", decision_trace.source)
+                + _field("Retrieval", decision_trace.retrieval)
+                + _field("GPT②", decision_trace.gpt2)
+                + _field("Hard Safety", decision_trace.hard_safety)
+                + _field("Auto Post", decision_trace.auto_post)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
         if phase9_analysis:
             displayed_order_id = str(inquiry.get("order_id") or "").strip()
             st.caption(

@@ -38,6 +38,7 @@ from services.dps_enrichment_service import (
 from services.dps_lookup_policy import DpsLookupDecision, DpsLookupStatus
 from services.hybrid_answer_service import HybridAnswerService
 from services.auto_processing_eligibility_service import (
+    AutoProcessingEligibility,
     AutoProcessingEligibilityService,
 )
 from services.inquiry_analysis_service import InquiryAnalysisService
@@ -849,7 +850,12 @@ class AnswerService:
             "router": decision.to_dict(),
             "called": False,
         }
-        if not semantic_analyzer_enabled() or not decision.use_semantic:
+        # GPT① is the production semantic authority.  The legacy router may
+        # remain diagnostic telemetry, but it cannot decide that a new
+        # inquiry is not worth understanding.  When the feature is enabled,
+        # every inquiry receives the same bounded understanding attempt;
+        # provider failure is represented explicitly below as workflow state.
+        if not semantic_analyzer_enabled():
             payload["fallback"] = "DETERMINISTIC"
             return None, payload
         analyzer = self._semantic_analyzer()
@@ -1312,12 +1318,11 @@ class AnswerService:
         request: AnswerRequest,
         result: AnswerResult,
     ) -> None:
-        """Record and enforce clear question/answer coverage failures.
+        """Record question/answer coverage observations.
 
-        UNKNOWN remains observational: the deterministic anchor set must not
-        turn an unfamiliar but safe question into a false hold.  FAIL and
-        PARTIAL are different: at least one recognised core question was not
-        answered, so publishing the otherwise polished draft would be unsafe.
+        This legacy lexical measurement is diagnostic only. GPT② owns evidence
+        sufficiency for current runs; a deterministic coverage classifier must
+        not become a second semantic publisher on an older/fixed route.
         """
 
         hybrid = result.metadata.get("hybrid")
@@ -1337,17 +1342,11 @@ class AnswerService:
             )
             payload = coverage.to_dict()
             result.metadata["semantic_coverage"] = payload
-            if coverage.status in {"FAIL", "PARTIAL"}:
-                result.status = AnswerStatus.NEEDS_REVIEW
-                result.auto_answerable = False
-                result.needs_review = True
-                result.metadata["requires_manual_review"] = True
-                result.metadata["semantic_coverage_enforced"] = True
+            result.metadata["semantic_coverage_enforced"] = False
             self.logs.record_inquiry(
                 inquiry_id,
                 f"SEMANTIC_COVERAGE_{coverage.status}",
-                "고객 질문과 답변의 대응 여부를 기록했습니다."
-                " 명백한 FAIL/PARTIAL은 직원 검토로 전환합니다.",
+                "고객 질문과 답변의 대응 여부를 진단 정보로 기록했습니다.",
                 level="INFO",
                 details=payload,
             )
@@ -1446,7 +1445,12 @@ class AnswerService:
             LOGGER.exception(
                 "미등록 사유 계산 실패: inquiry_id=%s", inquiry.get("id")
             )
-            return "", ()
+            # Eligibility evaluation is an execution dependency. Its failure
+            # is never evidence that a held draft became safe, and it must not
+            # be papered over by legacy semantic metadata.
+            return "ELIGIBILITY_EVALUATION_FAILED", (
+                "ELIGIBILITY_EVALUATION_FAILED",
+            )
         if verdict.safe:
             return "", ()
         return (
@@ -1465,10 +1469,10 @@ class AnswerService:
     ) -> None:
         if not draft.get("is_active"):
             return
-        needs_review = (
-            plan.needs_staff_review
-            or result.status is not AnswerStatus.GENERATED
-        )
+        # ``plan.needs_staff_review`` is preliminary legacy semantic
+        # telemetry.  It must not revive a review outcome after the persisted
+        # GPT② decision has made this draft eligible.
+        needs_review = result.status is not AnswerStatus.GENERATED
         # A generated answer is only an intermediate state while the same
         # automatic lifecycle still has to decide and perform Naver posting.
         # The confirmed post path owns the single success notification, so a
@@ -1493,6 +1497,11 @@ class AnswerService:
             hold_reason, hold_codes = self._hold_reason_for(
                 inquiry=inquiry, draft=draft, result=result
             )
+            # A stale non-generated status without a current hard/workflow or
+            # GPT-evidence hold is not an operator action.
+            needs_review = bool(hold_codes)
+        if not needs_review:
+            return
         try:
             notification_enqueued = notify_qna_safely(
                 title=(
@@ -2198,34 +2207,18 @@ class AnswerService:
                     inquiry_id,
                     "ORDER_INFO_REQUIRED",
                 )
-            elif phase9_analysis.manual_review_required:
-                self.inquiries.update_phase9_status(
-                    inquiry_id,
-                    "MANUAL_REVIEW_REQUIRED",
-                )
             # At this point order/DPS evidence has not been collected yet.
             # ``plan.needs_staff_review`` may therefore be a preliminary
             # "lookup pending" state, not a final manual-only finding.  Only
             # classifier-proven manual/high-risk causes may stop before those
             # lookups; the normal later gate judges evidence-dependent holds.
             pre_generation = PreGenerationGate.evaluate_plan(
-                analysis=(
-                    analysis_data
-                    if phase9_analysis.manual_review_required
-                    or plan.is_high_risk
-                    else {}
-                ),
-                plan=(
-                    plan.to_dict()
-                    if phase9_analysis.manual_review_required
-                    or plan.is_high_risk
-                    else {}
-                ),
+                # GPT①/② owns semantic meaning and answerability.  Legacy
+                # intent/high-risk classifications remain telemetry only and
+                # must not suppress evidence retrieval or generation.
+                analysis={}, plan={},
             )
-            if (
-                pre_generation.skip_generation
-                or not phase9_analysis.can_generate_answer
-            ):
+            if pre_generation.skip_generation:
                 # A working safety gate, not a failure: say so in the event
                 # code as well as the level, so the dashboard does not count a
                 # correctly blocked high-risk inquiry as a system fault.
@@ -2416,6 +2409,30 @@ class AnswerService:
                 option_name=request.option_name,
             )
             if is_delivery_schedule:
+                # A schedule-change request is an operational action, not a
+                # semantic uncertainty.  Until the real order/DPS action is
+                # performed, a Q&A draft must not complete or auto-post it.
+                dps_action = self.dps_enrichment.policy.decide(request)
+                if dps_action.change_request:
+                    self.workflows.initialize_steps(inquiry_id)
+                    self.workflows.mark_needs_review(
+                        inquiry_id,
+                        StepCode.DPS_LOOKUP,
+                        error_code="CURRENT_ORDER_ACTION_REQUIRED",
+                        message="현재 주문의 일정 변경은 실제 처리 확인이 필요합니다.",
+                        metadata={"change_request": True},
+                    )
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "CURRENT_ORDER_ACTION_REQUIRED",
+                        "일정 변경 요청은 자동 답변 완료 대상이 아니므로 직원 처리 대기로 전환했습니다.",
+                        level="WARNING",
+                        details={"change_request": True},
+                    )
+                    raise AutoAnswerProhibitedError(
+                        "현재 주문의 일정 변경은 실제 처리 확인이 필요합니다.",
+                        policy_reason="CURRENT_ORDER_ACTION_REQUIRED",
+                    )
                 # Delivery/installation schedules are routed before the rule
                 # engine so broad legacy shipping templates can never hide a
                 # missing order_id or a confirmed DPS date.
@@ -3941,6 +3958,53 @@ class AnswerService:
                     if key != "semantic"
                 }
             self._record_pipeline_trace(request, result)
+            # Persist the actual eligibility verdict with the draft.  The
+            # Dashboard must display this production decision, never rebuild
+            # semantic meaning from the inquiry while an operator is viewing
+            # it.  Auto-post records its later execution result separately.
+            trace_draft = {
+                "original_answer": result.answer,
+                "validation_status": str(
+                    (result.metadata.get("validator_result") or {}).get("status")
+                    if isinstance(result.metadata.get("validator_result"), dict)
+                    else result.metadata.get("validation_status") or ""
+                ),
+                "validator_result_json": result.metadata.get("validator_result") or {},
+                "review_status": "PENDING",
+                "posted": False,
+                "metadata_json": result.metadata,
+            }
+            # This first verdict is persisted for the operator and the later
+            # worker.  It must not turn an already-generated draft into a
+            # failed generation merely because diagnostic eligibility code is
+            # temporarily unavailable: the worker will re-check the actual
+            # hard-safety/workflow prerequisites before execution.  Record a
+            # fail-closed workflow trace instead, so neither Dashboard nor the
+            # worker has to invent a semantic explanation for the failure.
+            try:
+                trace_verdict = self.eligibility.evaluate(
+                    inquiry=inquiry,
+                    draft=trace_draft,
+                    route=str(result.metadata.get("selected_answer_route") or ""),
+                )
+            except Exception as error:  # pragma: no cover - defensive boundary
+                LOGGER.exception(
+                    "자동등록 적격성 trace 기록 실패: inquiry_id=%s", inquiry_id
+                )
+                trace_verdict = AutoProcessingEligibility(
+                    decision="BLOCKED",
+                    stage="WORKFLOW",
+                    reasons=("WORKFLOW_FAILURE",),
+                )
+                result.metadata["eligibility_trace_error"] = (
+                    error.__class__.__name__
+                )
+            result.metadata["production_decision_trace"] = {
+                "eligibility": trace_verdict.decision,
+                "blocking_reason_codes": list(trace_verdict.reasons),
+                "soft_reason_codes": list(trace_verdict.soft_reasons),
+                "auto_post": "NOT_ATTEMPTED",
+            }
             dps_metadata = (
                 request.metadata.get("dps")
                 if isinstance(request.metadata.get("dps"), dict)

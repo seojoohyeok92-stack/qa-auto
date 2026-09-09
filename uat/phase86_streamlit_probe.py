@@ -65,6 +65,13 @@ else:
                 }
 
         class DeterministicDps:
+            # The probe fakes the external lookup result only.  Reuse the
+            # production policy for current-order workflow decisions so the
+            # dashboard test cannot bypass DPS OFF/ON safety behaviour.
+            from services.dps_lookup_policy import DpsLookupPolicy
+
+            policy = DpsLookupPolicy()
+
             def enrich(self, request, **kwargs):
                 metadata = {
                     "lookup_required": True,

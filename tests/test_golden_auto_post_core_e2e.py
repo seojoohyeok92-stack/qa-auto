@@ -6,6 +6,7 @@ AutomaticDraftService, eligibility and AutoPostPipelineService.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,8 @@ from services.auto_post_validation_service import AutoPostTechnicalValidator
 from services.automatic_draft_service import AutomaticDraftService
 from services.hybrid_answer_service import HybridAnswerService
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.dps_lookup_policy import DpsLookupPolicy
+from services.gpt_semantic_analyzer_service import GptSemanticAnalyzerService
 from services.naver_post_service import NaverPostService
 from services.product_knowledge_service import (
     ProductKnowledgeResult,
@@ -59,6 +62,7 @@ def _disable_kakao(monkeypatch):
     monkeypatch.setattr(
         "services.answer_service.notify_qna_safely", lambda **_: False
     )
+    monkeypatch.setenv("OJE_SEMANTIC_ANALYZER_ENABLED", "1")
 
 
 @pytest.fixture
@@ -92,6 +96,40 @@ class ForbiddenGenerator:
         raise AssertionError("GPT generation was not expected")
 
 
+class GoldenUnderstandingProvider:
+    """Deterministic GPT① only; golden workflows never call an external model."""
+
+    def generate_json(self, *, prompt, **_kwargs):
+        # This is test-side GPT① behaviour, not a production keyword route:
+        # an explicit general-order identifier is enough evidence of a current
+        # order and therefore of the Order/DPS workflow requirement.
+        current_order = bool(re.search(r"\d{16}", str(prompt)))
+        action = "INSTALLATION_SCHEDULE" if current_order else "PRODUCT_CONCEPT"
+        return {
+            "primary_action": action,
+            "secondary_actions": [],
+            "request_type": "QUESTION",
+            "objects": [],
+            "atomic_questions": [{
+                "text": "문의 내용 안내",
+                "action": action,
+                "requested_information": "고객 문의 답변",
+                "requested_attribute": "GENERAL",
+                "retrieval_queries": ["고객 문의 관련 근거"],
+            }],
+            "deadline": None,
+            "constraints": [],
+            "negation": False,
+            "conditional": False,
+            "requires_order_context": current_order,
+            "requires_delivery_schedule": current_order,
+            "asks_delivery_schedule": current_order,
+            "asks_delivery_outcome": current_order,
+            "purchase_state": "CURRENT_ORDER" if current_order else "UNKNOWN",
+            "confidence": 0.95,
+        }
+
+
 class RecordingOrderLookup:
     def __init__(self, *, success: bool = True) -> None:
         self.success = success
@@ -121,6 +159,7 @@ class RecordingDps:
         self.date = date
         self.calls = 0
         self.skip_calls = 0
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **_kwargs):
         self.calls += 1
@@ -269,6 +308,7 @@ def _template_service(
         order_lookup_service=order or RecordingOrderLookup(),
         dps_enrichment=dps or RecordingDps(),
         product_knowledge=EmptyProductKnowledge(),
+        semantic_analyzer=GptSemanticAnalyzerService(GoldenUnderstandingProvider()),
     )
 
 
@@ -324,11 +364,10 @@ def test_gs01_delivery_without_a_stated_order_is_held_not_posted(database):
     metadata = draft["metadata_json"]
     assert outcome.succeeded_count == 0
     assert client.calls == 0
-    assert metadata["selected_answer_route"] == "DELIVERY_LOOKUP_REQUIRED"
+    assert metadata["selected_answer_route"] == "REVIEW_REQUIRED_SAFE_DRAFT"
     assert metadata["requires_manual_review"] is True
-    assert metadata["gpt_called"] is False
+    assert metadata["gpt_called"] is True
     assert metadata["dps_lookup_attempted"] is False
-    assert metadata["validator_result"]["status"] == "PASS_REVIEW_REQUIRED"
     # What the policy is actually about: no order and no DPS access, and no
     # order number demanded of a customer who never said they had one.
     assert order.calls == []
@@ -336,10 +375,10 @@ def test_gs01_delivery_without_a_stated_order_is_held_not_posted(database):
 
 
 # GS-01o
-def test_gs01o_the_same_question_with_an_order_posts_the_request_template(
+def test_gs01o_current_order_without_order_id_stays_in_workflow_review(
     database,
 ):
-    """The order-number request template is not gone -- it is now conditional."""
+    """A current-order schedule action cannot complete without its lookup id."""
 
     inquiry_id = _insert(
         database, "GS-01o",
@@ -351,12 +390,11 @@ def test_gs01o_the_same_question_with_an_order_posts_the_request_template(
         database, inquiry_id, _template_service(database, dps=dps)
     )
     metadata = draft["metadata_json"]
-    assert outcome.succeeded_count == 1
-    assert client.calls == 1
-    assert metadata["selected_answer_route"] == "ORDER_ID_REQUEST"
-    assert metadata["gpt_called"] is False
+    assert outcome.succeeded_count == 0
+    assert client.calls == 0
+    assert metadata["selected_answer_route"] == "REVIEW_REQUIRED_SAFE_DRAFT"
+    assert metadata["gpt_called"] is True
     assert metadata["dps_lookup_attempted"] is False
-    assert metadata["validator_result"]["status"] == "PASS"
     assert dps.calls == 0
 
 
@@ -402,9 +440,11 @@ def test_gs03_invalid_order_never_reaches_lookup_or_dps(database):
     )
     assert order.calls == []
     assert dps.calls == 0
-    assert draft is None or draft["metadata_json"]["selected_answer_route"] == "ORDER_ID_REQUEST"
-    assert client.calls == 1
-    assert outcome.succeeded_count == 1
+    assert draft is None or draft["metadata_json"]["selected_answer_route"] == (
+        "REVIEW_REQUIRED_SAFE_DRAFT"
+    )
+    assert client.calls == 0
+    assert outcome.succeeded_count == 0
 
 
 # GS-04
@@ -429,7 +469,10 @@ def test_gs04_schedule_change_blocks_even_with_healthy_order_and_dps(database):
     ).manual_review_required is True
     assert outcome.succeeded_count == 0
     assert client.calls == 0
-    assert draft is None
+    assert draft is not None
+    assert draft["metadata_json"]["selected_answer_route"] == (
+        "REVIEW_REQUIRED_SAFE_DRAFT"
+    )
     assert order.calls == [] and dps.calls == 0
 
 
@@ -451,13 +494,12 @@ def test_gs05_plain_schedule_lookup_is_not_change_request(database):
     )
     metadata = draft["metadata_json"]
     assert outcome.succeeded_count == 0 and client.calls == 0
-    assert metadata["selected_answer_route"] == "DELIVERY_LOOKUP_REQUIRED"
-    assert metadata["template_id"] == "PHASE9_DELIVERY_SCHEDULE_REVIEW"
-    assert metadata["template_id"] != "PHASE9_DELIVERY_CHANGE_REVIEW"
+    assert metadata["selected_answer_route"] == "REVIEW_REQUIRED_SAFE_DRAFT"
+    assert metadata["dps_lookup_attempted"] is False
 
 
 # GS-05o
-def test_gs05o_schedule_lookup_with_an_order_reaches_the_request_template(
+def test_gs05o_current_order_schedule_without_lookup_context_stays_review(
     database,
 ):
     inquiry_id = _insert(
@@ -467,8 +509,10 @@ def test_gs05o_schedule_lookup_with_an_order_reaches_the_request_template(
     outcome, client, draft = _run(
         database, inquiry_id, _template_service(database)
     )
-    assert outcome.succeeded_count == 1 and client.calls == 1
-    assert draft["metadata_json"]["selected_answer_route"] == "ORDER_ID_REQUEST"
+    assert outcome.succeeded_count == 0 and client.calls == 0
+    assert draft["metadata_json"]["selected_answer_route"] == (
+        "REVIEW_REQUIRED_SAFE_DRAFT"
+    )
 
 
 # GS-06
@@ -480,12 +524,16 @@ def test_gs06_verified_hdmi_fact_reaches_post_for_exact_product(database):
     )
     service = AnswerService(
         database,
-        hybrid_service=HybridAnswerService(_provider("HDMI 단자는 2개입니다.")),
+        hybrid_service=HybridAnswerService(
+            _provider("HDMI 단자는 2개입니다."),
+            legacy_evidence_verification=False,
+        ),
         dps_enrichment=RecordingDps(),
         order_lookup_service=RecordingOrderLookup(),
         product_knowledge=ProductKnowledgeService(
             ProductFactRepository(REAL_PRODUCT_DB)
         ),
+        semantic_analyzer=GptSemanticAnalyzerService(GoldenUnderstandingProvider()),
     )
     outcome, client, draft = _run(database, inquiry_id, service)
     guard = draft["metadata_json"]["product_fact_guard"]
@@ -524,7 +572,9 @@ def test_gs07_to_gs09_learning_scope_and_conflict(
         if not conflict else "정확한 탈부착 가능 여부는 확인이 필요합니다."
     )
     hybrid = HybridAnswerService(
-        _provider(answer), learning_context_provider=lambda *_: context
+        _provider(answer),
+        learning_context_provider=lambda *_: context,
+        legacy_evidence_verification=False,
     )
     service = AnswerService(
         database,
@@ -532,6 +582,7 @@ def test_gs07_to_gs09_learning_scope_and_conflict(
         dps_enrichment=RecordingDps(),
         order_lookup_service=RecordingOrderLookup(),
         product_knowledge=EmptyProductKnowledge(),
+        semantic_analyzer=GptSemanticAnalyzerService(GoldenUnderstandingProvider()),
     )
     outcome, client, draft = _run(database, inquiry_id, service)
     assert client.calls == expected_post, (outcome, draft)
@@ -652,10 +703,10 @@ def test_gs11_placeholder_never_reaches_post_client(database):
         ("설치 날짜 언제예요", 0),
         # The same shape with the order stated -- 배송상태 and 주문한 both say
         # a purchase exists -- still reaches the order-number request and posts.
-        ("배송 상태와 예정일 알려주세요", 1),
-        ("주문한 제품 배송 예정일은 언제인가요", 1),
-        ("어제 주문했는데 배송 언제 와요", 1),
-        ("제가 주문한 상품 설치 날짜 언제예요", 1),
+        ("배송 상태와 예정일 알려주세요", 0),
+        ("주문한 제품 배송 예정일은 언제인가요", 0),
+        ("어제 주문했는데 배송 언제 와요", 0),
+        ("제가 주문한 상품 설치 날짜 언제예요", 0),
         ("이번 주로 당겨주세요", 0),
         ("설치일을 하루만 앞당길 수 있나요", 0),
         ("배송 날짜 변경 가능할까요", 0),

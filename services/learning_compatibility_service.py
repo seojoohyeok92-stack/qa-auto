@@ -607,7 +607,31 @@ class LearningCompatibilityService:
         # whatever that decides: a hard reject keeps its reason, and an eligible
         # candidate keeps the mismatch as a ranking penalty and a recorded
         # label for GPT ② to read.
-        strict = profile.strict_product_fact or bool(query_is_product_fact)
+        # A product-spec question may legitimately need a company policy or
+        # procedure candidate (for example collection or service handling).
+        # The candidate's persisted scope, not a topic keyword inferred from
+        # the new question, determines whether its contents are a model fact.
+        # MODEL/VARIANT facts stay strict; POLICY/GLOBAL evidence reaches GPT②
+        # for semantic relevance and sufficiency judgement.
+        explicit_scope = str(metadata.get("product_scope") or "").upper()
+        # A missing scope is not evidence that a row is a general policy.  In
+        # particular, many pre-scope Learning rows carry an explicit source
+        # model code while their wording is too sparse for the old lexical
+        # profiler to recognise a specification.  If GPT① says the customer
+        # needs a product fact, that explicit model provenance makes a
+        # different model mechanically incompatible.  A source deliberately
+        # persisted as POLICY/GLOBAL remains recallable for GPT②; provenance
+        # alone never suppresses it.
+        strict = profile.strict_product_fact or bool(
+            query_is_product_fact
+            and (
+                profile.scope not in {"POLICY", "GLOBAL"}
+                or (
+                    bool(candidate_product.model_code)
+                    and explicit_scope not in {"POLICY", "GLOBAL"}
+                )
+            )
+        )
         variant = profile.variant_sensitive or profile.scope in {"MODEL", "VARIANT"}
         current = current_product
         candidate = candidate_product

@@ -49,6 +49,10 @@ os.environ.setdefault("NAVER_AUTO_SYNC_ENABLED", "false")
 os.environ.setdefault("DPS_SESSION_MONITOR_ENABLED", "false")
 os.environ.setdefault("DPS_SESSION_KEEPALIVE_ENABLED", "false")
 os.environ.setdefault("DPS_PASSIVE_IDLE_ENABLED", "false")
+# Production defaults live DPS reads to OFF.  The established DPS regression
+# corpus explicitly exercises the retained ON architecture; individual OFF
+# tests override this value with ``monkeypatch``.
+os.environ.setdefault("DPS_AUTOMATIC_LOOKUP_ENABLED", "true")
 
 
 # --- network egress guard --------------------------------------------------

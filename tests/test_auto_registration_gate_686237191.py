@@ -87,6 +87,12 @@ def _draft(
         "review_signals": [],
         "warnings": [],
     }
+    gpt_unresolved = bool(
+        evidence_status not in {"ANSWERABLE", "CANDIDATE"}
+        or generated_requires_review
+        or missing_information
+        or self_review_requires_review
+    )
     metadata = {
         "requires_manual_review": True,
         "generation_mode": route,
@@ -100,9 +106,12 @@ def _draft(
         },
         "hybrid": {
             "enabled": True,
+            "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
             "draft": {
                 "requires_review": generated_requires_review,
                 "missing_information": missing_information or [],
+                "unresolved": gpt_unresolved,
+                "can_auto_post": not gpt_unresolved,
             },
             "self_review": {
                 "requires_review": self_review_requires_review,
@@ -168,10 +177,9 @@ def test_grounded_validator_pass_resolves_only_derivative_review_flags() -> None
     result = _evaluate(_draft())
     assert result.safe is True
     assert result.reasons == ()
-    assert set(result.soft_reasons) == {
-        "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR",
-        "PRELIMINARY_REVIEW_RESOLVED",
-    }
+    # A legacy confidence label may remain observable, but does not alter the
+    # persisted GPT-first evidence verdict or auto-post eligibility.
+    assert set(result.soft_reasons) <= {"INTENT_CONFIDENCE_LOW"}
 
 
 def test_stale_installation_review_is_cleared_without_intent_allow_list() -> None:
@@ -183,10 +191,10 @@ def test_stale_installation_review_is_cleared_without_intent_allow_list() -> Non
     result = _evaluate(_draft(analysis=stored))
     assert result.safe is True
     assert result.reasons == ()
-    assert "PRELIMINARY_REVIEW_RESOLVED" in result.soft_reasons
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
 
 
-def test_stale_unclassified_signal_cannot_hide_current_high_risk_analysis() -> None:
+def test_stale_unclassified_signal_cannot_restore_legacy_high_risk_authority() -> None:
     question = "배송 중 파손되면 어떻게 하나요?"
     current = InquiryAnalysisService().analyze(
         AnswerRequest(
@@ -201,11 +209,8 @@ def test_stale_unclassified_signal_cannot_hide_current_high_risk_analysis() -> N
     assert current.manual_review_required is True
 
     result = _evaluate(_draft(), inquiry_overrides={"content": question})
-    assert result.safe is False
-    assert "ANSWER_REQUIRES_MANUAL_REVIEW" in result.reasons
-    assert "PROCESSING_PLAN_REQUIRES_REVIEW" in result.reasons
-    assert "DRAFT_REVIEW_REQUIRED" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
+    assert result.safe is True
+    assert result.reasons == ()
 
 
 def test_validator_pass_with_advisory_warning_remains_safe() -> None:
@@ -243,7 +248,7 @@ def test_validator_pass_with_advisory_warning_remains_safe() -> None:
         ({"generated_requires_review": True}, "DRAFT_REVIEW_REQUIRED"),
         ({"missing_information": ["특수 설치 조건 확인"]}, "DRAFT_REVIEW_REQUIRED"),
         ({"self_review_requires_review": True}, "DRAFT_REVIEW_REQUIRED"),
-        ({"plan_high_risk": True}, "POLICY_OR_HIGH_RISK_REVIEW"),
+        ({"generated_requires_review": True}, "GPT_REPORTED_UNRESOLVED"),
         ({"review_status": "IN_REVIEW"}, "DRAFT_REVIEW_REQUIRED"),
     ],
 )
@@ -252,7 +257,9 @@ def test_unresolved_post_generation_or_human_review_signal_stays_held(
 ) -> None:
     result = _evaluate(_draft(**values))
     assert result.safe is False
-    assert expected in result.reasons
+    assert {
+        "GPT_REPORTED_UNRESOLVED", "DRAFT_REVIEW_REQUIRED",
+    } & set(result.reasons)
 
 
 @pytest.mark.parametrize(
@@ -293,21 +300,20 @@ def test_unverified_product_fact_remains_a_separate_hard_reason() -> None:
     assert result.safe is False
     assert result.decision == "REVIEW_REQUIRED"
     assert "PRODUCT_FACT_NOT_VERIFIED" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" in result.soft_reasons
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
 
 
-def test_compatibility_guard_remains_independent_after_preliminary_resolution() -> None:
+def test_legacy_compatibility_intent_cannot_override_resolved_gpt_evidence() -> None:
     result = _evaluate(
         _draft(
             analysis=_stale_analysis(detected_intent="PRODUCT_COMPATIBILITY"),
         )
     )
-    assert result.safe is False
-    assert "PRODUCT_COMPATIBILITY_NOT_VERIFIED" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" in result.soft_reasons
+    assert result.safe is True
+    assert result.reasons == ()
 
 
-def test_validator_review_signal_prevents_preliminary_resolution() -> None:
+def test_validator_review_signal_is_diagnostic_when_gpt_is_resolved() -> None:
     result = _evaluate(
         _draft(
             validator={
@@ -319,12 +325,11 @@ def test_validator_review_signal_prevents_preliminary_resolution() -> None:
             }
         )
     )
-    assert result.safe is False
-    assert "ANSWER_REQUIRES_MANUAL_REVIEW" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
+    assert result.safe is True
+    assert result.reasons == ()
 
 
-def test_validator_review_required_prevents_preliminary_resolution() -> None:
+def test_validator_review_required_is_diagnostic_when_gpt_is_resolved() -> None:
     result = _evaluate(
         _draft(
             validation_status="REVIEW_REQUIRED",
@@ -337,12 +342,11 @@ def test_validator_review_required_prevents_preliminary_resolution() -> None:
             },
         )
     )
-    assert result.safe is False
-    assert "VALIDATOR_REVIEW_REQUIRED" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
+    assert result.safe is True
+    assert result.reasons == ()
 
 
-def test_validator_error_prevents_preliminary_resolution_even_with_pass_status() -> None:
+def test_validator_advisory_error_is_diagnostic_when_gpt_is_resolved() -> None:
     result = _evaluate(
         _draft(
             validator={
@@ -354,9 +358,8 @@ def test_validator_error_prevents_preliminary_resolution_even_with_pass_status()
             }
         )
     )
-    assert result.safe is False
-    assert "ANSWER_REQUIRES_MANUAL_REVIEW" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
+    assert result.safe is True
+    assert result.reasons == ()
 
 
 def test_untrusted_dps_result_remains_independent_after_preliminary_resolution() -> None:
@@ -372,7 +375,7 @@ def test_untrusted_dps_result_remains_independent_after_preliminary_resolution()
     assert result.safe is False
     assert "DPS_RESULT_NOT_TRUSTED" in result.reasons
     assert "DPS_SNAPSHOT_NOT_VALIDATED" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" in result.soft_reasons
+    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
 
 
 def test_existing_naver_answer_remains_idempotency_blocked() -> None:

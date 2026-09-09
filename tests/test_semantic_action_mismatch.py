@@ -232,8 +232,14 @@ def evaluate_eligibility(drafted, route="TEMPLATE"):
     )
 
 
-def test_a_recorded_mismatch_blocks_auto_post() -> None:
+def test_a_gpt_reported_unresolved_atom_blocks_auto_post() -> None:
     decision = evaluate_eligibility(draft({
+        "semantic_routing": {"understanding": {"usable": True}},
+        "hybrid": {
+            "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+            "draft": {"unresolved": ["collection"], "can_auto_post": False},
+        },
+        # Legacy action metadata may coexist, but it has no publish authority.
         "semantic_action_support": evaluate(
             understanding("COLLECTION"),
             route="TEMPLATE", template_id="설치상품/공통안내",
@@ -241,7 +247,8 @@ def test_a_recorded_mismatch_blocks_auto_post() -> None:
     }))
 
     assert decision.decision == "REVIEW_REQUIRED"
-    assert REASON_CODE in decision.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in decision.reasons
+    assert REASON_CODE not in decision.reasons
     assert decision.safe is False
 
 
@@ -305,8 +312,8 @@ def test_eligibility_holds_no_provider() -> None:
     assert "GptSemanticAnalyzerService" not in source
 
 
-def test_the_existing_deadline_gate_is_untouched() -> None:
-    """Both gates hold the deadline case, independently."""
+def test_a_legacy_deadline_label_has_no_worker_publish_authority() -> None:
+    """Deadline evidence must be resolved by GPT/workflow, not a keyword gate."""
 
     decision = evaluate_eligibility(
         draft(), route="TEMPLATE",
@@ -328,6 +335,5 @@ def test_the_existing_deadline_gate_is_untouched() -> None:
         route="TEMPLATE",
     )
 
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" in deadline.reasons
-    assert REASON_CODE in deadline.reasons
-    assert deadline.decision == "REVIEW_REQUIRED"
+    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" not in deadline.reasons
+    assert REASON_CODE not in deadline.reasons

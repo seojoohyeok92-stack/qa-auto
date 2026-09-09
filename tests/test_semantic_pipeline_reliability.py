@@ -37,6 +37,7 @@ from services.auto_processing_eligibility_service import (
 )
 from services.semantic_action_support import REASON_CODE
 from services.inquiry_processing_plan_service import InquiryProcessingPlanService
+from services.dps_lookup_policy import DpsLookupPolicy
 from services.gpt_governance_service import GovernedHybridAnswerService
 import services.answer_service as answer_service_module
 
@@ -185,6 +186,7 @@ class NoDps:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         return self.skip_for_phase9(request)
@@ -693,7 +695,8 @@ def test_an_already_held_answer_is_still_understood_before_routing(
 
     provider = SemanticProvider()
     install(monkeypatch, provider)
-    # A deadline question is already held by DELIVERY_DEADLINE_NOT_CONFIRMABLE.
+    # GPT/provider availability, not a worker keyword gate, determines the
+    # safe review outcome when this draft cannot obtain a GPT-first verdict.
     inquiry_id = ask(
         store, "혹시 오늘 주문하면 9일까지 받아볼 수 있을까요?", key="held",
     )
@@ -702,7 +705,8 @@ def test_an_already_held_answer_is_still_understood_before_routing(
     assert error is None
     decision = verdict(store, inquiry_id, draft)
     assert decision.decision == "REVIEW_REQUIRED"
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" in decision.reasons
+    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" not in decision.reasons
+    assert "UNDERSTANDING_UNAVAILABLE" in decision.reasons
     metadata = draft.get("metadata_json") or {}
     router = (metadata.get("semantic_analysis") or {}).get("router") or {}
     # Semantic-first routing runs before the Plan is known to be held.  The

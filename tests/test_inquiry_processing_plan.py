@@ -19,6 +19,7 @@ from repositories.inquiry_repository import InquiryRepository
 from repositories.workflow_repository import WorkflowRepository
 from answer.models import AnswerResult, AnswerStatus
 from services.answer_service import AnswerService
+from services.dps_lookup_policy import DpsLookupPolicy
 from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
 )
@@ -52,6 +53,11 @@ class FakeDps:
         self.metadata = dict(metadata or {})
         self.calls = 0
         self.skip_calls = 0
+        # Keep the deterministic double on the same workflow-decision
+        # interface as the production enrichment service.  The fake owns only
+        # the external lookup result; whether an inquiry requires that action
+        # is production policy and must not be silently bypassed in tests.
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.calls += 1

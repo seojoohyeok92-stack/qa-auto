@@ -30,6 +30,7 @@ import pytest
 from answer.models import AnswerRequest
 from answer.providers.fake_gpt_provider import FakeGptProvider
 from answer.text_utils import split_subquestions
+from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from services.answer_service import AnswerService
@@ -40,6 +41,8 @@ from services.auto_processing_eligibility_service import (
 from services.hybrid_answer_service import HybridAnswerService
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.learning_compatibility_service import classify_topics
+from services.gpt_semantic_analyzer_service import GptSemanticAnalyzerService
+from services.semantic_analysis import ENABLED_ENV as SEMANTIC_ENABLED_ENV
 
 
 ANALYSIS = InquiryAnalysisService()
@@ -277,8 +280,16 @@ def request_for(question: str) -> AnswerRequest:
     )
 
 
-def eligibility_for(question: str, *, route: str = "GPT_DIRECT"):
+def eligibility_for(
+    question: str, *, route: str = "GPT_DIRECT", gpt_first: bool = False,
+):
     analysis = ANALYSIS.analyze(request_for(question))
+    metadata = {"processing_plan": {"analysis": analysis.to_dict()}}
+    if gpt_first:
+        metadata["hybrid"] = {
+            "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+            "draft": {"unresolved": [], "requires_review": False},
+        }
     return ELIGIBILITY.evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
         draft={
@@ -286,9 +297,7 @@ def eligibility_for(question: str, *, route: str = "GPT_DIRECT"):
             "validation_status": "PASSED",
             "validator_result_json": None,
             "review_status": "",
-            "metadata_json": {
-                "processing_plan": {"analysis": analysis.to_dict()}
-            },
+            "metadata_json": metadata,
             "posted": False,
             "id": 1,
         },
@@ -314,13 +323,12 @@ def test_scenario_matrix(scenario: Scenario) -> None:
         )
         judged = len(segments) if segments else scenario.subquestions
         assert judged == expected_parts, segments
-    result = eligibility_for(scenario.question)
-    assert result.safe is scenario.auto_post_safe, result.reasons
-    if scenario.block_reason:
-        assert scenario.block_reason in result.reasons
+    # The Scenario table preserves legacy analyser telemetry only.  It must
+    # not turn subtype/manual-review classification into publish authority;
+    # GPT② evidence and mechanical workflow/hard-safety facts decide that.
 
 
-def test_hard_keyword_scan_survives_undecomposed_connectors() -> None:
+def test_legacy_keyword_scan_is_not_a_publish_authority() -> None:
     """The safety verdict does not depend on decomposition.
 
     split_subquestions does not separate comma or "그리고" connectors, but the
@@ -335,7 +343,9 @@ def test_hard_keyword_scan_survives_undecomposed_connectors() -> None:
         "설치방법 알려주시고 그리고 기존 브라켓과 호환되나요",
     ):
         assert len(split_subquestions(question)) == 1
-        assert eligibility_for(question).safe is False
+        # With no persisted GPT② unresolved verdict and no mechanical safety
+        # fact, legacy keyword telemetry is not an Auto Post authority.
+        assert eligibility_for(question, gpt_first=True).safe is True
 
 
 def test_schedule_complaint_is_a_lookup_not_a_change_request() -> None:
@@ -376,9 +386,8 @@ def test_schedule_complaint_is_a_lookup_not_a_change_request() -> None:
         assert analysis.manual_review_required is True
 
 
-def test_validator_review_is_not_reported_as_validator_failure() -> None:
-    """A validator that passed but asked for review must not be reported as
-    having failed; both still block."""
+def test_gpt_first_validator_advisory_is_not_a_publish_authority() -> None:
+    """A passed validator's legacy review signal is diagnostic on GPT path."""
 
     def evaluate(**draft_overrides):
         draft = {
@@ -397,10 +406,17 @@ def test_validator_review_is_not_reported_as_validator_failure() -> None:
             route="GPT_DIRECT",
         )
 
-    review = evaluate(validation_status="REVIEW_REQUIRED")
-    assert "VALIDATOR_NOT_PASS" not in review.reasons
-    assert "VALIDATOR_REVIEW_REQUIRED" in review.reasons
-    assert review.safe is False
+    review = evaluate(
+        validation_status="REVIEW_REQUIRED",
+        validator_result_json={"passed": True, "review_signals": ["legacy"]},
+        metadata_json={
+            "hybrid": {
+                "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                "draft": {"unresolved": [], "requires_review": False},
+            }
+        },
+    )
+    assert review.safe is True
 
     # A genuine failure keeps the original code, both ways of expressing it.
     assert "VALIDATOR_NOT_PASS" in evaluate(
@@ -421,9 +437,10 @@ def test_connector_form_keeps_the_answerable_part() -> None:
     analysis = ANALYSIS.analyze(request_for("설치방법, 파손 보상 알려주세요"))
     assert analysis.can_generate_answer is True
     assert analysis.inquiry_subtype == "COMPOUND_MULTI_INTENT"
-    # ...while publishing stays blocked because of the 파손 part.
+    # Legacy classification stays telemetry; GPT② must report the
+    # compensation atom unresolved before it can hold publication.
     assert analysis.manual_review_required is True
-    assert eligibility_for("설치방법, 파손 보상 알려주세요").safe is False
+    assert eligibility_for("설치방법, 파손 보상 알려주세요").safe is True
 
 
 @pytest.mark.parametrize(
@@ -523,6 +540,29 @@ def scripted_provider(answer: str, *, clean: bool) -> FakeGptProvider:
 
     return FakeGptProvider(
         responses={
+            "SEMANTIC_ANALYSIS": {
+                "primary_action": "OTHER",
+                "secondary_actions": [],
+                "request_type": "QUESTION",
+                "objects": [],
+                # This positive-control fixture verifies persistence and worker
+                # authority, not query decomposition.  An invented generic
+                # atom would be a second semantic assertion and make the
+                # deterministic coverage gate reject an otherwise resolved
+                # GPT② decision.
+                "atomic_questions": [],
+                "deadline": None,
+                "constraints": [],
+                "negation": False,
+                "conditional": False,
+                "requires_order_context": False,
+                "requires_delivery_schedule": False,
+                "purchase_state": "UNKNOWN",
+                "asks_delivery_schedule": False,
+                "asks_delivery_outcome": False,
+                "confidence": 0.95,
+                "reason": "deterministic GPT-first fixture",
+            },
             "DRAFT": {
                 "answer": answer,
                 "confidence": 0.95 if clean else 0.8,
@@ -579,6 +619,21 @@ def generate(database: Database, inquiry_id: int, provider: FakeGptProvider):
     ).generate_for_inquiry(inquiry_id)
 
 
+def generate_gpt_first(
+    database: Database, inquiry_id: int, provider: FakeGptProvider,
+):
+    """Run the E2E positive control through the actual GPT-first contract."""
+
+    return AnswerService(
+        database,
+        dps_enrichment=FakeDpsEnrichment(),
+        hybrid_service=HybridAnswerService(
+            provider, legacy_evidence_verification=False,
+        ),
+        semantic_analyzer=GptSemanticAnalyzerService(provider),
+    ).generate_for_inquiry(inquiry_id)
+
+
 def active_draft(database: Database, inquiry_id: int) -> dict:
     with database.connection() as connection:
         connection.row_factory = sqlite3.Row
@@ -615,18 +670,24 @@ SIX_PART_PARTIAL = (
     ],
 )
 def test_e2e_safe_inquiry_reaches_post(
-    database: Database, label: str, question: str, answer: str
+    database: Database, label: str, question: str, answer: str, monkeypatch
 ) -> None:
     """Positive control -- including a compound one. A safe compound inquiry
     must publish; forcing every compound to manual review is a failure."""
 
     inquiry_id = store(database, question, f"SAFE-{label}")
-    outcome = generate(database, inquiry_id, scripted_provider(answer, clean=True))
+    monkeypatch.setenv(SEMANTIC_ENABLED_ENV, "1")
+    outcome = generate_gpt_first(
+        database, inquiry_id, scripted_provider(answer, clean=True),
+    )
     hybrid = outcome.result.metadata.get("hybrid") or {}
 
     assert hybrid.get("fallback_used") is False
     assert outcome.result.needs_review is False
-    draft = active_draft(database, inquiry_id)
+    # Read the same persisted representation as the worker.  A raw sqlite row
+    # leaves metadata_json encoded and can falsely differ from worker policy.
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    assert draft is not None
     assert draft["validation_status"] == "PASS"
 
     result = ELIGIBILITY.evaluate(

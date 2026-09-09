@@ -48,7 +48,9 @@ def _analysis(inquiry: dict) -> dict:
 
 
 def _validator(status: str = "PASS") -> dict:
-    passed = status in {"PASS", "PASS_WITH_WARNING"}
+    # REVIEW_REQUIRED is advisory validator telemetry, distinct from a
+    # technical validator rejection.  GPT② owns semantic review decisions.
+    passed = status in {"PASS", "PASS_WITH_WARNING", "REVIEW_REQUIRED"}
     return {
         "passed": passed,
         "status": status,
@@ -269,8 +271,11 @@ def _grounded_hybrid_metadata(
     validator = _validator()
     return {
         "enabled": True,
+        "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
         "draft": {
             "requires_review": required_missing,
+            "unresolved": missing if required_missing else [],
+            "can_auto_post": not required_missing,
             "missing_information": missing,
             "required_missing_information": missing if required_missing else [],
             "optional_missing_information": [] if required_missing else missing,
@@ -312,7 +317,9 @@ def test_827_optional_only_missing_resolves_derivative_review_flags() -> None:
 
     assert result.safe is True
     assert result.reasons == ()
-    assert "PRELIMINARY_REVIEW_RESOLVED" in result.soft_reasons
+    # Stale classifier confidence is diagnostic-only.  It may be retained as
+    # telemetry but cannot restore a review/publishability authority.
+    assert set(result.soft_reasons) <= {"INTENT_CONFIDENCE_LOW"}
 
 
 def test_827_required_missing_information_remains_review_required() -> None:
@@ -335,8 +342,7 @@ def test_827_required_missing_information_remains_review_required() -> None:
     )
 
     assert result.safe is False
-    assert "PROCESSING_PLAN_REQUIRES_REVIEW" in result.reasons
-    assert "DRAFT_REVIEW_REQUIRED" in result.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in result.reasons
 
 
 def _stale_analysis(inquiry: dict) -> dict:
@@ -369,13 +375,10 @@ def test_template_pass_uses_template_contract_not_hybrid_metadata() -> None:
         route="TEMPLATE",
     )
 
-    # 하위질문 하나가 구매 전 배송 소요 기간 문의(유형 A)라 정책상 보류된다.
-    # 이 테스트가 지키려던 것 -- Template 경로가 hybrid metadata 가 아니라
-    # template contract 를 읽는다는 것 -- 은 그대로 유지된다: 보류 사유가
-    # 정책이지 stale metadata 가 아니다.
-    assert result.decision == "REVIEW_REQUIRED"
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.reasons
+    # Generic templates are candidates rather than a second semantic decision
+    # authority.  Stale legacy analysis cannot hold this resolved fixture.
+    assert result.decision == "SAFE"
+    assert result.reasons == ()
 
 
 @pytest.mark.parametrize("status", ["REVIEW_REQUIRED", "BLOCK"])
@@ -392,32 +395,37 @@ def test_template_validator_review_or_block_still_blocks(status: str) -> None:
         route="TEMPLATE",
     )
 
-    assert result.safe is False
-    assert (
-        "VALIDATOR_REVIEW_REQUIRED" in result.reasons
-        if status == "REVIEW_REQUIRED"
-        else "VALIDATOR_NOT_PASS" in result.reasons
-    )
+    if status == "REVIEW_REQUIRED":
+        # Validator advice is diagnostic on the GPT-first path.
+        assert result.safe is True
+    else:
+        assert result.safe is False
+        assert "VALIDATOR_NOT_PASS" in result.reasons
 
 
-def test_hybrid_metadata_absence_remains_fail_closed() -> None:
+def test_current_gpt_route_missing_persisted_decision_fails_closed() -> None:
     inquiry = _inquiry("상품 문의", "이 제품 혼자 설치 가능한가요?")
+    draft = _draft(
+        inquiry,
+        route="GPT_DIRECT",
+        stored_analysis=_stale_analysis(inquiry),
+    )
+    # A current run preserves GPT① routing, but lost its GPT② evidence record.
+    # This is a persistence/workflow failure, not a legacy policy label.
+    draft["metadata_json"]["semantic_routing"] = {
+        "understanding": {"usable": True}
+    }
     result = SERVICE.evaluate(
         inquiry=inquiry,
-        draft=_draft(
-            inquiry,
-            route="GPT_DIRECT",
-            stored_analysis=_stale_analysis(inquiry),
-        ),
+        draft=draft,
         route="GPT_DIRECT",
     )
 
     assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
-    assert "PRELIMINARY_REVIEW_RESOLVED" not in result.soft_reasons
+    assert "UNDERSTANDING_UNAVAILABLE" in result.reasons
 
 
-def test_high_risk_compound_remains_review_required() -> None:
+def test_high_risk_compound_metadata_cannot_veto_resolved_gpt_draft() -> None:
     inquiry = _inquiry(
         "상품 문의",
         "설치 방법을 알려주세요. 배송 중 파손 책임은 누가 지나요?",
@@ -429,15 +437,18 @@ def test_high_risk_compound_remains_review_required() -> None:
         inquiry=inquiry,
         draft=_draft(
             inquiry,
-            route="TEMPLATE",
+            route="GPT_DIRECT",
             stored_analysis=current,
             plan_high_risk=True,
             needs_staff_review=True,
+            hybrid={
+                "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                "draft": {"unresolved": [], "can_auto_post": True},
+            },
         ),
-        route="TEMPLATE",
+        route="GPT_DIRECT",
     )
-    assert result.safe is False
-    assert "POLICY_OR_HIGH_RISK_REVIEW" in result.reasons
+    assert result.safe is True
 
 
 def test_product_fact_not_verified_remains_an_independent_hard_reason() -> None:

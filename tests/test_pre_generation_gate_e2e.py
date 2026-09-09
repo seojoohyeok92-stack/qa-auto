@@ -88,22 +88,26 @@ def notifications(monkeypatch):
 
 
 # ------------------------------------------------------------------ A / J
-def test_a_high_risk_inquiry_is_blocked_before_any_generation(
+def test_a_legacy_high_risk_label_does_not_block_generation(
     database, notifications
 ):
-    """The existing policy block: no draft at all, and reported as a decision."""
-
-    from answer.exceptions import AutoAnswerProhibitedError
+    """A classifier label is not a pre-generation publication authority."""
 
     inquiry_id = create_inquiry(database, HIGH_RISK)
-    hybrid = CountingHybrid()
-    service = AnswerService(
-        database, engine=CountingEngine(rule_result()), hybrid_service=hybrid,
+    engine = CountingEngine(
+        AnswerResult(
+            status=AnswerStatus.GENERATED, category="PRODUCT", reason="Rule",
+            answer="문의하신 내용은 확인 후 안내드리겠습니다.", provider="rules",
+            auto_answerable=True, needs_review=False, matched_rule="PRODUCT",
+        )
     )
-    with pytest.raises(AutoAnswerProhibitedError):
-        service.generate_for_inquiry(inquiry_id)
+    service = AnswerService(
+        database, engine=engine,
+    )
+    outcome = service.generate_for_inquiry(inquiry_id)
 
-    assert hybrid.calls == 0, "a provider was called for a prohibited inquiry"
+    assert outcome.draft is not None
+    assert engine.requests
 
 
 def test_an_ordinary_inquiry_still_reaches_generation(database, notifications):
@@ -209,7 +213,7 @@ def test_hold_reason_failure_does_not_lose_the_notification(
     ).generate_for_inquiry(inquiry_id)
 
     assert len(notifications) == 1
-    assert notifications[0]["hold_reason"] == ""
+    assert notifications[0]["hold_reason"] == "ELIGIBILITY_EVALUATION_FAILED"
 
 
 # --------------------------------------------- no real outbound side effects

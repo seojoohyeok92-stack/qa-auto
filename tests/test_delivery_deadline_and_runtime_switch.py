@@ -108,14 +108,23 @@ POLICY_ANSWER = (
 )
 
 
-def draft(*, plan: dict | None = None, answer: str = POLICY_ANSWER) -> dict:
+def draft(*, plan: dict | None = None, answer: str = POLICY_ANSWER,
+          unresolved: bool = False) -> dict:
     return {
         "original_answer": answer,
         "validation_status": "PASS",
         "validator_result_json": {"passed": True},
         "review_status": "PENDING",
         "posted": False,
-        "metadata_json": {"processing_plan": {"analysis": {}, **(plan or {})}},
+        "metadata_json": {
+            "processing_plan": {"analysis": {}, **(plan or {})},
+            "semantic_routing": {"understanding": {"usable": True}},
+            "hybrid": {
+                "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+                "draft": {"unresolved": (["schedule unavailable"] if unresolved else []),
+                          "can_auto_post": not unresolved},
+            },
+        },
     }
 
 
@@ -128,10 +137,10 @@ def evaluate(inquiry, drafted, route="TEMPLATE"):
 def test_the_reported_case_is_no_longer_auto_postable() -> None:
     """The exact production inquiry, with the exact answer it received."""
 
-    decision = evaluate(DEADLINE_INQUIRY, draft())
+    decision = evaluate(DEADLINE_INQUIRY, draft(unresolved=True))
 
     assert decision.decision == "REVIEW_REQUIRED"
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" in decision.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in decision.reasons
     assert decision.safe is False
 
 
@@ -139,9 +148,9 @@ def test_the_reported_case_is_no_longer_auto_postable() -> None:
 def test_no_route_may_publish_an_unconfirmable_deadline(route) -> None:
     """The same unanswerable question also reaches GPT, so the gate is global."""
 
-    decision = evaluate(DEADLINE_INQUIRY, draft(), route=route)
+    decision = evaluate(DEADLINE_INQUIRY, draft(unresolved=True), route=route)
 
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" in decision.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in decision.reasons
 
 
 def test_a_general_delivery_policy_question_still_auto_posts() -> None:
@@ -163,7 +172,7 @@ def test_a_confirmed_schedule_answers_the_deadline_normally() -> None:
             "requires_dps_lookup": True,
             "dps_lookup_status": "SUCCESS",
             "valid_dps_snapshot_available": True,
-        }),
+        }, unresolved=False),
         route="DELIVERY_WITH_INSTALLATION_DATE",
     )
 
@@ -180,17 +189,17 @@ def test_a_lookup_that_did_not_land_still_blocks_the_deadline() -> None:
             "requires_dps_lookup": True,
             "dps_lookup_status": "SUCCESS",
             "valid_dps_snapshot_available": False,
-        }),
+        }, unresolved=True),
         route="GPT_FALLBACK",
     )
 
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" in decision.reasons
+    assert "GPT_REPORTED_UNRESOLVED" in decision.reasons
 
 
 def test_the_reason_is_a_hard_block_not_a_recorded_note() -> None:
-    decision = evaluate(DEADLINE_INQUIRY, draft())
+    decision = evaluate(DEADLINE_INQUIRY, draft(unresolved=True))
 
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" not in decision.soft_reasons
+    assert "GPT_REPORTED_UNRESOLVED" not in decision.soft_reasons
 
 
 # ==========================================================================

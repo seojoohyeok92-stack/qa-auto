@@ -14,6 +14,7 @@ from repositories.log_repository import LogRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.answer_service import AnswerService
 from services.dps_enrichment_service import DpsEnrichmentService
+from services.dps_lookup_policy import DpsLookupPolicy
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.phase9_answer_policy import (
     DELIVERY_DATE_ANSWER,
@@ -102,6 +103,7 @@ class CountingDps:
         self.metadata = dict(metadata or {})
         self.lookup_calls = 0
         self.skip_calls = 0
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.lookup_calls += 1

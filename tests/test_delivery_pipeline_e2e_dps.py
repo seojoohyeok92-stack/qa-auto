@@ -54,6 +54,7 @@ from services.auto_processing_eligibility_service import (
     AutoProcessingEligibilityService,
 )
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.dps_lookup_policy import DpsLookupPolicy
 from services.phase9_answer_policy import apply_phase9_rule_policy
 
 
@@ -444,6 +445,7 @@ class _StubDps:
     def __init__(self, metadata: dict[str, Any]) -> None:
         self.metadata = metadata
         self.calls: list[str] = []
+        self.policy = DpsLookupPolicy()
 
     def enrich(self, request, **kwargs):
         self.calls.append(request.order_id)

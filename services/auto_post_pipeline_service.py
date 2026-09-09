@@ -261,17 +261,15 @@ class AutoPostPipelineService:
 
     @staticmethod
     def _needs_review(draft: dict[str, Any]) -> bool:
-        metadata = draft.get("metadata_json")
-        data = metadata if isinstance(metadata, dict) else {}
-        plan = data.get("processing_plan")
-        plan_data = plan if isinstance(plan, dict) else {}
-        return bool(
-            data.get("requires_manual_review")
-            or plan_data.get("needs_staff_review")
-            or str(draft.get("review_status") or "").upper() in {
-                "NEEDS_REVIEW", "IN_REVIEW"
-            }
-        )
+        """Whether a *current lifecycle* explicitly remains in review.
+
+        This is used only for post-review queue priority after execution.  The
+        old aggregate analysis flags are semantic telemetry and cannot regain
+        authority after a GPT-first draft was persisted and auto-posted.
+        ``IN_REVIEW`` remains a real lifecycle state set by a human/workflow.
+        """
+
+        return str(draft.get("review_status") or "").upper() == "IN_REVIEW"
 
     def _dps_session_block_reason(
         self, draft: dict[str, Any]
