@@ -186,9 +186,18 @@ def test_unreviewed_case_is_automatic_answer_context_but_low_blocked_are_exclude
     historical = context["historical_cases"]
     assert len(historical) == 1
     assert "설명서의 순서" in historical[0]["answer_style_reference"]
-    assert context["historical_case_policy"]["current_authority_order"][:3] == [
-        "RULE_AND_SAFETY", "CURRENT_ORDER", "CURRENT_DPS"
+    # ``current_authority_order`` 는 제거됐다. 어느 출처가 이기는지를 모델이
+    # 근거를 읽기도 전에 정해두는 서열이었고, 같은 프롬프트의 블록 설명과
+    # 어긋났다(historical 을 REFERENCE_ONLY 라 부르면서 동시에 검증된
+    # 재사용 지식이라고 말했다). 남은 것은 판단이 아니라 안전 규칙인 항목
+    # 하나뿐이다: 시점에 의존하는 사실은 현재 주문에서만 온다.
+    policy = context["historical_case_policy"]
+    assert "current_authority_order" not in policy
+    assert policy["time_dependent_claims_require_current_facts"] is True
+    assert policy["current_order_facts_only_from"] == [
+        "CURRENT_ORDER", "CURRENT_DPS"
     ]
+    assert policy["never_use_as_current_fact"] is True
     with database.connection() as connection:
         provenance = connection.execute(
             """

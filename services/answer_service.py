@@ -277,6 +277,28 @@ def _is_safe_rule_result(result: AnswerResult) -> bool:
     )
 
 
+def _is_review_required_safe_draft(result: AnswerResult) -> bool:
+    """Identify the conservative draft the pipeline writes for itself.
+
+    ``review_required_safe_result`` is produced when nothing settled the
+    inquiry -- a semantically mismatched fixed rule was discarded, the
+    pre-generation gate stopped, the provider failed.  It says a person has to
+    check, which is a statement about the pipeline's own state and never a
+    fact about the product.
+
+    Read from the state that draft already records, not from its wording: the
+    body is rendered from the customer's own questions, so any text match
+    would be matching the inquiry rather than the decision.
+    """
+
+    metadata = dict(result.metadata or {})
+    return bool(
+        str(result.matched_rule or "") == "REVIEW_REQUIRED_SAFE_DRAFT"
+        or str(metadata.get("answer_type") or "")
+        == "review_required_safe_draft"
+    )
+
+
 def _apply_safe_rule_metadata(
     result: AnswerResult,
     *,
@@ -307,6 +329,18 @@ def _apply_safe_rule_metadata(
     return result
 
 
+# Diagnostics that survive neutralisation. Deliberately not ``answer_type``
+# or ``matched_rule``: those identify the draft, and the neutral context must
+# not be mistaken for one.
+_CARRIED_REJECTION_DIAGNOSTICS = frozenset({
+    "semantic_rule_rejected",
+    "semantic_action_support",
+    "rejected_rule_category",
+    "rejected_template_match_kind",
+    "safe_failure_code",
+})
+
+
 def _neutral_gpt_context(
     template_result: AnswerResult,
     *,
@@ -335,6 +369,15 @@ def _neutral_gpt_context(
             "template_candidate_category": template_result.category,
             "template_candidate_status": template_result.status.value,
             "template_candidate_provider": template_result.provider,
+            # Why the deterministic candidate was discarded is written once,
+            # here, and read by nothing but a person looking at the draft
+            # afterwards. Neutralising the result must not also erase the
+            # reason, or an investigation like 688159337's has nothing to read.
+            **{
+                key: value
+                for key, value in (template_result.metadata or {}).items()
+                if key in _CARRIED_REJECTION_DIAGNOSTICS
+            },
         },
     )
 
@@ -3297,37 +3340,61 @@ class AnswerService:
                                 category=phase9_analysis.inquiry_type.value,
                             )
                             if (
-                                template_candidate_requested
-                                and (
-                                    not is_valid_draft(
-                                        base_rule_result.answer
-                                    )
-                                    or template_failure != "NOT_FOUND"
-                                    or (
-                                        product_fact_guard.sensitive
-                                        and _is_safe_rule_result(
-                                            base_rule_result
+                                # The pipeline's own "a person has to check
+                                # this" draft, which is never grounding. It is
+                                # neutralised on its own terms because whether
+                                # a Template was requested says nothing about
+                                # it: 688159337 -- "새 티비 설치하러 오실 때
+                                # 집에 있는 오래된 티비도 같이 가져가 주실 수
+                                # 있나요?" -- reached here with GPT ① asking
+                                # for Learning and not Template, so
+                                # ``template_candidate_requested`` was False,
+                                # the conjunction below short-circuited before
+                                # reading any of its own conditions, and the
+                                # safety draft went on as ``rule.answer``. The
+                                # provider then ignored all six retrieved
+                                # candidates, writing each refusal as "현재
+                                # 적용되는 우선 답변에서 정확한 확인이
+                                # 필요하다고 명시하고 있어".
+                                _is_review_required_safe_draft(
+                                    base_rule_result
+                                )
+                                or (
+                                    template_candidate_requested
+                                    and (
+                                        not is_valid_draft(
+                                            base_rule_result.answer
                                         )
-                                    )
-                                    # We are here because the deterministic
-                                    # answer did not settle the inquiry. Handing
-                                    # it on as ``rule.answer`` contradicts that:
-                                    # it arrives among the selected facts, and
-                                    # the model reads it as the rule to follow.
-                                    #
-                                    # Measured on 325584049 with the live
-                                    # provider. Its own learning_usage came back
-                                    # {"learning_id": 314283,
-                                    #  "answer_supported": false,
-                                    #  "reason": "학습 근거는 참고 가능하나,
-                                    #   제공된 확인 안내 규칙을 우선 적용했습니다"}
-                                    # -- the approved answer saying collection is
-                                    # free was in the prompt and was passed over
-                                    # for a rule answer that only asked for the
-                                    # facts to be checked. A reply that settles
-                                    # nothing is not grounding.
-                                    or not self._deterministic_answer_settles_inquiry(
-                                        request, base_rule_result.answer
+                                        or template_failure != "NOT_FOUND"
+                                        or (
+                                            product_fact_guard.sensitive
+                                            and _is_safe_rule_result(
+                                                base_rule_result
+                                            )
+                                        )
+                                        # We are here because the deterministic
+                                        # answer did not settle the inquiry.
+                                        # Handing it on as ``rule.answer``
+                                        # contradicts that: it arrives among the
+                                        # selected facts, and the model reads it
+                                        # as the rule to follow.
+                                        #
+                                        # Measured on 325584049 with the live
+                                        # provider. Its own learning_usage came
+                                        # back {"learning_id": 314283,
+                                        #  "answer_supported": false,
+                                        #  "reason": "학습 근거는 참고 가능하나,
+                                        #   제공된 확인 안내 규칙을 우선
+                                        #   적용했습니다"}
+                                        # -- the approved answer saying
+                                        # collection is free was in the prompt
+                                        # and was passed over for a rule answer
+                                        # that only asked for the facts to be
+                                        # checked. A reply that settles nothing
+                                        # is not grounding.
+                                        or not self._deterministic_answer_settles_inquiry(
+                                            request, base_rule_result.answer
+                                        )
                                     )
                                 )
                             )

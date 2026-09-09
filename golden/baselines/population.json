@@ -1,0 +1,111 @@
+{
+ "total_replayable_inquiries": 3109,
+ "with_production_answer": 1021,
+ "with_active_draft": 570,
+ "with_current_pipeline_draft": 34,
+ "with_replayable_understanding": 20,
+ "by_source_type": [
+  [
+   "PRODUCT_INQUIRY",
+   1905
+  ],
+  [
+   "CUSTOMER_INQUIRY",
+   1204
+  ]
+ ],
+ "by_product_identity": [
+  [
+   "EXACT",
+   1797
+  ],
+  [
+   "NOT_FOUND",
+   887
+  ],
+  [
+   "AMBIGUOUS",
+   404
+  ],
+  [
+   "UNIQUE_MATCH",
+   21
+  ]
+ ],
+ "by_model_code_in_name": [
+  [
+   "True",
+   1884
+  ],
+  [
+   "False",
+   1225
+  ]
+ ],
+ "by_atom_bucket": [
+  [
+   "UNOBSERVED",
+   3088
+  ],
+  [
+   "2",
+   10
+  ],
+  [
+   "1",
+   8
+  ],
+  [
+   "3+",
+   3
+  ]
+ ],
+ "by_primary_action": [
+  [
+   "UNOBSERVED",
+   3088
+  ],
+  [
+   "PRODUCT_SPEC",
+   9
+  ],
+  [
+   "INSTALLATION_METHOD",
+   3
+  ],
+  [
+   "COLLECTION",
+   2
+  ],
+  [
+   "REPAIR",
+   2
+  ],
+  [
+   "DELIVERY_STATUS",
+   2
+  ],
+  [
+   "NOTIFICATION_POLICY",
+   1
+  ],
+  [
+   "PACKAGE_CONTENTS",
+   1
+  ],
+  [
+   "CANCEL_RETURN",
+   1
+  ]
+ ],
+ "by_eligibility": [
+  [
+   "None",
+   3103
+  ],
+  [
+   "REVIEW_REQUIRED",
+   6
+  ]
+ ]
+}

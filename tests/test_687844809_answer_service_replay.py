@@ -169,11 +169,29 @@ def test_687844809_full_answer_service_replay(tmp_path, monkeypatch):
         source.close()
     assert copied_ids
 
+    # 실제 문의 687844809 의 상품 값 그대로. 운영 DB 확인:
+    #   product_id   9645661432
+    #   product_name 삼성 4K UHD 스마트 사이니지 TV 1등급 티비 기사님 방문설치
+    #                107.9cm(43인치), 스탠드
+    #   option_name  None
+    #
+    # 이전 fixture 는 상품명에 존재하지 않는 model code "LH43BEDH" 를 끼워
+    # 넣고 option_name 을 따로 분리해, product_id 9645661432 와 서로 다른
+    # listing 을 가리키고 있었다. product_id 가 상품 사실에 쓰이지 않던 동안에는
+    # 그 불일치가 드러나지 않았고, 카탈로그가 그 가짜 이름을 LH43BEDH 로
+    # 식별해 주었다. 식별 계약에서 product_id 가 최우선(1번)이 된 지금은 같은
+    # fixture 가 "A 의 id + B 의 모델명" 이라는 존재하지 않는 상품이 된다.
+    #
+    # 이 테스트는 실제 문의의 replay 이므로 운영 값을 그대로 쓴다.
     inquiry_id = InquiryRepository(db).upsert_work_item({
         "store_code": "OJE_PLUS", "source_type": "TEST", "source_question_id": "687844809",
-        "inquiry_type": "PRODUCT_INQUIRY", "content": QUESTION, "product_id": "9645661432",
-        "product_name": "삼성 4K UHD 스마트 사이니지 TV LH43BEDH 기사님 방문설치",
-        "option_name": "107.9cm(43인치), 스탠드", "raw_json": {},
+        "inquiry_type": "PRODUCT_INQUIRY", "content": QUESTION,
+        "product_id": "9645661432",
+        "product_name": (
+            "삼성 4K UHD 스마트 사이니지 TV 1등급 티비 기사님 방문설치"
+            " 107.9cm(43인치), 스탠드"
+        ),
+        "option_name": None, "raw_json": {},
     }).inquiry_id
 
     semantic_provider, draft_provider = _SemanticProvider(), _DraftProvider()
@@ -282,13 +300,21 @@ def test_687844809_full_answer_service_replay(tmp_path, monkeypatch):
         "need_order": False, "need_dps": False,
     }
     assert len(contract["questions"]) == 4
-    assert product.calls >= 1 and "4K UHD" in context["product_catalog"]["instructions"]
-    assert "4K UHD" in prompt
+    # 상품 근거는 이제 이 listing 자신의 검증 사실에서 온다. 기대값을 코드에
+    # 적어두지 않고 조회 결과에서 읽어, "어떤 값" 이 아니라 "이 listing 의
+    # 사실이 GPT ② 까지 도달한다" 는 성질을 지킨다.
+    assert product.calls >= 1
     product_result = product.results[-1]
+    assert product_result.matched is True
+    assert product_result.listing_id == "listing_9645661432"
+    assert product_result.identity_status == "LISTING_EXACT"
     catalog_fields = {fact.field_key: fact.value for fact in product_result.safe_facts}
-    assert product_result.listing_id == "LH43BEDH"
-    assert catalog_fields["resolution"] == "4K UHD"
-    assert catalog_fields["vesa_mm"] == "200x200"
+    assert catalog_fields, "식별된 listing 인데 검증 사실이 하나도 없다"
+    instructions = context["product_catalog"]["instructions"]
+    for field_key in catalog_fields:
+        assert field_key in instructions, field_key
+    # 상품명 자체는 판매 페이지 표기로서 프롬프트에 남아 있어야 한다.
+    assert "사이니지" in prompt
     assert engine.calls >= 1 and captured["hybrid_request_metadata"].get(
         "template_candidates"
     ), {

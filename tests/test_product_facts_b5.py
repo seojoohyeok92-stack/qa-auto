@@ -276,12 +276,24 @@ def test_unknown_product_returns_no_facts(service):
     assert not result.has_safe_facts
 
 
-def test_missing_product_id_is_not_guessed_from_the_name(service):
+def test_missing_product_id_falls_back_to_the_listing_name(service):
+    """계약 2번 -- product_id 가 없으면 상품명으로 식별을 시도한다.
+
+    이 테스트는 원래 "이름으로 추측하지 않는다" 였다. product_facts.db 가
+    은퇴해 있던 동안에는 이름 매칭이 유일한 경로였는데도 그랬고, 실제
+    운영 문의 3,109건 중 2,149건(69%)에는 product_id 자체가 없다. 이름
+    fallback 을 금지하면 그 69% 는 상품 근거를 영구히 잃는다.
+
+    지켜야 할 것은 "추측 금지" 가 아니라 "특정되지 않으면 확정 금지"
+    (계약 4번)이고, 그것은 아래에서 그대로 확인한다: 이름도 카탈로그가
+    알아보지 못하면 사실은 하나도 나오지 않는다.
+    """
+
     result = service.facts_for_inquiry(
         product_id="", question="HDMI 몇 개인가요?",
     )
-    assert result.unavailable_reason == "NO_PRODUCT_ID"
     assert not result.has_safe_facts
+    assert result.unavailable_reason != "NO_PRODUCT_ID"
 
 
 def test_missing_database_degrades_quietly(tmp_path):

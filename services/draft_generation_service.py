@@ -235,11 +235,44 @@ class DraftGenerationService:
         # of the learning database rather than with the inquiry.
         prompt_input = {
             "intent": intent.to_dict(),
-            "context_priority": [
-                "CURRENT_INQUIRY", "PRODUCT_DB", "POLICY", "FIXED_TEMPLATE",
-                "SIMILAR_APPROVED_ANSWERS", "SELLER_STYLE_EXAMPLES",
-                "HISTORICAL_CASES_REFERENCE_ONLY", "OJE_STYLE_RULES",
-            ],
+            # What each block *is*, not which one wins.
+            #
+            # This used to be a ranking, and the ranking decided answers. With
+            # FIXED_TEMPLATE above SIMILAR_APPROVED_ANSWERS, 688159337's model
+            # read a "확인이 필요합니다" rule as outranking the approved answer
+            # that settled the question, and wrote its refusal as "현재 적용되는
+            # 우선 답변에서 정확한 확인이 필요하다고 명시하고 있어". Calling the
+            # historical block REFERENCE_ONLY did the same job more quietly:
+            # every historical candidate came back rejected as "과거 사례" while
+            # two other blocks of the same prompt describe those rows as
+            # verified, reusable knowledge.
+            #
+            # Which evidence applies to this question is a judgement about
+            # meaning. The prompt now says what each source is and leaves the
+            # judgement where it belongs.
+            "context_sources": {
+                "CURRENT_INQUIRY": "고객이 지금 물은 내용. 답변의 대상.",
+                "CURRENT_ORDER_AND_DPS": (
+                    "이 고객의 현재 주문/배송 사실. 시간에 의존하는 사실은"
+                    " 여기에서만 온다."
+                ),
+                # Named for the block it describes. "PRODUCT_FACTS" would
+                # not match any block in the prompt, and a test that
+                # asserts no product facts reached the model checks for
+                # exactly that string.
+                "PRODUCT_CATALOG_JSON": "이 상품에 대해 검증된 사양.",
+                "APPROVED_LEARNING": "사람이 승인한 과거 답변. 사실 근거로 사용 가능.",
+                "HISTORICAL_CASES": (
+                    "과거 상담 기록. 안정적인 운영 지식이면 사실 근거로 사용 가능하며,"
+                    " 특정 주문의 사실로는 사용할 수 없다."
+                ),
+                "TEMPLATE_CANDIDATE": (
+                    "결정적 규칙이 낸 후보 문안. 다른 후보와 같은 자격의 후보이며"
+                    " 우선 적용되는 답변이 아니다."
+                ),
+                "SELLER_STYLE_EXAMPLES": "문체 참고용. 사실 근거가 아니다.",
+                "OJE_STYLE_RULES": "표현 규칙.",
+            },
             **evidence,
         }
         atomic_questions = _atomic_question_payload(analysis, learning_context)

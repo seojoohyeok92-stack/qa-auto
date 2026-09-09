@@ -1,0 +1,751 @@
+{
+ "mode": "full",
+ "cases": 4,
+ "cases_ran": 4,
+ "metrics": {
+  "semantic_correctness": {
+   "value": 1.0,
+   "numerator": 4,
+   "denominator": 4,
+   "not_measurable": 0,
+   "not_yet_labelled": 0,
+   "render": "100.0% (4/4)"
+  },
+  "evidence_retrieval_recall": {
+   "value": 1.0,
+   "numerator": 3,
+   "denominator": 3,
+   "not_measurable": 0,
+   "not_yet_labelled": 3,
+   "render": "100.0% (3/3)  [unlabelled=3]"
+  },
+  "evidence_adoption": {
+   "value": 1.0,
+   "numerator": 1,
+   "denominator": 1,
+   "not_measurable": 0,
+   "not_yet_labelled": 3,
+   "render": "100.0% (1/1)  [unlabelled=3]"
+  },
+  "wrong_evidence_usage": {
+   "value": 0.0,
+   "numerator": 0,
+   "denominator": 2,
+   "not_measurable": 0,
+   "not_yet_labelled": 2,
+   "render": "0.0% (0/2)  [unlabelled=2]"
+  },
+  "unsupported_claim": {
+   "value": null,
+   "numerator": 0,
+   "denominator": 0,
+   "not_measurable": 4,
+   "not_yet_labelled": 0,
+   "render": "NOT_MEASURABLE (n=4)"
+  },
+  "unnecessary_review": {
+   "value": 0.0,
+   "numerator": 0,
+   "denominator": 3,
+   "not_measurable": 0,
+   "not_yet_labelled": 1,
+   "render": "0.0% (0/3)  [unlabelled=1]"
+  },
+  "missed_required_review": {
+   "value": 0.0,
+   "numerator": 0,
+   "denominator": 3,
+   "not_measurable": 0,
+   "not_yet_labelled": 1,
+   "render": "0.0% (0/3)  [unlabelled=1]"
+  },
+  "product_fact_availability": {
+   "value": 1.0,
+   "numerator": 1,
+   "denominator": 1,
+   "not_measurable": 0,
+   "not_yet_labelled": 0,
+   "render": "100.0% (1/1)"
+  },
+  "compound_coverage": {
+   "value": null,
+   "numerator": 0,
+   "denominator": 0,
+   "not_measurable": 0,
+   "not_yet_labelled": 1,
+   "render": "NOT_YET_LABELED (n=1)"
+  },
+  "subquestion_evidence_suppression": {
+   "value": 0.0,
+   "numerator": 0,
+   "denominator": 5,
+   "not_measurable": 0,
+   "not_yet_labelled": 0,
+   "render": "0.0% (0/5)"
+  },
+  "order_routing_correctness": {
+   "value": 1.0,
+   "numerator": 4,
+   "denominator": 4,
+   "not_measurable": 0,
+   "not_yet_labelled": 0,
+   "render": "100.0% (4/4)"
+  },
+  "dps_routing_correctness": {
+   "value": 1.0,
+   "numerator": 4,
+   "denominator": 4,
+   "not_measurable": 0,
+   "not_yet_labelled": 0,
+   "render": "100.0% (4/4)"
+  },
+  "auto_post_false_positive": {
+   "value": 0.0,
+   "numerator": 0,
+   "denominator": 3,
+   "not_measurable": 0,
+   "not_yet_labelled": 1,
+   "render": "0.0% (0/3)  [unlabelled=1]"
+  },
+  "auto_post_false_negative": {
+   "value": 0.0,
+   "numerator": 0,
+   "denominator": 3,
+   "not_measurable": 0,
+   "not_yet_labelled": 1,
+   "render": "0.0% (0/3)  [unlabelled=1]"
+  },
+  "answer_quality": {
+   "value": null,
+   "numerator": 0,
+   "denominator": 0,
+   "not_measurable": 4,
+   "not_yet_labelled": 0,
+   "render": "NOT_MEASURABLE (n=4)"
+  }
+ },
+ "findings": [
+  {
+   "case_id": "Q688159391",
+   "metric": "replay_fidelity_drift",
+   "severity": "MINOR",
+   "detail": "product_identity_status: stored=NOT_FOUND replay=LISTING_EXACT; learning_hard_valid: stored=578 replay=669"
+  }
+ ],
+ "severity": {
+  "CRITICAL": 0,
+  "MAJOR": 0,
+  "MINOR": 1
+ },
+ "side_effects": {
+  "naver_post_calls": 0,
+  "dps_calls": 0,
+  "order_lookup_calls": 0,
+  "provider_calls": 4,
+  "live_gpt_calls": 4
+ },
+ "fidelity": [
+  [
+   "CORPUS_DRIFT",
+   2
+  ],
+  [
+   "OK",
+   1
+  ],
+  [
+   "CONTRACT_DRIFT",
+   1
+  ]
+ ],
+ "baseline_name": "AFTER_SIMPLIFICATION_ANCHOR_FULL",
+ "elapsed_seconds": 142.1,
+ "tier": "anchor",
+ "git": {
+  "commit": "139b66df9bafd09fd6f8bda69f113438e8c20dd2",
+  "branch": "main",
+  "dirty": "M services/answer_service.py\n M services/draft_generation_service.py\n M services/historical_learning_quality_service.py\n M services/learning_compatibility_service.py\n M services/learning_context_service.py\n M services/product_fact_guard.py\n M services/product_knowledge_service.py\n M services/similar_answer_service.py\n M tests/test_historical_cases_v20.py\n M tests/test_learning_v2.py\n M tests/test_product_catalog_evidence_scope.py\n M tests/test_product_facts_b5.py\n M tests/test_v4_evidence_generalization.py\n M tests/test_v4_evidence_pipeline_replay.py\n?? golden/\n?? scripts/run_golden_replay.py\n?? tests/test_golden_replay_infrastructure.py\n?? tests/test_safety_draft_is_not_grounding_688159337.py"
+ },
+ "data_fingerprint": {
+  "database": {
+   "path": "C:\\Users\\user\\Desktop\\프로젝트\\Q&A 통합\\git\\qa-auto\\data\\서버pc_data\\data\\oje_automation.db",
+   "exists": true,
+   "size_bytes": 985206784,
+   "mtime": "2026-09-09T05:19:44"
+  },
+  "semantic_index": {
+   "path": "C:\\Users\\user\\Desktop\\프로젝트\\Q&A 통합\\git\\qa-auto\\data\\서버pc_data\\data\\learning_semantic_index.json",
+   "exists": true,
+   "size_bytes": 35078039,
+   "mtime": "2026-09-09T04:40:26"
+  },
+  "cases": {
+   "path": "C:\\Users\\user\\Desktop\\프로젝트\\Q&A 통합\\git\\qa-auto\\golden\\cases\\anchor.jsonl",
+   "exists": true,
+   "size_bytes": 13761,
+   "mtime": "2026-09-09T06:52:42"
+  }
+ },
+ "cases_detail": [
+  {
+   "case_id": "Q688159337",
+   "source_question_id": "688159337",
+   "inquiry_id": 3108,
+   "tier": "ANCHOR",
+   "stratum": {
+    "actions": [
+     "COLLECTION"
+    ],
+    "atom_bucket": "1",
+    "blocking_reasons": [
+     "GPT_REPORTED_UNRESOLVED",
+     "GPT_WITHHELD_AUTO_POST"
+    ],
+    "eligibility": "REVIEW_REQUIRED",
+    "evidence_statuses": [
+     "CANDIDATE"
+    ],
+    "has_current_pipeline_draft": true,
+    "has_production_answer": false,
+    "learning_selected": 3,
+    "model_code_in_name": true,
+    "need_dps": false,
+    "need_order": false,
+    "need_product": false,
+    "primary_action": "COLLECTION",
+    "product_identity": "NOT_FOUND",
+    "replayable_understanding": true,
+    "source_type": "PRODUCT_INQUIRY",
+    "verified_product_facts": 0
+   },
+   "label": {
+    "label_source": "FORENSIC_ANALYSIS",
+    "expected_answerability": "ANSWERABLE",
+    "expected_review_required": false,
+    "expected_order_lookup": false,
+    "expected_dps_lookup": false,
+    "expected_evidence_learning_ids": [
+     23755
+    ],
+    "expected_evidence_historical_ids": [
+     117,
+     34
+    ],
+    "forbidden_evidence_learning_ids": [
+     96
+    ],
+    "required_subquestions": [
+     "기존 TV 수거|기존 티비 수거|폐가전 수거"
+    ],
+    "forbidden_claims": [],
+    "expected_answer_quality": "CORRECT",
+    "production_answer": null,
+    "notes": "L23755(style_only=0) '기존 TV 수거는 설치 기사님 방문 시 요청하시면 진행됩니다' 가 직접 근거. HC117/HC34 가 같은 정책을 확인. 전제인 '기사 방문설치 상품' 은 product_facts.db 의 installation_method=VERIFIED 가 뒷받침한다. L167848/L154574 는 동등한 대체 근거이므로 필수 목록에는 넣지 않는다. L96 은 style_only=1 이라 사실 근거로 쓰이면 안 된다. WATCHES: G29/G30 (근거 권위 서열), 1차 수정 회귀."
+   },
+   "observed": {
+    "ran": true,
+    "error": null,
+    "semantic_usable": true,
+    "semantic_actions": [
+     "COLLECTION"
+    ],
+    "atom_count": 1,
+    "atoms": [
+     "새 TV 설치 방문 시 기존의 오래된 TV도 함께 수거해 주실 수 있나요?"
+    ],
+    "need_template": false,
+    "need_product": false,
+    "need_learning": true,
+    "need_order": false,
+    "need_dps": false,
+    "learning_pool": 899,
+    "learning_hard_valid": 669,
+    "learning_selected": 5,
+    "product_identity_status": "NOT_FOUND",
+    "verified_product_facts": 0,
+    "template_candidates": 0,
+    "subquestion_evidence": [
+     {
+      "subquestion": "새 TV 설치 방문 시 기존의 오래된 TV도 함께 수거해 주실 수 있나요?",
+      "status": "CANDIDATE",
+      "source": "ACTIVE_POSITIVE_LEARNING",
+      "learning_ids": [
+       23755,
+       154574,
+       291311,
+       167848
+      ],
+      "historical_case_ids": [
+       117,
+       34,
+       200
+      ],
+      "feedback_signal_ids": [],
+      "answer_required": true,
+      "evidence_coverage": "SUPPORTED"
+     }
+    ],
+    "prompt_fact_keys": [
+     "product.name",
+     "product.product_id"
+    ],
+    "prompt_learning_ids": [
+     23755,
+     154574,
+     291311,
+     167848
+    ],
+    "prompt_historical_ids": [
+     117,
+     34,
+     200
+    ],
+    "prompt_chars": 30420,
+    "used_learning_ids": [
+     23755
+    ],
+    "used_historical_ids": [],
+    "used_template_ids": [],
+    "unresolved": [],
+    "requires_review": false,
+    "can_auto_post": true,
+    "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n네, 설치 기사님 방문 시 기존 TV 수거를 요청하시면 됩니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+    "validator_status": "PASS",
+    "eligibility_decision": "SAFE",
+    "eligibility_reasons": [],
+    "eligibility_soft_reasons": [
+     "INTENT_CONFIDENCE_LOW"
+    ],
+    "naver_post_calls": 0,
+    "dps_calls": 0,
+    "order_lookup_calls": 0,
+    "gpt_calls": 1,
+    "duration_seconds": 25.938,
+    "fidelity": "CORPUS_DRIFT",
+    "fidelity_notes": [
+     "learning_hard_valid: stored=578 replay=669"
+    ]
+   }
+  },
+  {
+   "case_id": "Q688159361",
+   "source_question_id": "688159361",
+   "inquiry_id": 3107,
+   "tier": "ANCHOR",
+   "stratum": {
+    "actions": [
+     "DELIVERY_STATUS",
+     "SCHEDULE_CHANGE"
+    ],
+    "atom_bucket": "2",
+    "blocking_reasons": [
+     "REQUIRED_ORDER_ID_MISSING_OR_INVALID",
+     "ORDER_LOOKUP_NOT_TRUSTED",
+     "DPS_RESULT_NOT_TRUSTED",
+     "DPS_SNAPSHOT_NOT_VALIDATED",
+     "GPT_REPORTED_UNRESOLVED",
+     "GPT_WITHHELD_AUTO_POST"
+    ],
+    "eligibility": "REVIEW_REQUIRED",
+    "evidence_statuses": [
+     "NEEDS_DPS"
+    ],
+    "has_current_pipeline_draft": true,
+    "has_production_answer": false,
+    "learning_selected": 3,
+    "model_code_in_name": true,
+    "need_dps": true,
+    "need_order": true,
+    "need_product": false,
+    "primary_action": "DELIVERY_STATUS",
+    "product_identity": "NOT_FOUND",
+    "replayable_understanding": true,
+    "source_type": "PRODUCT_INQUIRY",
+    "verified_product_facts": 0
+   },
+   "label": {
+    "label_source": "COMPANY_POLICY",
+    "expected_answerability": "NEEDS_CURRENT_ORDER_FACT",
+    "expected_review_required": true,
+    "expected_order_lookup": true,
+    "expected_dps_lookup": true,
+    "expected_evidence_learning_ids": [],
+    "expected_evidence_historical_ids": [],
+    "forbidden_evidence_learning_ids": [],
+    "required_subquestions": [
+     "배송 예정일|배송 날짜|언제 오는지",
+     "연기|미룰|미루|뒤로|변경"
+    ],
+    "forbidden_claims": [
+     "구체적 배송 예정일",
+     "구체적 소요 기간",
+     "연기 확정"
+    ],
+    "expected_answer_quality": "CORRECT",
+    "production_answer": null,
+    "notes": "두 질문 모두 이 고객의 주문에 달려 있고 주문번호가 없다. 과거 문의의 날짜를 재사용하면 안 되므로 주문번호를 요청하고 검토로 넘기는 것이 정답이다. WATCHES: 현재 주문 사실 safety (G23)."
+   },
+   "observed": {
+    "ran": true,
+    "error": null,
+    "semantic_usable": true,
+    "semantic_actions": [
+     "DELIVERY_STATUS",
+     "SCHEDULE_CHANGE"
+    ],
+    "atom_count": 2,
+    "atoms": [
+     "주문한 제품의 배송 예정일이 언제인지 확인하고 싶습니다.",
+     "잡혀있는 배송 날짜가 있다면 하루 이틀 뒤로 미룰 수 있는지 알고 싶습니다."
+    ],
+    "need_template": true,
+    "need_product": false,
+    "need_learning": false,
+    "need_order": true,
+    "need_dps": true,
+    "learning_pool": null,
+    "learning_hard_valid": null,
+    "learning_selected": null,
+    "product_identity_status": "NOT_FOUND",
+    "verified_product_facts": 0,
+    "template_candidates": 5,
+    "subquestion_evidence": [],
+    "prompt_fact_keys": [],
+    "prompt_learning_ids": [],
+    "prompt_historical_ids": [],
+    "prompt_chars": null,
+    "used_learning_ids": [],
+    "used_historical_ids": [],
+    "used_template_ids": [],
+    "unresolved": [],
+    "requires_review": null,
+    "can_auto_post": null,
+    "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n문의주신 아래 내용은\n\n- 주문한 제품의 배송 예정일이 언제인지 확인하고 싶습니다.\n- 잡혀있는 배송 날짜가 있다면 하루 이틀 뒤로 미룰 수 있는지 알고 싶습니다. 관련하여 정확한 정보 확인이 필요합니다.\n\n확인되지 않은 내용을 임의로 안내하지 않고 직원 검토가 필요한 상태로 처리하겠습니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+    "validator_status": null,
+    "eligibility_decision": "REVIEW_REQUIRED",
+    "eligibility_reasons": [
+     "UNDERSTANDING_UNAVAILABLE",
+     "INTENT_NOT_AUTO_POSTABLE",
+     "ROUTE_REVIEW_REQUIRED_SAFE_DRAFT",
+     "REQUIRED_ORDER_ID_MISSING_OR_INVALID",
+     "ORDER_LOOKUP_NOT_TRUSTED",
+     "DPS_RESULT_NOT_TRUSTED",
+     "DPS_SNAPSHOT_NOT_VALIDATED"
+    ],
+    "eligibility_soft_reasons": [],
+    "naver_post_calls": 0,
+    "dps_calls": 0,
+    "order_lookup_calls": 0,
+    "gpt_calls": 1,
+    "duration_seconds": 49.403,
+    "fidelity": "OK",
+    "fidelity_notes": []
+   }
+  },
+  {
+   "case_id": "Q688159391",
+   "source_question_id": "688159391",
+   "inquiry_id": 3106,
+   "tier": "ANCHOR",
+   "stratum": {
+    "actions": [
+     "PACKAGE_CONTENTS",
+     "PRODUCT_SPEC"
+    ],
+    "atom_bucket": "2",
+    "blocking_reasons": [
+     "PRODUCT_FACT_NOT_VERIFIED",
+     "GPT_REPORTED_UNRESOLVED",
+     "GPT_WITHHELD_AUTO_POST"
+    ],
+    "eligibility": "REVIEW_REQUIRED",
+    "evidence_statuses": [
+     "CANDIDATE",
+     "NO_RELIABLE_SOURCE"
+    ],
+    "has_current_pipeline_draft": true,
+    "has_production_answer": false,
+    "learning_selected": 4,
+    "model_code_in_name": true,
+    "need_dps": false,
+    "need_order": false,
+    "need_product": true,
+    "primary_action": "PRODUCT_SPEC",
+    "product_identity": "NOT_FOUND",
+    "replayable_understanding": true,
+    "source_type": "PRODUCT_INQUIRY",
+    "verified_product_facts": 0
+   },
+   "label": {
+    "label_source": "FORENSIC_ANALYSIS",
+    "expected_answerability": null,
+    "expected_review_required": null,
+    "expected_order_lookup": false,
+    "expected_dps_lookup": false,
+    "expected_evidence_learning_ids": [],
+    "expected_evidence_historical_ids": [],
+    "forbidden_evidence_learning_ids": [
+     168495,
+     172315
+    ],
+    "required_subquestions": [
+     "리모컨 조작|리모컨으로",
+     "구성품 리모컨|리모컨 포함|리모컨이 들어"
+    ],
+    "forbidden_claims": [],
+    "expected_answer_quality": null,
+    "production_answer": null,
+    "notes": "정답 미확정 — HUMAN REVIEW 필요. 이 listing(11815213767)에 리모컨/구성품 관련 exact-product Learning 은 0건이다. 형제 상품에는 있다(L19554 사이니지 '기본 리모컨 포함', L159481/L168277 삼탠바이미 M5 32인치 '리모컨 포함'). 32인치 M5 의 구성품이 50인치 비즈니스TV 에 그대로 적용되는지는 사람이 판단해야 한다. forbidden 은 확정: L168495(반품/리퍼 문의), L172315(화면 밝기 초기설정)는 리모컨 질문과 무관하며 근거가 될 수 없다. WATCHES: G12/G14 (Product Knowledge 도달)."
+   },
+   "observed": {
+    "ran": true,
+    "error": null,
+    "semantic_usable": true,
+    "semantic_actions": [
+     "PRODUCT_SPEC",
+     "PACKAGE_CONTENTS"
+    ],
+    "atom_count": 2,
+    "atoms": [
+     "이 제품은 리모컨으로 조작하는 제품인가요?",
+     "기본 구성품에 리모컨이 들어있는지도 궁금합니다."
+    ],
+    "need_template": false,
+    "need_product": true,
+    "need_learning": true,
+    "need_order": false,
+    "need_dps": false,
+    "learning_pool": 899,
+    "learning_hard_valid": 669,
+    "learning_selected": 4,
+    "product_identity_status": "LISTING_EXACT",
+    "verified_product_facts": 4,
+    "template_candidates": 0,
+    "subquestion_evidence": [
+     {
+      "subquestion": "이 제품은 리모컨으로 조작하는 제품인가요?",
+      "status": "CANDIDATE",
+      "source": "ACTIVE_POSITIVE_LEARNING",
+      "learning_ids": [
+       190231,
+       312192,
+       168495
+      ],
+      "historical_case_ids": [],
+      "feedback_signal_ids": [],
+      "answer_required": true,
+      "evidence_coverage": "PARTIALLY_SUPPORTED",
+      "product_fact_fields": [
+       "brand",
+       "model_name",
+       "resolution",
+       "screen_size"
+      ]
+     },
+     {
+      "subquestion": "기본 구성품에 리모컨이 들어있는지도 궁금합니다.",
+      "status": "CANDIDATE",
+      "source": "VERIFIED_PRODUCT_FACT",
+      "learning_ids": [],
+      "historical_case_ids": [],
+      "feedback_signal_ids": [],
+      "answer_required": true,
+      "evidence_coverage": "UNSUPPORTED",
+      "product_fact_fields": [
+       "brand",
+       "model_name",
+       "resolution",
+       "screen_size"
+      ]
+     }
+    ],
+    "prompt_fact_keys": [
+     "product.name",
+     "product.product_id"
+    ],
+    "prompt_learning_ids": [
+     190231,
+     312192,
+     168495
+    ],
+    "prompt_historical_ids": [],
+    "prompt_chars": 26966,
+    "used_learning_ids": [],
+    "used_historical_ids": [],
+    "used_template_ids": [],
+    "unresolved": [
+     "기본 구성품에 리모컨이 들어있는지도 궁금합니다.",
+     "이 제품은 리모컨으로 조작하는 제품인가요?"
+    ],
+    "requires_review": true,
+    "can_auto_post": false,
+    "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n현재 확인된 상품 정보만으로는 리모컨 조작 가능 여부와 기본 구성품의 리모컨 포함 여부를 확인하기 어렵습니다. 두 사항 모두 정확한 상품 사양과 구성품 확인이 필요합니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+    "validator_status": "PASS",
+    "eligibility_decision": "REVIEW_REQUIRED",
+    "eligibility_reasons": [
+     "GPT_REPORTED_UNRESOLVED",
+     "GPT_WITHHELD_AUTO_POST"
+    ],
+    "eligibility_soft_reasons": [],
+    "naver_post_calls": 0,
+    "dps_calls": 0,
+    "order_lookup_calls": 0,
+    "gpt_calls": 1,
+    "duration_seconds": 22.457,
+    "fidelity": "CONTRACT_DRIFT",
+    "fidelity_notes": [
+     "product_identity_status: stored=NOT_FOUND replay=LISTING_EXACT",
+     "learning_hard_valid: stored=578 replay=669"
+    ]
+   }
+  },
+  {
+   "case_id": "Q688159421",
+   "source_question_id": "688159421",
+   "inquiry_id": 3105,
+   "tier": "ANCHOR",
+   "stratum": {
+    "actions": [
+     "DELIVERY_STATUS",
+     "MISSING_ITEM_REPORT"
+    ],
+    "atom_bucket": "2",
+    "blocking_reasons": [
+     "REQUIRED_ORDER_ID_MISSING_OR_INVALID",
+     "ORDER_LOOKUP_NOT_TRUSTED",
+     "GPT_REPORTED_UNRESOLVED",
+     "GPT_WITHHELD_AUTO_POST"
+    ],
+    "eligibility": "REVIEW_REQUIRED",
+    "evidence_statuses": [
+     "NEEDS_DPS"
+    ],
+    "has_current_pipeline_draft": true,
+    "has_production_answer": false,
+    "learning_selected": 3,
+    "model_code_in_name": true,
+    "need_dps": false,
+    "need_order": true,
+    "need_product": false,
+    "primary_action": "DELIVERY_STATUS",
+    "product_identity": "NOT_FOUND",
+    "replayable_understanding": true,
+    "source_type": "PRODUCT_INQUIRY",
+    "verified_product_facts": 0
+   },
+   "label": {
+    "label_source": "FORENSIC_ANALYSIS",
+    "expected_answerability": "NEEDS_CURRENT_ORDER_FACT",
+    "expected_review_required": true,
+    "expected_order_lookup": true,
+    "expected_dps_lookup": false,
+    "expected_evidence_learning_ids": [],
+    "expected_evidence_historical_ids": [],
+    "forbidden_evidence_learning_ids": [],
+    "required_subquestions": [
+     "별도 배송|따로 배송|따로 오는",
+     "미수령|못 받|누락|안 보이"
+    ],
+    "forbidden_claims": [
+     "부속품 발송 완료 확정",
+     "부속품 미발송 확정"
+    ],
+    "expected_answer_quality": "PARTIALLY_CORRECT",
+    "production_answer": null,
+    "notes": "'제가 못 받은 것인지' 는 이 고객의 출고 내역이 필요하므로 검토가 정답이다. 그러나 '원래 별도 배송되는 부속품인가' 는 주문과 무관한 포장/구성 정책 질문이며 자기 근거를 유지해야 한다. 현재는 문의 단위 requires_order_context 때문에 두 atom 모두 CURRENT_DPS_REQUIRED 로 비워진다(need_dps=false 인데도). expected_answer_quality=PARTIALLY_CORRECT 는 '정책 부분은 답하고 미수령 부분은 확인 요청' 이 정답이라는 뜻이다. WATCHES: G26 (sub-question evidence suppression)."
+   },
+   "observed": {
+    "ran": true,
+    "error": null,
+    "semantic_usable": true,
+    "semantic_actions": [
+     "DELIVERY_STATUS",
+     "MISSING_ITEM_REPORT"
+    ],
+    "atom_count": 2,
+    "atoms": [
+     "박스에 있어야 할 부속품이 원래 따로 배송되는지 확인 부탁드립니다.",
+     "부속품을 제가 못 받은 것인지 확인 부탁드립니다."
+    ],
+    "need_template": true,
+    "need_product": false,
+    "need_learning": true,
+    "need_order": true,
+    "need_dps": false,
+    "learning_pool": 899,
+    "learning_hard_valid": 669,
+    "learning_selected": 6,
+    "product_identity_status": "NOT_FOUND",
+    "verified_product_facts": 0,
+    "template_candidates": 5,
+    "subquestion_evidence": [
+     {
+      "subquestion": "박스에 있어야 할 부속품이 원래 따로 배송되는지 확인 부탁드립니다.",
+      "status": "NEEDS_DPS",
+      "source": "CURRENT_DPS_REQUIRED",
+      "learning_ids": [],
+      "historical_case_ids": [],
+      "feedback_signal_ids": [],
+      "answer_required": false,
+      "evidence_coverage": "DEFERRED_TO_CURRENT_FACT"
+     },
+     {
+      "subquestion": "부속품을 제가 못 받은 것인지 확인 부탁드립니다.",
+      "status": "CANDIDATE",
+      "source": "ACTIVE_POSITIVE_LEARNING",
+      "learning_ids": [
+       19460,
+       318189
+      ],
+      "historical_case_ids": [],
+      "feedback_signal_ids": [],
+      "answer_required": true,
+      "evidence_coverage": "SUPPORTED"
+     }
+    ],
+    "prompt_fact_keys": [
+     "product.name",
+     "product.product_id"
+    ],
+    "prompt_learning_ids": [
+     19460,
+     318189,
+     159487
+    ],
+    "prompt_historical_ids": [
+     116,
+     241
+    ],
+    "prompt_chars": 33694,
+    "used_learning_ids": [],
+    "used_historical_ids": [],
+    "used_template_ids": [],
+    "unresolved": [
+     "부속품을 제가 못 받은 것인지 확인 부탁드립니다.",
+     "박스에 있어야 할 부속품이 원래 따로 배송되는지 확인 부탁드립니다."
+    ],
+    "requires_review": true,
+    "can_auto_post": false,
+    "answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n부속품의 별도 배송 여부와 실제 누락 여부는 현재 제공된 정보만으로 확인되지 않아 담당자 확인이 필요합니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+    "validator_status": "PASS",
+    "eligibility_decision": "REVIEW_REQUIRED",
+    "eligibility_reasons": [
+     "REQUIRED_ORDER_ID_MISSING_OR_INVALID",
+     "ORDER_LOOKUP_NOT_TRUSTED",
+     "GPT_REPORTED_UNRESOLVED",
+     "GPT_WITHHELD_AUTO_POST"
+    ],
+    "eligibility_soft_reasons": [],
+    "naver_post_calls": 0,
+    "dps_calls": 0,
+    "order_lookup_calls": 0,
+    "gpt_calls": 1,
+    "duration_seconds": 43.952,
+    "fidelity": "CORPUS_DRIFT",
+    "fidelity_notes": [
+     "learning_hard_valid: stored=578 replay=669"
+    ]
+   }
+  }
+ ]
+}

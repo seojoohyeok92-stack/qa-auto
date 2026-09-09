@@ -43,6 +43,16 @@ STORE = "OJE_PLUS"
 IDENTIFIED_PRODUCT = (
     "삼성 125.7cm(50인치) UHD 4K 1등급 비즈니스TV LH50BEFHLGFXKR 스탠드형"
 )
+# 이 파일은 카탈로그(model_data_with_color.json) 경로를 검증한다. 상품 식별
+# 계약상 product_id 가 있으면 listing store(product_facts.db)가 먼저 답하므로,
+# 여기서는 product_id 를 비워 이름 기반 카탈로그 매칭(계약 2번)을 태운다.
+#
+# 이전에는 harness 가 모든 케이스에 "11815213767" 을 박아 넣었는데, 그것은
+# 삼탠바이미 listing 의 id 이고 IDENTIFIED_PRODUCT 는 LH50BEFHLGFXKR 이다.
+# id 가 무시되던 동안에는 무해했지만, 이제 id 가 가장 강한 식별자이므로 그
+# 조합은 "A 의 id 와 B 의 이름" 이라는 존재하지 않는 상품을 시험하게 된다.
+CATALOGUE_ONLY_PRODUCT_ID = ""
+
 # 상품명에 model code 가 없어 카탈로그가 식별하지 못하는 실제 상품.
 UNIDENTIFIED_PRODUCT = (
     "삼성 삼탠바이미 50인치(125cm) 4K UHD 무빙 스마트 비즈니스TV 거치대 화이트"
@@ -191,7 +201,8 @@ def _copy_learning(target: Database, product_names, limit=60) -> int:
 
 
 def _run(tmp_path, monkeypatch, *, name, question, product_name, atoms,
-         stub, learning_products=(), option_name=None):
+         stub, learning_products=(), option_name=None,
+         product_id=CATALOGUE_ONLY_PRODUCT_ID):
     database = Database(tmp_path / f"{name}.db")
     database.initialize()
     if learning_products:
@@ -203,7 +214,7 @@ def _run(tmp_path, monkeypatch, *, name, question, product_name, atoms,
         "source_question_id": f"gen-{name}",
         "inquiry_type": "PRODUCT_INQUIRY",
         "content": question,
-        "product_id": "11815213767",
+        "product_id": product_id,
         "product_name": product_name,
         "option_name": option_name,
         "raw_json": {},

@@ -16,6 +16,7 @@ from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
 from services.similar_answer_service import SimilarAnswerService
 from services.historical_case_service import HistoricalCaseService
+from services.historical_learning_quality_service import is_data_unsafe
 from repositories.learning_provenance_repository import LearningProvenanceRepository
 from repositories.feedback_signal_provenance_repository import (
     FeedbackSignalProvenanceRepository,
@@ -43,7 +44,22 @@ from services.semantic_analysis import (
 # character DRAFT prompt (94.7%) while the actual evidence was 15,045.
 # They stay in the context for telemetry; they are kept out of the prompt.
 PROMPT_EXCLUDED_CONTEXT_KEYS: frozenset[str] = frozenset(
-    {"learning_retrieval", "historical_retrieval"}
+    {
+        "learning_retrieval",
+        "historical_retrieval",
+        # A verdict about the candidates, sitting in the prompt beside them.
+        #
+        # ``learning_evidence_policy`` requires an exact product match before
+        # an approved answer "qualifies", so every product-independent policy
+        # answer -- collection, installation method, after-service -- comes
+        # back {"usable": false, "reason": "NO_QUALIFYING_APPROVED_LEARNING"}.
+        # On 688159337 that reached the model next to the very rows that
+        # answered the question. Whether a candidate applies is the judgement
+        # GPT ② is being asked to make; telling it in advance that the answer
+        # is no is not evidence. The verdict is still computed and still
+        # persisted for the dashboard -- it is only out of the prompt.
+        "approved_learning_evidence",
+    }
 )
 
 # The seller answer is carried twice per historical case, as
@@ -252,10 +268,20 @@ def _order_evidence_required(
     if semantic_analysis is None or not semantic_analysis.usable:
         return None
     if atomic is not None:
-        return bool(
-            str(atomic.action).upper() in _ORDER_SCOPED_ACTIONS
-            or semantic_analysis.requires_order_context
-        )
+        # This sub-question's own action, and nothing else.
+        #
+        # ``requires_order_context`` is a property of the *inquiry*, so ORing
+        # it here made one order-shaped clause pull every sibling into the
+        # customer's order. Measured on 688159421 -- "오늘 설치까지 끝났는데
+        # 박스에 있어야 할 부속품 하나가 안 보이네요. 원래 따로 배송되는 건지
+        # 제가 못 받은 건지" -- both atoms came back CURRENT_DPS_REQUIRED with
+        # their evidence lists emptied, although ``need_dps`` was false and one
+        # of them is a packaging-policy question that no order can answer.
+        #
+        # The inquiry-level reading is kept below for the no-atom case, where
+        # there is no sub-question to ask about and the whole inquiry is the
+        # only thing there is to judge.
+        return bool(str(atomic.action).upper() in _ORDER_SCOPED_ACTIONS)
     return bool(
         semantic_analysis.actions & _ORDER_SCOPED_ACTIONS
         or semantic_analysis.requires_order_context
@@ -267,7 +293,13 @@ _UNSET = object()
 # How many meaning-based neighbours a sub-question may bring in. Recall is the
 # point, and everything after this stage filters; the benchmark that chose the
 # hybrid union measured its gain at rank 20.
-SEMANTIC_NEIGHBOUR_LIMIT = 20
+# Raised from 20 with the rank bonus in ``similar_answer_service``: the two
+# only work together. At 20, a row outside the index's top 20 fell back to
+# lexical overlap, which is where the collection answer that belonged at rank 1
+# was scoring 0.104. A wider neighbourhood costs nothing at query time -- the
+# vectors are already loaded and the lookup is one pass -- and the bonus decays
+# with rank, so a distant neighbour is admitted without being promoted.
+SEMANTIC_NEIGHBOUR_LIMIT = 60
 
 
 class LearningContextService:
@@ -436,15 +468,43 @@ class LearningContextService:
                 metadata.get("human_verified") is True
                 and source_origin != "HISTORICAL_PROMOTED"
             )
+            # Only a fact about the row itself may remove it here.
+            #
+            # ``assess`` returns two very different kinds of finding through
+            # one flag. DATA_UNSAFE statuses are properties of the stored row --
+            # it is inactive, its promotion was revoked, its validity has
+            # expired, it carries a policy risk, or it states one past
+            # customer's order fact. Those are ours to enforce and they stay.
+            #
+            # The rest -- QUESTION_ANSWER_MISMATCH, LOW_RELEVANCE,
+            # LOW_INFORMATION_ANSWER -- are judgements about meaning, made from
+            # concept-set overlap and four hand-tuned thresholds, and they were
+            # removing 321 of 899 candidates on a single inquiry before GPT ②
+            # saw any of them. Whether a stored answer is on point is exactly
+            # what GPT ② is given the candidates to decide, so the finding now
+            # travels with the candidate as a hint instead of deleting it.
             approval_overrides_soft_quality = bool(
                 explicitly_approved
                 and eligibility.status in {
-                    "QUESTION_ANSWER_MISMATCH",
-                    "LOW_RELEVANCE",
+                    "QUESTION_ANSWER_MISMATCH", "LOW_RELEVANCE",
                     "REVIEW_REQUIRED",
                 }
             )
-            if not eligibility.context_eligible and not approval_overrides_soft_quality:
+            semantic_finding_only = (
+                not eligibility.context_eligible
+                and not is_data_unsafe(eligibility)
+            )
+            if semantic_finding_only:
+                learning_quality_rejections[
+                    f"DEMOTED_{eligibility.status}"
+                ] = learning_quality_rejections.get(
+                    f"DEMOTED_{eligibility.status}", 0
+                ) + 1
+            if (
+                not eligibility.context_eligible
+                and not approval_overrides_soft_quality
+                and not semantic_finding_only
+            ):
                 learning_quality_rejections[eligibility.status] = (
                     learning_quality_rejections.get(eligibility.status, 0) + 1
                 )
@@ -543,7 +603,19 @@ class LearningContextService:
                     question_guard.sensitive
                     or (atomic is not None and atomic.action in PRODUCT_FACT_ACTIONS)
                 ),
-                limit=2 if len(questions) > 1 else 3,
+                # How many candidates one sub-question may show GPT ②.
+                #
+                # Two, on a compound inquiry, out of 669 that had already
+                # cleared validity, product identity and the relevance floor --
+                # and which two was settled by a lexical score. Choosing the
+                # evidence is the judgement being moved to GPT ②; the number of
+                # candidates is a budget question -- and the binding budget
+                # turned out to be the provider's 45s read timeout, not the
+                # 60,000-char prompt cap. At 4/6 the largest compound
+                # inquiry reached 39,350 chars and timed out; 35,619 had
+                # completed. These values keep the widening (2/3 -> 3/5)
+                # inside the envelope that is known to answer.
+                limit=3 if len(questions) > 1 else 5,
                 candidate_pool=candidate_pool,
                 candidate_diagnostics=candidate_diagnostics,
                 semantic_goal=semantic_goal,
@@ -623,9 +695,12 @@ class LearningContextService:
                 reverse=True,
             )[:limit]
 
-        approved = merged("similar_approved_answers", limit=6)
+        # The union across sub-questions. Raised with the per-question
+        # limit above so a three-part inquiry is not squeezed back to two
+        # candidates each by the merge.
+        approved = merged("similar_approved_answers", limit=8)
         seller = merged(
-            "seller_style_examples", limit=max(0, 6 - len(approved))
+            "seller_style_examples", limit=max(0, 4)
         )
         context = {
             "similar_approved_answers": approved,
@@ -1220,13 +1295,16 @@ class LearningContextService:
             "safe_reusable_knowledge_allowed": True,
             "runtime_eligibility_required": True,
             "never_use_as_current_fact": True,
-            "current_authority_order": [
-                "RULE_AND_SAFETY", "CURRENT_ORDER", "CURRENT_DPS",
-                "PRODUCT_DB", "VALIDATED_TEMPLATE",
-                "VERIFIED_FEEDBACK_SIGNAL", "APPROVED_LEARNING",
-                "HISTORICAL_VERIFIED_LEARNING",
-            ],
+            # ``current_authority_order`` used to rank the sources, with
+            # RULE_AND_SAFETY first and HISTORICAL_VERIFIED_LEARNING last. A
+            # standing order like that answers "which source wins" before the
+            # model has read either one, and it disagreed with the block names
+            # in the same prompt. What remains is the one precedence that is a
+            # safety rule rather than a judgement: a claim that depends on
+            # *when* can only come from this customer's current order.
             "time_dependent_claims_require_current_facts": True,
+            "current_order_facts_only_from": ["CURRENT_ORDER", "CURRENT_DPS"],
+            "otherwise_judge_each_candidate_on_its_own_provenance": True,
         }
         context["product_fact_guard"] = {
             **guard.to_dict(),

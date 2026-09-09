@@ -91,6 +91,33 @@ DPS_SESSION_KEEPALIVE_ENABLED=false
 
 Naver Client ID/Secret과 GPT API key는 실제 기능을 승인받은 경우에만 서버 `.env` 또는 승인된 Secret store에 입력합니다.
 
+### GPT read timeout (서버 배포 시 반드시 반영)
+
+개발 PC `.env`는 아래 값으로 변경되었습니다. **서버 PC `.env`에도 동일하게 반영해야 합니다.**
+
+```dotenv
+QNA_GPT_READ_TIMEOUT_SECONDS=75
+```
+
+**이유.** GPT-first 구조 단순화로 Learning/Historical/Product 근거를 이전보다
+넓게 전달하면서 DRAFT prompt가 커졌습니다(실측 최대 37,186자). 45초에서는
+가장 근거가 풍부한 복합문의가 `GPTPROVIDERTIMEOUTERROR`로 실패해 안전초안으로
+떨어졌습니다 — 근거를 많이 찾을수록 답변이 나빠지는 역전입니다. 실측: 35,619자
+성공 / 39,350자 실패 / 37,186자 간헐 실패.
+
+고객 안전에는 영향이 없습니다(어느 쪽이든 REVIEW로 갑니다). 영향은 답변 품질과
+불필요한 직원 검토 증가입니다.
+
+**함께 확인할 것.**
+
+* `QNA_GPT_TOTAL_TIMEOUT_SECONDS`가 read timeout보다 커야 합니다. 개발 PC는
+  120이라 75와 정합합니다.
+* `.env.example`은 현재 `QNA_GPT_READ_TIMEOUT_SECONDS=30`,
+  `QNA_GPT_TOTAL_TIMEOUT_SECONDS=40`입니다. 이 템플릿으로 새 서버를 구성하면
+  75가 아니라 30이 적용되고, 75로 올릴 경우 total 40에 먼저 걸립니다. 서버
+  `.env`를 새로 만들 때는 두 값을 함께 조정하십시오
+  (`READ=75`, `TOTAL`은 최소 120 권장).
+
 ## DPS 운영 조건
 
 현재 DPS Agent는 Windows Chrome GUI와 `pywinauto`를 사용합니다.

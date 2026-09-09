@@ -761,9 +761,25 @@ class ProductKnowledgeService:
         repository: ProductFactRepository | None = None,
         catalog_repository: ProductCatalogRepository | None = None,
     ) -> None:
-        # An explicitly supplied ProductFactRepository remains available for
-        # historical diagnostics/tests only.  The production default never
-        # constructs or reads product_facts.db.
+        # ``product_facts.db`` is the production source again.
+        #
+        # The default was None, with a comment saying production never reads
+        # this file. The consequence was measured on the Golden set: of the
+        # inquiries where GPT ① asked for product evidence, *none* received a
+        # single verified fact, and the auto-post gate then held them with
+        # PRODUCT_FACT_NOT_VERIFIED -- blaming a fact source the pipeline had
+        # been told not to open.
+        #
+        # The catalogue is keyed on a model code parsed out of the listing
+        # title, which 42% of this store's listings do not contain
+        # ("삼성 삼탠바이미 50인치(125cm) ... 이동식 거치대"). ``product_facts.db``
+        # is keyed on the Naver ``product_id`` -- the exact listing the customer
+        # is writing from -- so it identifies the product where the title
+        # cannot. The two are complements, and ``facts_for_inquiry`` now falls
+        # through from one to the other rather than choosing at construction.
+        if repository is None:
+            candidate = ProductFactRepository()
+            repository = candidate if candidate.available() else None
         self.repository = repository
         self.catalog_repository = catalog_repository or ProductCatalogRepository()
 
@@ -785,6 +801,20 @@ class ProductKnowledgeService:
         evidence. The catalogue is then offered whole rather than filtered
         through the customer's wording -- see ``CATALOG_BACKED_FIELDS`` for why,
         and for the one class of field that keeps its keyword path.
+
+        Product identity contract, in force here:
+
+        1. A ``product_id`` is the strongest identity and is used first.
+        2. With no ``product_id``, the listing name may be matched instead.
+        3. An exact ``product_id`` wins over an ambiguous name -- the id names
+           the listing the customer is writing from; the name only resembles
+           one.
+        4. If neither settles which product this is, nothing is reported as a
+           VERIFIED fact. Candidates may still travel, labelled as candidates.
+        5. A fact the listing store excluded (NEEDS_REVIEW, CONFLICT,
+           superseded, foreign model) is never revived from the catalogue.
+        6. When the listing store knows the product, its safety verdict stands;
+           the catalogue is consulted only when it does not know it.
         """
 
         key = str(product_id or "").strip()
@@ -798,7 +828,7 @@ class ProductKnowledgeService:
                 (*fields, *sorted(CATALOG_BACKED_FIELDS))
             ))
 
-        if self.repository is None:
+        def _catalog() -> ProductKnowledgeResult:
             return self._catalog_facts_for_inquiry(
                 product_id=key,
                 product_name=product_name,
@@ -809,12 +839,48 @@ class ProductKnowledgeService:
                 combined=combined,
             )
 
-        if not key:
-            return ProductKnowledgeResult(
-                product_id=None, listing_id=None, matched=False,
-                requested_fields=fields, topics=topics,
-                unavailable_reason="NO_PRODUCT_ID",
-            )
+        if self.repository is None or not key:
+            return _catalog()
+
+        # One source per product, never a blend.
+        #
+        # The listing store is asked first because it identifies the product by
+        # the Naver ``product_id`` the customer is actually writing from. If it
+        # knows the listing, its answer stands -- *including* when that answer
+        # is "these facts exist and none of them may be used". Those exclusions
+        # are the NEEDS_REVIEW / CONFLICT / superseded / foreign-model checks,
+        # and an earlier version of this fall-through read "no safe facts" as
+        # "nothing found" and went to the catalogue, which happily supplied the
+        # same fields from a model-code match. That turned every deliberate
+        # exclusion into a lookup in a different table: the wrong-model
+        # specification the listing store had just refused arrived anyway.
+        #
+        # The catalogue is consulted only when the listing store has never
+        # heard of the product, where there is no exclusion to defeat.
+        db_result = self._repository_facts_for_inquiry(
+            key=key, fields=fields, topics=topics, combined=combined,
+            model_code=model_code,
+        )
+        if db_result.matched:
+            return db_result
+        catalog_result = _catalog()
+        if catalog_result.matched or catalog_result.candidate_models:
+            return catalog_result
+        # Neither source knows it. Report the listing store's reason: it is the
+        # one keyed on the identifier this inquiry actually carries.
+        return db_result
+
+    def _repository_facts_for_inquiry(
+        self,
+        *,
+        key: str,
+        fields: tuple[str, ...],
+        topics: tuple[str, ...],
+        combined: str,
+        model_code: object,
+    ) -> ProductKnowledgeResult:
+        """Verified facts for the exact listing the customer is writing from."""
+
         if not fields:
             # Nothing in the question is a product-specification topic.
             return ProductKnowledgeResult(
@@ -872,6 +938,12 @@ class ProductKnowledgeService:
             excluded_facts=tuple(excluded),
             collection_status=collection_status,
             component_subject=component_subject,
+            # These rows were stored against this Naver product_id, so the
+            # identity is the listing itself rather than a model code guessed
+            # from the title. Left at the "NOT_FOUND" default, the prompt told
+            # the model the product was unidentified while handing it that
+            # product's verified specification.
+            identity_status="LISTING_EXACT",
         )
 
     def _catalog_facts_for_inquiry(

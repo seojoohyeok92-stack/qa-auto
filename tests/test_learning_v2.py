@@ -215,10 +215,19 @@ def test_gpt_prompt_receives_approved_style_context_in_declared_priority() -> No
         IntentResult("GENERAL", ("TV 사용 문의",), Emotion.NORMAL, "NORMAL", 0.9, False, ""),
     )
     prompt_input = captured["prompt"]["input"]
-    assert prompt_input["context_priority"] == [
-        "CURRENT_INQUIRY", "PRODUCT_DB", "POLICY", "FIXED_TEMPLATE",
-        "SIMILAR_APPROVED_ANSWERS", "SELLER_STYLE_EXAMPLES",
-        "HISTORICAL_CASES_REFERENCE_ONLY", "OJE_STYLE_RULES",
-    ]
+    # ``context_priority`` 라는 고정 서열은 제거됐다. 그 목록이
+    # FIXED_TEMPLATE 을 SIMILAR_APPROVED_ANSWERS 위에 두는 바람에
+    # 688159337 에서 모델이 "확인이 필요합니다" 규칙을 우선 적용 답변으로
+    # 읽고 정답 승인 답변을 기각했다. 이제 프롬프트는 각 블록이 *무엇인지*
+    # 만 설명하고, 어느 것이 적용되는지는 GPT ② 가 판단한다.
+    assert "context_priority" not in prompt_input
+    sources = prompt_input["context_sources"]
+    assert set(sources) >= {
+        "CURRENT_INQUIRY", "CURRENT_ORDER_AND_DPS", "PRODUCT_CATALOG_JSON",
+        "APPROVED_LEARNING", "HISTORICAL_CASES", "TEMPLATE_CANDIDATE",
+        "SELLER_STYLE_EXAMPLES", "OJE_STYLE_RULES",
+    }
+    # 문체 예시는 여전히 사실 근거가 아니라고 명시된다.
+    assert "사실 근거가 아니" in sources["SELLER_STYLE_EXAMPLES"]
     assert prompt_input["similar_approved_answers"][0]["answer"] == "승인 답변"
     assert prompt_input["oje_style_rules"]["seller_examples_are_style_only"] is True

@@ -115,14 +115,25 @@ def _normalized_answer(value: object) -> str:
 
 
 def _semantic_rank_bonus(rank: int) -> float:
-    """A semantic neighbour's floor, decreasing with its rank.
+    """How close in meaning this candidate is, as a score contribution.
 
-    Deliberately tiny. It exists to clear ``minimum_relevance`` so the
-    candidate is scored at all; ordering among real matches stays with the
-    lexical signal and the answer-support re-ranking after it.
+    This used to return at most 0.02 -- enough to clear ``minimum_relevance``
+    and nothing more -- with ordering left to the lexical signal. On
+    "지금 설치되어 있는 타 85인치 TV가 있는데 회수가 가능한지" that put four
+    unrelated 반품/취소/배송 answers above "78인치 티비도 수거해주시나요?" →
+    "폐가전 무상수거 가능합니다", which is the answer to the question: 회수 and
+    수거 are the same act and share no character, so lexical overlap ranked the
+    one row that answered it at 0.104 while a return-request row scored 0.099
+    on the word 회수 appearing in its reply.
+
+    The embedding rank is the meaning signal, and it was already being computed
+    and then thrown away. Using it is not a new rule -- it is one fewer place
+    where lexical overlap stands in for meaning. It stays a floor rather than a
+    replacement (`max` with the lexical score below), so a candidate the
+    lexical scorer likes is never demoted by it.
     """
 
-    return max(0.0, 0.02 - 0.001 * max(int(rank) - 1, 0))
+    return max(0.0, 0.45 * (0.94 ** max(int(rank) - 1, 0)))
 
 
 class SimilarAnswerService:
@@ -202,7 +213,7 @@ class SimilarAnswerService:
         product_id: str | None = None,
         option_name: str | None = None,
         product_fact_sensitive: bool = False,
-        limit: int = 3, minimum_relevance: float = 0.24,
+        limit: int = 8, minimum_relevance: float = 0.24,
         candidate_pool: list[dict[str, Any]] | None = None,
         candidate_diagnostics: dict[str, int] | None = None,
         semantic_goal: dict[str, Any] | None = None,
@@ -574,7 +585,14 @@ class SimilarAnswerService:
             ),
             reverse=True,
         )
-        selected = [item for _, item in ranked[: max(0, min(limit, 3))]]
+        # ``min(limit, 3)`` used to cap this at three whatever the caller asked
+        # for, so 669 candidates that had already cleared validity, identity and
+        # the relevance floor were reduced to three before GPT ② saw any of
+        # them -- and which three was decided by a lexical score the code's own
+        # comments call a poor proxy. How many candidates are worth reading is a
+        # prompt-budget question, and the budget (60,000 chars, against ~26,000
+        # actually used) has room; which of them apply is GPT ②'s judgement.
+        selected = [item for _, item in ranked[: max(0, limit)]]
         self.last_trace = {
             "query": query,
             "query_variants": query_variants,

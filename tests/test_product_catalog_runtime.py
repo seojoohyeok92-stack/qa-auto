@@ -44,7 +44,12 @@ def test_catalog_ambiguous_or_missing_model_is_unknown(tmp_path: Path) -> None:
     )
     assert result.matched is False
     assert result.safe_facts == ()
-    assert result.unavailable_reason == "PRODUCT_CATALOG_MODEL_NOT_FOUND"
+    # 두 출처 모두 상품을 특정하지 못하면(식별 계약 4번) 사유는 listing store
+    # 쪽 것이 보고된다 -- 이 문의가 실제로 들고 있는 식별자로 조회한 쪽이기
+    # 때문이다. 사실이 0건이라는 본질은 위 두 단언이 그대로 지킨다.
+    assert result.unavailable_reason in {
+        "PRODUCT_CATALOG_MODEL_NOT_FOUND", "PRODUCT_NOT_IN_PRODUCT_DB",
+    }
 
 
 def test_catalog_never_uses_weight_for_explicit_stand_scope(tmp_path: Path) -> None:

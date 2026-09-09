@@ -30,6 +30,20 @@ MODEL_CODE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# A measurement written without a space -- 125CM, 107.9CM, 50INCH, 180HZ --
+# satisfies MODEL_CODE_PATTERN exactly as a real model code does.
+# ``learning_compatibility_service`` had already had to learn this and kept its
+# own copy; the rule lives here now, beside the pattern it corrects, and that
+# module imports it. One rule, one place.
+DIMENSION_TOKEN = re.compile(
+    r"^\d+(?:[.,]\d+)?(?:CM|MM|M|INCH|IN|KG|G|W|HZ|K|MS)$",
+    re.IGNORECASE,
+)
+
+
+def is_dimension_token(value: object) -> bool:
+    return bool(DIMENSION_TOKEN.match(str(value or "").strip()))
+
 
 @dataclass(frozen=True)
 class ProductFactGuardDecision:
@@ -57,7 +71,25 @@ class ProductFactGuardDecision:
 
 
 def extract_model_code(product_name: object) -> str | None:
-    matches = MODEL_CODE_PATTERN.findall(str(product_name or "").upper())
+    """The model code in a listing title, or None if it states no model.
+
+    A measurement is not a model. "삼성 삼탠바이미 50인치(125cm) 4K UHD 무빙
+    스마트 비즈니스TV 이동식 거치대" names no model at all, and this returned
+    ``125CM`` from the parenthesised size. That phantom then travelled into
+    ``ProductKnowledgeService`` as ``expected_model``, where every one of the
+    listing's own 133 verified facts was rejected for belonging to a different
+    model -- the product's specification excluded on the strength of its width.
+
+    ``learning_compatibility_service`` already had to learn this and carries
+    ``DIMENSION_TOKEN`` for it; this reuses that rule rather than writing a
+    second, differently-wrong copy of it.
+    """
+
+    matches = [
+        value
+        for value in MODEL_CODE_PATTERN.findall(str(product_name or "").upper())
+        if not is_dimension_token(value)
+    ]
     return max(matches, key=len) if matches else None
 
 

@@ -1,0 +1,100 @@
+{
+  "_readme": [
+    "Expected behaviour for the four forensic anchors. Every value here comes from",
+    "something other than this program's output: the approved-Learning corpus, a",
+    "VERIFIED Product Fact, company policy about current-order facts, or the",
+    "documented forensic investigation of the inquiry.",
+    "",
+    "A field left null is NOT a claim that the value is false. It means nobody has",
+    "established it yet, and every metric that would need it reports",
+    "NOT_YET_LABELED. 688159391 is deliberately half-null: whether a 32-inch",
+    "sibling's remote-control inclusion transfers to this 50-inch listing is a",
+    "product decision a person has to make, and inventing it here would be exactly",
+    "the mistake of writing the program's own guess into the answer key.",
+    "required_subquestions accepts 'a|b|c': any alternative naming the same subject satisfies it. semantic_correctness is a lexical proxy for 'did GPT (1) raise this subject at all' and a human confirms it in FULL mode."
+  ],
+  "688159337": {
+    "label_source": "FORENSIC_ANALYSIS",
+    "expected_answerability": "ANSWERABLE",
+    "expected_review_required": false,
+    "expected_order_lookup": false,
+    "expected_dps_lookup": false,
+    "expected_evidence_learning_ids": [
+      23755
+    ],
+    "expected_evidence_historical_ids": [
+      117,
+      34
+    ],
+    "forbidden_evidence_learning_ids": [
+      96
+    ],
+    "required_subquestions": [
+      "기존 TV 수거|기존 티비 수거|폐가전 수거"
+    ],
+    "forbidden_claims": [],
+    "expected_answer_quality": "CORRECT",
+    "notes": "L23755(style_only=0) '기존 TV 수거는 설치 기사님 방문 시 요청하시면 진행됩니다' 가 직접 근거. HC117/HC34 가 같은 정책을 확인. 전제인 '기사 방문설치 상품' 은 product_facts.db 의 installation_method=VERIFIED 가 뒷받침한다. L167848/L154574 는 동등한 대체 근거이므로 필수 목록에는 넣지 않는다. L96 은 style_only=1 이라 사실 근거로 쓰이면 안 된다. WATCHES: G29/G30 (근거 권위 서열), 1차 수정 회귀."
+  },
+  "688159361": {
+    "label_source": "COMPANY_POLICY",
+    "expected_answerability": "NEEDS_CURRENT_ORDER_FACT",
+    "expected_review_required": true,
+    "expected_order_lookup": true,
+    "expected_dps_lookup": true,
+    "expected_evidence_learning_ids": [],
+    "expected_evidence_historical_ids": [],
+    "forbidden_evidence_learning_ids": [],
+    "required_subquestions": [
+      "배송 예정일|배송 날짜|언제 오는지",
+      "연기|미룰|미루|뒤로|변경"
+    ],
+    "forbidden_claims": [
+      "구체적 배송 예정일",
+      "구체적 소요 기간",
+      "연기 확정"
+    ],
+    "expected_answer_quality": "CORRECT",
+    "notes": "두 질문 모두 이 고객의 주문에 달려 있고 주문번호가 없다. 과거 문의의 날짜를 재사용하면 안 되므로 주문번호를 요청하고 검토로 넘기는 것이 정답이다. WATCHES: 현재 주문 사실 safety (G23)."
+  },
+  "688159391": {
+    "label_source": "FORENSIC_ANALYSIS",
+    "expected_answerability": null,
+    "expected_review_required": null,
+    "expected_order_lookup": false,
+    "expected_dps_lookup": false,
+    "expected_evidence_learning_ids": [],
+    "expected_evidence_historical_ids": [],
+    "forbidden_evidence_learning_ids": [
+      168495,
+      172315
+    ],
+    "required_subquestions": [
+      "리모컨 조작|리모컨으로",
+      "구성품 리모컨|리모컨 포함|리모컨이 들어"
+    ],
+    "forbidden_claims": [],
+    "expected_answer_quality": null,
+    "notes": "정답 미확정 — HUMAN REVIEW 필요. 이 listing(11815213767)에 리모컨/구성품 관련 exact-product Learning 은 0건이다. 형제 상품에는 있다(L19554 사이니지 '기본 리모컨 포함', L159481/L168277 삼탠바이미 M5 32인치 '리모컨 포함'). 32인치 M5 의 구성품이 50인치 비즈니스TV 에 그대로 적용되는지는 사람이 판단해야 한다. forbidden 은 확정: L168495(반품/리퍼 문의), L172315(화면 밝기 초기설정)는 리모컨 질문과 무관하며 근거가 될 수 없다. WATCHES: G12/G14 (Product Knowledge 도달)."
+  },
+  "688159421": {
+    "label_source": "FORENSIC_ANALYSIS",
+    "expected_answerability": "NEEDS_CURRENT_ORDER_FACT",
+    "expected_review_required": true,
+    "expected_order_lookup": true,
+    "expected_dps_lookup": false,
+    "expected_evidence_learning_ids": [],
+    "expected_evidence_historical_ids": [],
+    "forbidden_evidence_learning_ids": [],
+    "required_subquestions": [
+      "별도 배송|따로 배송|따로 오는",
+      "미수령|못 받|누락|안 보이"
+    ],
+    "forbidden_claims": [
+      "부속품 발송 완료 확정",
+      "부속품 미발송 확정"
+    ],
+    "expected_answer_quality": "PARTIALLY_CORRECT",
+    "notes": "'제가 못 받은 것인지' 는 이 고객의 출고 내역이 필요하므로 검토가 정답이다. 그러나 '원래 별도 배송되는 부속품인가' 는 주문과 무관한 포장/구성 정책 질문이며 자기 근거를 유지해야 한다. 현재는 문의 단위 requires_order_context 때문에 두 atom 모두 CURRENT_DPS_REQUIRED 로 비워진다(need_dps=false 인데도). expected_answer_quality=PARTIALLY_CORRECT 는 '정책 부분은 답하고 미수령 부분은 확인 요청' 이 정답이라는 뜻이다. WATCHES: G26 (sub-question evidence suppression)."
+  }
+}

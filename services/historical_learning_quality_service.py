@@ -133,6 +133,35 @@ CONCEPT_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 SUPPORTING_CONCEPTS = {"PACKAGING", "POLICY"}
 
+# The statuses that are facts about the stored row rather than judgements about
+# meaning. Only these may remove a candidate before GPT ② reads it.
+#
+# ``assess`` returns both kinds through one ``context_eligible`` flag, and that
+# conflation is what let a lexical relevance score delete evidence: on a single
+# production inquiry 321 of 899 candidates were dropped as
+# FILTERED_BY_RUNTIME_QUALITY, and the measure behind most of that is
+# concept-set overlap between a stored question and its own stored answer.
+#
+# A row that is inactive, revoked, expired, policy-risky or that states one past
+# customer's order fact is unusable whatever GPT ② thinks of it -- that is ours.
+# Whether an answer is on point for *this* question is not.
+# Keyed on ``reasons`` rather than ``status``: REVIEW_REQUIRED is returned both
+# for a row that is inactive or empty (a fact about the row) and for one whose
+# answer reads as low-information (a judgement about its text), and only the
+# first may delete a candidate.
+DATA_UNSAFE_REASONS: frozenset[str] = frozenset({
+    "INACTIVE_OR_EMPTY",
+    "POLICY_RISK",
+    "TEMPORARY_WITHOUT_STRUCTURED_VALIDITY",
+    "PAST_ORDER_FACT_NOT_REUSABLE",
+})
+
+
+def is_data_unsafe(eligibility: "HistoricalEligibility") -> bool:
+    """Whether this row must not reach GPT ② whatever it judges."""
+
+    return bool(DATA_UNSAFE_REASONS & set(eligibility.reasons))
+
 
 @dataclass(frozen=True)
 class HistoricalEligibility:

@@ -192,7 +192,8 @@ def _copy_learning(target: Database, *, product_names: tuple[str, ...]) -> int:
 
 
 def _run(tmp_path, monkeypatch, *, name, question, product_name,
-         atoms, draft_stub, learning_products=()):
+         atoms, draft_stub, learning_products=(),
+         product_id="11815213767"):
     database = Database(tmp_path / f"{name}.db")
     database.initialize()
     copied = _copy_learning(database, product_names=tuple(learning_products)) \
@@ -204,7 +205,7 @@ def _run(tmp_path, monkeypatch, *, name, question, product_name,
         "source_question_id": f"v4-{name}",
         "inquiry_type": "PRODUCT_INQUIRY",
         "content": question,
-        "product_id": "11815213767",
+        "product_id": product_id,
         "product_name": product_name,
         "option_name": None,
         "raw_json": {},
@@ -294,11 +295,20 @@ def test_687932845_listing_metadata_survives_the_keyword_classifier(
         "listing_metadata", "product_catalog", "product_candidates", "precedence",
     }
 
-    # 카탈로그가 이 상품을 식별하지 못했다는 사실 자체도 전달된다 --
-    # "조회했는데 없었다" 와 "조회하지 않았다" 는 다른 상황이다.
+    # 조회가 어떻게 끝났는지 자체가 전달된다 -- "조회했는데 없었다" 와
+    # "조회하지 않았다" 는 다른 상황이다.
+    #
+    # 이 상품명에는 model code 가 없어 카탈로그는 여전히 식별하지 못한다.
+    # 그러나 이제 listing store(product_facts.db)가 Naver product_id 로
+    # 같은 상품을 식별하므로, 이 문의의 identity 는 NOT_FOUND 가 아니라
+    # LISTING_EXACT 로 끝날 수 있다. 두 출처는 provenance 가 다르고
+    # product_information_tiers 가 그 차이를 모델에게 설명하므로, 같은 이름을
+    # 쓰지 않는다.
     identity = run.prompt["input"]["product_identity"]
-    assert identity["status"] in {"NOT_FOUND", "AMBIGUOUS", "UNIQUE_MATCH", "EXACT"}
-    assert identity["matched"] is False
+    assert identity["status"] in {
+        "NOT_FOUND", "AMBIGUOUS", "UNIQUE_MATCH", "EXACT", "LISTING_EXACT",
+    }
+    assert identity["matched"] is (identity["status"] == "LISTING_EXACT")
 
     assert run.order.calls == 0
 
@@ -321,6 +331,14 @@ def test_a_listing_that_names_its_model_reaches_the_verified_catalogue(
         tmp_path, monkeypatch, name="identified",
         question="이 제품 해상도가 어떻게 되나요?",
         product_name=PRODUCT_WITH_MODEL_CODE,
+        # 이 대조군만 product_id 를 비운다. harness 기본값 "11815213767" 은
+        # 삼탠바이미 listing 의 id 이고, 이 케이스의 상품명은
+        # LH50BEFHLGFXKR 이다. 식별 계약에서 id 가 최우선(1번)이므로 그
+        # 조합은 "A 의 id + B 의 모델명" 이라는 존재하지 않는 상품이 되고,
+        # listing store 가 이름이 요구하는 모델과 다르다며 사실을 배제한 뒤
+        # (5번) 카탈로그 대체도 막는다(6번). 이 테스트의 주어는 카탈로그
+        # 경로이므로 이름으로 식별하게 둔다(2번).
+        product_id="",
         atoms=[{
             "text": "이 제품 해상도가 어떻게 되나요?", "action": "PRODUCT_SPEC",
             "requested_information": "제품 해상도", "requested_attribute": "SPEC_VALUE",

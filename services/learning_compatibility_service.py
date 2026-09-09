@@ -5,7 +5,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
-from services.product_fact_guard import extract_model_code
+from services.product_fact_guard import (
+    DIMENSION_TOKEN,
+    extract_model_code,
+    is_dimension_token,
+)
 
 
 PRODUCT_SCOPES = {
@@ -240,14 +244,9 @@ MODEL_STOPWORDS = {
 # fact from one would have settled the other. Dimensions are excluded here
 # rather than repaired in the data, because the fallback -- product_id and
 # distinctive-name matching -- is already correct and already in place.
-DIMENSION_TOKEN = re.compile(
-    r"^\d+(?:[.,]\d+)?(?:CM|MM|M|INCH|IN|KG|G|W|HZ|K|MS)$",
-    re.IGNORECASE,
-)
-
-
-def _is_dimension_token(value: str) -> bool:
-    return bool(DIMENSION_TOKEN.match(value.strip()))
+# Moved to ``product_fact_guard`` so the rule sits beside the pattern it
+# corrects and one module owns it. Re-exported here for existing readers.
+_is_dimension_token = is_dimension_token
 
 
 @dataclass(frozen=True)
