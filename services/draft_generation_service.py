@@ -155,7 +155,17 @@ ATOMIC_QUESTION_INSTRUCTIONS = (
     "evidence가 있는 질문만 사실로 답한다.",
     "review_required 또는 근거가 없는 질문은 추측하지 않고 확인이 필요하다고만 안내한다.",
     "확인이 필요한 질문 때문에 답변 가능한 다른 질문까지 회피하지 않는다.",
-    "각 질문의 근거는 그 질문에 연결된 evidence만 사용한다.",
+    # The per-question map is what retrieval matched, not a fence.
+    #
+    # One stored answer routinely settles two sub-questions at once: the
+    # store's reply "폐가전 무상수거 가능합니다" answers both whether the old TV
+    # is collected and whether it costs anything. Retrieval attaches it to one
+    # atom, and this line then forbade reading it for the other -- on 688292751
+    # the collection half was answered from it and the cost half came back
+    # unresolved with that very sentence in the prompt.
+    "각 질문에 연결된 evidence는 검색이 그 질문에 맞다고 본 것이다."
+    " 한 근거가 여러 질문에 실제로 답하고 있으면 그 질문들에 모두 사용할 수 있다.",
+    "다만 다른 주제의 근거를 이 질문에 답한 것처럼 쓰지는 않는다.",
     # The contract that was missing. Without it the model may answer a
     # neighbouring property of the same subject -- cost instead of whether the
     # service is performed -- and the answer reads as responsive while telling
@@ -286,15 +296,44 @@ class DraftGenerationService:
                     " SELLER_POSTED_NOT_VERIFIED는 과거에 판매자가 실제로 고객에게"
                     " 보낸 답변이지만 사실 근거로는 검증되지 않은 것이며,"
                     " AUTO는 파이프라인이 생성한 기록이다."
-                    " 확정 사실로 인용할 수 있는 것은 APPROVED 뿐이다."
+                    # Provenance, not permission.
+                    #
+                    # These two lines used to read "only APPROVED may be cited
+                    # as a definite fact" and "when the source is unverified or
+                    # hedged, say it needs checking or leave it unresolved".
+                    # Measured against the live store that is an instruction to
+                    # give up: 624 of 1,047 active rows are the seller's own
+                    # posted answers (SELLER_POSTED_NOT_VERIFIED) and 510 carry
+                    # a hedge flag, so for most real questions every candidate
+                    # the retrieval found was pre-labelled unusable.
+                    #
+                    # Four server inquiries show the effect. 688292805 asked
+                    # whether the wall-mount installation fee is extra and was
+                    # handed the store's own answer saying it is not charged;
+                    # 688292840 asked whether the remote is included and was
+                    # handed two answers saying it is. Both atoms came back
+                    # unresolved with used_learning_ids empty -- the model did
+                    # exactly what it was told.
+                    #
+                    # So the authority label stays and its meaning stays: it
+                    # says where the sentence came from, and the model has to
+                    # weigh that. What it no longer does is decide the outcome
+                    # in advance.
+                    " evidence_authority는 출처를 알려주는 정보이며 사용 허가가"
+                    " 아니다. 어느 근거가 이 질문에 답하는지는 내용을 읽고"
+                    " 판단하라."
                     " hedge_reason이 비어 있지 않으면 그 답변은 스스로 추정임을"
                     " 밝힌 문장이다."
                     " SENTENCE 단위로 읽어라: 추정 표현이 있다고 해서 그 답변의"
                     " 다른 정책·사실 내용까지 버리지 말고, 반대로 추정인 부분을"
                     " 확정 사실처럼 단정하지도 마라."
-                    " 검수되지 않은 출처나 추정 문장만으로 확정 표현을 쓰면"
-                    " 근거 없는 주장으로 처리된다. 그런 근거로 답할 때는"
-                    " 확인이 필요하다고 안내하거나 unresolved로 남겨라."
+                    " 근거가 질문에 답하고 있으면 그 내용으로 답하고 어떤 근거를"
+                    " 썼는지 보고하라. 출처가 검수 전이거나 다른 상품에서 온"
+                    " 경우에는 확정 표현의 수준을 그 근거가 실제로 뒷받침하는"
+                    " 만큼으로 맞춰라."
+                    " 전달된 근거 중 어느 것도 그 질문에 답하지 않을 때에만"
+                    " unresolved 로 남겨라. 없는 사양이나 정책을 추측해서"
+                    " 만들어내지는 마라."
                 ),
                 "HISTORICAL_CASES": (
                     "과거 상담 기록. 안정적인 운영 지식이면 사실 근거로 사용 가능하며,"
