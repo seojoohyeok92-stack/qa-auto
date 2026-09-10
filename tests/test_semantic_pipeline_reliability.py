@@ -137,7 +137,7 @@ class DraftProvider(FakeGptProvider):
         if action == "REPAIR":
             return {
                 "answer": "고장난 TV 수리는 삼성전자 서비스센터를 통해 접수하실 수 있습니다.",
-                "confidence": 0.95, "used_facts": ["rule.answer"],
+                "confidence": 0.95, "used_facts": [],
                 "missing_information": [], "requires_review": False,
                 "warnings": [],
                 "subquestion_results": [{
@@ -148,7 +148,7 @@ class DraftProvider(FakeGptProvider):
         if action == "COLLECTION" and "고장" in question:
             return {
                 "answer": "고장난 기존 TV 수거 가능 여부는 상품과 설치 조건을 확인한 뒤 안내드리겠습니다.",
-                "confidence": 0.9, "used_facts": ["rule.answer"],
+                "confidence": 0.9, "used_facts": [],
                 "missing_information": ["수거 가능 여부"], "requires_review": True,
                 "warnings": [],
                 "subquestion_results": [{
@@ -159,7 +159,7 @@ class DraftProvider(FakeGptProvider):
         if action == "COLLECTION":
             return {
                 "answer": "기존 TV 수거 가능 여부는 설치 상품과 수거 조건을 확인한 뒤 안내드리겠습니다.",
-                "confidence": 0.9, "used_facts": ["rule.answer"],
+                "confidence": 0.9, "used_facts": [],
                 "missing_information": [], "requires_review": False,
                 "warnings": [],
                 "subquestion_results": [{
@@ -170,7 +170,7 @@ class DraftProvider(FakeGptProvider):
         if "배송" in question and ("며칠" in question or "기간" in question):
             return {
                 "answer": "구매 전 배송 기간은 지역과 주문 조건에 따라 달라 현재 확정 안내가 어려워 담당자 확인 후 안내드리겠습니다.",
-                "confidence": 0.9, "used_facts": ["rule.answer"],
+                "confidence": 0.9, "used_facts": [],
                 "missing_information": ["현재 배송 기간"], "requires_review": True,
                 "warnings": [],
                 "subquestion_results": [{
@@ -688,29 +688,41 @@ def test_the_recorder_never_lets_its_own_fault_escape(
 # ==========================================================================
 
 
-def test_an_already_held_answer_is_still_understood_before_routing(
+def test_a_named_deadline_is_understood_before_routing_and_held_by_gpt(
     store, semantic_on, monkeypatch,
 ) -> None:
-    """The gate can only add a hold, so on a held answer it buys nothing."""
+    """Understanding runs first; the timing claim is then GPT ②'s to withhold.
+
+    This used to be held by UNDERSTANDING_UNAVAILABLE -- the GPT route could not
+    complete, so the legacy path produced the draft and the publishing gate
+    refused it for that reason. The route completes now, so the hold has to come
+    from the thing that actually read the question: GPT ② reporting that it
+    cannot confirm the named date. What the pipeline still owes is the ordering,
+    which is what this checks -- the understanding happened before any routing
+    decision, and the pre-routing record names the deadline constraint.
+    """
 
     provider = SemanticProvider()
     install(monkeypatch, provider)
-    # GPT/provider availability, not a worker keyword gate, determines the
-    # safe review outcome when this draft cannot obtain a GPT-first verdict.
     inquiry_id = ask(
         store, "혹시 오늘 주문하면 9일까지 받아볼 수 있을까요?", key="held",
     )
-    draft, error = run(store, inquiry_id)
+    withholding = FakeGptProvider(responses={"DRAFT": {
+        "answer": "주문 시점에 따라 9일까지 도착 여부는 확정이 어려워 담당자 확인 후 안내드리겠습니다.",
+        "confidence": 0.9, "used_facts": [], "missing_information": ["도착 가능일"],
+        "requires_review": True, "warnings": [],
+        "unresolved": ["9일까지 받아볼 수 있나요?"], "can_auto_post": False,
+    }})
+    draft, error = run(store, inquiry_id, draft_provider=withholding)
 
     assert error is None
     decision = verdict(store, inquiry_id, draft)
     assert decision.decision == "REVIEW_REQUIRED"
-    assert "DELIVERY_DEADLINE_NOT_CONFIRMABLE" not in decision.reasons
-    assert "UNDERSTANDING_UNAVAILABLE" in decision.reasons
     metadata = draft.get("metadata_json") or {}
-    router = (metadata.get("semantic_analysis") or {}).get("router") or {}
-    # Semantic-first routing runs before the Plan is known to be held.  The
-    # result may constrain order/DPS selection, so the old post-answer
-    # "decision value" optimisation is intentionally no longer applicable.
+    # The pre-routing record is ``semantic_routing``: it is written before the
+    # Plan exists and persisted with the draft. ``semantic_analysis`` is the
+    # post-answer legacy record, and on the GPT route it is deliberately marked
+    # unused rather than recomputed.
+    router = (metadata.get("semantic_routing") or {}).get("router") or {}
     assert "DEADLINE_CONSTRAINT" in (router.get("reasons") or [])
-    assert provider.calls
+    assert provider.calls, "the understanding stage never ran"

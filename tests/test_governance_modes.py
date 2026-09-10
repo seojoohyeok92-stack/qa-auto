@@ -90,15 +90,30 @@ def test_fake_mode_keeps_existing_hybrid_result(database: Database) -> None:
     assert outcome.fallback_used is False
 
 
-def test_disabled_mode_skips_gpt_and_uses_rule(database: Database) -> None:
+def test_disabled_mode_produces_no_answer_instead_of_the_rule_answer(
+    database: Database,
+) -> None:
+    """The GPT layer being off is not a licence to publish a keyword rule.
+
+    This used to assert the opposite: with GPT disabled the Rule Engine's body
+    became the outcome, so a deterministic answer reached the customer with
+    nothing having read the question. The rule is still available as evidence;
+    it is no longer an answer.
+    """
+
     provider = FakeGptProvider()
     outcome = GovernedHybridAnswerService(
         database,
         settings=settings(GptMode.DISABLED),
         provider=provider,
     ).generate(request(), rule())
-    assert outcome.result.answer == "검증된 Rule Answer"
-    assert outcome.result.provider == "rules"
+    assert outcome.result.answer == ""
+    assert "검증된 Rule Answer" not in str(outcome.result.answer)
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.fallback_used is True
+    assert (
+        outcome.result.metadata["governance"]["fallback_reason"] == "DISABLED"
+    )
     assert provider.calls == []
 
 
@@ -122,7 +137,8 @@ def test_active_real_provider_invalid_configuration_falls_back(
     outcome = GovernedHybridAnswerService(
         database, settings=config, provider=FakeGptProvider()
     ).generate(request(), rule())
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert (
         outcome.result.metadata["governance"]["fallback_reason"]
         == "CONFIGURATION_INVALID"
@@ -156,13 +172,24 @@ def test_privacy_block_prevents_real_provider_call(database: Database) -> None:
         database, settings=config, provider=provider
     ).generate(request(question="token=secret-value"), rule())
     assert provider.calls == []
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert "GPT_PRIVACY_BLOCKED" in {
         event.code for event in outcome.events
     }
 
 
-def test_shadow_never_replaces_program_answer(database: Database) -> None:
+def test_no_mode_substitutes_the_rule_answer_for_the_generated_one(
+    database: Database,
+) -> None:
+    """SHADOW used to publish the rule answer while calling the provider.
+
+    That made a rollout switch the difference between a model-composed reply
+    and a keyword one -- a GPT bypass selected by configuration. The branch is
+    removed: the generated answer stands, and the comparison event that
+    announced the substitution is gone with it.
+    """
+
     provider = FakeGptProvider(
         responses={
             "DRAFT": {
@@ -178,22 +205,9 @@ def test_shadow_never_replaces_program_answer(database: Database) -> None:
     outcome = GovernedHybridAnswerService(
         database, settings=settings(GptMode.SHADOW), provider=provider
     ).generate(request(), rule())
-    assert outcome.result.answer == "검증된 Rule Answer"
-    assert outcome.result.provider == "rules"
-    assert outcome.result.metadata["governance"]["shadow"] is True
-    run = GptProviderRunRepository(database).recent(limit=1)[0]
-    assert run["shadow_comparison_json"]["gpt_length"] == len(
-        "비교용 외부 답변"
-    )
-
-
-def test_shadow_event_is_recorded(database: Database) -> None:
-    outcome = GovernedHybridAnswerService(
-        database,
-        settings=settings(GptMode.SHADOW),
-        provider=FakeGptProvider(),
-    ).generate(request(), rule())
-    assert "GPT_SHADOW_COMPLETED" in {
+    assert outcome.result.answer != "검증된 Rule Answer"
+    assert outcome.result.provider != "rules"
+    assert "GPT_SHADOW_COMPLETED" not in {
         event.code for event in outcome.events
     }
 
@@ -242,7 +256,8 @@ def test_high_risk_canary_is_excluded(
         settings=settings(GptMode.CANARY, canary_percentage=100),
         provider=FakeGptProvider(),
     ).generate(request(question=question), rule())
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert (
         outcome.result.metadata["governance"]["fallback_reason"]
         == "CANARY_EXCLUDED"
@@ -256,7 +271,8 @@ def test_rule_forced_review_is_excluded_from_canary(
         database,
         settings=settings(GptMode.CANARY, canary_percentage=100),
     ).generate(request(), rule(needs_review=True))
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert outcome.result.needs_review is True
 
 
@@ -270,7 +286,8 @@ def test_timeout_fixture_falls_back_and_records_timeout(
         settings=settings(GptMode.ACTIVE),
         provider=provider,
     ).generate(request(), rule())
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert "GPT_PROVIDER_FAILED" in {event.code for event in outcome.events}
 
 
@@ -298,7 +315,8 @@ def test_rate_limit_falls_back_without_app_error(database: Database) -> None:
         database,
         settings=settings(GptMode.ACTIVE, requests_per_minute=0),
     ).generate(request(), rule())
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert "GPT_PROVIDER_RATE_LIMITED" in {
         event.code for event in outcome.events
     }
@@ -327,7 +345,8 @@ def test_cost_limit_falls_back(database: Database) -> None:
         database,
         settings=settings(GptMode.ACTIVE, daily_cost_limit_krw=50),
     ).generate(request(), rule())
-    assert outcome.result.provider == "rules"
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
     assert "GPT_PROVIDER_COST_LIMITED" in {
         event.code for event in outcome.events
     }

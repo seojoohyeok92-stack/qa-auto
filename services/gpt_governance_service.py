@@ -116,29 +116,52 @@ class GovernedHybridAnswerService:
         return None
 
     @staticmethod
-    def _rule_outcome(
+    def _gpt_unavailable_outcome(
         request: AnswerRequest,
         rule: AnswerResult,
         governance: dict[str, Any],
         events: list[HybridEvent],
     ) -> HybridAnswerOutcome:
-        facts = build_answer_facts(request, rule)
-        metadata = dict(rule.metadata)
-        metadata["governance"] = governance
+        """Report that the GPT answer step did not run. No answer is produced.
+
+        The predecessor copied the Rule Engine's body, status,
+        ``auto_answerable`` and ``needs_review`` into the outcome, so a keyword
+        rule became the customer-facing reply whenever the provider was
+        disabled, misconfigured, privacy-blocked, excluded from the canary or
+        failing. That conversion is gone. A deterministic rule is evidence for
+        the answer step; when the step does not happen there is nothing to
+        publish, and the rule's own verdict is not a stand-in for the judgement
+        that was skipped.
+
+        ``fallback_used`` stays True, which is what makes AnswerService raise
+        and write its own review draft, so staff still get something to edit and
+        the governance events above are still logged on the way out.
+        """
+
+        reason = str(governance.get("fallback_reason") or "UNKNOWN")
         result = AnswerResult(
-            status=rule.status,
+            status=AnswerStatus.NOT_SUPPORTED,
             category=rule.category,
-            reason=rule.reason,
-            answer=rule.answer,
-            provider=rule.provider,
-            auto_answerable=rule.auto_answerable,
-            needs_review=rule.needs_review,
-            matched_rule=rule.matched_rule,
-            warnings=rule.warnings,
-            metadata=metadata,
+            reason=f"GPT_ANSWER_STEP_UNAVAILABLE:{reason}",
+            answer="",
+            provider="gpt_answer_step_unavailable",
+            auto_answerable=False,
+            needs_review=True,
+            matched_rule="",
+            metadata={
+                "governance": governance,
+                # Named here so the raised message and the draft both carry the
+                # real cause instead of a generic validation label.
+                "hybrid": {
+                    "fallback_used": True,
+                    "fallback_reason": reason,
+                    "provider": "gpt_answer_step_unavailable",
+                },
+            },
         )
         return HybridAnswerOutcome(
-            result, facts, None, None, None, None, True, tuple(events)
+            result, build_answer_facts(request, result),
+            None, None, None, None, True, tuple(events),
         )
 
     def _audit(
@@ -258,7 +281,7 @@ class GovernedHybridAnswerService:
                     details={"reason": "DISABLED"},
                 )
             )
-            outcome = self._rule_outcome(
+            outcome = self._gpt_unavailable_outcome(
                 request, rule_result, governance, events
             )
             self._audit(
@@ -293,7 +316,7 @@ class GovernedHybridAnswerService:
                     ),
                 ]
             )
-            outcome = self._rule_outcome(
+            outcome = self._gpt_unavailable_outcome(
                 request, rule_result, governance, events
             )
             self._audit(
@@ -327,7 +350,7 @@ class GovernedHybridAnswerService:
                     ),
                 ]
             )
-            outcome = self._rule_outcome(
+            outcome = self._gpt_unavailable_outcome(
                 request, rule_result, governance, events
             )
             self._audit(
@@ -365,7 +388,7 @@ class GovernedHybridAnswerService:
                     ),
                 ]
             )
-            outcome = self._rule_outcome(
+            outcome = self._gpt_unavailable_outcome(
                 request, rule_result, governance, events
             )
             self._audit(
@@ -418,7 +441,7 @@ class GovernedHybridAnswerService:
                         {"reason": "CANARY_EXCLUDED"},
                     )
                 )
-                outcome = self._rule_outcome(
+                outcome = self._gpt_unavailable_outcome(
                     request, rule_result, governance, events
                 )
                 self._audit(
@@ -492,47 +515,13 @@ class GovernedHybridAnswerService:
                 )
             shadow_comparison: dict[str, Any] = {}
             outcome = hybrid
-            if settings.mode is GptMode.SHADOW:
-                shadow_comparison = {
-                    "validator_passed": bool(
-                        hybrid.validation and hybrid.validation.passed
-                    ),
-                    "rule_length": len(rule_result.answer),
-                    "gpt_length": len(hybrid.result.answer),
-                    "question_count": (
-                        len(hybrid.intent.questions) if hybrid.intent else 0
-                    ),
-                    "used_facts": (
-                        list(hybrid.draft.used_facts)
-                        if hybrid.draft
-                        else []
-                    ),
-                    "missing_information": (
-                        list(hybrid.draft.missing_information)
-                        if hybrid.draft
-                        else []
-                    ),
-                }
-                governance["shadow_comparison"] = shadow_comparison
-                events.append(
-                    HybridEvent(
-                        "GPT_SHADOW_COMPLETED",
-                        "Shadow 비교를 완료하고 Program Answer는 Rule로 유지했습니다.",
-                        details=shadow_comparison,
-                    )
-                )
-                outcome = self._rule_outcome(
-                    request, rule_result, governance, events
-                )
-                outcome = replace(
-                    outcome,
-                    intent=hybrid.intent,
-                    draft=hybrid.draft,
-                    self_review=hybrid.self_review,
-                    validation=hybrid.validation,
-                    fallback_used=hybrid.fallback_used,
-                )
-            elif settings.mode is GptMode.CANARY and canary:
+            # SHADOW used to live here: it called the provider, compared the
+            # two answers, and then published the *Rule* answer anyway. That
+            # made a rollout switch the difference between a model-composed
+            # reply and a keyword one, which is the authority this architecture
+            # removes. The comparison was telemetry; the substitution was a
+            # GPT bypass, and both are gone.
+            if settings.mode is GptMode.CANARY and canary:
                 metadata = dict(hybrid.result.metadata)
                 governance["employee_review_required"] = True
                 metadata["governance"] = governance
@@ -635,7 +624,7 @@ class GovernedHybridAnswerService:
             governance["fallback_reason"] = (
                 "TIMEOUT" if timeout else "PROVIDER_FAILED"
             )
-            outcome = self._rule_outcome(
+            outcome = self._gpt_unavailable_outcome(
                 request, rule_result, governance, events
             )
             self._audit(

@@ -527,7 +527,11 @@ def test_case_c_draft_exists_and_is_still_held(tmp_path) -> None:
 
     assert result["draft"] is not None, "staff were handed a blank reply"
     assert result["answer"].strip()
-    assert "일정 변경은 담당자 확인이 필요합니다" in result["answer"]
+    # The body used to be Phase9's own schedule-change sentence, because that
+    # deterministic text was the answer. It is a candidate now, so the wording
+    # belongs to the answer step; what this stage owes is unchanged -- a draft
+    # exists and the inquiry is still held.
+    assert "담당자 확인" in result["answer"]
     assert result["eligibility"] == "REVIEW_REQUIRED"
     assert result["auto_post_allowed"] is False
 
@@ -568,8 +572,19 @@ def test_case_d_draft_exists_and_is_still_held(tmp_path) -> None:
     assert result["auto_post_allowed"] is False
 
 
-def test_a_clean_single_question_still_auto_posts(tmp_path) -> None:
-    """The separation cuts both ways: nothing here made publishing harder."""
+def test_a_clean_single_question_without_understanding_goes_to_staff(
+    tmp_path,
+) -> None:
+    """Publishing is not harder -- it now requires that something understood it.
+
+    This pipeline runs with ``OJE_SEMANTIC_ANALYZER_ENABLED`` unset, which is
+    the legacy shape: no understanding stage ran. It used to auto-post anyway,
+    on the strength of the keyword route alone. A draft is still written and a
+    person can still send it; what is withdrawn is the automatic path, and the
+    reason says exactly why. With the understanding present the same schedule
+    question keeps its order/DPS execution route -- see
+    ``.verification/p2/routing_authority.py`` cases EXEC-1 and EXEC-2.
+    """
 
     result, _ = run_pipeline(
         tmp_path, "clean", "언제설치가능한가요?", order_id=ORDER_NUMBER
@@ -577,15 +592,28 @@ def test_a_clean_single_question_still_auto_posts(tmp_path) -> None:
 
     assert result["draft"] is not None
     assert result["validation_status"] == "PASS"
-    assert result["eligibility"] == "SAFE"
-    assert result["auto_post_allowed"] is True
+    assert result["eligibility"] == "REVIEW_REQUIRED"
+    assert "UNDERSTANDING_UNAVAILABLE" in result["reasons"]
 
 
-def test_missing_order_number_still_asks_for_it(tmp_path) -> None:
+def test_without_understanding_the_order_number_request_is_not_asserted(
+    tmp_path,
+) -> None:
+    """Deciding this inquiry is about a current order is a reading of it.
+
+    The ORDER_ID_REQUEST route still exists and still asks the customer for the
+    number -- but only once the understanding stage has said this is a
+    current-order schedule question (EXEC-1 in
+    ``.verification/p2/routing_authority.py``). With no understanding the route
+    was selected by the keyword classifier alone, and that licence is withdrawn:
+    the inquiry goes to staff instead.
+    """
+
     result, _ = run_pipeline(tmp_path, "no-order", "제가 주문한 상품 언제 배송되나요?")
 
-    assert "일반 주문번호가 필요합니다" in result["answer"]
-    assert result["metadata"].get("selected_answer_route") == "ORDER_ID_REQUEST"
+    assert result["metadata"].get("selected_answer_route") != "ORDER_ID_REQUEST"
+    assert result["eligibility"] == "REVIEW_REQUIRED"
+    assert result["answer"].strip()
 
 
 def test_already_answered_inquiry_is_still_blocked(tmp_path) -> None:

@@ -146,11 +146,19 @@ def test_a_held_inquiry_is_notified_with_the_real_blocking_reason(
     assert "Rule" not in sent["hold_reason"]
 
 
-def test_a_successful_generation_keeps_its_own_notification(
+def test_an_answer_with_only_a_keyword_rule_behind_it_is_held_for_staff(
     database, notifications
 ):
+    """A matched rule is evidence, not grounds.
+
+    This used to auto-post: the rule body was handed to the answer step as the
+    text to follow, so the reply was the rule's sentence and the gates saw a
+    grounded answer. The rule now travels as one candidate among the retrieved
+    evidence, and an answer nothing verified goes to a person instead.
+    """
+
     inquiry_id = create_inquiry(database, ORDINARY, sid="GATE-OK2")
-    AnswerService(
+    outcome = AnswerService(
         database,
         engine=CountingEngine(
             AnswerResult(
@@ -162,9 +170,12 @@ def test_a_successful_generation_keeps_its_own_notification(
         ),
     ).generate_for_inquiry(inquiry_id)
 
-    # Generation alone is not terminal: the verified Naver-post success path
-    # sends the one success notification for this lifecycle.
-    assert notifications == []
+    assert len(notifications) == 1
+    assert notifications[0]["title"] == "[Q&A 미등록 / 직원 확인 필요]"
+    assert notifications[0]["hold_codes"]
+    assert str(
+        outcome.result.metadata.get("selected_answer_route")
+    ).upper() not in {"TEMPLATE", "SAFE_RULE", "PRODUCT_DB"}
 
 
 def test_a_skipped_generation_never_sends_a_generation_complete_notice(
@@ -230,6 +241,22 @@ def test_no_real_kakao_message_is_ever_enqueued(database, notifications):
 
 
 # ------------------------------------ a skip must never look like a GPT call
+class CountingHybrid:
+    """A real generation, counted -- proves nothing skipped the call."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, request, rule_result):
+        from answer.providers.fake_gpt_provider import FakeGptProvider
+        from services.hybrid_answer_service import HybridAnswerService
+
+        self.calls += 1
+        return HybridAnswerService(FakeGptProvider()).generate(
+            request, rule_result
+        )
+
+
 class SkippingHybrid:
     """Raises the gate's signal without touching a provider."""
 
@@ -245,22 +272,27 @@ class SkippingHybrid:
         )
 
 
-def test_a_skipped_inquiry_is_never_recorded_as_having_called_gpt(
+def test_nothing_stops_the_answer_step_before_it_is_called(
     database, notifications
 ):
-    """Cost telemetry and the operator both read this flag."""
+    """There is no pre-generation gate left to skip the provider.
 
+    It used to read the keyword classifier's intent, subtype and high-risk
+    flags and return before retrieval, so an inquiry could be decided with
+    nothing having understood it and no evidence ever collected. Both call
+    sites are gone; the publishing gate still decides afterwards.
+    """
+
+    hybrid = CountingHybrid()
     inquiry_id = create_inquiry(database, ORDINARY, sid="GATE-NOGPT")
     outcome = AnswerService(
         database,
         engine=CountingEngine(rule_result()),
-        hybrid_service=SkippingHybrid(),
+        hybrid_service=hybrid,
     ).generate_for_inquiry(inquiry_id)
 
-    metadata = outcome.result.metadata
-    assert metadata["gpt_called"] is False
-    assert metadata["generation_skipped"] is True
-    assert metadata["selected_answer_route"] == "REVIEW_REQUIRED_SAFE_DRAFT"
+    assert hybrid.calls == 1, "the answer step was skipped before being called"
+    assert outcome.result.metadata["generation_skipped"] is False
 
 
 def test_a_skipped_inquiry_still_stores_a_usable_draft(database, notifications):
@@ -294,7 +326,9 @@ def test_a_skipped_inquiry_reports_the_gate_reason_to_the_operator(
 
     assert len(notifications) == 1
     sent = notifications[0]
-    assert sent["generation_skipped"] is True
+    # No pre-generation skip exists any more, so this is recorded as a failed
+    # attempt rather than a policy decision taken before the attempt.
+    assert sent["generation_skipped"] is False
     assert sent["title"] == "[Q&A 미등록 / 직원 확인 필요]"
     assert sent["hold_codes"]
 

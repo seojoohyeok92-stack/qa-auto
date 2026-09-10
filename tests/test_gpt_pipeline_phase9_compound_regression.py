@@ -135,7 +135,9 @@ def test_usable_understanding_turns_rule_into_gpt_candidate() -> None:
 
     draft_call = next(call for call in provider.calls if call["task"] == "DRAFT")
     context = draft_call["context"]
-    assert AnswerService._deterministic_shortcut_allowed(request) is False
+    # The predicate that used to allow a fixed reply is gone, so the
+    # candidate below is the only thing the rule can become.
+    assert not hasattr(AnswerService, "_deterministic_shortcut_allowed")
     assert context["template_candidates"][0]["template_id"] == "FIXED_POLICY_SHIPPING"
     assert context["product_catalog"]["facts"] == []
     assert "4K UHD" in context["product_catalog"]["instructions"]
@@ -155,7 +157,10 @@ def test_gpt_understanding_need_template_controls_candidate_retrieval() -> None:
     )
 
     assert request.metadata["gpt_understanding"]["need_template"] is False
+    # ``need_template`` still decides whether the product-wide Template sweep
+    # is worth running. It no longer decides anything about the answer: there
+    # is no shortcut predicate left for it to feed.
     assert AnswerService._template_candidate_retrieval_requested(
         request, prefer_template=True,
     ) is False
-    assert AnswerService._deterministic_shortcut_allowed(request) is False
+    assert not hasattr(AnswerService, "_deterministic_shortcut_allowed")

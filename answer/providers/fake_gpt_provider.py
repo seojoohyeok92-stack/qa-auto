@@ -113,6 +113,25 @@ class FakeGptProvider(GptProvider):
                     "감사합니다."
                 )
                 used = ["installation.date"]
+            fixture_placeholder = False
+            if not answer:
+                # The deterministic rule is no longer handed to the answer
+                # step as grounding, so there is nothing for this fixture to
+                # echo. It still has to produce a valid draft -- FAKE mode
+                # exists so a developer can run the pipeline end to end, and
+                # an empty body would make every inquiry look like a provider
+                # failure -- but it must never produce a *postable* one. This
+                # fixture reads no evidence, so anything it writes is
+                # unsupported by construction, and a deployment left on FAKE
+                # would otherwise auto-post it to customers. It therefore
+                # asks for review explicitly.
+                fixture_placeholder = True
+                answer = (
+                    "안녕하세요, 고객님.\n"
+                    "문의하신 내용 확인하여 안내드립니다.\n"
+                    "감사합니다."
+                )
+                used = []
             for key in (
                 "delivery_status",
                 "installation_status",
@@ -130,7 +149,9 @@ class FakeGptProvider(GptProvider):
                 "used_facts": used,
                 "missing_information": [] if answer else ["rule.answer"],
                 "requires_review": bool(
-                    rule.get("needs_review") or not answer
+                    rule.get("needs_review")
+                    or not answer
+                    or fixture_placeholder
                 ),
                 "warnings": [],
             }

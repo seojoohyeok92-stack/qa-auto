@@ -295,10 +295,16 @@ def test_the_boundary_is_reached_with_template_not_requested(
     assert len(understanding["questions"]) == 1
     assert understanding["questions"][0]["action"] == "COLLECTION"
 
-    # 의미 불일치로 고정 rule 이 폐기되어 안전 초안이 실제로 만들어졌는가.
+    # 고정 rule 이 의미 불일치 분류기로 폐기되던 경로는 제거됐다. 지금 지켜야
+    # 하는 것은 더 강한 불변식이다: 그 rule 은 어떤 경우에도 최종 답변이 되지
+    # 않고, 근거 후보로만 전달된다.
     metadata = run.outcome.result.metadata
-    assert metadata["semantic_rule_rejected"]["status"] == "MISMATCH"
-    assert metadata["rejected_rule_category"] == "설치상품/공통안내"
+    assert "semantic_rule_rejected" not in metadata
+    assert str(
+        metadata.get("selected_answer_route") or ""
+    ).upper() not in {"TEMPLATE", "SAFE_RULE", "PRODUCT_DB"}
+    facts = run.prompt.get("allowed_facts") or {}
+    assert "rule.answer" not in facts
 
     assert run.order.calls == 0
 
@@ -416,36 +422,34 @@ def test_a_semantically_matching_fixed_template_still_grounds_generation(
     assert "semantic_rule_rejected" not in metadata
     assert metadata.get("safe_failure_code") is None
 
+    # 이 대조군의 의미는 일치한다. 그래도 ``rule.answer`` 로는 전달되지 않는다:
+    # 일치하는 Template 과 일치하지 않는 Template 을 분류기가 갈라내는 대신,
+    # 둘 다 후보로 전달하고 판단을 GPT 에게 남긴다. 하나의 substring 일치가
+    # 승인된 답변을 누르던 권한은 좋은 경우에서도 회수된다.
     facts = run.prompt.get("allowed_facts") or {}
-    assert "rule.answer" in facts
-    assert str(facts["rule.answer"]).strip()
+    assert "rule.answer" not in facts
+    candidates = run.prompt["input"].get("template_candidates") or []
+    assert candidates, "일치하는 Template 이 후보로도 전달되지 않았다"
 
 
 # ---------------------------------------------------------------------------
 # 판별은 문구가 아니라 상태로 한다.
 # ---------------------------------------------------------------------------
 
-def test_the_safety_draft_is_identified_by_state_not_by_wording():
-    """본문은 고객의 질문으로 렌더링되므로 문구 비교는 문의를 비교하는 셈이다."""
+def test_no_draft_has_to_be_identified_because_none_is_grounding():
+    """판별 자체가 필요 없어졌다.
 
-    from answer.models import AnswerResult, AnswerStatus
-    from services.answer_service import _is_review_required_safe_draft
+    ``_is_review_required_safe_draft`` 는 "이건 우리 파이프라인이 스스로 쓴
+    확인 요청 문구이니 근거로 쓰지 말라"를 상태로 판별하던 함수였다. 판별이
+    필요했던 이유는 중립화가 조건부였기 때문이고, 그 조건이 사라졌으므로
+    판별할 대상도 없다. 지켜야 하는 것은 조건이 돌아오지 않는 것이다.
+    """
+    import inspect
 
-    engine_result = AnswerEngine().generate(AnswerRequest(
-        inquiry_id=1, question_id="X", inquiry_type="PRODUCT_INQUIRY",
-        question=REPAIR_QUESTION, product_name=PRODUCT_688159337,
-    ))
-    assert _is_review_required_safe_draft(engine_result) is False
+    import services.answer_service as module
 
-    # 같은 문구를 담고 있어도 안전 초안이 아니면 근거로 남는다.
-    lookalike = AnswerResult(
-        status=AnswerStatus.GENERATED,
-        category="설치상품/공통안내",
-        reason="고정 정책",
-        answer="정확한 정보 확인이 필요합니다.",
-        provider="rules",
-        auto_answerable=True,
-        needs_review=False,
-        matched_rule="설치상품/공통안내",
-    )
-    assert _is_review_required_safe_draft(lookalike) is False
+    assert not hasattr(module, "_is_review_required_safe_draft")
+    assert not hasattr(module, "_is_safe_rule_result")
+    source = inspect.getsource(module.AnswerService.generate_for_inquiry)
+    assert "gpt_rule_context = _neutral_gpt_context(" in source
+    assert "else base_rule_result" not in source

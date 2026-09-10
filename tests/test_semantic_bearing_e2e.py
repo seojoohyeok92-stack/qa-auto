@@ -163,19 +163,20 @@ def _instrument_route_boundary(service: AnswerService, sink: list) -> None:
     routing change would have.
     """
 
-    original = service._exclude_semantic_rule_mismatch
+    original = service._record_template_candidate
 
-    def spy(candidate, semantic, request):
+    def spy(request, result, *, source):
+        semantic = request.metadata.get("_semantic_routing_value")
         atoms = list(getattr(semantic, "atomic_questions", ()) or ())
         sink.append({
             "semantic_present": semantic is not None,
             "atom_count": len(atoms),
             "atom_texts": [str(item.text) for item in atoms],
-            "attached": request.metadata.get("_semantic_routing_value") is not None,
+            "attached": semantic is not None,
         })
-        return original(candidate, semantic, request)
+        return original(request, result, source=source)
 
-    service._exclude_semantic_rule_mismatch = spy
+    service._record_template_candidate = spy
 
 
 @pytest.fixture(autouse=True)
@@ -335,60 +336,24 @@ def test_a_compound_inquiry_the_rule_only_half_answers_does_not_take_the_route()
     assert outcome["route"] not in {"TEMPLATE", "PRODUCT_DB"}
 
 
-def test_the_gate_decides_on_the_semantic_analysis_and_nothing_else():
-    """Same question text, same deterministic answer, different analysis.
+def test_no_deterministic_shortcut_predicate_survives_in_the_service():
+    """There is no longer a decision that lets a rule answer stand alone.
 
-    The route a compound inquiry ends up on depends on more than this gate --
-    template matching, product-fact sensitivity and validator results all
-    move it. So the authority claim is made where it actually lives: the one
-    decision that reads the semantic analysis. Holding text and answer fixed,
-    the verdict flips on the analysis alone.
+    This file used to pin the predicate that earned the shortcut: a single
+    atom kept it, an unanswered second atom withdrew it. Both verdicts are
+    gone because the shortcut is. A Rule/Template/Product result is evidence
+    for the answer step now, whatever the atom count, so there is nothing left
+    to flip and no route for the flip to select.
     """
-    from answer.models import AnswerRequest
 
-    service = AnswerService(
-        Database(pathlib.Path(tempfile.mkdtemp()) / "gate.db"),
-        dps_enrichment=_FakeDps(),
-        hybrid_service=HybridAnswerService(_StubProvider()),
-    )
-    question = STAND_COMPOUND
-    answer = "스탠드는 오베닉 스탠드 FMS 모델로 출고되고 있습니다."
-
-    def gate(payload):
-        request = AnswerRequest(
-            inquiry_id=1, question_id="G", inquiry_type="상품",
-            question=question, product_name=PRODUCT,
-            metadata={"_semantic_routing_value": parse(payload)},
+    for name in (
+        "_deterministic_answer_settles_inquiry",
+        "_deterministic_shortcut_allowed",
+        "_exclude_semantic_rule_mismatch",
+    ):
+        assert not hasattr(AnswerService, name), (
+            f"{name} still exists; a deterministic answer can still win"
         )
-        return service._deterministic_answer_settles_inquiry(request, answer)
-
-    one_atom = semantic_payload(atom(question))
-    two_atoms = semantic_payload(
-        atom("오베닉 스탠드는 몇 세대인가요"),
-        atom("배송비는 얼마인가요", action="DELIVERY_POLICY",
-             attribute="AMOUNT_OR_COST"),
-    )
-
-    assert gate(one_atom) is True, "a single question keeps the shortcut"
-    assert gate(two_atoms) is False, "an unanswered second question withdraws it"
-
-
-def test_the_gate_is_inert_without_a_semantic_analysis():
-    """No analysis means no new behaviour, which is the whole legacy suite."""
-    from answer.models import AnswerRequest
-
-    service = AnswerService(
-        Database(pathlib.Path(tempfile.mkdtemp()) / "gate2.db"),
-        dps_enrichment=_FakeDps(),
-        hybrid_service=HybridAnswerService(_StubProvider()),
-    )
-    request = AnswerRequest(
-        inquiry_id=1, question_id="G2", inquiry_type="상품",
-        question=STAND_COMPOUND, product_name=PRODUCT, metadata={},
-    )
-    assert service._deterministic_answer_settles_inquiry(
-        request, "스탠드는 오베닉 스탠드 FMS 모델로 출고되고 있습니다."
-    ) is True
 
 
 def test_a_compound_inquiry_answered_throughout_keeps_the_shortcut():
@@ -484,23 +449,6 @@ def test_the_measured_inquiry_is_still_held_from_auto_post():
 # False 였다. 운영 DB 에는 이 질문에 답하는 승인 Learning 이 63건 있다. 그 답변은
 # coverage 가 UNKNOWN -- 앵커가 아무것도 알아보지 못한 상태 -- 였으므로, "FAIL/
 # PARTIAL 이 아니다" 를 지름길의 조건으로 삼으면 통과해 버린다.
-def _gate(question: str, answer: str, payload: dict | None):
-    from answer.models import AnswerRequest
-
-    service = AnswerService(
-        Database(pathlib.Path(tempfile.mkdtemp()) / "g.db"),
-        dps_enrichment=_FakeDps(),
-        hybrid_service=HybridAnswerService(_StubProvider()),
-    )
-    request = AnswerRequest(
-        inquiry_id=1, question_id="G", inquiry_type="상품",
-        question=question, product_name=PRODUCT,
-        metadata={} if payload is None
-        else {"_semantic_routing_value": parse(payload)},
-    )
-    return service._deterministic_answer_settles_inquiry(request, answer)
-
-
 COLLECTION_INQUIRY = "혼자계신 엄마댁이라 tv설지하고 페가전 수거해주시는거죠?"
 COLLECTION_ATOMS = semantic_payload(
     atom("tv 설치해주시나요", action="INSTALLATION_METHOD",
@@ -515,34 +463,23 @@ NEEDS_INFO_ANSWER = (
 )
 
 
-def test_an_unrecognised_answer_cannot_settle_a_compound_inquiry():
-    """CASE B -- 확인이 필요하다는 답변은 두 질문을 해결한 것이 아니다."""
-    assert _gate(COLLECTION_INQUIRY, NEEDS_INFO_ANSWER, COLLECTION_ATOMS) is False
+def test_the_collection_inquiry_reaches_the_answer_step_with_both_atoms():
+    """CASE A/B replacement -- the inquiry no longer ends on a rule answer.
 
+    "확인이 필요합니다" used to be able to close this two-part inquiry whenever
+    the coverage evaluator happened to recognise it. The shortcut is gone, so
+    what matters is what the measurement always wanted: both atoms reach the
+    answer step, and the deterministic deferral is not the reply.
+    """
 
-def test_a_single_question_keeps_its_route_even_when_unrecognised():
-    """CASE A -- 단일 문의는 이 게이트가 손대지 않는다."""
-    single = semantic_payload(atom("폐가전 수거해주시나요", action="COLLECTION"))
-    assert _gate("폐가전 수거해주시나요?", NEEDS_INFO_ANSWER, single) is True
-
-
-def test_a_compound_inquiry_answered_throughout_keeps_the_shortcut_too():
-    """지름길이 사라지는 것이 아니라, 해결했을 때만 유지된다."""
-    payload = semantic_payload(
-        atom("배송비는 얼마인가요", action="DELIVERY_POLICY",
-             attribute="AMOUNT_OR_COST"),
-        atom("브라켓도 같이 오나요", action="PACKAGE_CONTENTS",
-             attribute="INCLUSION"),
-    )
-    assert _gate(
-        "배송비는 얼마인가요?\n브라켓도 같이 오나요?",
-        "배송비는 무료입니다. 벽걸이 브라켓은 구성품에 포함되어 함께 발송됩니다.",
-        payload,
-    ) is True
-
-
-def test_the_gate_is_still_inert_without_semantics():
-    assert _gate(COLLECTION_INQUIRY, NEEDS_INFO_ANSWER, None) is True
+    seen: list = []
+    outcome = run(COLLECTION_INQUIRY, COLLECTION_ATOMS, label="coll",
+                  observe=seen)
+    assert seen and seen[0]["atom_count"] == 2
+    assert str(outcome["route"]).upper() not in {
+        "TEMPLATE", "SAFE_RULE", "PRODUCT_DB",
+    }
+    assert outcome["answer"].strip() != NEEDS_INFO_ANSWER
 
 
 # ================== semantic atom 이 하나여도 검색 질의로 남아야 한다 (retrieval)
@@ -572,14 +509,21 @@ def test_a_single_semantic_atom_is_used_as_the_retrieval_query():
 # facts["rule.answer"] 에 "정확한 정보 확인이 필요합니다" 라는 rule 답변이
 # 함께 실려 있었고 모델은 그쪽을 규칙으로 읽었다. 아무것도 해결하지 못해서
 # 계속 진행하기로 한 답변을, 근거로 다시 건네고 있었던 셈이다.
-def test_an_answer_that_did_not_settle_the_inquiry_is_not_passed_as_grounding():
-    """continuation 으로 넘어간 rule 답변은 중립화되어야 한다."""
+def test_no_deterministic_answer_is_ever_passed_as_grounding():
+    """중립화는 조건이 아니라 규칙이다.
+
+    Neutralisation used to be conditional, and every branch of the condition
+    was a way for a keyword rule to arrive as the text to follow. The source
+    assertion therefore flipped: what has to be true now is that no condition
+    is left -- ``_neutral_gpt_context`` is applied outright, with no
+    ``else base_rule_result`` alternative.
+    """
     import inspect
 
     source = inspect.getsource(AnswerService.generate_for_inquiry)
-    assert "_neutral_gpt_context" in source
-    # 중립화 조건에 "해결하지 못했다" 가 포함되어야 한다.
-    assert "not self._deterministic_answer_settles_inquiry(" in source
+    assert "gpt_rule_context = _neutral_gpt_context(" in source
+    assert "else base_rule_result" not in source
+    assert "_deterministic_answer_settles_inquiry" not in source
 
 
 def test_the_neutral_context_carries_no_answer_body():
@@ -603,16 +547,27 @@ def test_the_neutral_context_carries_no_answer_body():
     assert neutral.auto_answerable is False
 
 
-def test_a_settling_deterministic_answer_still_grounds_generation():
-    """해결한 답변까지 중립화하면 안 된다 -- 게이트가 True 면 조건이 꺼진다."""
-    payload = semantic_payload(
-        atom("배송비는 얼마인가요", action="DELIVERY_POLICY",
-             attribute="AMOUNT_OR_COST"),
-        atom("브라켓도 같이 오나요", action="PACKAGE_CONTENTS",
-             attribute="INCLUSION"),
-    )
-    assert _gate(
+def test_even_a_complete_deterministic_answer_arrives_as_a_candidate():
+    """A good rule answer is still a candidate, not the instruction.
+
+    The previous contract was the opposite: an answer that covered every atom
+    kept its grounding authority. That authority is what let a substring match
+    outrank an approved answer, so it is withdrawn from the good case as well
+    as the bad one -- the text still reaches the model, as one candidate among
+    the retrieved evidence.
+    """
+    seen: list = []
+    outcome = run(
         "배송비는 얼마인가요?\n브라켓도 같이 오나요?",
-        "배송비는 무료입니다. 벽걸이 브라켓은 구성품에 포함되어 함께 발송됩니다.",
-        payload,
-    ) is True
+        semantic_payload(
+            atom("배송비는 얼마인가요", action="DELIVERY_POLICY",
+                 attribute="AMOUNT_OR_COST"),
+            atom("브라켓도 같이 오나요", action="PACKAGE_CONTENTS",
+                 attribute="INCLUSION"),
+        ),
+        label="cand", observe=seen,
+    )
+    assert seen and seen[0]["atom_count"] == 2
+    assert str(outcome["route"]).upper() not in {
+        "TEMPLATE", "SAFE_RULE", "PRODUCT_DB",
+    }

@@ -96,13 +96,22 @@ def test_hybrid_compound_questions_are_tracked() -> None:
     assert len(outcome.result.metadata["hybrid"]["intent"]["questions"]) == 3
 
 
-def test_hybrid_provider_failure_falls_back_to_rule() -> None:
+def test_hybrid_provider_failure_produces_no_answer() -> None:
+    """A failed generation carries no answer out, not the rule's answer.
+
+    It used to return ``rule.answer`` with ``auto_answerable`` forced off and
+    called that staff context -- but it was still the draft body staff saw and
+    could send, written by a keyword match rather than by anything that read the
+    question. The cause is recorded; the body is not.
+    """
+
     outcome = HybridAnswerService(
         FakeGptProvider(fail_tasks={"DRAFT"})
     ).generate(request(), rule())
     assert outcome.fallback_used is True
-    assert outcome.result.provider == "rules"
-    assert outcome.result.answer == rule().answer
+    assert outcome.result.provider == "gpt_answer_step_unavailable"
+    assert outcome.result.answer == ""
+    assert rule().answer not in str(outcome.result.answer)
     assert outcome.result.metadata["hybrid"]["fallback_reason"] == "RUNTIMEERROR"
 
 
@@ -121,7 +130,7 @@ def test_hybrid_invalid_fact_reference_falls_back() -> None:
     )
     outcome = HybridAnswerService(provider).generate(request(), rule())
     assert outcome.fallback_used is True
-    assert outcome.result.answer == rule().answer
+    assert outcome.result.answer == ""
     assert any(
         "존재하지 않는 Fact" in error
         for error in outcome.validation.errors
@@ -143,7 +152,7 @@ def test_hybrid_speculative_answer_falls_back() -> None:
     )
     outcome = HybridAnswerService(provider).generate(request(), rule())
     assert outcome.fallback_used is True
-    assert outcome.result.answer == rule().answer
+    assert outcome.result.answer == ""
 
 
 def test_hybrid_evidence_verdict_is_not_overridden_by_legacy_rule_review() -> None:
@@ -200,7 +209,8 @@ def test_hybrid_emits_validation_and_fallback_events() -> None:
         ).events
     ]
     assert "GPT_VALIDATION_FAILED" in codes
-    assert codes[-1] == "GPT_FALLBACK_RULE"
+    assert codes[-1] == "GPT_ANSWER_STEP_UNAVAILABLE"
+    assert "GPT_FALLBACK_RULE" not in codes
 
 
 def test_answer_facts_do_not_include_customer_display() -> None:
@@ -284,7 +294,10 @@ def test_answer_service_fallback_keeps_workflow_success(
     step = WorkflowRepository(database).get_step(
         inquiry_id, "ANSWER_GENERATED"
     )
-    assert outcome.result.provider == "rules"
+    # The workflow still completes and staff still get a draft -- the
+    # pipeline's own review draft, written from the customer's questions,
+    # rather than the keyword rule's answer.
+    assert outcome.result.provider != "rules"
     assert step["step_status"] == "COMPLETED"
 
 

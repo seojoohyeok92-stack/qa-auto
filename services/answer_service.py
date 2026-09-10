@@ -13,7 +13,6 @@ from answer.exceptions import (
     AnswerGenerationError,
     AnswerGenerationInProgressError,
     AutoAnswerProhibitedError,
-    GenerationSkippedError,
 )
 from answer.hold_reasons import primary_reason
 from answer.models import AnswerResult, AnswerStatus
@@ -66,14 +65,11 @@ from services.semantic_action_support import (
     evaluate as evaluate_action_support,
 )
 from services.semantic_analysis import (
-    SKIP_NO_DECISION_VALUE,
     SemanticAnalysis,
-    SemanticRouteDecision,
     is_enabled as semantic_analyzer_enabled,
     route as semantic_route,
 )
 from services.semantic_coverage_service import (
-    PASS as COVERAGE_PASS,
     SemanticCoverageService,
     is_enabled as semantic_coverage_enabled,
 )
@@ -84,7 +80,6 @@ from services.product_fact_guard import (
     classify_product_fact,
     extract_model_code,
 )
-from services.pre_generation_gate import PreGenerationGate
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
 
@@ -119,43 +114,6 @@ def _safe_log_text(value: object) -> str:
     text = str(value or "")
     text = re.sub(r"(?<!\d)\d{10,24}(?!\d)", "[NUMBER_MASKED]", text)
     return text[:500]
-
-
-def _apply_existing_template_metadata(
-    result: AnswerResult,
-    *,
-    order_id_present: bool,
-    template_preferred: bool,
-) -> AnswerResult:
-    metadata = dict(result.metadata)
-    template_id = result.matched_rule or metadata.get("template_id") or None
-    metadata.update(
-        {
-            "answer_type": "existing_template",
-            "answer_source": "rule_engine",
-            "generation_mode": "TEMPLATE",
-            "template_preferred": template_preferred,
-            "template_override": False,
-            "template_id": template_id,
-            "template_name": metadata.get("template_name") or template_id,
-            "template_version": (
-                metadata.get("template_version")
-                or (
-                    "configuration.xlsx"
-                    if metadata.get("existing_template")
-                    else "rule-engine-v1"
-                )
-            ),
-            "order_id_present": order_id_present,
-            "dps_lookup_attempted": False,
-            "delivery_date_found": False,
-            "gpt_called": False,
-            "draft_created": True,
-            "requires_manual_review": False,
-        }
-    )
-    result.metadata = metadata
-    return result
 
 
 # Rule matchers whose wording is deterministic for the situation they match:
@@ -242,91 +200,6 @@ def _template_unavailable_reason(
     if not validation.passed:
         return "VALIDATION_FAILED"
     return None
-
-
-def _is_product_db_result(result: AnswerResult) -> bool:
-    """Identify answers grounded in the loaded model catalog."""
-
-    category = str(result.category or "")
-    reason = str(result.reason or "")
-    return category.startswith("모델스펙/") and (
-        "JSON" in reason or "스펙" in reason
-    )
-
-
-def _is_safe_rule_result(result: AnswerResult) -> bool:
-    """Identify an existing non-empty rule answer that requires review."""
-
-    provider = str(result.provider or "").lower()
-    source_status = str(result.metadata.get("source_status") or "")
-    return bool(
-        result.status is AnswerStatus.NEEDS_REVIEW
-        and is_valid_draft(result.answer)
-        and provider in {
-            "rules",
-            "rule",
-            "rule_provider",
-            "safe_rule",
-        }
-        and (
-            provider == "safe_rule"
-            or source_status == "추가정보 필요"
-        )
-        and result.needs_review
-        and not result.auto_answerable
-    )
-
-
-def _is_review_required_safe_draft(result: AnswerResult) -> bool:
-    """Identify the conservative draft the pipeline writes for itself.
-
-    ``review_required_safe_result`` is produced when nothing settled the
-    inquiry -- a semantically mismatched fixed rule was discarded, the
-    pre-generation gate stopped, the provider failed.  It says a person has to
-    check, which is a statement about the pipeline's own state and never a
-    fact about the product.
-
-    Read from the state that draft already records, not from its wording: the
-    body is rendered from the customer's own questions, so any text match
-    would be matching the inquiry rather than the decision.
-    """
-
-    metadata = dict(result.metadata or {})
-    return bool(
-        str(result.matched_rule or "") == "REVIEW_REQUIRED_SAFE_DRAFT"
-        or str(metadata.get("answer_type") or "")
-        == "review_required_safe_draft"
-    )
-
-
-def _apply_safe_rule_metadata(
-    result: AnswerResult,
-    *,
-    order_id_present: bool,
-    template_preferred: bool,
-) -> AnswerResult:
-    metadata = dict(result.metadata)
-    metadata.update(
-        {
-            "answer_type": "safe_rule",
-            "answer_source": "safe_rule",
-            "generation_mode": "SAFE_RULE",
-            "selected_answer_route": "SAFE_RULE",
-            "template_preferred": bool(template_preferred),
-            "template_override": False,
-            "template_id": result.matched_rule or None,
-            "template_name": result.matched_rule or None,
-            "template_version": "safe-rule-v1",
-            "order_id_present": bool(order_id_present),
-            "dps_lookup_attempted": False,
-            "delivery_date_found": False,
-            "gpt_called": False,
-            "draft_created": True,
-            "requires_manual_review": True,
-        }
-    )
-    result.metadata = metadata
-    return result
 
 
 # Diagnostics that survive neutralisation. Deliberately not ``answer_type``
@@ -421,23 +294,6 @@ def _template_candidate_payload(
             if key in metadata
         },
     }
-
-
-# What staff are told when the pipeline declines to draft. The message has to
-# name the actual policy: a missing shipment shown as "고위험·분쟁" sends the
-# reader looking for a dispute that is not there.
-_POLICY_BLOCK_MESSAGES = {
-    "EMPTY_QUESTION": "빈 문의라 자동 Draft를 생성하지 않습니다.",
-    "HIGH_RISK_OR_DISPUTE": (
-        "고위험·분쟁 문의 정책에 따라 자동 Draft를 생성하지 않고 직원 검토로 "
-        "넘깁니다."
-    ),
-    "MISSING_ITEM_REPORT": (
-        "상품·구성품 누락·미수령 신고입니다. 실제 출고·구성품 확인이 필요해 "
-        "자동 답변을 생성하지 않으며, 네이버에는 미답변으로 남습니다. "
-        "직원 확인이 필요합니다."
-    ),
-}
 
 
 class AnswerService:
@@ -745,119 +601,15 @@ class AnswerService:
                 details=payload,
             )
             return
-        if not semantic_analyzer_enabled():
-            return
-        try:
-            question = str(request.question or "")
-            # The pipeline passes its analysis around as a value object in some
-            # paths and as a plain dict in others; the router reads it as a
-            # mapping either way.
-            if analysis is None:
-                analysis_dict: dict[str, Any] = {}
-            elif isinstance(analysis, dict):
-                analysis_dict = analysis
-            else:
-                to_dict = getattr(analysis, "to_dict", None)
-                analysis_dict = to_dict() if callable(to_dict) else {}
-            decision = semantic_route(question, analysis=analysis_dict)
-            payload: dict[str, Any] = {
-                "router": decision.to_dict(), "called": False,
-            }
-            # Would this answer be published if the semantic gate did not
-            # exist? The gate is block-only -- it can turn SAFE into
-            # REVIEW_REQUIRED and nothing else -- so on an answer that is
-            # already held, a model call cannot change what the customer
-            # receives. It would only find a second reason for a decision
-            # already taken, and a real call costs seconds.
-            #
-            # Measured against the live store this is where most of the cost
-            # was: of the inquiries the router flags, the large majority are
-            # already going to a person for some other reason.
-            if decision.use_semantic:
-                publishable = self._would_publish_without_semantics(
-                    inquiry_id, result,
-                )
-                payload["decision_value"] = publishable
-                if not publishable:
-                    decision = SemanticRouteDecision(
-                        use_semantic=False,
-                        reasons=(
-                            SKIP_NO_DECISION_VALUE, *decision.reasons,
-                        ),
-                    )
-                    payload["router"] = decision.to_dict()
-            if decision.use_semantic:
-                analyzer = self._semantic_analyzer()
-                if analyzer is not None:
-                    semantic = analyzer.analyze(question)
-                    payload["called"] = True
-                    payload["semantic"] = semantic.to_dict()
-                    payload["trace"] = dict(analyzer.last_trace)
-                    support = evaluate_action_support(
-                        semantic,
-                        route=str(
-                            result.metadata.get("selected_answer_route") or ""
-                        ),
-                        template_id=result.metadata.get("template_id"),
-                        match_kind=result.metadata.get("template_match_kind"),
-                    )
-                    result.metadata["semantic_action_support"] = (
-                        support.to_dict()
-                    )
-                    payload["support"] = support.to_dict()
-            result.metadata["semantic_analysis"] = payload
-            self.logs.record_inquiry(
-                inquiry_id,
-                "SEMANTIC_ANALYSIS_RECORDED",
-                "문의 의미 분석 결과를 기록했습니다.",
-                level="INFO",
-                details=payload,
-            )
-        except Exception as error:  # pragma: no cover - defensive only
-            self.logs.record_inquiry(
-                inquiry_id,
-                "SEMANTIC_ANALYSIS_ERROR",
-                "의미 분석에 실패했습니다. 답변 생성에는 영향이 없습니다.",
-                level="WARNING",
-                details={"error_type": error.__class__.__name__},
-            )
-
-    def _would_publish_without_semantics(
-        self, inquiry_id: int, result: AnswerResult,
-    ) -> bool:
-        """Whether every existing gate would let this answer through.
-
-        Uses the real eligibility service rather than a copy of its rules, so
-        the two can never drift apart. It is pure computation -- no provider,
-        no network -- and the draft it is handed is the one about to be saved.
-        Any doubt resolves to True, which spends a call rather than skipping a
-        check.
-        """
-
-        try:
-            inquiry = self.inquiries.get(inquiry_id) or {}
-            metadata = dict(result.metadata)
-            validator = metadata.get("validator_result")
-            validator = validator if isinstance(validator, dict) else {}
-            draft = {
-                "original_answer": result.answer,
-                "validation_status": str(
-                    validator.get("status")
-                    or metadata.get("validation_status")
-                    or ""
-                ),
-                "validator_result_json": validator,
-                "review_status": str(metadata.get("review_status") or "PENDING"),
-                "posted": False,
-                "metadata_json": metadata,
-            }
-            verdict = self.eligibility.evaluate(
-                inquiry=inquiry, draft=draft,
-                route=str(metadata.get("selected_answer_route") or ""),
-            )
-            return verdict.decision == "SAFE"
-        except Exception:
-            return True
+        # No prepared record means nothing understood this inquiry.  A second
+        # semantic pass used to run right here: the legacy keyword router
+        # decided whether a model call was worth it, the analyzer was called
+        # again, and the outcome could add SEMANTIC_ACTION_MISMATCH to an
+        # answer no understanding stage had read.  Every current production run
+        # persists ``semantic_routing`` before routing, so that branch only
+        # ever saw drafts predating it -- and a keyword classifier is not what
+        # should judge those either.
+        result.metadata["legacy_semantic_action_support"] = "NO_SEMANTIC_RECORD"
 
     def _semantic_analyzer(self) -> GptSemanticAnalyzerService | None:
         """One analyzer per service, so its cache survives repeat questions."""
@@ -1021,115 +773,6 @@ class AnswerService:
         # second provider call after the answer has been rendered.
         request.metadata["_semantic_routing_value"] = semantic
 
-    @staticmethod
-    def _exclude_semantic_rule_mismatch(
-        candidate: AnswerResult,
-        semantic: SemanticAnalysis | None,
-        request: AnswerRequest,
-    ) -> AnswerResult:
-        """Discard a known wrong fixed-rule candidate before it can win."""
-
-        if semantic is None or not semantic.usable or not candidate.auto_answerable:
-            return candidate
-        decision = evaluate_action_support(
-            semantic,
-            route="TEMPLATE",
-            template_id=candidate.category,
-            match_kind=(candidate.metadata or {}).get("template_match_kind"),
-        )
-        if not decision.mismatched:
-            return candidate
-        safe = _review_required_safe_result(
-            request,
-            template_preferred=True,
-            failure_code="SEMANTIC_RULE_MISMATCH",
-            questions=tuple(
-                item.text for item in semantic.atomic_questions
-            ) or split_subquestions(request.question),
-            generation_skipped=True,
-            skip_reasons=("SEMANTIC_RULE_MISMATCH",),
-        )
-        safe.metadata.update({
-            "semantic_rule_rejected": decision.to_dict(),
-            "semantic_action_support": decision.to_dict(),
-            "rejected_rule_category": candidate.category,
-            "rejected_template_match_kind": (
-                candidate.metadata or {}
-            ).get("template_match_kind"),
-        })
-        return safe
-
-    def _deterministic_answer_settles_inquiry(
-        self, request: AnswerRequest, answer: str,
-    ) -> bool:
-        """May this one deterministic answer stand as the whole reply?
-
-        A keyword rule and an exact template each return a single answer for
-        the whole inquiry and say nothing about which part of it they
-        addressed. For one question that is exactly right, and it is left
-        alone here. For a compound one it decided the inquiry was finished on
-        the strength of a substring: in 687718601 "스탠드형 비즈니스 tv" and
-        "2026년 출시형 모델" matched a rule about which generation an Overnic
-        stand is, and the two questions actually asked -- which TV line suits
-        OTT viewing, and which model to pick -- left the pipeline entirely,
-        with Learning, the product catalogue and generation never called.
-
-        So the shortcut keeps its precedence only where it earns it: the
-        semantic pass already decomposed this inquiry, and the coverage
-        evaluator is asked, on this very text, whether anything the customer
-        raised is still unanswered. If something is, the inquiry carries on
-        down the path it would have taken anyway, with the rule answer handed
-        to generation as context. No new engine, no second provider call, and
-        the same evaluator that guards publication decides.
-
-        Semantics are required, not assumed: with no analysis, or with one
-        atomic question, the answer is yes and every existing route is
-        untouched. A fault is also yes -- this may withhold the shortcut,
-        never invent one.
-        """
-
-        try:
-            semantic = request.metadata.get("_semantic_routing_value")
-            if semantic is None or not getattr(semantic, "usable", False):
-                return True
-            atoms = [
-                str(getattr(item, "text", "") or "").strip()
-                for item in (getattr(semantic, "atomic_questions", ()) or ())
-            ]
-            atoms = [text for text in atoms if text]
-            if len(atoms) < 2:
-                return True
-            if not semantic_coverage_enabled() or not str(answer or "").strip():
-                return True
-            # The atom list says *that* this is compound; it is deliberately
-            # not passed as the sub-questions. An atom is a clause lifted out
-            # of the sentence and read on its own -- "비즈니스tv와 사이니지tv 중
-            # 뭐가 낫나요" -- and the coverage anchors, which are calibrated on
-            # whole inquiries, recognise less in it than in the text it came
-            # from: both atoms of 687718601 score QUESTION_TOPIC_UNRECOGNISED
-            # while the inquiry itself scores PARTIAL. Each side is asked what
-            # it is good at: the semantic pass whether there is more than one
-            # question, the evaluator whether any of them went unanswered.
-            coverage = self.semantic_coverage.evaluate(
-                question=str(request.question or ""),
-                answer=str(answer),
-                route="",
-            )
-            # For a compound inquiry the shortcut has to be earned, so the
-            # evaluator has to say the answer covered what was asked -- not
-            # merely fail to say otherwise. UNKNOWN means the anchors did not
-            # recognise the reply, which is what an "확인이 필요합니다" answer
-            # scores, and 325584049 ended on exactly that: a safe rule saying
-            # it needed more information closed a two-part inquiry while the
-            # store held 63 approved answers about the second part.
-            #
-            # This asymmetry is deliberate. A single question is untouched
-            # above, so an unrecognised reply to one question keeps its route;
-            # only a compound one has to show it settled everything.
-            return coverage.status == COVERAGE_PASS
-        except Exception:  # noqa: BLE001 - a measurement never blocks a route
-            return True
-
     # Rejection reasons that are facts about a stored row rather than
     # judgements about this question. These are the removals CODE owns, and
     # keeping them apart from the rest is what lets a reader see that the
@@ -1209,33 +852,6 @@ class AnswerService:
             understanding.get("need_template")
         )
 
-    @classmethod
-    def _deterministic_shortcut_allowed(cls, request: AnswerRequest) -> bool:
-        """Allow a final fixed reply only for a fully self-contained request.
-
-        A usable GPT① contract turns deterministic answers into candidates by
-        default.  The retained shortcut is intentionally narrow: exactly one
-        question, Template requested, and no Product/Learning/Order/DPS
-        evidence requested.  Legacy behaviour is preserved only when GPT① is
-        unavailable or invalid.
-        """
-
-        understanding = cls._usable_gpt_understanding(request)
-        if understanding is None:
-            return True
-        questions = [
-            item for item in understanding.get("questions", ())
-            if isinstance(item, dict) and str(item.get("text") or "").strip()
-        ]
-        return (
-            len(questions) == 1
-            and bool(understanding.get("need_template"))
-            and not bool(understanding.get("need_product"))
-            and not bool(understanding.get("need_learning"))
-            and not bool(understanding.get("need_order"))
-            and not bool(understanding.get("need_dps"))
-        )
-
     @staticmethod
     def _append_template_candidate(
         request: AnswerRequest, payload: dict[str, Any],
@@ -1302,14 +918,19 @@ class AnswerService:
         Phase9 owns reliable order/DPS actions and confirmed schedule text.  It
         does not own the meaning of a compound inquiry.  In particular, a
         pre-purchase delivery clause must not discard product or Learning
-        evidence requested by another clause.  The semantic understanding
-        produced before planning is the source of truth when it is usable;
-        legacy deterministic routing remains the safe fallback when it is not.
+        evidence requested by another clause.
+
+        Without a usable GPT understanding the inquiry is not handed back to
+        the legacy router.  ``is_delivery_schedule`` is itself a keyword
+        classification, so letting it finish an inquiry that nothing
+        understood is the shadow path this architecture removes: retrieval and
+        the GPT answer step still run, and eligibility holds the draft for
+        staff through UNDERSTANDING_UNAVAILABLE.
         """
 
         semantic = request.metadata.get("_semantic_routing_value")
         if semantic is None or not getattr(semantic, "usable", False):
-            return True
+            return False
         questions = [
             str(getattr(item, "text", "") or "").strip()
             for item in (getattr(semantic, "atomic_questions", ()) or ())
@@ -2345,48 +1966,14 @@ class AnswerService:
                     inquiry_id,
                     "ORDER_INFO_REQUIRED",
                 )
-            # At this point order/DPS evidence has not been collected yet.
-            # ``plan.needs_staff_review`` may therefore be a preliminary
-            # "lookup pending" state, not a final manual-only finding.  Only
-            # classifier-proven manual/high-risk causes may stop before those
-            # lookups; the normal later gate judges evidence-dependent holds.
-            pre_generation = PreGenerationGate.evaluate_plan(
-                # GPT①/② owns semantic meaning and answerability.  Legacy
-                # intent/high-risk classifications remain telemetry only and
-                # must not suppress evidence retrieval or generation.
-                analysis={}, plan={},
-            )
-            if pre_generation.skip_generation:
-                # A working safety gate, not a failure: say so in the event
-                # code as well as the level, so the dashboard does not count a
-                # correctly blocked high-risk inquiry as a system fault.
-                policy_reason = str(
-                    phase9_analysis.inquiry_subtype or "AUTO_ANSWER_PROHIBITED"
-                ).upper()
-                self.logs.record_inquiry(
-                    inquiry_id,
-                    "ANSWER_POLICY_BLOCKED",
-                    _POLICY_BLOCK_MESSAGES.get(
-                        policy_reason,
-                        "정책에 따라 자동 Draft를 생성하지 않고 직원 검토로 "
-                        "넘깁니다.",
-                    ),
-                    level="WARNING",
-                    details={
-                        **decision_details,
-                        "policy_blocked": True,
-                        "policy_reason": policy_reason,
-                        "safe_error_code": "AUTO_ANSWER_PROHIBITED",
-                        "pre_generation_gate_stage": pre_generation.stage,
-                        "pre_generation_gate_reasons": list(
-                            pre_generation.reasons
-                        ),
-                    },
-                )
-                raise AutoAnswerProhibitedError(
-                    "이 문의는 자동 답변 생성이 금지되어 직원 확인이 필요합니다.",
-                    policy_reason=policy_reason,
-                )
+            # The legacy pre-generation gate used to stand here. It read the
+            # keyword classifier's intent/subtype/high-risk flags and stopped
+            # the inquiry before retrieval, so nothing understood the question
+            # and no evidence was ever collected. Meaning and answerability
+            # belong to the GPT stages, so the call is gone rather than passed
+            # empty arguments. Real policy blocks keep their own raises: an
+            # empty question, a missing-item report and a current-order
+            # schedule change each still refuse here and below.
             order_lookup_result: dict[str, Any] | None = None
             if plan.is_delivery and plan.order_id_status == "VALID":
                 self.logs.record_inquiry(
@@ -2683,18 +2270,20 @@ class AnswerService:
                 )
                 try:
                     base_rule_result = self.engine.generate(request)
-                    base_rule_result = self._exclude_semantic_rule_mismatch(
-                        base_rule_result, routing_semantic, request,
+                    # The engine's own result is always kept as evidence.
+                    # It no longer grounds the prompt (see ``gpt_rule_context``
+                    # below), so a candidate entry is the only way it can reach
+                    # the answer step at all -- and dropping it because the
+                    # understanding did not ask for Template evidence would
+                    # delete a confirmed store sentence that may still bear on
+                    # the question.
+                    self._record_template_candidate(
+                        request, base_rule_result, source="ANSWER_ENGINE",
                     )
-                    # A usable GPT understanding requested Template evidence.
-                    # The ordinary (non-delivery) branch used to render this
-                    # deterministic candidate but then discard it before the
-                    # common GPT path.  Preserve it as evidence just as the
-                    # delivery branch does; it is not a final shortcut here.
+                    # The product-wide sweep stays understanding-driven: that
+                    # is a retrieval decision, and the request for it is what
+                    # makes the extra rows worth the prompt budget.
                     if template_candidate_requested:
-                        self._record_template_candidate(
-                            request, base_rule_result, source="ANSWER_ENGINE",
-                        )
                         self._record_template_candidates(request)
                 except Exception as template_error:
                     self.logs.record_inquiry(
@@ -2765,14 +2354,10 @@ class AnswerService:
                 # delivery placeholder as the whole answer.
                 try:
                     base_rule_result = self.engine.generate(request)
-                    base_rule_result = self._exclude_semantic_rule_mismatch(
-                        base_rule_result, routing_semantic, request,
+                    self._record_template_candidate(
+                        request, base_rule_result, source="ANSWER_ENGINE",
                     )
-                    if template_candidate_requested:
-                        self._record_template_candidate(
-                            request, base_rule_result, source="ANSWER_ENGINE",
-                        )
-                        self._record_template_candidates(request)
+                    self._record_template_candidates(request)
                 except Exception as template_error:
                     self.logs.record_inquiry(
                         inquiry_id,
@@ -3254,170 +2839,161 @@ class AnswerService:
                     if template_candidate_requested
                     else "BYPASSED"
                 )
-                if (
-                    template_candidate_requested
-                    and template_failure is None
-                    and self._deterministic_shortcut_allowed(request)
-                    and self._deterministic_answer_settles_inquiry(
-                        request, base_rule_result.answer
-                    )
-                ):
-                    product_db_result = _is_product_db_result(
-                        base_rule_result
+                if template_candidate_requested:
+                    event_code = (
+                        "TEMPLATE_VALIDATION_FAILED"
+                        if template_failure == "VALIDATION_FAILED"
+                        else "TEMPLATE_NOT_FOUND"
                     )
                     self.logs.record_inquiry(
                         inquiry_id,
-                        (
-                            "PRODUCT_DB_MATCHED"
-                            if product_db_result
-                            else "TEMPLATE_MATCHED"
-                        ),
-                        (
-                            "검증된 Product DB 사실을 선택했습니다."
-                            if product_db_result
-                            else "현재 문의에 적용 가능한 기존 템플릿을 선택했습니다."
-                        ),
+                        event_code,
+                        "적용 가능한 기존 템플릿이 없어 GPT로 전환합니다.",
+                        level="WARNING",
                         details={
-                            "template_id": (
-                                base_rule_result.matched_rule or None
-                            ),
+                            "reason": template_failure,
                             "store": request.store_code,
                             "inquiry_type": request.inquiry_type,
                         },
                     )
-                    result = _apply_existing_template_metadata(
-                        base_rule_result,
-                        order_id_present=bool(request.order_id.strip()),
-                        template_preferred=True,
-                    )
-                    if product_db_result:
-                        result.metadata.update(
-                            {
-                                "answer_type": "product_db",
-                                "answer_source": "product_db",
-                                "generation_mode": "PRODUCT_DB",
-                                "selected_answer_route": "PRODUCT_DB",
-                            }
-                        )
-                    else:
-                        result.metadata["selected_answer_route"] = "TEMPLATE"
-                    template_validation = (
-                        self.validator.validate_route(
-                            result.answer,
-                            route="PRODUCT_DB",
-                            product_name=request.product_name,
-                        )
-                        if product_db_result
-                        else self.validator.validate_route(
-                            result.answer,
-                            route="TEMPLATE",
-                            question=request.question,
-                        )
-                    )
-                    result.metadata["hybrid"] = {
-                        "validation": template_validation.to_dict(),
-                        "fallback_used": False,
-                        "provider": "template_validator",
-                    }
-                    result.metadata["validator_result"] = (
-                        template_validation.to_dict()
-                    )
                     self.logs.record_inquiry(
                         inquiry_id,
-                        "ANSWER_VALIDATION_PASSED",
-                        "운영 템플릿 Validator를 통과했습니다.",
-                        details={
-                            "selected_answer_route": (
-                                "PRODUCT_DB"
-                                if product_db_result
-                                else "TEMPLATE"
-                            ),
-                            "validator_result": template_validation.status,
-                        },
-                    )
-                elif (
-                    template_candidate_requested
-                    and _is_safe_rule_result(base_rule_result)
-                    and not product_fact_guard.sensitive
-                    # The same question the template branch above asks. A safe
-                    # rule answers the whole inquiry too, and 325584049 --
-                    # "tv설지하고 페가전 수거해주시는거죠?" -- ended here with
-                    # learning_search_called False, so the collection question
-                    # never reached the 63 approved answers that address it.
-                    and self._deterministic_shortcut_allowed(request)
-                    and self._deterministic_answer_settles_inquiry(
-                        request, base_rule_result.answer
-                    )
-                ):
-                    result = _apply_safe_rule_metadata(
-                        base_rule_result,
-                        order_id_present=bool(request.order_id.strip()),
-                        template_preferred=True,
-                    )
-                    safe_rule_validation = self.validator.validate_route(
-                        result.answer,
-                        route="SAFE_RULE",
-                    )
-                    result.metadata["hybrid"] = {
-                        "validation": safe_rule_validation.to_dict(),
-                        "fallback_used": False,
-                        "provider": "safe_rule_validator",
-                    }
-                    result.metadata["validator_result"] = (
-                        safe_rule_validation.to_dict()
-                    )
-                    if not safe_rule_validation.passed:
-                        raise AnswerGenerationError(
-                            "SAFE_RULE 답변이 전용 Validator를 통과하지 못했습니다."
-                        )
-                    self.logs.record_inquiry(
-                        inquiry_id,
-                        "SAFE_RULE_SELECTED",
-                        "기존 안전 Rule 답변을 GPT보다 먼저 선택했습니다.",
+                        "GPT_FALLBACK_STARTED",
+                        "템플릿 우선 생성에서 GPT 자동 Fallback을 시작했습니다.",
                         details={
                             **decision_details,
-                            "selected_answer_route": "SAFE_RULE",
-                            "generation_mode": "SAFE_RULE",
-                            "safe_rule_id": result.matched_rule or None,
-                            "gpt_called": False,
-                            "learning_search_called": False,
-                            "validator_result": safe_rule_validation.status,
+                            "reason": template_failure,
+                            "template_preferred": True,
+                            "selected_answer_route": "GPT_FALLBACK",
+                            "generation_mode": "GPT_FALLBACK",
+                            "gpt_called": True,
+                            "dps_lookup_attempted": False,
                         },
                     )
+                safe_review_fallback = False
+                generation_skipped = False
+                try:
+                    # A deterministic Rule/Template/Phase9 result is evidence, never
+                    # the instruction the answer step must follow.  It reaches the model
+                    # as one ``template_candidates`` entry beside Learning, Historical and
+                    # the product record, and which of them answers the customer is the
+                    # model's judgement.
+                    #
+                    # This used to be conditional, and every branch of the condition was a
+                    # way for a keyword rule to become the grounding.  688159337 arrived
+                    # with the understanding asking for Learning and not Template, the
+                    # conjunction short-circuited, and the pipeline's own "a person has to
+                    # check this" safety draft went on as ``rule.answer``; the provider then
+                    # refused all six retrieved candidates because the answer it had been
+                    # handed said to confirm first.  325584049 lost an approved answer the
+                    # same way.
+                    gpt_rule_context = _neutral_gpt_context(
+                        base_rule_result,
+                        template_failure=str(template_failure),
+                        category=phase9_analysis.inquiry_type.value,
+                    )
+                    hybrid_outcome = self.hybrid_service.generate(
+                        request, gpt_rule_context
+                    )
+                    for event in hybrid_outcome.events:
+                        self.logs.record_inquiry(
+                            inquiry_id,
+                            event.code,
+                            event.message,
+                            level=event.level,
+                            details=event.details or {},
+                        )
+                    result = hybrid_outcome.result
+                    validation = getattr(
+                        hybrid_outcome, "validation", None
+                    )
+                    fallback_used = bool(
+                        getattr(hybrid_outcome, "fallback_used", False)
+                    )
+                    if fallback_used:
+                        hybrid_metadata = (
+                            result.metadata.get("hybrid")
+                            if isinstance(
+                                result.metadata.get("hybrid"), dict
+                            )
+                            else {}
+                        )
+                        fallback_reason = str(
+                            hybrid_metadata.get("fallback_reason")
+                            or "GPT_VALIDATION_FAILED"
+                        )
+                        # Keep the reason machine-readable as well as in
+                        # the message: a provider limit is a "retry
+                        # shortly" for the operator, a validation failure
+                        # is not, and the UI can only say so if the cause
+                        # survives the raise.
+                        raise AnswerGenerationError(
+                            "GPT 답변이 안전 검증을 통과하지 못했습니다: "
+                            + fallback_reason,
+                            reason_code=fallback_reason,
+                        )
+                    if not is_valid_draft(result.answer):
+                        raise AnswerGenerationError(
+                            "GPT Fallback 생성 결과가 비어 있습니다."
+                        )
+                    if (
+                        validation is not None
+                        and not bool(validation.passed)
+                    ):
+                        raise AnswerGenerationError(
+                            "GPT Fallback 결과가 Validator를 통과하지 못했습니다."
+                        )
                     self.logs.record_inquiry(
                         inquiry_id,
                         "ANSWER_VALIDATION_PASSED",
-                        "SAFE_RULE 전용 Validator를 통과했습니다.",
+                        "일반 문의 GPT 답변 Validator를 통과했습니다.",
                         details={
-                            "selected_answer_route": "SAFE_RULE",
-                            "validator_result": safe_rule_validation.status,
+                            "selected_answer_route": (
+                                "GPT_FALLBACK"
+                                if prefer_template
+                                else "GPT_DIRECT"
+                            ),
+                            "validator_result": (
+                                getattr(validation, "status", "PASS")
+                                if validation is not None
+                                else "PASS"
+                            ),
                         },
                     )
-                else:
-                    if template_candidate_requested:
-                        event_code = (
-                            "TEMPLATE_VALIDATION_FAILED"
-                            if template_failure == "VALIDATION_FAILED"
-                            else "TEMPLATE_NOT_FOUND"
+                # The GenerationSkippedError clause was removed with the gate that
+                # raised it: nothing in the pipeline now decides, before the model is
+                # called, that no answer it could write would be publishable.
+                except Exception as fallback_error:
+                    validation_failure_reason = None
+                    safe_error_code = _error_code(fallback_error)
+                    if "hybrid_outcome" in locals():
+                        failed_validation = getattr(
+                            hybrid_outcome, "validation", None
                         )
+                        if failed_validation is not None:
+                            validation_failure_reason = "; ".join(
+                                str(value)
+                                for value in getattr(
+                                    failed_validation, "errors", ()
+                                )
+                            )[:500] or None
+                    if prefer_template:
                         self.logs.record_inquiry(
                             inquiry_id,
-                            event_code,
-                            "적용 가능한 기존 템플릿이 없어 GPT로 전환합니다.",
-                            level="WARNING",
-                            details={
-                                "reason": template_failure,
-                                "store": request.store_code,
-                                "inquiry_type": request.inquiry_type,
-                            },
-                        )
-                        self.logs.record_inquiry(
-                            inquiry_id,
-                            "GPT_FALLBACK_STARTED",
-                            "템플릿 우선 생성에서 GPT 자동 Fallback을 시작했습니다.",
+                            "GPT_FALLBACK_FAILED",
+                            "GPT 자동 Fallback에 실패해 기존 Draft를 유지합니다.",
+                            level="ERROR",
                             details={
                                 **decision_details,
+                                "error_type": (
+                                    fallback_error.__class__.__name__
+                                ),
                                 "reason": template_failure,
+                                "validator_failure_reason": (
+                                    validation_failure_reason
+                                ),
+                                "safe_error_code": safe_error_code,
+                                "correlation_id": correlation_id,
                                 "template_preferred": True,
                                 "selected_answer_route": "GPT_FALLBACK",
                                 "generation_mode": "GPT_FALLBACK",
@@ -3425,403 +3001,171 @@ class AnswerService:
                                 "dps_lookup_attempted": False,
                             },
                         )
-                    safe_review_fallback = False
-                    generation_skipped = False
-                    try:
-                        gpt_rule_context = (
-                            _neutral_gpt_context(
-                                base_rule_result,
-                                template_failure=str(template_failure),
-                                category=phase9_analysis.inquiry_type.value,
-                            )
-                            if (
-                                # The pipeline's own "a person has to check
-                                # this" draft, which is never grounding. It is
-                                # neutralised on its own terms because whether
-                                # a Template was requested says nothing about
-                                # it: 688159337 -- "새 티비 설치하러 오실 때
-                                # 집에 있는 오래된 티비도 같이 가져가 주실 수
-                                # 있나요?" -- reached here with GPT ① asking
-                                # for Learning and not Template, so
-                                # ``template_candidate_requested`` was False,
-                                # the conjunction below short-circuited before
-                                # reading any of its own conditions, and the
-                                # safety draft went on as ``rule.answer``. The
-                                # provider then ignored all six retrieved
-                                # candidates, writing each refusal as "현재
-                                # 적용되는 우선 답변에서 정확한 확인이
-                                # 필요하다고 명시하고 있어".
-                                _is_review_required_safe_draft(
-                                    base_rule_result
-                                )
-                                or (
-                                    template_candidate_requested
-                                    and (
-                                        not is_valid_draft(
-                                            base_rule_result.answer
-                                        )
-                                        or template_failure != "NOT_FOUND"
-                                        or (
-                                            product_fact_guard.sensitive
-                                            and _is_safe_rule_result(
-                                                base_rule_result
-                                            )
-                                        )
-                                        # We are here because the deterministic
-                                        # answer did not settle the inquiry.
-                                        # Handing it on as ``rule.answer``
-                                        # contradicts that: it arrives among the
-                                        # selected facts, and the model reads it
-                                        # as the rule to follow.
-                                        #
-                                        # Measured on 325584049 with the live
-                                        # provider. Its own learning_usage came
-                                        # back {"learning_id": 314283,
-                                        #  "answer_supported": false,
-                                        #  "reason": "학습 근거는 참고 가능하나,
-                                        #   제공된 확인 안내 규칙을 우선
-                                        #   적용했습니다"}
-                                        # -- the approved answer saying
-                                        # collection is free was in the prompt
-                                        # and was passed over for a rule answer
-                                        # that only asked for the facts to be
-                                        # checked. A reply that settles nothing
-                                        # is not grounding.
-                                        or not self._deterministic_answer_settles_inquiry(
-                                            request, base_rule_result.answer
-                                        )
-                                    )
-                                )
-                            )
-                            else base_rule_result
-                        )
-                        hybrid_outcome = self.hybrid_service.generate(
-                            request, gpt_rule_context
-                        )
-                        for event in hybrid_outcome.events:
-                            self.logs.record_inquiry(
-                                inquiry_id,
-                                event.code,
-                                event.message,
-                                level=event.level,
-                                details=event.details or {},
-                            )
-                        result = hybrid_outcome.result
-                        validation = getattr(
-                            hybrid_outcome, "validation", None
-                        )
-                        fallback_used = bool(
-                            getattr(hybrid_outcome, "fallback_used", False)
-                        )
-                        if fallback_used:
-                            hybrid_metadata = (
-                                result.metadata.get("hybrid")
-                                if isinstance(
-                                    result.metadata.get("hybrid"), dict
-                                )
-                                else {}
-                            )
-                            fallback_reason = str(
-                                hybrid_metadata.get("fallback_reason")
-                                or "GPT_VALIDATION_FAILED"
-                            )
-                            # Keep the reason machine-readable as well as in
-                            # the message: a provider limit is a "retry
-                            # shortly" for the operator, a validation failure
-                            # is not, and the UI can only say so if the cause
-                            # survives the raise.
-                            raise AnswerGenerationError(
-                                "GPT 답변이 안전 검증을 통과하지 못했습니다: "
-                                + fallback_reason,
-                                reason_code=fallback_reason,
-                            )
-                        if not is_valid_draft(result.answer):
-                            raise AnswerGenerationError(
-                                "GPT Fallback 생성 결과가 비어 있습니다."
-                            )
-                        if (
-                            validation is not None
-                            and not bool(validation.passed)
-                        ):
-                            raise AnswerGenerationError(
-                                "GPT Fallback 결과가 Validator를 통과하지 못했습니다."
-                            )
+                    else:
                         self.logs.record_inquiry(
                             inquiry_id,
-                            "ANSWER_VALIDATION_PASSED",
-                            "일반 문의 GPT 답변 Validator를 통과했습니다.",
-                            details={
-                                "selected_answer_route": (
-                                    "GPT_FALLBACK"
-                                    if prefer_template
-                                    else "GPT_DIRECT"
-                                ),
-                                "validator_result": (
-                                    getattr(validation, "status", "PASS")
-                                    if validation is not None
-                                    else "PASS"
-                                ),
-                            },
-                        )
-                    except GenerationSkippedError as skipped:
-                        # The Pre-generation Gate decided before any provider
-                        # call that no answer it produced could be published.
-                        # The customer still gets a reply and staff still get
-                        # something to edit -- the same conservative draft a
-                        # provider failure produces -- but it is recorded as a
-                        # decision, not an outage, and gpt_called stays False
-                        # so nobody is told an answer was composed.
-                        result = _review_required_safe_result(
-                            request,
-                            template_preferred=prefer_template,
-                            failure_code="GENERATION_SKIPPED",
-                            questions=split_subquestions(request.question),
-                            generation_skipped=True,
-                            skip_reasons=skipped.reasons,
-                        )
-                        validation = self.validator.validate_route(
-                            result.answer,
-                            route="REVIEW_REQUIRED_SAFE_DRAFT",
-                        )
-                        if not validation.passed:
-                            raise AnswerGenerationError(
-                                "생성 생략 안전 답변이 Validator를 통과하지 못했습니다."
-                            ) from skipped
-                        safe_review_fallback = True
-                        generation_skipped = True
-                        result.metadata["hybrid"] = {
-                            "validation": validation.to_dict(),
-                            "fallback_used": False,
-                            "provider": "pre_generation_gate",
-                            "generation_skipped": True,
-                            "generation_skip_stage": skipped.stage,
-                            "generation_skip_reasons": list(skipped.reasons),
-                        }
-                        result.metadata["validator_result"] = (
-                            validation.to_dict()
-                        )
-                        self.logs.record_inquiry(
-                            inquiry_id,
-                            "GENERATION_SKIPPED_BY_PRE_GATE",
-                            "자동등록 불가가 이미 확정되어 답변 생성을 생략했습니다.",
-                            level="WARNING",
+                            "GPT_DIRECT_FAILED",
+                            "GPT 직접 답변 생성에 실패해 기존 Draft를 유지합니다.",
+                            level="ERROR",
                             details={
                                 **decision_details,
-                                "selected_answer_route": (
-                                    "REVIEW_REQUIRED_SAFE_DRAFT"
+                                "error_type": (
+                                    fallback_error.__class__.__name__
                                 ),
-                                "generation_mode": "SAFE_RULE",
-                                "gpt_called": False,
-                                "pre_generation_gate_stage": skipped.stage,
-                                "pre_generation_gate_reasons": list(
-                                    skipped.reasons
+                                "validator_failure_reason": (
+                                    validation_failure_reason
                                 ),
-                                "correlation_id": correlation_id,
-                            },
-                        )
-                    except Exception as fallback_error:
-                        validation_failure_reason = None
-                        safe_error_code = _error_code(fallback_error)
-                        if "hybrid_outcome" in locals():
-                            failed_validation = getattr(
-                                hybrid_outcome, "validation", None
-                            )
-                            if failed_validation is not None:
-                                validation_failure_reason = "; ".join(
-                                    str(value)
-                                    for value in getattr(
-                                        failed_validation, "errors", ()
-                                    )
-                                )[:500] or None
-                        if prefer_template:
-                            self.logs.record_inquiry(
-                                inquiry_id,
-                                "GPT_FALLBACK_FAILED",
-                                "GPT 자동 Fallback에 실패해 기존 Draft를 유지합니다.",
-                                level="ERROR",
-                                details={
-                                    **decision_details,
-                                    "error_type": (
-                                        fallback_error.__class__.__name__
-                                    ),
-                                    "reason": template_failure,
-                                    "validator_failure_reason": (
-                                        validation_failure_reason
-                                    ),
-                                    "safe_error_code": safe_error_code,
-                                    "correlation_id": correlation_id,
-                                    "template_preferred": True,
-                                    "selected_answer_route": "GPT_FALLBACK",
-                                    "generation_mode": "GPT_FALLBACK",
-                                    "gpt_called": True,
-                                    "dps_lookup_attempted": False,
-                                },
-                            )
-                        else:
-                            self.logs.record_inquiry(
-                                inquiry_id,
-                                "GPT_DIRECT_FAILED",
-                                "GPT 직접 답변 생성에 실패해 기존 Draft를 유지합니다.",
-                                level="ERROR",
-                                details={
-                                    **decision_details,
-                                    "error_type": (
-                                        fallback_error.__class__.__name__
-                                    ),
-                                    "validator_failure_reason": (
-                                        validation_failure_reason
-                                    ),
-                                    "safe_error_code": safe_error_code,
-                                    "correlation_id": correlation_id,
-                                    "template_preferred": False,
-                                    "selected_answer_route": "GPT_DIRECT",
-                                    "generation_mode": "GPT_DIRECT",
-                                    "gpt_called": True,
-                                    "dps_lookup_attempted": False,
-                                },
-                            )
-                        if prior_active and is_valid_draft(
-                            prior_active.get("original_answer")
-                        ):
-                            # Manual regeneration is a later operation.  If it
-                            # fails, keep the already-valid active Draft exactly
-                            # as it was instead of replacing it with a weaker
-                            # safety response.
-                            raise
-                        failed_intent = (
-                            hybrid_outcome.intent
-                            if "hybrid_outcome" in locals()
-                            and getattr(hybrid_outcome, "intent", None)
-                            is not None
-                            else None
-                        )
-                        result = _review_required_safe_result(
-                            request,
-                            template_preferred=prefer_template,
-                            failure_code=safe_error_code,
-                            questions=(
-                                tuple(failed_intent.questions)
-                                if failed_intent is not None
-                                else ()
-                            ),
-                        )
-                        validation = self.validator.validate_route(
-                            result.answer,
-                            route="REVIEW_REQUIRED_SAFE_DRAFT",
-                        )
-                        if not validation.passed:
-                            raise AnswerGenerationError(
-                                "최종 안전 답변이 Validator를 통과하지 못했습니다."
-                            ) from fallback_error
-                        safe_review_fallback = True
-                        self.logs.record_inquiry(
-                            inquiry_id,
-                            "SAFE_DRAFT_CREATED",
-                            "GPT 생성 실패 후 직원 검토용 안전 Draft를 생성했습니다.",
-                            level="WARNING",
-                            details={
-                                **decision_details,
-                                "selected_answer_route": (
-                                    "REVIEW_REQUIRED_SAFE_DRAFT"
-                                ),
-                                "generation_mode": "SAFE_RULE",
-                                "gpt_called": True,
-                                "validator_result": validation.status,
                                 "safe_error_code": safe_error_code,
                                 "correlation_id": correlation_id,
-                            },
-                        )
-                    generation_mode = (
-                        "SAFE_RULE"
-                        if safe_review_fallback
-                        else "GPT_FALLBACK"
-                        if prefer_template
-                        else "GPT_DIRECT"
-                    )
-                    selected_general_route = (
-                        "REVIEW_REQUIRED_SAFE_DRAFT"
-                        if safe_review_fallback
-                        else generation_mode
-                    )
-                    result.metadata.update(
-                        {
-                            "answer_type": (
-                                "review_required_safe_draft"
-                                if safe_review_fallback
-                                else "gpt_generated"
-                            ),
-                            "answer_source": (
-                                "SAFE_TEMPLATE"
-                                if safe_review_fallback
-                                else "openai"
-                            ),
-                            "generation_mode": generation_mode,
-                            "selected_answer_route": selected_general_route,
-                            "template_preferred": bool(prefer_template),
-                            "template_override": not bool(prefer_template),
-                            "template_id": (
-                                "REVIEW_REQUIRED_SAFE_DRAFT"
-                                if safe_review_fallback
-                                else None
-                            ),
-                            "template_name": (
-                                "REVIEW_REQUIRED_SAFE_DRAFT"
-                                if safe_review_fallback
-                                else None
-                            ),
-                            "template_version": (
-                                "safe-rule-v1"
-                                if safe_review_fallback
-                                else None
-                            ),
-                            "order_id_present": bool(
-                                request.order_id.strip()
-                            ),
-                            "dps_lookup_attempted": False,
-                            "delivery_date_found": False,
-                            # False when the gate stopped ahead of the
-                            # provider. Reporting True there would tell an
-                            # operator an answer had been composed and
-                            # rejected, and would put a phantom call in the
-                            # cost telemetry.
-                            "gpt_called": not generation_skipped,
-                            "generation_skipped": generation_skipped,
-                            "draft_created": True,
-                            "delivery_question": False,
-                        }
-                    )
-                    if not safe_review_fallback:
-                        self.logs.record_inquiry(
-                            inquiry_id,
-                            (
-                                "GPT_FALLBACK_SUCCESS"
-                                if prefer_template
-                                else "GPT_DIRECT_SUCCESS"
-                            ),
-                            (
-                                "적용 가능한 기존 템플릿이 없어 GPT로 새 답변을 생성했습니다."
-                                if prefer_template
-                                else "사용자 요청으로 GPT 새 답변을 생성했습니다."
-                            ),
-                            details={
-                                **decision_details,
-                                "generation_mode": generation_mode,
-                                "selected_answer_route": generation_mode,
-                                "provider": result.provider,
-                                "template_preferred": bool(prefer_template),
-                                "template_id": None,
-                                "template_name": None,
+                                "template_preferred": False,
+                                "selected_answer_route": "GPT_DIRECT",
+                                "generation_mode": "GPT_DIRECT",
                                 "gpt_called": True,
                                 "dps_lookup_attempted": False,
-                                "validator_result": (
-                                    getattr(validation, "status", "PASS")
-                                    if validation is not None
-                                    else "PASS"
-                                ),
-                                "draft_length": len(result.answer.strip()),
-                                "correlation_id": correlation_id,
                             },
                         )
+                    if prior_active and is_valid_draft(
+                        prior_active.get("original_answer")
+                    ):
+                        # Manual regeneration is a later operation.  If it
+                        # fails, keep the already-valid active Draft exactly
+                        # as it was instead of replacing it with a weaker
+                        # safety response.
+                        raise
+                    failed_intent = (
+                        hybrid_outcome.intent
+                        if "hybrid_outcome" in locals()
+                        and getattr(hybrid_outcome, "intent", None)
+                        is not None
+                        else None
+                    )
+                    result = _review_required_safe_result(
+                        request,
+                        template_preferred=prefer_template,
+                        failure_code=safe_error_code,
+                        questions=(
+                            tuple(failed_intent.questions)
+                            if failed_intent is not None
+                            else ()
+                        ),
+                    )
+                    validation = self.validator.validate_route(
+                        result.answer,
+                        route="REVIEW_REQUIRED_SAFE_DRAFT",
+                    )
+                    if not validation.passed:
+                        raise AnswerGenerationError(
+                            "최종 안전 답변이 Validator를 통과하지 못했습니다."
+                        ) from fallback_error
+                    safe_review_fallback = True
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "SAFE_DRAFT_CREATED",
+                        "GPT 생성 실패 후 직원 검토용 안전 Draft를 생성했습니다.",
+                        level="WARNING",
+                        details={
+                            **decision_details,
+                            "selected_answer_route": (
+                                "REVIEW_REQUIRED_SAFE_DRAFT"
+                            ),
+                            "generation_mode": "SAFE_RULE",
+                            "gpt_called": True,
+                            "validator_result": validation.status,
+                            "safe_error_code": safe_error_code,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                generation_mode = (
+                    "SAFE_RULE"
+                    if safe_review_fallback
+                    else "GPT_FALLBACK"
+                    if prefer_template
+                    else "GPT_DIRECT"
+                )
+                selected_general_route = (
+                    "REVIEW_REQUIRED_SAFE_DRAFT"
+                    if safe_review_fallback
+                    else generation_mode
+                )
+                result.metadata.update(
+                    {
+                        "answer_type": (
+                            "review_required_safe_draft"
+                            if safe_review_fallback
+                            else "gpt_generated"
+                        ),
+                        "answer_source": (
+                            "SAFE_TEMPLATE"
+                            if safe_review_fallback
+                            else "openai"
+                        ),
+                        "generation_mode": generation_mode,
+                        "selected_answer_route": selected_general_route,
+                        "template_preferred": bool(prefer_template),
+                        "template_override": not bool(prefer_template),
+                        "template_id": (
+                            "REVIEW_REQUIRED_SAFE_DRAFT"
+                            if safe_review_fallback
+                            else None
+                        ),
+                        "template_name": (
+                            "REVIEW_REQUIRED_SAFE_DRAFT"
+                            if safe_review_fallback
+                            else None
+                        ),
+                        "template_version": (
+                            "safe-rule-v1"
+                            if safe_review_fallback
+                            else None
+                        ),
+                        "order_id_present": bool(
+                            request.order_id.strip()
+                        ),
+                        "dps_lookup_attempted": False,
+                        "delivery_date_found": False,
+                        # False when the gate stopped ahead of the
+                        # provider. Reporting True there would tell an
+                        # operator an answer had been composed and
+                        # rejected, and would put a phantom call in the
+                        # cost telemetry.
+                        "gpt_called": not generation_skipped,
+                        "generation_skipped": generation_skipped,
+                        "draft_created": True,
+                        "delivery_question": False,
+                    }
+                )
+                if not safe_review_fallback:
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        (
+                            "GPT_FALLBACK_SUCCESS"
+                            if prefer_template
+                            else "GPT_DIRECT_SUCCESS"
+                        ),
+                        (
+                            "적용 가능한 기존 템플릿이 없어 GPT로 새 답변을 생성했습니다."
+                            if prefer_template
+                            else "사용자 요청으로 GPT 새 답변을 생성했습니다."
+                        ),
+                        details={
+                            **decision_details,
+                            "generation_mode": generation_mode,
+                            "selected_answer_route": generation_mode,
+                            "provider": result.provider,
+                            "template_preferred": bool(prefer_template),
+                            "template_id": None,
+                            "template_name": None,
+                            "gpt_called": True,
+                            "dps_lookup_attempted": False,
+                            "validator_result": (
+                                getattr(validation, "status", "PASS")
+                                if validation is not None
+                                else "PASS"
+                            ),
+                            "draft_length": len(result.answer.strip()),
+                            "correlation_id": correlation_id,
+                        },
+                    )
             final_route = str(
                 result.metadata.get("selected_answer_route")
                 or result.metadata.get("generation_mode")

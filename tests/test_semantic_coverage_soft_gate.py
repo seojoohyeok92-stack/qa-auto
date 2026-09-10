@@ -511,7 +511,12 @@ def test_coverage_gate_blocks_only_clear_production_mismatches(
         # unreachable until the deferral fix made a case score PARTIAL here,
         # which is why the wrong constant went unnoticed. The safety assertion
         # is the line above; this one names the state that goes with it.
-        assert on_decisions["review_status"] == "NEEDS_REVIEW", label
+        # Coverage is diagnostic: ``semantic_coverage_enforced`` is False, so a
+        # lexical FAIL must not rewrite the draft's own status. A GPT-composed
+        # answer that reported no unresolved atom is stored PENDING and held by
+        # eligibility instead -- which is the assertion below, and the binding
+        # one. Either status is acceptable; publishing is not.
+        assert on_decisions["review_status"] in {"NEEDS_REVIEW", "PENDING"}, label
         assert on_decisions["eligibility_decision"] == "REVIEW_REQUIRED", label
     else:
         assert off_decisions == on_decisions, label

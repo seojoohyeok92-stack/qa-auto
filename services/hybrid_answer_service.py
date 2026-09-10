@@ -21,7 +21,6 @@ from answer.providers.interfaces import JsonGptProvider
 from answer.text_utils import split_subquestions
 from answer.providers.provider_factory import create_gpt_provider
 from services.draft_generation_service import DraftGenerationService
-from answer.exceptions import GenerationSkippedError
 from services import learning_evidence_policy
 from services.learning_evidence_policy import usable_as_factual_evidence
 from services.gpt_understanding_service import GptUnderstandingService
@@ -32,7 +31,6 @@ from services.evidence_verification_service import (
     record,
     selected_pairs_from_context,
 )
-from services.pre_generation_gate import PreGenerationGate
 # ``required_fact_groups`` is no longer consulted here: see _product_fact_fields.
 from services.product_knowledge_service import SUBJECT_SENSITIVE_FIELDS
 from services.self_review_service import SelfReviewService
@@ -624,24 +622,32 @@ class HybridAnswerService:
                 ),
             },
         }
+        # No answer is carried out of a failed generation. This used to copy
+        # ``rule_result.answer``/``provider``/``matched_rule`` through with
+        # ``auto_answerable`` forced off -- the keyword answer preserved as
+        # "staff context" while still being the draft body a person saw first
+        # and could send. The deterministic text remains retrievable evidence;
+        # it is not what the failure produces. AnswerService raises on
+        # ``fallback_used`` and writes its own review draft from the customer's
+        # own questions, which is the reply staff actually want to edit.
         fallback = AnswerResult(
             status=AnswerStatus.NEEDS_REVIEW,
             category=rule_result.category,
-            reason=rule_result.reason,
-            answer=rule_result.answer,
-            provider=rule_result.provider,
+            reason=f"GPT_ANSWER_STEP_UNAVAILABLE:{reason}",
+            answer="",
+            provider="gpt_answer_step_unavailable",
             auto_answerable=False,
             needs_review=True,
-            matched_rule=rule_result.matched_rule,
+            matched_rule="",
             warnings=tuple(rule_result.warnings),
             metadata=metadata,
         )
         events.append(
             HybridEvent(
-                "GPT_FALLBACK_RULE",
-                "GPT 결과 대신 검증된 Rule Answer를 사용했습니다.",
+                "GPT_ANSWER_STEP_UNAVAILABLE",
+                "GPT 답변 생성이 실행되지 못해 직원 검토 Draft로 전환했습니다.",
                 "WARNING",
-                {"reason": reason, "provider": rule_result.provider},
+                {"reason": reason},
             )
         )
         return HybridAnswerOutcome(
@@ -790,20 +796,11 @@ class HybridAnswerService:
         draft: DraftResult | None = None
         review: SelfReviewResult | None = None
         validation: ValidationResult | None = None
-        # PRE-GENERATION GATE (1/2) -- the processing plan.
-        # Evaluated here, ahead of the provider-started event, because this is
-        # the last point at which nothing has been spent. It asks the
-        # publishing gate's own question: is there a hard reason that no
-        # generated answer could clear? Anything that generation might still
-        # resolve is deliberately allowed through to the normal path.
-        plan_gate = PreGenerationGate.evaluate_plan(
-            analysis=request.metadata.get("phase9_analysis"),
-            plan=request.metadata.get("processing_plan"),
-        )
-        if plan_gate.skip_generation:
-            raise GenerationSkippedError(
-                reasons=plan_gate.reasons, stage=plan_gate.stage
-            )
+        # The plan-level pre-generation gate used to run here and could stop
+        # the provider call from the keyword classifier's intent, subtype and
+        # high-risk flags alone. Whether an inquiry is answerable is a reading
+        # of the question, so it is the understanding stage's to make; the call
+        # is removed rather than neutralised.
         try:
             events.append(
                 HybridEvent(
@@ -918,27 +915,13 @@ class HybridAnswerService:
                 learning_context = self._apply_evidence_conflicts(
                     request, learning_context
                 )
-                evidence_gate = PreGenerationGate.evaluate_evidence(
-                    learning_context
-                )
-                if (
-                    evidence_gate.skip_generation
-                    and self._legacy_evidence_verification
-                ):
-                    raise GenerationSkippedError(
-                        reasons=evidence_gate.reasons,
-                        stage=evidence_gate.stage,
-                    )
-                if evidence_gate.skip_generation:
-                    # In the GPT-understand/retrieve/answer production path a
-                    # conflict holds publication, not composition.  GPT② must
-                    # still see the retrieved evidence and leave the disputed
-                    # claim unresolved; otherwise one disputed atom erases
-                    # independently grounded Product/Template answers.
-                    learning_context["legacy_pre_generation_evidence_gate"] = {
-                        "status": "PRODUCTION_PATH_UNUSED",
-                        **evidence_gate.to_dict(),
-                    }
+                # The evidence-level pre-generation gate used to run here: a
+                # sub-question whose sources disagreed skipped composition
+                # entirely, so one disputed atom erased the independently
+                # grounded answers beside it. A conflict holds publication, not
+                # composition -- it is marked on the evidence, the model reads
+                # both sides and leaves the disputed claim unresolved, and the
+                # publishing gate decides. The call is removed.
                 # The draft provider is the one final evidence reader in the
                 # production path.  The former selector/verifier pair made
                 # additional semantic provider calls after retrieval and
@@ -1457,11 +1440,6 @@ class HybridAnswerService:
                 False,
                 tuple(events),
             )
-        except GenerationSkippedError:
-            # A decision, not a provider failure. Falling back to the rule
-            # answer here would publish the very assertion the gate just
-            # refused to let anyone compose.
-            raise
         except Exception as error:
             return self._fallback(
                 rule_result,
