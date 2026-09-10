@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import pandas as pd
 import streamlit as st
 
 from answer.learning_signal import SIGNAL_KIND_LABELS
@@ -108,7 +107,14 @@ def _answer_preview(answer: str | None) -> str:
 
 
 def _percent(value: float | None) -> str:
-    return "측정 데이터 부족" if value is None else f"{value:.1f}%"
+    """A rate, or a dash when there is nothing to divide by.
+
+    ``_percentage``/``_rate`` return None for a zero denominator rather than
+    0.0, so an empty period never renders as "0.0%" or "100.0%" -- both of
+    which an operator would read as a measurement.
+    """
+
+    return "데이터 없음" if value is None else f"{value:.1f}%"
 
 
 def _sample_caption(sample: int) -> str:
@@ -166,42 +172,23 @@ def render_learning_performance(database: Database) -> None:
         period_days=period_days
     )
     current = data["quality"]["current"]
-    previous = data["quality"]["previous"]
+    # Three numbers, one line, no comparison.
+    #
+    # The period-over-period badge and the correction-rate chart were answering
+    # a question nobody asked at this altitude: on a store this size the
+    # previous window is frequently empty, so the badge mostly read "이전 기간
+    # 데이터 부족" and the chart mostly read "데이터가 아직 부족합니다". Both are
+    # still computable from the snapshot -- ``previous`` and
+    # ``correction_trend`` are untouched in the payload and the detail table
+    # below still shows the period comparison.
     card_specs = (
-        ("자동 등록률", "auto_post_rate", True),
-        ("직원 수정률", "correction_rate", False),
-        ("직원 검토 필요율", "review_required_rate", False),
+        ("자동 등록률", "auto_post_rate"),
+        ("직원 수정률", "correction_rate"),
+        ("직원 검토 필요율", "review_required_rate"),
     )
     cards = st.columns(3, gap="small")
-    for card, (label, key, higher_is_better) in zip(cards, card_specs):
-        delta, delta_color = _metric_delta(
-            current[key], previous[key],
-            higher_is_better=higher_is_better,
-        )
-        card.metric(
-            label,
-            _percent(current[key]),
-            delta,
-            delta_color=delta_color,
-        )
-
-    st.markdown("#### 직원 수정률 추이")
-    correction_trend = [
-        row for row in data["quality"]["correction_trend"]
-        if row["correction_rate"] is not None
-    ]
-    if len(correction_trend) >= 2:
-        st.line_chart(
-            pd.DataFrame(correction_trend).set_index("period")[["correction_rate"]],
-            y_label="직원 수정률(%)",
-        )
-        st.caption(
-            _correction_summary(
-                current["correction_rate"], previous["correction_rate"]
-            )
-        )
-    else:
-        st.info("직원 수정률 추이를 측정할 수 있는 데이터가 아직 부족합니다.")
+    for card, (label, key) in zip(cards, card_specs):
+        card.metric(label, _percent(current[key]))
 
     with st.expander("상세 분석", expanded=False):
         st.markdown("#### 기간 비교")

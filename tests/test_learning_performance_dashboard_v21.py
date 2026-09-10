@@ -329,15 +329,30 @@ def test_operator_quality_kpis_use_durable_period_sources(tmp_path: Path) -> Non
     assert (current["processed"], current["generated"]) == (6, 2)
     assert (current["auto_posted"], current["review_required"]) == (1, 2)
     assert current["generation_rate"] == round(2 / 6 * 100, 1)
-    assert current["auto_post_rate"] == round(1 / 6 * 100, 1)
+    # 자동 등록률의 분모는 "답변이 만들어진 문의"다.
+    #
+    # 이 fixture 가 그 이유를 그대로 보여준다: 들어온 문의 6건 중 답변이 있는
+    # 것은 2건이고, 그중 1건이 자동등록됐다. 6을 분모로 쓰면 16.7% 가 되어
+    # 답변조차 만들어지지 않은 4건을 자동등록 실패로 읽게 된다. "자동등록 대상"
+    # 은 어디에도 저장되지 않으며, 저장 구조가 실제로 아는 것은 답변의 존재다.
+    assert current["auto_post_rate"] == round(1 / 2 * 100, 1)
+    assert current["auto_post_denominator"] == 2
+    # 직원 검토 필요율은 분자·분모가 같은 모집단을 쓴다. 이전에는 분자가 로그
+    # 시각으로, 분모가 문의 시각으로 필터링돼 100% 를 넘을 수 있었다.
     assert current["review_required_rate"] == round(2 / 6 * 100, 1)
+    assert current["review_required_denominator"] == 6
+    # 직원 수정률의 분모는 기간 내 답변 전체다. 이전에는 "수정됨 + 무수정 확인"
+    # 만을 분모로 써서, 무수정 확인이 없으면 수정 1건으로도 50~100% 가 나왔다.
+    assert current["corrected_in_period"] == 1
+    assert current["correction_rate"] == round(1 / 2 * 100, 1)
+    assert current["correction_denominator"] == 2
+    # 판정 완료/대기 수치는 상세 표용으로 그대로 유지된다.
     assert current["correction_known"] == 2
     assert current["corrected"] == 1
-    assert current["correction_rate"] == 50.0
     assert (previous["processed"], previous["generated"]) == (4, 2)
-    assert previous["auto_post_rate"] == 50.0
+    assert previous["auto_post_rate"] == round(2 / 2 * 100, 1)
     assert previous["review_required_rate"] == 25.0
-    assert previous["correction_rate"] == 50.0
+    assert previous["correction_rate"] == round(1 / 2 * 100, 1)
     # The selected 7-day KPI trend contains the current cohort only; the
     # preceding period is shown by the card comparison, not mixed into chart.
     assert len(data["quality"]["correction_trend"]) == 1
@@ -409,4 +424,154 @@ render_learning_performance(db)
     selector = next(item for item in app.selectbox if item.label == "품질 기간")
     assert selector.options == ["최근 7일", "최근 30일", "최근 90일"]
     assert any(item.label == "상세 분석" for item in app.expander)
-    assert any(metric.value == "측정 데이터 부족" for metric in app.metric)
+    # 분모가 0 이면 0.0%/100.0% 대신 "데이터 없음" 을 보여준다.
+    assert any(metric.value == "데이터 없음" for metric in app.metric)
+
+
+def test_kpi_denominators_are_the_period_population(tmp_path: Path) -> None:
+    """세 KPI 의 분자/분모를 fixture 로 직접 세어 확인한다.
+
+    이 테스트가 막는 것은 세 가지 실제 결함이다.
+
+    * 자동 등록률이 답변조차 없는 문의를 분모에 넣어 낮게 나오는 것
+    * 직원 수정률이 "수정됨 + 무수정 확인" 만을 분모로 써서, 무수정 확인이 없으면
+      수정 1건으로도 100% 가 되는 것
+    * 직원 검토 필요율의 분자가 로그 시각으로, 분모가 문의 시각으로 필터링돼
+      기간 밖 문의가 분자에만 들어가 100% 를 넘을 수 있는 것
+    """
+
+    database = Database(tmp_path / "kpi-denominator.db")
+    database.initialize()
+
+    # 답변 있음 + 자동등록 성공
+    posted, posted_draft, _ = _post(database, "kpi-posted")
+    _auto_post_attempt(
+        database, inquiry_id=posted, draft_id=posted_draft, key="kpi-posted",
+    )
+    # 답변 있음 + 자동등록 없음 + 직원 수정 있음
+    corrected, _, _ = _post(database, "kpi-corrected")
+    PostReviewRepository(database).capture_remote_naver_edit(
+        inquiry_id=corrected, answer_body="직원이 고친 답변입니다.",
+    )
+    # 답변 있음 + 수정 없음 + 검토 필요
+    reviewed, _, _ = _post(database, "kpi-reviewed")
+    _event(database, reviewed, "AUTO_PROCESSING_REVIEW_REQUIRED")
+    # 답변 없음 (분모에서 제외되어야 하는 쪽)
+    no_answer = _inquiry(database, "kpi-no-answer")
+    _event(database, no_answer, "AUTO_ANSWER_STARTED")
+
+    # 기간 밖 문의인데 검토 로그는 기간 안에 있는 경우 -> 분자에 들어가면 안 된다.
+    outside = _inquiry(database, "kpi-outside")
+    _event(database, outside, "AUTO_PROCESSING_REVIEW_REQUIRED")
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET source_created_at=datetime('now','-40 days'),"
+            " created_at=datetime('now','-40 days') WHERE id=?",
+            (outside,),
+        )
+
+    current = LearningPerformanceService(database).snapshot(
+        period_days=7
+    )["quality"]["current"]
+
+    # 분모: 기간 내 문의 4건(기간 밖 1건 제외), 그중 답변이 있는 것 3건
+    assert current["processed"] == 4
+    assert current["generated"] == 3
+    # 자동 등록률 = 1 / 3 (답변 없는 1건은 분모에 없다)
+    assert current["auto_posted"] == 1
+    assert current["auto_post_denominator"] == 3
+    assert current["auto_post_rate"] == round(1 / 3 * 100, 1)
+    # 직원 수정률 = 1 / 3 (수정 1건, 분모는 기간 내 답변 전체)
+    assert current["corrected_in_period"] == 1
+    assert current["correction_denominator"] == 3
+    assert current["correction_rate"] == round(1 / 3 * 100, 1)
+    # 직원 검토 필요율 = 1 / 4. 기간 밖 문의의 검토 로그는 분자에 없다.
+    assert current["review_required"] == 1
+    assert current["review_required_denominator"] == 4
+    assert current["review_required_rate"] == round(1 / 4 * 100, 1)
+    assert current["review_required_rate"] <= 100.0
+
+
+def test_kpi_shows_no_data_instead_of_zero_when_period_is_empty(
+    tmp_path: Path,
+) -> None:
+    """분모가 0 이면 0.0%/100.0% 가 아니라 None -> "데이터 없음" 이어야 한다."""
+
+    from ui.learning_performance import _percent
+
+    database = Database(tmp_path / "kpi-empty.db")
+    database.initialize()
+    current = LearningPerformanceService(database).snapshot(
+        period_days=7
+    )["quality"]["current"]
+
+    assert current["processed"] == 0
+    for key in ("auto_post_rate", "correction_rate", "review_required_rate"):
+        assert current[key] is None, key
+        assert _percent(current[key]) == "데이터 없음"
+
+
+def test_period_selection_uses_one_window_for_all_three_kpis(
+    tmp_path: Path,
+) -> None:
+    """기간 선택이 세 KPI 에 같은 start/end 로 적용된다."""
+
+    database = Database(tmp_path / "kpi-period.db")
+    database.initialize()
+    inside, inside_draft, _ = _post(database, "kpi-inside")
+    _auto_post_attempt(
+        database, inquiry_id=inside, draft_id=inside_draft, key="kpi-inside",
+    )
+    older, older_draft, _ = _post(database, "kpi-older")
+    _auto_post_attempt(
+        database, inquiry_id=older, draft_id=older_draft, key="kpi-older",
+    )
+    _event(database, older, "AUTO_PROCESSING_REVIEW_REQUIRED", days_ago=20)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE inquiries SET source_created_at=datetime('now','-20 days'),"
+            " created_at=datetime('now','-20 days') WHERE id=?",
+            (older,),
+        )
+
+    service = LearningPerformanceService(database)
+    seven = service.snapshot(period_days=7)["quality"]["current"]
+    thirty = service.snapshot(period_days=30)["quality"]["current"]
+
+    # 7일 창에는 최근 1건만, 30일 창에는 2건 모두. 세 KPI 가 같은 모집단을 쓴다.
+    assert (seven["processed"], seven["generated"]) == (1, 1)
+    assert seven["review_required_denominator"] == 1
+    assert seven["auto_post_denominator"] == 1
+    assert seven["correction_denominator"] == 1
+    assert (thirty["processed"], thirty["generated"]) == (2, 2)
+    assert thirty["review_required_denominator"] == 2
+    assert thirty["auto_post_denominator"] == 2
+    assert thirty["correction_denominator"] == 2
+    # 기간 경계: 20일 전 문의는 7일 창에서 완전히 빠진다(분자·분모 모두).
+    assert seven["review_required"] == 0
+    assert thirty["review_required"] == 1
+
+
+def test_correction_rate_does_not_read_as_100_percent_without_observations(
+    tmp_path: Path,
+) -> None:
+    """무수정 확인이 한 건도 없어도 직원 수정률이 100% 로 읽히지 않는다."""
+
+    database = Database(tmp_path / "kpi-correction.db")
+    database.initialize()
+    for index in range(4):
+        _post(database, f"kpi-plain-{index}")
+    corrected, _, _ = _post(database, "kpi-one-correction")
+    PostReviewRepository(database).capture_remote_naver_edit(
+        inquiry_id=corrected, answer_body="직원이 고친 답변입니다.",
+    )
+
+    current = LearningPerformanceService(database).snapshot(
+        period_days=7
+    )["quality"]["current"]
+
+    # 수정 1건 / 답변 5건. 예전 분모(수정 1 + 무수정 확인 0)로는 100.0% 였다.
+    assert current["corrected_in_period"] == 1
+    assert current["correction_denominator"] == 5
+    assert current["correction_rate"] == 20.0
+    assert current["correction_known"] == 1

@@ -72,6 +72,14 @@ class LearningPerformanceRepository:
                   WHERE is_active=1
                     AND TRIM(COALESCE(final_answer, edited_answer, original_answer, ''))<>''
                 ), review_required AS (
+                  -- No second date filter.
+                  --
+                  -- The numerator used to be filtered by the *log's* timestamp
+                  -- while the denominator is filtered by the *inquiry's*, so an
+                  -- inquiry that arrived before the window and was reviewed
+                  -- inside it counted in the numerator and not the denominator.
+                  -- The cohort below is the period; an inquiry in it that was
+                  -- ever held for review is a review for that inquiry.
                   SELECT DISTINCT inquiry_id
                   FROM activity_logs
                   WHERE event_code IN (
@@ -79,9 +87,18 @@ class LearningPerformanceRepository:
                     'AUTO_PROCESSING_BLOCKED',
                     'AUTO_POST_BLOCKED_DPS_SESSION',
                     'AUTO_POST_SKIPPED_POLICY_BLOCKED'
-                  ) AND """
-                + range_sql.format(column="datetime(created_at, '+9 hours')")
-                + """
+                  )
+                ), corrected AS (
+                  SELECT DISTINCT av.inquiry_id
+                  FROM answer_versions av
+                  WHERE av.version_kind IN (
+                    'NAVER_CORRECTION_APPLIED', 'STAFF_CORRECTION_DRAFT'
+                  )
+                  UNION
+                  SELECT DISTINCT d.inquiry_id FROM answer_drafts d
+                  WHERE TRIM(COALESCE(d.edited_answer,''))<>''
+                    AND TRIM(COALESCE(d.edited_answer,''))
+                        <>TRIM(COALESCE(d.original_answer,''))
                 ), posted AS (
                   SELECT DISTINCT inquiry_id
                   FROM naver_post_attempts
@@ -99,13 +116,14 @@ class LearningPerformanceRepository:
                        SUM(EXISTS(
                          SELECT 1 FROM review_required r
                          WHERE r.inquiry_id=p.inquiry_id
-                       )) review_required
+                       )) review_required,
+                       SUM(EXISTS(
+                         SELECT 1 FROM corrected c
+                         WHERE c.inquiry_id=p.inquiry_id
+                       )) corrected
                 FROM processed p
                 """,
-                (
-                    start, int(end_days), end,
-                    start, int(end_days), end,
-                ),
+                (start, int(end_days), end),
             ).fetchone()
         outcome = self.operator_correction_period(
             start_days=start_days, end_days=end_days
@@ -114,17 +132,42 @@ class LearningPerformanceRepository:
         generated = int(row["generated"] or 0)
         auto_posted = int(row["auto_posted"] or 0)
         review_required = int(row["review_required"] or 0)
+        corrected = int(row["corrected"] or 0)
         return {
             "processed": processed,
             "generated": generated,
             "auto_posted": auto_posted,
             "review_required": review_required,
+            "corrected_in_period": corrected,
             "generation_rate": self._percentage(generated, processed),
-            "auto_post_rate": self._percentage(auto_posted, processed),
+            # Auto-post rate over the answers that could be posted.
+            #
+            # The denominator used to be every inbound inquiry, which counts
+            # inquiries that never had an answer to post against the rate -- a
+            # quiet day of unanswerable inquiries reads as an auto-post failure.
+            # "자동등록 대상" is not stored as a flag anywhere, and the closest
+            # thing the data model actually records is whether an answer exists:
+            # without one there is nothing to register. So the denominator is
+            # the cohort that produced an answer, and ``processed`` stays in the
+            # payload for anyone who wants the inbound total.
+            "auto_post_rate": self._percentage(auto_posted, generated),
+            "auto_post_denominator": generated,
             "review_required_rate": self._percentage(
                 review_required, processed
             ),
-            "correction_rate": outcome["correction_rate"],
+            "review_required_denominator": processed,
+            # Correction rate over the period's answers, not over the subset
+            # whose outcome happens to be known.
+            #
+            # ``operator_correction_period`` divides corrections by
+            # corrections + explicit no-change observations. Those observations
+            # exist only when a person used the review screen, so three
+            # corrections and no observations reported 100.0% -- a number that
+            # says nothing about the period. The cohort that has an answer is
+            # the population the question is about; the known/pending split
+            # stays below for the detail table.
+            "correction_rate": self._percentage(corrected, generated),
+            "correction_denominator": generated,
             "correction_known": outcome["known"],
             "corrected": outcome["corrected"],
             "correction_pending": outcome["pending"],

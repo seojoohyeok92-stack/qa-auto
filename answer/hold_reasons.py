@@ -195,7 +195,7 @@ STAFF_REASON_LABELS: dict[str, str] = {
 # was *lifted*, and ORDER_ID_REQUESTED_FROM_CUSTOMER describes what the answer
 # says rather than what stopped it. Hidden from the message only -- both are
 # still produced, still recorded, and still shown on the dashboard.
-STAFF_REASON_LABELS["DPS_LOOKUP_DISABLED"] = "DPS 일정 조회 중지"
+STAFF_REASON_LABELS["DPS_LOOKUP_DISABLED"] = "배송·설치 조회 일시 중지"
 
 STAFF_HIDDEN_REASONS = frozenset({
     "PRELIMINARY_REVIEW_RESOLVED",
@@ -213,6 +213,154 @@ _STAFF_SEPARATOR = " · "
 # an operator opening the console sees the full list anyway.
 _STAFF_MAX_ITEMS = 5
 
+
+# The one sentence a staff member reads in the KakaoTalk room, by category.
+#
+# ``REASON_LABELS`` is the dashboard's vocabulary and says what the pipeline
+# found -- "문의 의미 분석(GPT①)을 사용할 수 없어…", "Validator 안전 검증을
+# 통과하지 못했습니다", "DPS 조회 결과를 신뢰할 수 없습니다". Those are the right
+# words beside the codes in a console, and the wrong ones for a chat room: the
+# reader needs to know what to do next and has no reason to know the stages are
+# called GPT①, Validator or DPS.
+#
+# So this is a second, smaller vocabulary for one surface, grouped by what the
+# operator has to do rather than by which stage produced the code. Anything not
+# listed falls back to the generic sentence instead of being guessed at. The
+# codes, ``REASON_LABELS``, the stored values and the logs are untouched.
+_STAFF_HEADLINE_GENERIC = "자동 등록 전 직원 확인이 필요한 문의입니다."
+
+STAFF_HEADLINES: dict[str, str] = {
+    "UNDERSTANDING_UNAVAILABLE": (
+        "문의 내용을 자동으로 정확히 판단하지 못해 직원 확인이 필요합니다."
+    ),
+    "SEMANTIC_ACTION_MISMATCH": (
+        "문의 내용을 자동으로 정확히 판단하지 못해 직원 확인이 필요합니다."
+    ),
+    "INTENT_UNCLASSIFIED_VALIDATOR_CLEAR": (
+        "문의 내용을 자동으로 정확히 판단하지 못해 직원 확인이 필요합니다."
+    ),
+    "INTENT_CONFIDENCE_LOW": (
+        "문의 내용을 자동으로 정확히 판단하지 못해 직원 확인이 필요합니다."
+    ),
+    "INTENT_CONFIDENCE_UNKNOWN": (
+        "문의 내용을 자동으로 정확히 판단하지 못해 직원 확인이 필요합니다."
+    ),
+    "GPT_REPORTED_UNRESOLVED": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "GPT_WITHHELD_AUTO_POST": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "GPT_CONFIDENCE_LOW": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "GPT_CONFIDENCE_UNKNOWN": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "VALIDATOR_REVIEW_REQUIRED": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "DRAFT_REVIEW_REQUIRED": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "ANSWER_REQUIRES_MANUAL_REVIEW": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "PROCESSING_PLAN_REQUIRES_REVIEW": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "POLICY_OR_HIGH_RISK_REVIEW": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "INTENT_NOT_AUTO_POSTABLE": (
+        "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "EVIDENCE_CONFLICT": (
+        "답변 근거가 서로 달라 직원 확인이 필요합니다."
+    ),
+    "APPROVED_LEARNING_CONFLICT": (
+        "답변 근거가 서로 달라 직원 확인이 필요합니다."
+    ),
+    "PRODUCT_FACT_VS_LEARNING_CONFLICT": (
+        "답변 근거가 서로 달라 직원 확인이 필요합니다."
+    ),
+    "PRODUCT_FACT_NOT_VERIFIED": (
+        "상품 정보를 정확히 확인할 수 없어 직원 확인이 필요합니다."
+    ),
+    "PRODUCT_COMPATIBILITY_NOT_VERIFIED": (
+        "상품 정보를 정확히 확인할 수 없어 직원 확인이 필요합니다."
+    ),
+    "REQUIRED_ORDER_ID_MISSING_OR_INVALID": (
+        "배송·설치 확인을 위해 주문번호 확인이 필요합니다."
+    ),
+    "ORDER_LOOKUP_NOT_TRUSTED": (
+        "배송·설치 정보를 조회하지 못해 직원 확인이 필요합니다."
+    ),
+    "DPS_RESULT_NOT_TRUSTED": (
+        "배송·설치 정보를 조회하지 못해 직원 확인이 필요합니다."
+    ),
+    "DPS_LOOKUP_DISABLED": (
+        "배송·설치 정보를 조회하지 못해 직원 확인이 필요합니다."
+    ),
+    "DPS_SNAPSHOT_NOT_VALIDATED": (
+        "배송·설치 일정이 확정되지 않아 직원 확인이 필요합니다."
+    ),
+    "DELIVERY_DEADLINE_NOT_CONFIRMABLE": (
+        "배송·설치 일정이 확정되지 않아 직원 확인이 필요합니다."
+    ),
+    "UNCONFIRMED_PURCHASE_DELIVERY_PERIOD": (
+        "배송·설치 일정이 확정되지 않아 직원 확인이 필요합니다."
+    ),
+    "ELIGIBILITY_EVALUATION_FAILED": (
+        "일시적인 시스템 문제로 자동 등록되지 않았습니다."
+    ),
+    "PAYLOAD_FINAL_ANSWER_MISMATCH": (
+        "일시적인 시스템 문제로 자동 등록되지 않았습니다."
+    ),
+    "FINAL_ANSWER_REQUIRED": (
+        "일시적인 시스템 문제로 자동 등록되지 않았습니다."
+    ),
+    "VALIDATOR_NOT_PASS": (
+        "일시적인 시스템 문제로 자동 등록되지 않았습니다."
+    ),
+    "PII_EXPOSURE": (
+        "답변에 개인정보가 포함될 수 있어 자동 등록하지 않았습니다."
+    ),
+    "SECRET_EXPOSURE": (
+        "답변에 인증정보가 포함될 수 있어 자동 등록하지 않았습니다."
+    ),
+    "INTERNAL_PLACEHOLDER_EXPOSURE": (
+        "답변에 내부 표기가 남아 있어 자동 등록하지 않았습니다."
+    ),
+    "UNRESOLVED_PLACEHOLDER": (
+        "답변에 내부 표기가 남아 있어 자동 등록하지 않았습니다."
+    ),
+    "ALREADY_ANSWERED_OR_POSTED": (
+        "이미 답변이 등록되어 있어 다시 등록하지 않았습니다."
+    ),
+    "UNSUPPORTED_SOURCE_TYPE": (
+        "자동 등록을 지원하지 않는 문의라 직원 확인이 필요합니다."
+    ),
+}
+
+
+def staff_headline(codes: object, *, default: str = "") -> str:
+    """The KakaoTalk "미등록 사유" line, in the operator's language.
+
+    The first code carrying a sentence wins, which matches
+    ``primary_reason``'s rule that the first hard reason is the one to act on.
+    A hold made only of codes this vocabulary does not cover still gets a
+    sentence, because "자동 등록 전 직원 확인이 필요한 문의입니다." is both true
+    and actionable where a raw code is neither.
+    """
+
+    for code in _codes(codes):
+        sentence = STAFF_HEADLINES.get(code)
+        if sentence:
+            return sentence
+    if _codes(codes):
+        return _STAFF_HEADLINE_GENERIC
+    return str(default or "") or _STAFF_HEADLINE_GENERIC
 
 def staff_reason_labels(codes: object) -> tuple[str, ...]:
     """Short Korean labels for one hold, deduplicated, in order.

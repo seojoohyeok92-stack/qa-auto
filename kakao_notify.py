@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from answer.hold_reasons import staff_reason_summary
+from answer.hold_reasons import staff_headline, staff_reason_summary
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -387,10 +387,16 @@ def format_qna_message(
     held = bool(hold_reason or hold_codes)
 
     if held:
+        # ``hold_reason`` is the dashboard's sentence for this same hold, and it
+        # names the pipeline's parts: GPT①, Validator, DPS, payload. It is not
+        # changed anywhere -- it stays in the draft metadata, the activity log
+        # and the console -- but what reaches the chat room is the
+        # operator-facing sentence for the same codes. One boundary, one
+        # vocabulary: ``answer.hold_reasons.staff_headline``.
         lines.extend(
             [
                 "",
-                f"미등록 사유: {hold_reason or '자동 등록 조건을 충족하지 않았습니다.'}",
+                f"미등록 사유: {staff_headline(hold_codes, default=hold_reason)}",
             ]
         )
         # Internal reason codes are how the pipeline talks to itself. A staff
@@ -417,17 +423,15 @@ def format_qna_message(
             ]
         )
 
-    if (
-        reason
-        and not held
-        and action not in {"posted", "dry_run"}
-    ):
-        lines.extend(
-            [
-                "",
-                f"판단 사유: {reason}",
-            ]
-        )
+    # "판단 사유" is gone from the message, not from the record.
+    #
+    # It rendered ``AnswerResult.reason``, which is how the pipeline explains its
+    # own routing to itself: RULE_ENGINE_MATCH, TEMPLATE_RENDER_FAILED,
+    # CURRENT_ORDER_ACTION_REQUIRED, "적용 가능한 고정 템플릿이 없어 GPT 안전
+    # 답변을 생성합니다". None of it is something an operator acts on, and a held
+    # inquiry already carries 미등록 사유 and 세부 사유 above. The value itself is
+    # unchanged in the draft, the activity log and the dashboard.
+    _ = reason
 
     return "\n".join(lines)
 

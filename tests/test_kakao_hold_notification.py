@@ -47,7 +47,8 @@ def test_the_message_says_which_inquiry():
 def test_the_message_says_why_it_was_not_registered():
     message = hold()
     assert "미등록 사유:" in message
-    assert "문의 처리 계획상 직원 확인이 필요합니다." in message
+    # 대시보드 문구가 아니라 운영 문구가 나간다. 코드와 대시보드 문장은 그대로다.
+    assert "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다." in message
 
 
 def test_the_message_says_whether_an_answer_was_even_written():
@@ -98,7 +99,9 @@ def test_a_generated_but_blocked_answer_is_not_shown_as_registered():
     )
     assert "답변: -" in message
     assert "HDMI 포트는 3개입니다." not in message
-    assert "Validator 안전 검증을 통과하지 못했습니다." in message
+    # "Validator" 는 채팅방에 나가지 않는다. 같은 코드의 운영 문구로 바뀐다.
+    assert "일시적인 시스템 문제로 자동 등록되지 않았습니다." in message
+    assert "Validator" not in message
 
 
 # ------------------------------------------------------ hard beats soft
@@ -124,7 +127,9 @@ def test_soft_reasons_are_still_recorded_in_the_message():
     message = hold(
         hold_reason=primary_reason(codes[:1], codes[1:]), hold_codes=codes
     )
-    assert "위험·분쟁 가능성이 있어 직원 판단이 필요합니다." in message
+    assert "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다." in message
+    # 세부 사유에는 짧은 라벨이 남아 무엇이 걸렸는지 알 수 있다.
+    assert "위험·분쟁 가능성" in message
     # The soft finding is still shown, just not as a raw identifier.
     assert "분류 신뢰도 낮음" in message
     assert "INTENT_CONFIDENCE_LOW" not in message
@@ -153,7 +158,9 @@ def test_a_generation_notice_without_a_hold_is_unchanged():
         product=PRODUCT, option_name="", question="q", answer="a",
         reason="Rule 기반 답변", action="generated",
     )
-    assert "판단 사유: Rule 기반 답변" in message
+    # "판단 사유" 줄은 메시지에서 빠졌다. 값 자체는 draft/log/대시보드에 그대로
+    # 남아 있고, 운영자가 행동할 내용이 아니라 내부 routing 설명이었다.
+    assert "판단 사유" not in message
     assert "답변: -" in message
     assert "답변: a" not in message
     assert "미등록 사유" not in message
@@ -225,7 +232,7 @@ def test_the_airplay_conflict_message_states_the_real_cause():
         generation_skipped=True,
     )
     assert AIRPLAY_Q in message
-    assert "확보된 근거가 서로 일치하지 않아 자동으로 확정할 수 없습니다." in message
+    assert "답변 근거가 서로 달라 직원 확인이 필요합니다." in message
     assert "답변 생성: 생략됨" in message
     assert "네이버 등록: 안 됨" in message
 
@@ -419,6 +426,45 @@ def test_a_hold_whose_reasons_are_all_hidden_still_reads_sensibly():
     message = hold(hold_reason="", hold_codes=("PRELIMINARY_REVIEW_RESOLVED",),
                    generation_skipped=False)
     assert "세부 사유:" not in message
-    assert "미등록 사유: 자동 등록 조건을 충족하지 않았습니다." in message
+    # 표시할 코드가 모두 숨김 대상이어도 행동 가능한 한 문장은 남는다.
+    assert "미등록 사유: 자동 등록 전 직원 확인이 필요한 문의입니다." in message
     assert "네이버 등록: 안 됨" in message
     assert "PRELIMINARY_REVIEW_RESOLVED" not in message
+
+
+def test_no_internal_vocabulary_reaches_the_chat_room() -> None:
+    """채팅방 문구에 개발 용어가 섞이지 않는다.
+
+    운영 직원은 파이프라인의 단계 이름을 알 필요가 없다. 내부 코드와 대시보드
+    문장은 그대로 보존되고, 바뀌는 것은 이 한 경계의 표현뿐이다.
+    """
+
+    import re
+
+    from answer.hold_reasons import REASON_LABELS
+
+    internal = re.compile(
+        r"GPT|Validator|DPS|PROVIDER|NOT_RECORDED|UNRESOLVED|HARD_SAFETY"
+        r"|payload|pipeline|[A-Z][A-Z0-9]{3,}_[A-Z0-9_]+"
+    )
+    # 게이트가 실제로 낼 수 있는 모든 코드를 하나씩, 그리고 대시보드 문장을
+    # hold_reason 으로 함께 넘겨 본다.
+    leaked: list[tuple[str, str]] = []
+    for code, dashboard_sentence in REASON_LABELS.items():
+        message = format_qna_message(
+            product="삼성 스마트모니터 M5", option_name="",
+            question="배송 좀 당겨주실 수 없나요?", answer="",
+            reason="RULE_ENGINE_MATCH", action="needs_review",
+            hold_reason=dashboard_sentence, hold_codes=(code,),
+            generation_skipped=False,
+        )
+        found = internal.findall(message)
+        if found:
+            leaked.append((code, message))
+    assert not leaked, leaked
+
+    # 대시보드 쪽 문장은 바뀌지 않았다 -- 같은 코드가 여전히 파이프라인 용어로
+    # 설명된다.
+    assert "GPT①" in REASON_LABELS["UNDERSTANDING_UNAVAILABLE"]
+    assert "Validator" in REASON_LABELS["VALIDATOR_NOT_PASS"]
+    assert "DPS" in REASON_LABELS["DPS_RESULT_NOT_TRUSTED"]
