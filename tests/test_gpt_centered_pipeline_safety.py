@@ -491,9 +491,20 @@ def test_retrieval_candidates_no_longer_carry_a_binding_instruction():
     payload = json.loads(prompt)
     policy = payload["learning_usage_policy"]
     assert "subquestion_evidence_is_binding" not in policy
-    assert policy["retrieval_candidates_are_not_approved_evidence"] is True
+    # ``retrieval_candidates_are_not_approved_evidence`` is gone as a key: it
+    # said the same thing as the rule below and as
+    # ``you_decide_which_candidates_apply``, and three copies of "these are not
+    # approved" read as a caution rather than as a handover. The contract this
+    # test is about is the handover, so it is asserted directly.
     assert policy["relevance_and_answer_support_are_hints_not_permission"] is True
-    assert payload["evidence_judgement_rules"]
+    assert policy["you_decide_which_candidates_apply"] is True
+    rules = payload["evidence_judgement_rules"]
+    assert any("코드가 관련성을 보증하지 않는다" in rule for rule in rules), rules
+    # And no rule may tell the model a whole class of candidate is unusable.
+    assert not any(
+        "다른 모델/변형을 가리키는 후보는 사용하지 않는다" in rule
+        for rule in rules
+    ), rules
     # The two claims that must survive: a past order's facts are not this
     # order's, and stable knowledge is still usable.
     assert policy["historical_learning_forbidden_for_current_order_facts"] is True

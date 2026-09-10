@@ -63,7 +63,17 @@ class PromptBuilder:
         "확인된 사실과 확인이 필요한 내용을 명확히 구분한다."
     )
     PROHIBITIONS = (
-        "Facts에 없는 배송일, 주문상태, 설치일, 상품정보, 정책, "
+        # "Facts" was the two-entry ``allowed_facts`` dict -- on a real inquiry
+        # it holds ``product.name`` and ``product.product_id`` and nothing
+        # else. Naming it as the only source for 상품정보·정책·반품 가능 여부
+        # told the model that the Learning, Historical and Product Catalog
+        # blocks in the same prompt could not answer those questions, which is
+        # exactly what four server inquiries did: the evidence was attached and
+        # the atoms came back unresolved. The prohibition that matters is
+        # unchanged -- do not invent -- and it now names where the answer may
+        # come from.
+        "전달된 자료(Facts, Product Catalog, Learning, Historical, 주문/DPS)에 "
+        "없는 배송일, 주문상태, 설치일, 상품정보, 정책, "
         "기사 방문시간, 반품 가능 여부를 추측하지 않는다. "
         "전화번호, 주소, OTP, 인증정보, 토큰, Cookie, Session을 출력하지 않는다. "
         "인사말(예: 안녕하세요)과 마무리 인사(예: 감사합니다)는 별도 Template이 "
@@ -95,7 +105,6 @@ class PromptBuilder:
     # and whether the claim it carries is tied to one order or holds for the
     # product generally.
     EVIDENCE_JUDGEMENT_RULES: tuple[str, ...] = (
-        "retrieval이 가져온 후보는 '검토 대상'이지 '승인된 근거'가 아니다.",
         "각 후보의 relevance/answer_support/rank는 검색 신호이며,"
         " 낮다고 해서 사용 금지를 뜻하지 않는다. 표현이 달라도 같은 사실을"
         " 말하는 후보는 사용할 수 있다.",
@@ -105,14 +114,18 @@ class PromptBuilder:
         " 다른 주문에 재사용하지 않는다. 그 값은 현재 Order/DPS 결과에서만 온다.",
         "상품에 대해 일반적으로 성립하는 안정적 운영 지식(설치 방식, A/S 절차,"
         " 상시 정책)은 과거 문의에서 나왔더라도 현재 상품에 적용되면 사용할 수 있다.",
-        "만료되었거나 다른 모델/변형을 가리키는 후보는 사용하지 않는다.",
+        # "만료되었거나 다른 모델/변형을 가리키는 후보는 사용하지 않는다" 를
+        # 제거했다. 만료는 CODE 가 이미 후보에서 빼고, 뒤쪽의 "다른 모델/상품의
+        # 사양을 현재 상품의 사실로 전환하지 않는다" 가 필요한 경계를 정확히
+        # 말한다. 두 줄을 함께 두면 교차상품 후보 전체가 사용 금지로 읽히고,
+        # 그것이 서버에서 LID 117/72/19554 가 쓰이지 않은 이유와 같은 종류의
+        # 지시다.
         "후보들이 서로 충돌하면 한쪽을 고르지 말고 unresolved로 남긴다.",
         "근거가 실제로 말하지 않는 것을 확장하지 않는다."
         " 예: installation_method=PROFESSIONAL_TECHNICIAN_REQUIRED 는"
         " '전문 기사 설치'까지만 말하며, 기사의 소속 브랜드는 말하지 않는다.",
         "검색 결과는 후보이며 코드가 관련성을 보증하지 않는다. 각 후보를 직접"
         " 읽고 현재 atomic question 에 실제로 도움이 되는 것만 사용한다.",
-        "후보가 검색됐다는 이유만으로 사용하지 않는다.",
         "다른 모델/상품의 사양을 현재 상품의 사실로 전환하지 않는다.",
         "LISTING METADATA(판매 페이지 표기)와 VERIFIED PRODUCT CATALOG FACTS"
         "(검증 사양)를 구분한다. product_information_tiers 를 따른다.",
@@ -336,7 +349,7 @@ class PromptBuilder:
             "facts": fact_payload,
             "prohibited_claims": [
                 self.PROHIBITIONS,
-                "Allowed facts에 없는 사실을 만들거나 변경하지 않습니다.",
+                "allowed_facts 의 값을 바꾸거나 없는 값을 만들지 않습니다.",
                 "고객이 묻지 않은 구매요청 상태나 내부 처리 코드를 설명하지 않습니다.",
                 "DPS, 요구납기일, AnswerFacts, GPT, OpenAI, API, DB를 고객에게 노출하지 않습니다.",
             ],
@@ -360,10 +373,15 @@ class PromptBuilder:
             },
             "confirmed_facts": confirmed_facts,
             "learning_usage_policy": {
-                "approved_learning_allowed_for": [
-                    "stable policy", "installation method", "product guidance",
-                    "after-service policy", "promotion policy",
-                ],
+                # ``approved_learning_allowed_for`` used to list five topics --
+                # stable policy, installation method, product guidance,
+                # after-service policy, promotion policy. A question outside
+                # those five labels (a tax invoice, a return fee, power draw, a
+                # giveaway) read as not covered, and the list had to grow for
+                # every new kind of inquiry. Which candidate answers this
+                # question is the judgement below; the one thing Learning may
+                # never supply is a fact about *this* customer's current order,
+                # and that stays.
                 "approved_learning_forbidden_for": [
                     "current order status", "current delivery status",
                     "current installation date",
@@ -381,7 +399,6 @@ class PromptBuilder:
                 # "해당 상품은 삼성 기사님이 방문하여 설치하는 상품입니다." from
                 # answering "삼성기사분이 설치하러 오시나요". Whether a candidate
                 # answers *this* question is a judgement, and it is made here.
-                "retrieval_candidates_are_not_approved_evidence": True,
                 "relevance_and_answer_support_are_hints_not_permission": True,
                 "you_decide_which_candidates_apply": True,
                 "answerable_items_must_not_be_replaced_by_blanket_uncertainty": True,

@@ -755,7 +755,9 @@ def test_negative_corrections_reach_gpt2_as_constraints(tmp_path, monkeypatch):
         assert "negative_correction_instructions" in run.prompt
         rules = run.prompt["negative_correction_instructions"]
         assert any("claim" in r or "취소" in r for r in rules)
-    assert policy["retrieval_candidates_are_not_approved_evidence"] is True
+    # 중복 키 제거: 같은 내용을 evidence_judgement_rules 와
+    # you_decide_which_candidates_apply 가 이미 말한다.
+    assert policy["you_decide_which_candidates_apply"] is True
 
 
 # ===========================================================================

@@ -521,7 +521,8 @@ def test_687932894_candidates_are_not_removed_by_soft_semantic_gates(
 
     # 관련성 판단이 GPT ② 의 몫이라는 지시가 프롬프트에 있어야 한다.
     policy = run.prompt["learning_usage_policy"]
-    assert policy["retrieval_candidates_are_not_approved_evidence"] is True
+    # 중복 키는 제거됐고, 같은 계약을 아래 두 항목이 말한다.
+    assert policy["you_decide_which_candidates_apply"] is True
     assert "subquestion_evidence_is_binding" not in policy
 
 

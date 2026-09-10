@@ -1417,13 +1417,24 @@ class LearningContextService:
         }
         context["product_fact_guard"] = {
             **guard.to_dict(),
-            "cross_product_answer_bodies_excluded": guard.sensitive,
-            "same_product_detailed_examples_only": guard.sensitive,
-            "learning_role": "APPROVED_STABLE_POLICY_AND_PRODUCT_REFERENCE",
-            "approved_learning_may_support": [
-                "STABLE_POLICY", "INSTALLATION_METHOD", "PRODUCT_GUIDANCE",
-                "AFTER_SERVICE_POLICY", "PROMOTION_POLICY",
-            ],
+            # Three fields removed, and the first two because they had stopped
+            # being true. ``cross_product_answer_bodies_excluded`` and
+            # ``same_product_detailed_examples_only`` told the model that a
+            # candidate from another listing was not available and that only
+            # same-product examples could be read -- a description of the
+            # pipeline before P0-2, which now delivers those candidates with
+            # their identity verdict attached. On the four failing server
+            # inquiries the rows that answered the question were exactly those:
+            # LID 117, 72, 19554. The prompt was telling the model to ignore
+            # what the prompt had just handed it.
+            #
+            # ``approved_learning_may_support`` was a five-topic whitelist and
+            # had the same problem as its twin in ``learning_usage_policy``.
+            #
+            # What remains is the boundary that is a safety rule rather than a
+            # judgement: Learning never supplies a fact about this customer's
+            # current order, and the product identity travels so the model can
+            # tell whose specification it is holding.
             "approved_learning_must_not_supply": [
                 "CURRENT_ORDER_STATUS", "CURRENT_DELIVERY_STATUS",
                 "CURRENT_INSTALLATION_DATE",
