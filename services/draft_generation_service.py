@@ -176,6 +176,60 @@ ATOMIC_QUESTION_INSTRUCTIONS = (
 )
 
 
+def _reconcile_product_fact_names(
+    raw: dict[str, Any], learning_context: dict[str, Any]
+) -> dict[str, Any]:
+    """Put a product-fact field key in the list it belongs to.
+
+    The output contract asks for two lists of bare strings: ``used_facts`` holds
+    paths from ``allowed_fact_paths`` and ``used_product_facts`` holds field keys
+    from the product record. Nothing in the shape of either value distinguishes
+    them, and the product record now arrives in the same prompt with twenty-odd
+    field keys, so a model that answered from ``installation_fee_applies`` may
+    report it under either name.
+
+    The cost of guessing wrong is the whole answer. ``AnswerValidator`` resolves
+    every ``used_facts`` entry and, finding no such path, records "존재하지 않는
+    Fact를 사용했습니다: installation_fee_applies"; validation fails, the
+    corrective regeneration fails the same way, and the pipeline falls back to
+    the deterministic rule reply. Measured end to end: a correct answer is
+    discarded and the inquiry is published as RULE_FALLBACK with the Learning
+    and Product evidence unused.
+
+    This moves the name, and only a name the prompt actually delivered as a
+    product fact. It is a reconciliation of two namespaces CODE created, not a
+    judgement about the answer: an invented field name still fails, and so does
+    an invented fact path.
+    """
+
+    delivered = {
+        str(item.get("field_key"))
+        for item in (
+            ((learning_context or {}).get("product_catalog") or {}).get("facts")
+            or []
+        )
+        if isinstance(item, dict) and item.get("field_key")
+    }
+    if not delivered:
+        return raw
+    used_facts = raw.get("used_facts")
+    if not isinstance(used_facts, list):
+        return raw
+    misplaced = [item for item in used_facts if str(item) in delivered]
+    if not misplaced:
+        return raw
+    copied = dict(raw)
+    copied["used_facts"] = [
+        item for item in used_facts if str(item) not in delivered
+    ]
+    existing = raw.get("used_product_facts")
+    existing = list(existing) if isinstance(existing, list) else []
+    copied["used_product_facts"] = list(dict.fromkeys(
+        [*existing, *(str(item) for item in misplaced)]
+    ))
+    return copied
+
+
 class DraftGenerationService:
     def __init__(
         self,
@@ -395,6 +449,7 @@ class DraftGenerationService:
             prompt=prompt_text,
             context=self.prompt_builder.safe_payload(context),
         )
+        raw = _reconcile_product_fact_names(raw, learning_context)
         raw = self._apply_learning_grounded_recovery(
             raw, learning_context
         )

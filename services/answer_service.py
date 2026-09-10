@@ -977,7 +977,18 @@ class AnswerService:
             # ②'s judgement. The one exclusion is the one Learning already
             # makes -- a current-order schedule inquiry is answered from
             # Order/DPS evidence, and a stored record has nothing to add to it.
-            "offer_product_record": not need_dps,
+            #
+            # ``need_dps`` is an inquiry-wide flag, and withholding the record on
+            # it alone let one clause speak for the others: "해상도가 어떻게
+            # 되고, 설치도 해주시나요? 배송은 언제 받을 수 있을까요?" raised
+            # need_dps for its third question and the first question's answer --
+            # a verified resolution in this product's record -- arrived with one
+            # keyword-matched field instead of the record. The exclusion is
+            # therefore scoped to the inquiry it was written for: a single
+            # question that is only about the customer's current schedule.
+            "offer_product_record": not need_dps or len(
+                semantic.atomic_questions or ()
+            ) > 1,
             # Learning is recall-oriented context.  It is intentionally
             # requested for all non-current-schedule questions so GPT ②,
             # rather than a keyword gate, decides whether it is useful.
