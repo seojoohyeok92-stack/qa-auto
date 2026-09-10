@@ -9,7 +9,11 @@ from answer.hybrid_models import DraftResult, IntentResult
 from answer.inquiry_analysis import InquiryAnalysis
 from answer.prompt_builder import PromptBuilder
 from answer.providers.interfaces import JsonGptProvider
-from services.learning_context_service import apply_prompt_budget, prompt_context
+from services.learning_context_service import (
+    DRAFT_PROMPT_BUDGET_CHARS,
+    apply_prompt_budget,
+    prompt_context,
+)
 
 
 _SUMMARY_REQUEST = re.compile(r"간단|간략|요약|대략|기본(?:적인|으로)?")
@@ -261,7 +265,37 @@ class DraftGenerationService:
                 # asserts no product facts reached the model checks for
                 # exactly that string.
                 "PRODUCT_CATALOG_JSON": "이 상품에 대해 검증된 사양.",
-                "APPROVED_LEARNING": "사람이 승인한 과거 답변. 사실 근거로 사용 가능.",
+                "APPROVED_LEARNING": (
+                    "사람이 승인한 과거 답변. 사실 근거로 사용 가능."
+                    " 각 후보의 evidence_origin.identity가 출처를 알려준다:"
+                    " SAME_PRODUCT는 현재 상품에서 나온 자료,"
+                    " OTHER_PRODUCT_OR_MODEL은 다른 상품/모델에서 나온 자료,"
+                    " POLICY_OR_GENERAL은 상품과 무관한 정책·운영 안내,"
+                    " UNKNOWN_IDENTITY는 출처 상품을 특정하지 못한 자료다."
+                    " evidence_origin.knowledge가 PRODUCT_SPECIFIC이면 그 내용은"
+                    " 특정 모델의 사양·구성이므로 다른 상품에 자동 적용하지 마라."
+                    " 다른 상품에서 나온 자료라고 해서 무조건 버리지도 마라:"
+                    " 질문의 성격, 정책 공통성, PRODUCT_CATALOG_JSON,"
+                    " 다른 근거와 함께 현재 문의에 적용 가능한지 직접 판단하고,"
+                    " 적용했다면 그 근거를 답변 근거로 보고하라."
+                    # Two more provenance fields, for the same reason the
+                    # identity label exists: the row is offered, so the model
+                    # has to be able to tell what kind of thing it is holding.
+                    " evidence_authority는 이 답변의 출처 권위다:"
+                    " APPROVED는 담당자가 검수·승인한 답변이고,"
+                    " SELLER_POSTED_NOT_VERIFIED는 과거에 판매자가 실제로 고객에게"
+                    " 보낸 답변이지만 사실 근거로는 검증되지 않은 것이며,"
+                    " AUTO는 파이프라인이 생성한 기록이다."
+                    " 확정 사실로 인용할 수 있는 것은 APPROVED 뿐이다."
+                    " hedge_reason이 비어 있지 않으면 그 답변은 스스로 추정임을"
+                    " 밝힌 문장이다."
+                    " SENTENCE 단위로 읽어라: 추정 표현이 있다고 해서 그 답변의"
+                    " 다른 정책·사실 내용까지 버리지 말고, 반대로 추정인 부분을"
+                    " 확정 사실처럼 단정하지도 마라."
+                    " 검수되지 않은 출처나 추정 문장만으로 확정 표현을 쓰면"
+                    " 근거 없는 주장으로 처리된다. 그런 근거로 답할 때는"
+                    " 확인이 필요하다고 안내하거나 unresolved로 남겨라."
+                ),
                 "HISTORICAL_CASES": (
                     "과거 상담 기록. 안정적인 운영 지식이면 사실 근거로 사용 가능하며,"
                     " 특정 주문의 사실로는 사용할 수 없다."
@@ -284,15 +318,42 @@ class DraftGenerationService:
         if retry_feedback:
             prompt_input["prior_attempt_feedback"] = retry_feedback
         context.update(learning_context)
-        raw = self.provider.generate_json(
-            task="DRAFT",
-            prompt=self.prompt_builder.build(
+
+        def _built(extra: dict[str, Any]) -> str:
+            return self.prompt_builder.build(
                 task="DRAFT",
                 facts=facts,
-                extra=prompt_input,
+                extra=extra,
                 analysis=analysis,
                 selected_facts=selected_facts,
-            ),
+            )
+
+        # The budget now measures the prompt the provider is actually handed.
+        #
+        # It used to measure the learning evidence alone and compare that to
+        # the whole-prompt limit, so every other block -- the product record,
+        # the sub-question evidence map, the instruction text -- was spent
+        # without being counted. Nothing enforced the limit it was named for: a
+        # prompt of 67,805 characters passed a 60,000 character budget whose
+        # own report said it fitted.
+        #
+        # Authority is still never trimmed. Only the groups in
+        # ``_PROMPT_TRIM_ORDER`` shrink, least relevant entry last-first, and
+        # facts, the product record and the customer's own question are not
+        # among them.
+        prompt_text = _built(prompt_input)
+        if len(prompt_text) > DRAFT_PROMPT_BUDGET_CHARS:
+            prompt_input, assembled_report = apply_prompt_budget(
+                prompt_input, measure=lambda value: len(_built(value)),
+            )
+            prompt_text = _built(prompt_input)
+            self.last_prompt_budget = {
+                **(budget_report or {}),
+                "assembled": assembled_report,
+            }
+        raw = self.provider.generate_json(
+            task="DRAFT",
+            prompt=prompt_text,
             context=self.prompt_builder.safe_payload(context),
         )
         raw = self._apply_learning_grounded_recovery(

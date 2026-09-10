@@ -50,6 +50,31 @@ GENERIC_TOPICS = {"OTHER", "GENERAL_POLICY", "PRODUCT_SPEC"}
 # the ordering is the point, not a second threshold.
 TOPIC_MISMATCH_PENALTY = -0.20
 
+# What a product-identity mismatch costs a Learning candidate now that it no
+# longer deletes one.
+#
+# Identity used to return ``hard_reject=True``, which is the one verdict that
+# survives ``hard_conflicts_only`` -- production retrieval's mode -- so a
+# candidate whose topic matched the question exactly was removed before GPT ②
+# could read it. Measured on the server data: 688218182 asked about 벽걸이
+# 설치 and its 추가 비용, and the store holds an approved answer saying the
+# bracket ships with the order and the installation fee is not charged
+# (LID 117, ``topic_match=MATCH``). It was dropped as
+# INSUFFICIENT_PRODUCT_IDENTITY, and GPT ② was handed 해피콜 and 주문취소
+# instead. Same shape on 688218219 for 리모컨 (LID 72 / 193649 / 19554).
+#
+# A Learning row is candidate evidence, not a VERIFIED product fact: whether
+# another listing's answer applies here is a judgement about meaning, and it
+# belongs to GPT ②, which is told the candidate's origin and instructed not to
+# transfer it automatically. Product Fact identity safety is unchanged and
+# lives in ``product_knowledge_service`` -- nothing here touches it.
+#
+# The magnitude deliberately reuses the topic penalty rather than inventing a
+# new one: an on-topic candidate from another listing and an off-topic one
+# from this listing are equally uncertain, and which is worth reading is then
+# settled by question relevance, where it should be.
+IDENTITY_MISMATCH_PENALTY = -0.20
+
 # Topics say what an answer is *about*; these say what is being asked *of* it.
 #
 # A customer asked which seller name to enter on the 온누리 rebate form after
@@ -636,8 +661,25 @@ class LearningCompatibilityService:
         candidate = candidate_product
 
         def reject(reason: str, product_reason: str) -> CompatibilityDecision:
+            """Identity does not match. Report it; do not delete the candidate.
+
+            ``eligible`` stays False, so every caller that gates on it -- the
+            historical and feedback-signal paths -- behaves exactly as before.
+            What changes is ``hard_reject``: it is now soft, so the production
+            retrieval mode (``hard_conflicts_only``) keeps the row, carries its
+            identity verdict into the prompt, and lets GPT ② decide whether
+            another listing's answer applies here.
+
+            See ``IDENTITY_MISMATCH_PENALTY`` for the measured failures this
+            addresses.
+            """
+
             return CompatibilityDecision(
-                False, True, reason, 0.0, profile.scope, "MISMATCH",
+                False, False, reason,
+                IDENTITY_MISMATCH_PENALTY + (
+                    0.0 if topic_ok else TOPIC_MISMATCH_PENALTY
+                ),
+                profile.scope, "MISMATCH",
                 product_reason, query_topics, profile.topics, topic_match,
                 topic_reason, current, candidate,
             )

@@ -145,7 +145,13 @@ class HybridAnswerService:
         if rendered:
             context["product_catalog"] = {
                 "instructions": rendered,
-                "facts": [item.to_dict() for item in knowledge.safe_facts],
+                # The model's copy, not the audit copy. ``to_dict`` still
+                # backs telemetry and the review UI through
+                # ``result.metadata``; what goes in the prompt is the fields
+                # a reader can act on. See ``ProductFact.as_prompt_fact``.
+                "facts": [
+                    item.as_prompt_fact() for item in knowledge.safe_facts
+                ],
                 "product_id": knowledge.product_id,
                 "identity_status": getattr(knowledge, "identity_status", None),
             }
@@ -259,7 +265,7 @@ class HybridAnswerService:
         product_requested = bool(
             isinstance(understanding, dict)
             and understanding.get("usable") is True
-            and understanding.get("need_product")
+            and understanding.get("offer_product_record")
         )
         if not product_requested:
             return learning_context
@@ -310,9 +316,28 @@ class HybridAnswerService:
         """
 
         knowledge = request.metadata.get("product_knowledge")
+        # The facts the customer's own wording puts in play, not the whole
+        # record the model reads. See
+        # ``ProductKnowledgeResult.facts_in_question_scope``: this check
+        # compares polarities and quantities without knowing what either
+        # sentence is about, so a wider set only manufactures conflicts.
+        scoped = getattr(knowledge, "facts_in_question_scope", None)
+        safe_facts = (
+            scoped(request.question) if callable(scoped)
+            else getattr(knowledge, "safe_facts", ()) or ()
+        )
+        def _scope_for(subquestion: object) -> set[str] | None:
+            """Field keys one sub-question put in play, for the check above."""
+
+            text = str(subquestion or "").strip()
+            if not text or not callable(scoped):
+                return None
+            return {item.field_key for item in scoped(text)}
+
         decision = learning_evidence_policy.evaluate(
             learning_context=learning_context,
-            safe_facts=getattr(knowledge, "safe_facts", ()) or (),
+            safe_facts=safe_facts,
+            scope_for=_scope_for,
         )
         learning_context["approved_learning_evidence"] = decision.to_dict()
         if not decision.conflict:

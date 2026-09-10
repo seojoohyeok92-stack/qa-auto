@@ -600,14 +600,40 @@ def test_retrieval_returns_candidates_for_paraphrased_questions(
         assert "relevance" in item and "answer_support" in item
 
 
-def test_a_cross_model_learning_is_removed_for_a_specification_question(
+def assert_cross_model_learning_is_labelled(prompt_input, current_product):
+    """다른 모델 Learning 은 삭제 대신 출처가 표시된 채 전달된다 (P0-2).
+
+    이전 계약은 "사양 질문에서는 다른 모델의 Learning 이 GPT ② 에 도달하지
+    않는다" 였다. 그 계약을 지키려면 CODE 가 의미 판단으로 후보를 지워야 했고,
+    서버 실문의 688218182 / 688218219 에서 질문에 정확히 답하는 Learning
+    (LID 117 "설치비는 청구되지 않습니다", LID 72 "리모컨이 포함되어 있습니다")
+    까지 같은 규칙으로 사라졌다. GPT ② 에는 해피콜·온누리상품권만 남았다.
+
+    현재 계약: 후보는 전달하되 어느 상품에서 왔는지 표시하고, 적용 여부는
+    GPT ② 가 판단한다. 다른 모델의 사양이 근거 없이 단정되는 것은
+    evidence_origin 라벨, 프롬프트 지시, validator 의 ungrounded-claim 검사가
+    막는다 -- 후보의 부재가 아니라.
+    """
+
+    for item in (prompt_input.get("similar_approved_answers") or []):
+        origin = item.get("evidence_origin") or {}
+        assert origin, ("Learning 후보에 출처 라벨이 없다", item)
+        source = str(item.get("source_product_name") or "")
+        if source == current_product:
+            continue
+        assert origin.get("identity") != "SAME_PRODUCT", (
+            "다른 모델 Learning 이 현재 상품 자료로 표시됐다", source,
+        )
+        if origin.get("knowledge") == "PRODUCT_SPECIFIC":
+            assert origin.get("note"), (
+                "다른 모델의 사양 Learning 에 자동 적용 금지 안내가 없다", source,
+            )
+
+
+def test_a_cross_model_learning_is_labelled_for_a_specification_question(
     tmp_path, monkeypatch,
 ):
-    """사양 질문에서는 다른 모델의 Learning 이 GPT ② 에 도달하지 않는다.
-
-    설치 방식 같은 정책은 상품이 달라도 재사용될 수 있지만, 사양은 그렇지
-    않다. 이 구분은 GPT ① 이 붙인 atom action 으로 결정된다.
-    """
+    """사양 질문에서 다른 모델의 Learning 은 출처가 표시되어 전달된다."""
 
     run = _run(
         tmp_path, monkeypatch, name="crossmodel",
@@ -618,10 +644,9 @@ def test_a_cross_model_learning_is_removed_for_a_specification_question(
         learning_products=(IDENTIFIED_PRODUCT, UNIDENTIFIED_PRODUCT),
     )
     assert run.prompt is not None, run.error
-    for item in (run.prompt["input"].get("similar_approved_answers") or []):
-        assert str(item.get("source_product_name") or "") == UNIDENTIFIED_PRODUCT, (
-            "사양 질문에 다른 모델의 Learning 이 붙었다", item.get("source_product_name")
-        )
+    assert_cross_model_learning_is_labelled(
+        run.prompt["input"], UNIDENTIFIED_PRODUCT,
+    )
 
 
 # ===========================================================================
@@ -860,13 +885,17 @@ WRONG_EVIDENCE_CASES = [
     ("label", "question", "action"), WRONG_EVIDENCE_CASES,
     ids=[c[0] for c in WRONG_EVIDENCE_CASES],
 )
-def test_wrong_model_evidence_never_reaches_a_specification_question(
+def test_wrong_model_evidence_is_labelled_for_a_specification_question(
     tmp_path, monkeypatch, label, question, action,
 ):
-    """비슷하지만 다른 모델의 근거는 사양 질문에 도달하지 않는다.
+    """비슷하지만 다른 모델의 근거는 출처가 표시된 채 전달된다 (P0-2).
 
-    검색엔진은 비슷한 것을 가져오려 하고, identity 게이트가 그 앞을 막는다.
-    이것은 soft 판단이 아니라 model/size/category 비교다.
+    identity 비교 자체는 그대로다 -- model/size/category 를 비교하고 MISMATCH
+    로 판정한다. 바뀐 것은 그 판정의 결과가 '삭제'에서 '표시 + 감점'이 된
+    것뿐이다. 적용 여부는 GPT ② 가 판단한다.
+
+    Product Fact 계약은 변하지 않았다: 식별되지 않은 상품에는 여전히 검증된
+    카탈로그 사양이 붙지 않는다. 아래 마지막 단언이 그것을 지킨다.
     """
 
     run = _run(
@@ -876,9 +905,10 @@ def test_wrong_model_evidence_never_reaches_a_specification_question(
         learning_products=(IDENTIFIED_PRODUCT, UNIDENTIFIED_PRODUCT),
     )
     assert run.prompt is not None, run.error
-    for item in (run.prompt["input"].get("similar_approved_answers") or []):
-        assert str(item.get("source_product_name") or "") == UNIDENTIFIED_PRODUCT
-    # 카탈로그 쪽도 마찬가지: 식별되지 않았으면 검증 사양이 없다.
+    assert_cross_model_learning_is_labelled(
+        run.prompt["input"], UNIDENTIFIED_PRODUCT,
+    )
+    # 카탈로그 쪽은 그대로: 식별되지 않았으면 검증 사양이 없다.
     assert run.prompt["input"].get("product_catalog") is None
 
 

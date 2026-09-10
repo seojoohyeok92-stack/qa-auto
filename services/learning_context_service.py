@@ -66,7 +66,10 @@ PROMPT_EXCLUDED_CONTEXT_KEYS: frozenset[str] = frozenset(
 # answer_style_reference and answer_reference. One copy is enough for the
 # model; the other stays in the context for the provenance that reads it.
 _HISTORICAL_CASE_PROMPT_DROP: frozenset[str] = frozenset(
-    {"answer_style_reference"}
+    # ``compatibility`` goes for the reason given under
+    # ``_LEARNING_ITEM_PROMPT_DROP``: ``evidence_origin`` beside it says
+    # the same thing in a form the model can act on.
+    {"answer_style_reference", "compatibility"}
 )
 
 # What GPT ① went looking for is not something GPT ② may answer from.
@@ -80,6 +83,20 @@ _HISTORICAL_CASE_PROMPT_DROP: frozenset[str] = frozenset(
 # status. So it stays in the context, where the dashboard and the operator can
 # see what was searched, and out of the prompt.
 _SEMANTIC_ATOM_PROMPT_DROP: frozenset[str] = frozenset({"retrieval_queries"})
+
+# ``compatibility`` is the verdict record: both ProductIdentity structures, the
+# topic tables, every reason string. ``evidence_origin`` was added beside it as
+# the readable projection of exactly those facts -- identity, knowledge kind,
+# source product, reason -- and its own comment says so. Keeping both put the
+# same verdict in the prompt twice, and the verbose copy is 1,060 of the 2,500
+# characters a single candidate costs: 42% of the evidence budget spent
+# restating what the line above it already says. It stays in the context, where
+# ``learning_evidence_policy._qualifying``, the dashboard and the candidate
+# diagnostics read it.
+_LEARNING_ITEM_PROMPT_DROP: frozenset[str] = frozenset({"compatibility"})
+_LEARNING_PROMPT_KEYS: frozenset[str] = frozenset(
+    {"similar_approved_answers", "seller_style_examples"}
+)
 
 
 def prompt_context(context: dict[str, Any]) -> dict[str, Any]:
@@ -100,6 +117,18 @@ def prompt_context(context: dict[str, Any]) -> dict[str, Any]:
                     field: item[field]
                     for field in item
                     if field not in _HISTORICAL_CASE_PROMPT_DROP
+                }
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+            continue
+        if key in _LEARNING_PROMPT_KEYS and isinstance(value, list):
+            projected[key] = [
+                {
+                    field: item[field]
+                    for field in item
+                    if field not in _LEARNING_ITEM_PROMPT_DROP
                 }
                 if isinstance(item, dict)
                 else item
@@ -164,17 +193,44 @@ def apply_prompt_budget(
         "original_chars": size(trimmed),
         "dropped": [],
     }
+    # ``size`` is only ever asked about a whole context. A custom measure
+    # builds the real prompt, and a single evidence group is not one.
     for key in _PROMPT_TRIM_ORDER:
-        if size(trimmed) <= budget:
+        current = size(trimmed)
+        if current <= budget:
             break
         value = trimmed.get(key)
         if not value:
             continue
+        if isinstance(value, list):
+            # Least relevant first, not the whole group.
+            #
+            # Dropping the group entire was the only granularity there was, so
+            # one character over budget cost every retrieved answer the inquiry
+            # had -- including the one that answered it. These lists arrive
+            # ranked, best first, so the last entry is the one the prompt can
+            # most afford to lose. Shrinking to empty is still possible and is
+            # exactly the old behaviour; it is now the floor rather than the
+            # first step.
+            kept = list(value)
+            while kept and size({**trimmed, key: kept}) > budget:
+                kept.pop()
+            if len(kept) == len(value):
+                continue
+            after = size({**trimmed, key: kept})
+            trimmed[key] = kept
+            report["dropped"].append({
+                "component": key,
+                "chars": current - after,
+                "records": len(value) - len(kept),
+                "kept_records": len(kept),
+            })
+            continue
+        after = size({**trimmed, key: {}})
+        trimmed[key] = {}
         report["dropped"].append(
-            {"component": key, "chars": size(value),
-             "records": len(value) if isinstance(value, list) else None}
+            {"component": key, "chars": current - after, "records": None}
         )
-        trimmed[key] = [] if isinstance(value, list) else {}
     report["final_chars"] = size(trimmed)
     report["within_budget"] = report["final_chars"] <= budget
     return trimmed, report
@@ -615,6 +671,29 @@ class LearningContextService:
                 # inquiry reached 39,350 chars and timed out; 35,619 had
                 # completed. These values keep the widening (2/3 -> 3/5)
                 # inside the envelope that is known to answer.
+                # Left at 3/5 deliberately, and the reason is latency rather
+                # than relevance.
+                #
+                # This is a technical candidate budget, and on the evidence it
+                # is too small: after the scorer fix below, the store's own
+                # answer about the installation fee ranks 10th of 985 on the
+                # measured inquiry, so the cut -- not any judgement about the
+                # row -- is what keeps it from GPT ②. Raising it is the obvious
+                # next move and it was measured: 6/8 puts the prompt at 42,000
+                # to 46,000 characters and 4/6 at 35,700 to 40,500.
+                #
+                # What stops it is the note above. 4/6 is the configuration
+                # where the largest compound inquiry reached 39,350 characters
+                # and hit the provider's read timeout, and a timeout fails the
+                # whole inquiry -- strictly worse than one candidate going
+                # unread. The product record this release adds to every
+                # product prompt already costs about 9,500 characters of the
+                # same envelope.
+                #
+                # So the budget stays where it is known to answer, and the
+                # increase waits on latency measured against the real provider.
+                # Recorded in the P1 report as a server-validation item, not as
+                # a judgement that rank 10 does not matter.
                 limit=3 if len(questions) > 1 else 5,
                 candidate_pool=candidate_pool,
                 candidate_diagnostics=candidate_diagnostics,
@@ -1176,6 +1255,15 @@ class LearningContextService:
         ]
         retrieval = {
             "query": original_question,
+            # Which retrieval contract this run actually used.
+            #
+            # Production builds this service with ``hard_conflicts_only=True``
+            # and the constructor default is False, so a test or a replay that
+            # forgets the argument exercises a different set of gates than the
+            # server does and reports it as if it were the same. Recording it
+            # per run is what makes that difference visible in the trace rather
+            # than something a reader has to know.
+            "hard_conflicts_only": bool(self.hard_conflicts_only),
             "product": product_name,
             "inquiry_type": inquiry_type,
             "candidate_count": repository_candidate_count,
@@ -1241,8 +1329,23 @@ class LearningContextService:
                 "HISTORICAL_TOPIC_SCOPE_MISMATCH": (
                     historical_topic_scope_rejections
                 ),
+                # Removed, not "removed or kept with a note".
+                #
+                # ``learning_quality_rejections`` holds both kinds of finding:
+                # the statuses that actually dropped a row and the
+                # ``DEMOTED_*`` entries for rows that were kept and labelled.
+                # Summing all of them reported 434 candidates filtered on an
+                # inquiry where 270 were removed and 164 travelled to GPT ②
+                # with their finding attached -- the one number a reader uses to
+                # ask "did CODE delete evidence?" was overstating it by 60%.
+                # The demotions stay in the block below, under their own keys.
                 "FILTERED_BY_RUNTIME_QUALITY": sum(
-                    learning_quality_rejections.values()
+                    count for status, count in learning_quality_rejections.items()
+                    if not str(status).startswith("DEMOTED_")
+                ),
+                "DEMOTED_BY_RUNTIME_QUALITY": sum(
+                    count for status, count in learning_quality_rejections.items()
+                    if str(status).startswith("DEMOTED_")
                 ),
                 **learning_quality_rejections,
                 **{
@@ -1276,6 +1379,12 @@ class LearningContextService:
                 "matched_subquestion": item.get("matched_subquestion"),
                 "eligibility": item.get("runtime_eligibility"),
                 "compatibility": item.get("compatibility") or {},
+                # Which listing this past reply came from, in the same words the
+                # Learning candidates use. This projection rebuilds the item
+                # from an explicit key list, so a field added upstream reaches
+                # the prompt only if it is named here -- the identity verdict
+                # was being computed and then dropped one layer short.
+                "evidence_origin": item.get("evidence_origin") or {},
                 "attached_to_prompt": True,
                 "source": item.get("reference_strength")
                 or "HISTORICAL_VERIFIED_LEARNING",

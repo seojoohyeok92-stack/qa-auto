@@ -11,6 +11,7 @@ from services.learning_compatibility_service import (
     LearningCompatibilityService,
     extract_product_identity,
 )
+from answer.text_utils import split_subquestions
 from services.learning_evidence_policy import (
     LEARNING_AUTHORITY,
     classify_provenance,
@@ -136,6 +137,63 @@ def _semantic_rank_bonus(rank: int) -> float:
     return max(0.0, 0.45 * (0.94 ** max(int(rank) - 1, 0)))
 
 
+# Which listing a candidate's knowledge came from, in the four words GPT ② has
+# to tell apart, plus whether that knowledge is a product specification or a
+# company policy.
+#
+# ``compatibility`` already carries all of this, but nested three levels deep
+# beside two full ProductIdentity records. Now that identity mismatch keeps a
+# candidate instead of deleting it, the origin has to be legible at a glance in
+# the prompt, or the model cannot act on it. Nothing is derived that was not
+# already decided -- this is a projection of ``product_match`` and
+# ``product_scope``, not a new judgement.
+_IDENTITY_ORIGINS: dict[str, str] = {
+    "EXACT_MODEL": "SAME_PRODUCT",
+    "EXACT_PRODUCT": "SAME_PRODUCT",
+    "EXACT_NAME": "SAME_PRODUCT",
+    "MISMATCH": "OTHER_PRODUCT_OR_MODEL",
+    "POLICY_COMPATIBLE": "POLICY_OR_GENERAL",
+    "CATEGORY_UNCERTAIN": "UNKNOWN_IDENTITY",
+}
+
+
+def _evidence_origin(compatibility: Any) -> dict[str, Any]:
+    identity = _IDENTITY_ORIGINS.get(
+        str(getattr(compatibility, "product_match", "") or ""), "UNKNOWN_IDENTITY"
+    )
+    scope = str(getattr(compatibility, "product_scope", "") or "")
+    candidate = getattr(compatibility, "candidate_product", None)
+    current = getattr(compatibility, "current_product", None)
+    origin: dict[str, Any] = {
+        "identity": identity,
+        "knowledge": (
+            "PRODUCT_SPECIFIC" if scope in {"MODEL", "VARIANT"}
+            else "POLICY_OR_GENERAL"
+        ),
+        "product_scope": scope or None,
+        "source_product_name": getattr(candidate, "product_name", None),
+        "source_model_code": getattr(candidate, "model_code", None),
+        "current_product_name": getattr(current, "product_name", None),
+        "reason": getattr(compatibility, "product_match_reason", None),
+        "topic_match": getattr(compatibility, "topic_match", None),
+    }
+    # The caution applies to another listing's *product* knowledge only.
+    #
+    # A 폐가전 수거 or 배송 answer written against a different listing is
+    # company policy and reads the same here -- 688218171 is answered from
+    # exactly such rows today. Attaching "do not apply automatically" to those
+    # would teach the model to hedge on the one path that already works, so
+    # the note is scoped to candidates whose content is a model's own
+    # specification or components.
+    if identity != "SAME_PRODUCT" and origin["knowledge"] == "PRODUCT_SPECIFIC":
+        origin["note"] = (
+            "다른 상품/모델의 사양·구성 자료입니다. 현재 상품에 자동으로"
+            " 적용하지 말고, 질문의 성격·정책 공통성·Product Fact·다른 근거와"
+            " 함께 적용 가능한지 판단하세요."
+        )
+    return origin
+
+
 class SimilarAnswerService:
     def __init__(self, repository: LearningRepository) -> None:
         self.repository = repository
@@ -153,6 +211,37 @@ class SimilarAnswerService:
             min(len(left_concepts), len(right_concepts)), 1
         )
         return 0.65 * jaccard + 0.35 * sequence + 0.18 * concept_overlap
+
+    @staticmethod
+    def _question_parts(value: str) -> tuple[str, ...]:
+        """A stored question, plus each question inside it.
+
+        The pipeline decomposes the *customer's* inquiry into atoms and scores
+        each one separately; the stored side was still compared whole. 554 of
+        the 1,047 active rows in the live store -- 52.9% -- hold more than one
+        question, and a token/character scorer dilutes them by exactly the
+        length of everything else the customer happened to ask that day.
+
+        Measured on the inquiry this was found with: the atom "벽걸이 설치에
+        추가 비용이 있나요" against the stored "벽걸이추가만하면
+        설치비랑다포함되는건가요? 추가비용은업는거죠? 삼성기사님이
+        설치해주시는건가요? 언제받을수있어요?" scores 0.258 whole and 0.304 on
+        its closest part, while a single-question row about a different
+        listing's bracket scores 0.470. Nothing here is about brackets or
+        costs: a long stored question is penalised for its length on every
+        topic, and this is the half of the corpus that has one.
+        """
+
+        whole = str(value or "").strip()
+        if not whole:
+            return ()
+        parts = [
+            normalize_learning_question(part)
+            for part in split_subquestions(whole)
+        ]
+        return tuple(dict.fromkeys(
+            item for item in (whole, *parts) if item
+        ))
 
     @staticmethod
     def _semantic_concepts(value: str) -> set[str]:
@@ -432,9 +521,17 @@ class SimilarAnswerService:
             # is calibrated on this number alone -- adding product and intent
             # bonuses first would let an unrelated question clear a bar that
             # was measured on question similarity.
+            #
+            # Best over the stored question and each question inside it: see
+            # ``_question_parts``. A row is never scored lower than before,
+            # because the whole text is still one of the candidates.
+            candidate_parts = self._question_parts(
+                item.get("question_original_masked") or candidate_question
+            ) or (candidate_question,)
             question_relevance = max(
-                self._similarity(variant, candidate_question)
+                self._similarity(variant, part)
                 for variant in query_variants
+                for part in candidate_parts
             )
             # Recall, not ranking. Korean is agglutinative and the concept
             # table has eight entries, so two ways of asking the same thing
@@ -559,6 +656,7 @@ class SimilarAnswerService:
                 safe["answer_support"] = round(answer_support, 4)
                 safe["answer_support_reason"] = support_reason
                 safe["compatibility"] = compatibility.to_dict()
+                safe["evidence_origin"] = _evidence_origin(compatibility)
                 safe["semantic_goal"] = {
                     "required_action": required_action or None,
                     "candidate_action": candidate_action or None,
@@ -659,6 +757,13 @@ class SimilarAnswerService:
                     else "AUTO"
                 ),
                 "compatibility": item.get("compatibility") or {},
+                # Which listing this answer came from, said plainly. Identity
+                # mismatch no longer removes a candidate, so the prompt has to
+                # carry the verdict instead -- a candidate the model cannot
+                # place is one it cannot judge. ``compatibility`` above holds
+                # the same facts, nested and verbose; this is the form the
+                # model reads.
+                "evidence_origin": item.get("evidence_origin") or {},
                 "semantic_goal": item.get("semantic_goal") or {},
                 # Provenance the model needs to judge reuse for itself. The
                 # question this answer was written for is the single most
@@ -695,25 +800,66 @@ class SimilarAnswerService:
             # Demoted rather than dropped. The sentence is still written in the
             # seller's voice, so it keeps its value as a tone reference; what
             # it loses is the claim to prove something.
-            factual = not item["style_only"] and (
-                estimation_reason(item["final_answer"]) is None
+            # Both of these used to decide the *channel*, which decided
+            # whether GPT ② ever saw the row. Neither can carry that weight.
+            #
+            # ``style_only`` is set at write time as ``source ==
+            # "SELLER_ANSWER"`` -- it marks an answer a person wrote and posted
+            # to the customer, which is provenance, not a verdict on content.
+            # It is 624 of the 1,047 active rows in the live store: 59.6% of
+            # the corpus could not be read as evidence however exactly it
+            # answered the question. The inquiry this was measured on asked
+            # about 벽걸이 설치 비용, and the store's own reply saying the
+            # installation fee is not charged (LID 117) is one of those rows.
+            #
+            # ``estimation_reason`` is a phrase test. "배송/설치까지 약 2~3주
+            # 소요 예상됩니다" is a guess about a date and a statement about a
+            # policy in one sentence, and demoting the sentence threw away
+            # both. A phrase in an answer is not a verdict on everything else
+            # the answer says.
+            #
+            # So both become labels and the row is offered either way. What
+            # they still do is exactly what they did before: neither an
+            # unreviewed seller answer nor a hedged sentence may *prove* a
+            # claim. ``style_only`` is now on the payload, so
+            # ``usable_as_factual_evidence`` keeps them out of the validator's
+            # grounding corpus as it always has, and ``_qualifying`` keeps them
+            # from settling the auto-post product-fact hold. Prompt, policy and
+            # validator therefore still say the same thing; only the deletion
+            # is gone.
+            payload["style_only"] = bool(item["style_only"])
+            # ``style_only`` is read first, and that order is the point.
+            #
+            # A row can be both human_verified and style_only -- approved as a
+            # tone reference -- and labelling it APPROVED told the model it was
+            # a reviewed fact source while ``usable_as_factual_evidence`` was
+            # still refusing it from the grounding corpus. Three layers saying
+            # different things about the same row is the failure mode this
+            # project has already paid for once. Only APPROVED may ground a
+            # definite claim, which is exactly what that function allows.
+            payload["evidence_authority"] = (
+                "SELLER_POSTED_NOT_VERIFIED" if item["style_only"]
+                else "APPROVED" if payload["authority"] == "APPROVED"
+                else "AUTO"
             )
-            if factual:
-                normalized = _normalized_answer(item["final_answer"])
-                if normalized in factual_seen:
-                    # The same sentence stored many times is one fact, not
-                    # several independent corroborations of it. The live store
-                    # holds 122 repeat copies; letting them fill separate slots
-                    # both crowds out other evidence and makes a single claim
-                    # look independently confirmed.
-                    demotion_counts["DUPLICATE_EVIDENCE"] += 1
-                    continue
-                factual_seen.add(normalized)
-                approved.append(payload)
+            payload["hedge_reason"] = estimation_reason(item["final_answer"])
+            normalized = _normalized_answer(item["final_answer"])
+            if normalized in factual_seen:
+                # The same sentence stored many times is one fact, not
+                # several independent corroborations of it. The live store
+                # holds 122 repeat copies; letting them fill separate slots
+                # both crowds out other evidence and makes a single claim
+                # look independently confirmed.
+                demotion_counts["DUPLICATE_EVIDENCE"] += 1
                 continue
-            if not item["style_only"]:
+            factual_seen.add(normalized)
+            if payload["hedge_reason"] is not None:
                 demotion_counts["HEDGED_FACTUAL_DEMOTED"] += 1
-            seller.append(payload)
+            approved.append(payload)
+            # The tone channel keeps taking the seller's own wording, which is
+            # what it was for. Capped by the caller at four entries.
+            if item["style_only"]:
+                seller.append(payload)
         features = Counter()
         lengths = []
         style_pool = filters.get("candidate_pool")

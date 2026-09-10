@@ -92,11 +92,17 @@ def _promote(
 ) -> list[dict]:
     """Run the promotion the way the pipeline does.
 
-    ``need_product`` is GPT ①'s answer to "is this inquiry about the product",
-    and it is what now decides whether catalogue rows are offered at all. It
-    replaced ``required_fact_groups``, a table over the customer's wording that
-    had no installation entry of any kind -- so no phrasing of "누가 설치하나요"
-    could ever be answered from ``installation_method``.
+    ``need_product`` is GPT ①'s answer to "may this inquiry see the product
+    record", and it is what decides whether catalogue rows are offered at all.
+    It replaced ``required_fact_groups``, a table over the customer's wording
+    that had no installation entry of any kind -- so no phrasing of "누가
+    설치하나요" could ever be answered from ``installation_method``.
+
+    The pipeline now reads that answer from ``offer_product_record``: the three
+    action names in ``need_product`` put INSTALLATION_METHOD in the template
+    bucket, which withheld the record from the one inquiry whose answer was in
+    it. Both keys are set here from the same argument, because what this helper
+    means by ``need_product`` is the decision, not the key it is stored under.
     """
 
     context = HybridAnswerService._apply_product_fact_evidence(
@@ -104,6 +110,7 @@ def _promote(
             "product_knowledge": knowledge,
             "gpt_understanding": {
                 "usable": True, "need_product": need_product,
+                "offer_product_record": need_product,
             },
         }),
         {"subquestion_evidence": list(items)},

@@ -403,8 +403,14 @@ def test_687932860_each_atomic_question_keeps_its_own_evidence(
     assert install["status"] == "CANDIDATE"
     assert install["learning_ids"] or install["historical_case_ids"], install
 
-    # 사양 atom 은 다른 모델의 답변을 받지 않는다. 후보가 있다면 전부
-    # 현재 상품의 것이어야 한다.
+    # 사양 atom 에 다른 모델의 답변이 붙을 수 있고, 붙으면 그렇게 표시된다.
+    #
+    # 이전 계약은 "붙지 않는다" 였다. 그 계약은 두 가지가 받치고 있었고 둘 다
+    # 의미 판단이었다: identity mismatch 의 hard delete(P0-2 에서 제거)와
+    # style_only 채널 분리(판매자가 실제로 보낸 답변 전부가 여기 해당). 둘을
+    # 치우면 후보는 도달하고, 현재 상품의 사실로 단정되지 않게 막는 것은
+    # 부재가 아니라 evidence_origin 라벨 + 프롬프트 지시 + validator 의
+    # ungrounded-claim 검사다. 여기서 확인할 것도 그 라벨이다.
     spec_ids = set(spec["learning_ids"] or [])
     if spec_ids:
         attached = {
@@ -412,10 +418,19 @@ def test_687932860_each_atomic_question_keeps_its_own_evidence(
             for item in inp["similar_approved_answers"]
         }
         for learning_id in spec_ids:
-            source = str(attached[learning_id].get("source_product_name") or "")
-            assert source == PRODUCT_NO_MODEL_CODE, (
-                "사양 질문에 다른 모델의 Learning 이 붙으면 안 된다", source
+            item = attached[learning_id]
+            source = str(item.get("source_product_name") or "")
+            if source == PRODUCT_NO_MODEL_CODE:
+                continue
+            origin = item.get("evidence_origin") or {}
+            assert origin.get("identity") != "SAME_PRODUCT", (
+                "다른 모델 Learning 이 현재 상품 자료로 표시됐다", source
             )
+            if origin.get("knowledge") == "PRODUCT_SPECIFIC":
+                assert origin.get("note"), (
+                    "다른 모델의 사양 Learning 에 자동 적용 금지 안내가 없다",
+                    source,
+                )
 
 
 # ---------------------------------------------------------------------------

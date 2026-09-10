@@ -524,9 +524,33 @@ class AutoPostPipelineService:
                     auto_post_run_id=run_id,
                 )
                 if result.status == "POSTED":
+                    # The answer is on the customer's inquiry either way.
+                    #
+                    # Confirmation used to run first and raise straight out of
+                    # this block, so a post that succeeded but could not be
+                    # re-read left no post-review record -- the answer was
+                    # published and nobody was queued to look at it. That was
+                    # survivable while the only way to get here was a genuine
+                    # remote mismatch. It is not now: P0-1 made
+                    # ``REMOTE_ANSWER_NOT_VISIBLE`` an ordinary outcome, because
+                    # Naver's read model publishes the answer a moment after
+                    # accepting the write, and that path lands here.
+                    #
+                    # So the record is written first and the confirmation verdict
+                    # is re-raised afterwards, unchanged: the same exception
+                    # reaches the same handler, and
+                    # ``_pause_for_system_error`` still pauses for a real body
+                    # mismatch and not for an answer that has yet to appear.
+                    # Only ``succeeded_count`` waits for the confirmation, since
+                    # an unconfirmed post is not a confirmed success.
+                    confirmation_error: Exception | None = None
                     if self.confirmation is not None:
-                        self.confirmation.confirm(inquiry_id, run_id=run_id)
-                    counters["succeeded_count"] += 1
+                        try:
+                            self.confirmation.confirm(inquiry_id, run_id=run_id)
+                        except Exception as error:  # noqa: BLE001 - re-raised below
+                            confirmation_error = error
+                    if confirmation_error is None:
+                        counters["succeeded_count"] += 1
                     posted = self.inquiries.get(inquiry_id) or {}
                     self.reviews.create_review_after_post(
                         inquiry_id=inquiry_id,
@@ -543,8 +567,11 @@ class AutoPostPipelineService:
                         details={
                             "auto_post_run_id": run_id,
                             "review_status": "AUTO_POSTED_UNREVIEWED",
+                            "remote_confirmed": confirmation_error is None,
                         },
                     )
+                    if confirmation_error is not None:
+                        raise confirmation_error
                 elif result.status == "ALREADY_ANSWERED":
                     counters["skipped_count"] += 1
                     self.logs.record_inquiry(

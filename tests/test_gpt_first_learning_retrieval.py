@@ -671,7 +671,18 @@ def test_a_compound_inquiry_keeps_product_evidence_beside_learning(
 def test_extra_queries_do_not_let_another_model_fact_through(
     tmp_path, monkeypatch,
 ):
-    """검색이 넓어져도 다른 상품의 사양은 여전히 오지 않는다 (§40)."""
+    """다른 상품의 사양이 오더라도 출처가 표시된다 (§40, P0-2 갱신).
+
+    이전 계약은 "다른 상품 Learning 은 프롬프트에 오지 않는다" 였다. 그 계약은
+    CODE 가 의미 판단으로 후보를 삭제해야만 지킬 수 있었고, 실제 서버 문의
+    688218182 / 688218219 에서 질문에 정확히 답하는 Learning(LID 117 / 72)까지
+    같은 규칙으로 지워졌다.
+
+    현재 계약은 "다른 상품 Learning 은 출처가 표시된 채 전달되고, 적용 여부는
+    GPT ② 가 판단한다" 이다. 따라서 여기서 확인할 것은 부재가 아니라 라벨이다.
+    다른 모델의 사양이 근거 없이 고객에게 단정되는 것은 evidence_origin 라벨과
+    프롬프트 지시, 그리고 validator 의 ungrounded-claim 검사가 막는다.
+    """
 
     run = _run(
         tmp_path, monkeypatch, name="wrong-evidence-mq",
@@ -693,10 +704,23 @@ def test_extra_queries_do_not_let_another_model_fact_through(
     for item in (
         (run.prompt["input"] or {}).get("similar_approved_answers") or []
     ):
-        assert str(item.get("source_product_name") or "") == (
-            UNIDENTIFIED_PRODUCT
-        ), ("사양 질문에 다른 모델의 Learning 이 붙었다",
-            item.get("source_product_name"))
+        origin = item.get("evidence_origin") or {}
+        assert origin, ("Learning 후보에 출처 라벨이 없다", item.get("learning_example_id"))
+        if str(item.get("source_product_name") or "") == UNIDENTIFIED_PRODUCT:
+            continue
+        # 다른 상품에서 온 후보는 반드시 그렇게 표시되어야 하고, 현재 상품에서
+        # 온 자료로 위장되어서는 안 된다.
+        assert origin.get("identity") != "SAME_PRODUCT", (
+            "다른 모델 Learning 이 현재 상품 자료로 표시됐다",
+            item.get("source_product_name"),
+        )
+        # 다른 상품의 '사양·구성' 자료에는 자동 적용 금지 안내가 붙는다.
+        # 정책성 자료(수거·배송 등)는 상품이 달라도 그대로 적용되므로 제외한다.
+        if origin.get("knowledge") == "PRODUCT_SPECIFIC":
+            assert origin.get("note"), (
+                "다른 모델의 사양 Learning 에 자동 적용 금지 안내가 없다",
+                item.get("source_product_name"),
+            )
 
 
 def test_a_question_with_no_stored_answer_still_goes_unresolved(

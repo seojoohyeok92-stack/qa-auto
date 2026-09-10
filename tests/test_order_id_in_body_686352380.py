@@ -165,8 +165,18 @@ def test_E_compound_keeps_schedule_and_spec_sources_independent():
         questions=["배송일정 알려주세요", "HDMI 단자 개수"],
     )
     # The schedule half contributes no product fact; the spec half does.
-    block = knowledge.prompt_block()
-    assert "배송" not in block and "일정" not in block
+    #
+    # Asserted on the field keys rather than on a substring of the block. The
+    # block now carries a rule telling the model that a listing policy snapshot
+    # cannot answer a delivery-status question, and that sentence contains the
+    # word 배송 -- which is the instruction working, not a delivery fact leaking
+    # in. What must stay absent is a delivery or schedule *row*.
+    fields = knowledge.safe_field_keys()
+    assert not any(
+        word in key
+        for key in fields
+        for word in ("delivery", "arrival", "schedule", "shipping")
+    ), sorted(fields)
 
 
 # ------------------------------------------------------------ F. VALIDATED kept
@@ -323,3 +333,68 @@ def test_route_is_not_the_order_id_request_route():
     analysis = _analyze()
     assert analysis.answer_strategy.value == "DIRECT_FACT_ANSWER"
     assert analysis.order_id_status.value == "VALIDATED"
+
+
+# ---------------------------------------------- G. 전제를 잃은 주문번호 요청
+def _semantic(action: str, text: str, *, purchase_state: str = "PRE_PURCHASE",
+              schedule: bool = False):
+    from services.semantic_analysis import AtomicQuestion, SemanticAnalysis
+
+    return SemanticAnalysis(
+        primary_action=action,
+        atomic_questions=(AtomicQuestion(
+            text=text, action=action,
+            requested_information="확인 요청", requested_attribute="GENERAL",
+        ),),
+        purchase_state=purchase_state,
+        requires_order_context=False,
+        requires_delivery_schedule=schedule,
+        confidence=0.95,
+        source="GPT",
+    )
+
+
+def test_G_request_order_id_does_not_outlive_its_premise():
+    """GPT① 이 주문번호가 필요없다고 하면 주문번호 요청 전략도 사라진다.
+
+    REQUEST_ORDER_ID 는 독립된 판단이 아니라 "이 문의는 고객의 주문번호가
+    필요하고 그것이 없다" 는 전제에서 파생된다. ``_with_semantic`` 은 그 전제를
+    GPT① 의 분해로 다시 계산하는데, 파생된 결론은 갱신하지 않고 있었다.
+
+    이 전략은 문장만 바꾸는 것이 아니다. ``HybridAnswerService`` 에서 draft 를
+    rule 답변으로 대체하고 **GPT② 를 아예 호출하지 않는다**. 구매 전 반품 정책
+    질문이 CANCEL_RETURN_EXCHANGE 로 분류돼 이 경로로 가면, 매장이 가진 반품
+    안내를 모델이 볼 기회 자체가 없어진다.
+    """
+
+    text = "받아보고 마음에 안 들면 반품이 가능한가요?"
+    service = InquiryAnalysisService()
+    request = _request(text)
+
+    deterministic = service.analyze(request)
+    # 키워드 계층은 이 문의를 주문 정보 필요로 읽는다. 그 판단 자체는 건드리지
+    # 않는다 -- 바뀌는 것은 GPT① 이 아니라고 말한 뒤의 처리다.
+    assert deterministic.inquiry_subtype == "CANCEL_RETURN_EXCHANGE"
+    assert deterministic.answer_strategy.value == "REQUEST_ORDER_ID"
+
+    resolved = service.analyze(request, semantic=_semantic("OTHER", text))
+    assert resolved.requires_order_id is False
+    assert resolved.requires_order_lookup is False
+    assert resolved.answer_strategy.value != "REQUEST_ORDER_ID", (
+        "전제가 사라졌는데 주문번호 요청 전략이 남아 GPT② 가 호출되지 않는다"
+    )
+
+
+def test_G_current_order_schedule_still_requests_the_order_number():
+    """반대 방향: 정말 주문에 달린 질문이면 주문번호 요청이 유지된다."""
+
+    text = "제 주문 언제 배송되나요?"
+    analysis = InquiryAnalysisService().analyze(
+        _request(text),
+        semantic=_semantic(
+            "DELIVERY_STATUS", text,
+            purchase_state="CURRENT_ORDER", schedule=True,
+        ),
+    )
+    assert analysis.requires_order_lookup is True
+    assert analysis.requires_dps_lookup is True

@@ -1111,6 +1111,45 @@ class InquiryAnalysisService:
                     "semantic routing requires order evidence for a core sub-question"
                 )
 
+        # One consistency rule, where there were two special cases.
+        #
+        # REQUEST_ORDER_ID is not an independent judgement about an inquiry. The
+        # deterministic tier derives it from one premise -- "this inquiry needs
+        # the customer's order number and does not have it" (see
+        # ``requires_order_id and not validated`` above) -- and this method has
+        # just recomputed that premise from GPT ①'s own decomposition. When the
+        # premise is gone the conclusion has to go with it, and it was only
+        # being dropped in the one branch that noticed
+        # (``delivery_schedule_needs_review``).
+        #
+        # It matters because this strategy does not merely change wording: in
+        # ``HybridAnswerService`` it replaces the draft with a rule answer and
+        # GPT ② is never called at all. Measured on a holdout question, "받아
+        # 보고 마음에 안 들면 반품이 가능한가요?" -- asked before buying, GPT ①
+        # reading it as PRE_PURCHASE with no order context -- the keyword tier
+        # called it CANCEL_RETURN_EXCHANGE, kept REQUEST_ORDER_ID, and the model
+        # never saw the store's own answers about returns. Nothing here is about
+        # returns or about that subtype; the rule is that a conclusion may not
+        # outlive its premise.
+        #
+        # Order integrity is untouched: when the understanding says this inquiry
+        # does turn on the customer's order -- a current schedule, an order
+        # identification request -- ``requires_order`` stays True above and the
+        # strategy stands.
+        effective_requires_order_id = (
+            requires_order if requires_order_id_override is None
+            else requires_order_id_override
+        )
+        if (
+            strategy is AnswerStrategy.REQUEST_ORDER_ID
+            and not effective_requires_order_id
+        ):
+            strategy = AnswerStrategy.GENERAL_GUIDANCE
+            reasons.append(
+                "semantic 이해가 주문번호를 요구하지 않아 주문번호 요청 전략을 "
+                "해제했습니다."
+            )
+
         if semantic.atomic_questions:
             subquestion_analyses = tuple({
                 "question": item.text,

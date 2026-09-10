@@ -129,13 +129,20 @@ def test_the_same_product_installer_case_is_offered_as_a_candidate(tmp_path):
 
 
 def test_a_different_models_spec_never_becomes_a_candidate(tmp_path):
-    """Strict identity compares model codes, and it keeps its authority.
+    """Strict identity compares model codes, and it keeps its verdict.
 
     A product-fact question is where a sibling model's answer is actually
     dangerous: the 55-inch panel has its own resolution, weight and VESA
-    pattern. The compatibility gate rejects it during retrieval, so GPT ② is
-    never offered the choice -- widening what the model may judge must not
-    widen which products it may judge across.
+    pattern. What changed in P1 is where that danger is handled. The
+    compatibility gate used to delete the case during retrieval; Historical now
+    follows the rule Learning has followed since P0-2 -- remove what is invalid,
+    price and label the rest, and leave "does this apply here" to the reader.
+
+    So the assertion is the label, not the absence. The case arrives marked
+    OTHER_PRODUCT_OR_MODEL with its size-mismatch reason and an explicit
+    instruction not to transfer it, and a definite claim built from it is still
+    refused downstream: a sibling model's answer is not in the grounding corpus
+    for this product, and the Product Fact identity contract is untouched.
     """
 
     database = _database(tmp_path, "othermodelspec")
@@ -169,11 +176,23 @@ def test_a_different_models_spec_never_becomes_a_candidate(tmp_path):
         product_name=PRODUCT_43,
         semantic=semantic,
     )
-    attached = [
-        str(item.get("answer_reference") or "")
-        for item in context["historical_cases"]
-    ]
-    assert not any("4K UHD" in item for item in attached), attached
+    cases = context["historical_cases"]
+    attached = [str(item.get("answer_reference") or "") for item in cases]
+    assert any("4K UHD" in item for item in attached), attached
+    # 다른 모델에서 온 것이 반드시 그렇게 표시되어야 한다.
+    for item in cases:
+        if str(item.get("source_product_name") or "") == PRODUCT_43:
+            continue
+        origin = item.get("evidence_origin") or {}
+        assert origin.get("identity") == "OTHER_PRODUCT_OR_MODEL", origin
+        assert origin.get("reason"), origin
+        assert origin.get("note"), "다른 모델 사양에 자동 적용 금지 안내가 없다"
+    # identity 판정 자체는 그대로 강하다 -- 삭제만 하지 않는다.
+    verdicts = {
+        str((item.get("compatibility") or {}).get("product_match") or "")
+        for item in cases
+    }
+    assert verdicts == {"MISMATCH"}, verdicts
 
 
 def test_a_sibling_models_policy_answer_arrives_labelled_for_the_model(tmp_path):

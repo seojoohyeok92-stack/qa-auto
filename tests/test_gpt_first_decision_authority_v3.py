@@ -105,8 +105,19 @@ def test_policy_candidate_survives_product_fact_question_but_model_fact_does_not
     )
 
     assert policy.hard_reject is False
-    assert model_fact.hard_reject is True
+    # P0-2: another model's fact is still *identified* as incompatible -- the
+    # verdict, the reason and the MISMATCH label all survive -- but it is no
+    # longer deleted before GPT ② can read it. Removing a candidate because
+    # code decided it does not apply is the semantic judgement this
+    # architecture gives to the model; CODE's job is to say where the row came
+    # from. Whether another listing's HDMI count may be quoted here is then
+    # GPT ②'s call, made against a labelled candidate.
+    assert model_fact.eligible is False
+    assert model_fact.hard_reject is False
+    assert model_fact.reject_reason is not None
     assert model_fact.product_match == "MISMATCH"
+    # ...and it is ranked below a compatible candidate rather than deleted.
+    assert model_fact.score_adjustment < 0
 
 
 def test_legacy_hostile_metadata_cannot_veto_resolved_gpt2_draft() -> None:

@@ -351,7 +351,10 @@ def test_lg14_verified_hdmi_fact_answers_its_own_question() -> None:
     class _Request:
         metadata = {
             "product_knowledge": knowledge(fact("hdmi_port_count", 3, "개")),
-            "gpt_understanding": {"usable": True, "need_product": True},
+            "gpt_understanding": {
+                "usable": True, "need_product": True,
+                "offer_product_record": True,
+            },
         }
 
     item = {
@@ -388,7 +391,10 @@ def test_lg15_a_fact_the_catalogue_lacks_is_never_supplied() -> None:
                 fact("screen_size", {"inch": 43}),
                 fact("wifi_standard", "802.11ac"),
             ),
-            "gpt_understanding": {"usable": True, "need_product": True},
+            "gpt_understanding": {
+                "usable": True, "need_product": True,
+                "offer_product_record": True,
+            },
         }
 
     item = {

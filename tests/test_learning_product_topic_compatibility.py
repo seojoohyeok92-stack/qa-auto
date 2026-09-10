@@ -489,3 +489,160 @@ def test_zero_learning_without_verified_product_fact_requires_review() -> None:
     )
     assert result.decision == "REVIEW_REQUIRED"
     assert "PRODUCT_FACT_NOT_VERIFIED" in result.reasons
+
+
+# ---------------------------------------------------------------------------
+# P0-2 regression: product identity is provenance, not a delete rule.
+#
+# Measured on the server copy at 8afa4cf: 688218182 asked about 벽걸이 설치 and
+# its 추가 비용 while the store held LID 117 ("설치비는 청구되지 않습니다",
+# topic_match=MATCH), and 688218219 asked about 리모컨 구성품 while the store
+# held LID 72 ("리모컨이 포함되어 있습니다"). Both were removed as
+# INSUFFICIENT_PRODUCT_IDENTITY before GPT ② saw them, and the model was handed
+# 해피콜 / 온누리상품권 instead.
+# ---------------------------------------------------------------------------
+
+
+def _cross_product_decision(*, question: str, candidate_question: str,
+                            candidate_answer: str, scope: str | None = None):
+    service = LearningCompatibilityService()
+    return service.evaluate(
+        current_question=question,
+        current_product=extract_product_identity(
+            product_id="listing-50", product_name="삼성 삼탠바이미 50인치 비즈니스TV",
+        ),
+        candidate_question=candidate_question,
+        candidate_answer=candidate_answer,
+        candidate_product=extract_product_identity(
+            product_id="listing-43", product_name="삼성 비즈니스TV 43인치 LH43BEFHLGFXKR",
+        ),
+        candidate_metadata={"product_scope": scope} if scope else {},
+        query_is_product_fact=True,
+    )
+
+
+def test_other_model_learning_is_not_deleted_before_gpt2():
+    """D: 다른 상품이라는 이유만으로 GPT② 이전에 삭제되지 않는다."""
+
+    decision = _cross_product_decision(
+        question="리모컨이 기본 구성품으로 포함되나요?",
+        candidate_question="리모컨은 포함인가요",
+        candidate_answer="문의하신 제품에는 리모컨이 포함되어 있습니다.",
+    )
+    assert decision.hard_reject is False
+    # production 검색 모드(hard_conflicts_only=True)에서 살아남는지가 핵심이다.
+    removed_in_production = (
+        not decision.eligible and not (True and not decision.hard_reject)
+    )
+    assert removed_in_production is False
+
+
+def test_identity_mismatch_provenance_is_preserved():
+    """E: identity 판정과 출처는 그대로 보존된다."""
+
+    decision = _cross_product_decision(
+        question="벽걸이 설치에 추가 비용이 있나요?",
+        candidate_question="벽걸이추가만하면 설치비랑다포함되는건가요? 추가비용은업는거죠?",
+        candidate_answer="벽걸이용 브라켓이 함께 출고되며, 설치비는 청구되지 않습니다.",
+    )
+    assert decision.product_match == "MISMATCH"
+    assert decision.reject_reason is not None
+    assert decision.candidate_product.product_name
+    assert decision.current_product.product_name
+    assert decision.candidate_product.product_name != (
+        decision.current_product.product_name
+    )
+    # 삭제 대신 감점으로만 반영된다.
+    assert decision.score_adjustment < 0
+
+
+def test_same_product_candidate_outranks_cross_product_candidate():
+    """identity 를 무시하는 것이 아니라 순위로 반영한다."""
+
+    service = LearningCompatibilityService()
+    current = extract_product_identity(
+        product_id="listing-50", product_name="삼성 삼탠바이미 50인치 비즈니스TV",
+    )
+    common = dict(
+        current_question="리모컨이 기본 구성품으로 포함되나요?",
+        current_product=current,
+        candidate_question="리모컨은 포함인가요",
+        candidate_answer="문의하신 제품에는 리모컨이 포함되어 있습니다.",
+        query_is_product_fact=True,
+    )
+    same = service.evaluate(candidate_product=current, candidate_metadata={}, **common)
+    other = _cross_product_decision(
+        question="리모컨이 기본 구성품으로 포함되나요?",
+        candidate_question="리모컨은 포함인가요",
+        candidate_answer="문의하신 제품에는 리모컨이 포함되어 있습니다.",
+    )
+    assert same.score_adjustment > other.score_adjustment
+
+
+def test_evidence_origin_labels_reach_the_prompt_projection():
+    """H: GPT② 가 출처를 구분할 수 있는 라벨이 실제로 붙는다."""
+
+    from services.similar_answer_service import _evidence_origin
+
+    other = _cross_product_decision(
+        question="리모컨이 기본 구성품으로 포함되나요?",
+        candidate_question="리모컨은 포함인가요",
+        candidate_answer="문의하신 제품에는 리모컨이 포함되어 있습니다.",
+    )
+    origin = _evidence_origin(other)
+    assert origin["identity"] == "OTHER_PRODUCT_OR_MODEL"
+    assert origin["knowledge"] == "PRODUCT_SPECIFIC"
+    assert origin["source_product_name"]
+    assert origin["current_product_name"]
+    assert "자동으로" in origin["note"]
+
+    policy = _cross_product_decision(
+        question="기존 TV 수거가 가능한가요?",
+        candidate_question="설치해 주시고 기존 티비는 가져가실구 있나요?",
+        candidate_answer="기존 TV 수거는 설치 기사님 방문 시 요청하시면 진행됩니다.",
+        scope="POLICY",
+    )
+    policy_origin = _evidence_origin(policy)
+    assert policy_origin["identity"] == "POLICY_OR_GENERAL"
+    assert policy_origin["knowledge"] == "POLICY_OR_GENERAL"
+    assert "note" not in policy_origin
+
+
+def test_data_and_safety_filters_are_untouched_by_p0_2():
+    """F: 데이터 사실 기반 제거는 그대로 유지된다."""
+
+    from services.historical_learning_quality_service import (
+        DATA_UNSAFE_REASONS,
+        is_data_unsafe,
+    )
+    from services.learning_evidence_policy import (
+        contamination_reason,
+        order_identifier_request_reason,
+    )
+
+    # 이 네 가지는 GPT 판단 대상이 아니라 행(row) 자체의 사실이다.
+    assert DATA_UNSAFE_REASONS == frozenset({
+        "INACTIVE_OR_EMPTY",
+        "POLICY_RISK",
+        "TEMPORARY_WITHOUT_STRUCTURED_VALIDITY",
+        "PAST_ORDER_FACT_NOT_REUSABLE",
+    })
+    assert is_data_unsafe(
+        SimpleEligibility(reasons=("POLICY_RISK",))
+    ) is True
+    assert is_data_unsafe(
+        SimpleEligibility(reasons=("LOW_RELEVANCE",))
+    ) is False
+    # 마스킹 오염 답변은 계속 제거 대상이다.
+    assert contamination_reason("연락처는 <masked-phone> 입니다.") is not None
+    # 주문번호 요구형 Learning 도 계속 식별된다.
+    assert order_identifier_request_reason(
+        "주문번호를 알려주시면 확인 후 안내드리겠습니다."
+    ) is not None
+
+
+class SimpleEligibility:
+    """is_data_unsafe 는 reasons 만 읽는다."""
+
+    def __init__(self, *, reasons: tuple[str, ...]) -> None:
+        self.reasons = reasons

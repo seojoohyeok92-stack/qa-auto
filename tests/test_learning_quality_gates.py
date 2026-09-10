@@ -99,6 +99,21 @@ def retrieve(database: Database, question: str, **filters):
     )
 
 
+def grounding_corpus(context) -> str:
+    """What the deterministic validator will accept as proof.
+
+    This is the invariant these tests are named for. Channel membership is a
+    different question: a candidate reaches the prompt so GPT ② can read it and
+    say what it used, and ``usable_as_factual_evidence`` is what decides whether
+    a sentence may *prove* a claim. Measuring the channel measured the old
+    implementation of the rule rather than the rule.
+    """
+
+    from services.hybrid_answer_service import HybridAnswerService
+
+    return HybridAnswerService._evidence_texts(context)
+
+
 def factual_answers(context) -> list[str]:
     return [
         str(item.get("answer") or "")
@@ -129,7 +144,20 @@ def test_style_only_spec_never_grounds_a_fact(database) -> None:
     )
     context = retrieve(database, "HDMI 단자가 몇 개인가요?")
 
-    assert factual_answers(context) == []
+    # 후보로는 도달한다. 판매자가 실제로 보낸 답변이 코퍼스의 59.6% 이고,
+    # 그것을 채널에서 지우는 것은 GPT ② 가 읽을 기회를 없애는 일이었다.
+    assert factual_answers(context) == ["HDMI 단자는 4개입니다."]
+    # 그러나 사실을 증명하지는 못한다 -- 이 테스트의 이름이 말하는 불변식.
+    assert "4개" not in grounding_corpus(context)
+    assert all(
+        not usable_as_factual_evidence(item)
+        for item in context["similar_approved_answers"]
+    )
+    # 그리고 모델에게도 그렇게 표시된다.
+    assert [
+        item["evidence_authority"]
+        for item in context["similar_approved_answers"]
+    ] == ["SELLER_POSTED_NOT_VERIFIED"]
     assert not usable_as_factual_evidence(
         {"style_only": True, "answer": "HDMI 단자는 4개입니다."}
     )
@@ -221,7 +249,13 @@ def test_hedged_answer_with_rating_five_is_not_factual_evidence(
     )
     context = retrieve(database, "기사님이 언제 연락주시나요?")
 
-    assert factual_answers(context) == []
+    # 승인된 추정 문장도 후보로는 전달되고, 추정이라는 사실이 함께 전달된다.
+    assert factual_answers(context) == ["설치 기사님이 전날 연락드릴 것으로 보입니다."]
+    assert [
+        item["hedge_reason"] for item in context["similar_approved_answers"]
+    ] == ["보입니다"]
+    # 증명에는 쓰일 수 없다 -- 승인은 권위이고 확정성은 아니다.
+    assert "전날" not in grounding_corpus(context)
     assert estimation_reason("설치 기사님이 전날 연락드릴 것으로 보입니다.") is not None
 
 
@@ -233,7 +267,9 @@ def test_hedged_answer_is_demoted_not_discarded(database) -> None:
     )
     context = retrieve(database, "기사님이 언제 연락주시나요?")
 
-    assert any("전날" in answer for answer in style_answers(context))
+    # demote 의 의미가 바뀌었다: 채널에서 빼는 것이 아니라 증명 자격을 빼는 것.
+    assert any("전날" in answer for answer in factual_answers(context))
+    assert "전날" not in grounding_corpus(context)
     assert context["learning_retrieval"]["HEDGED_FACTUAL_DEMOTED"] >= 1
 
 

@@ -123,6 +123,45 @@ SUBJECT_SENSITIVE_FIELDS = frozenset({
 BASE_DEVICE_SCOPE = "BASE_DEVICE"
 ACCESSORY_SCOPE = "ACCESSORY"
 
+# Rows that exist so the collector can join its own tables, not because a
+# customer could ever be told them: surrogate keys, the SEO title, and the
+# listing thumbnail's URL and pixel dimensions.
+#
+# These are recognised by *shape*, never by a list of names. A name list would
+# have to grow every time the collector adds a column, and the next column it
+# adds would reach the prompt unreviewed in the meantime. Shape also keeps this
+# rule honest about what it is: it says nothing about which question is being
+# asked, so it can never become the field-selection judgement this module is
+# handing to GPT ②. Everything a person could conceivably ask about -- and that
+# includes the store's own policy rows -- goes to the model.
+_INTERNAL_FIELD_PREFIXES = ("seo_", "representative_image")
+_INTERNAL_FIELD_SUFFIXES = ("_id",)
+_INTERNAL_VALUE_PREFIXES = ("http://", "https://")
+
+
+def _is_internal_metadata(field_key: str, value: Any) -> bool:
+    key = str(field_key or "")
+    if key.startswith(_INTERNAL_FIELD_PREFIXES):
+        return True
+    if key.endswith(_INTERNAL_FIELD_SUFFIXES):
+        return True
+    return str(_render_value(value)).strip().lower().startswith(
+        _INTERNAL_VALUE_PREFIXES
+    )
+
+
+# What kind of thing a stored row is, said in the model's own terms.
+#
+# The Product DB already separates these and the distinction matters to an
+# answer: a panel's resolution is true of the device wherever it is sold, while
+# "무료배송" is this listing's current offer. Both may be read; only the first
+# is a property of the product. Labelling is CODE's job here -- deciding which
+# one answers the customer is not.
+_KNOWLEDGE_KINDS = {
+    "STATIC_PRODUCT_FACT": "DEVICE_SPECIFICATION",
+    "SEMI_STATIC_POLICY_FACT": "LISTING_POLICY_SNAPSHOT",
+}
+
 # Question wording -> canonical field keys. Kept explicit rather than derived
 # so that a new field cannot silently start answering questions nobody
 # reviewed it for. Each entry lists the base-device fields and, where the
@@ -304,6 +343,12 @@ class ProductFact:
             "exclusion_reason": self.exclusion_reason,
         }
 
+    @property
+    def knowledge_kind(self) -> str:
+        """Device specification, or this listing's own current offer."""
+
+        return _KNOWLEDGE_KINDS.get(self.volatility, "PRODUCT_RECORD")
+
     def as_prompt_line(self) -> str:
         """One evidence line for the provider prompt."""
 
@@ -311,10 +356,35 @@ class ProductFact:
             f"- field: {self.field_key}\n"
             f"  value: {_render_value(self.value)}\n"
             f"  verification: {self.verification_status}\n"
+            f"  kind: {self.knowledge_kind}\n"
             f"  product_scope: {self.component_scope}"
             f" ({self.model_code or self.product_id})\n"
             f"  evidence_id: {self.canonical_fact_id}"
         )
+
+    def as_prompt_fact(self) -> dict[str, Any]:
+        """The structured mirror of ``as_prompt_line``.
+
+        ``to_dict`` carries the internal identifiers this service needs to
+        explain itself -- canonical fact and value ids, every provenance id,
+        the flags that are constant across safe facts. Measured over the whole
+        Product DB with the record read whole, that shape costs a median of
+        25,600 characters per product against 4,700 here, and the prompt was
+        already carrying the same values a second time in the text block. The
+        identifiers stay in ``to_dict`` for telemetry and the UI; the model
+        gets what it can act on.
+        """
+
+        fact: dict[str, Any] = {
+            "field_key": self.field_key,
+            "value": self.value,
+            "verification": self.verification_status,
+            "kind": self.knowledge_kind,
+            "product_scope": self.component_scope,
+        }
+        if self.unit:
+            fact["unit"] = self.unit
+        return fact
 
 
 @dataclass(frozen=True)
@@ -355,6 +425,40 @@ class ProductKnowledgeResult:
     def covers_all(self, fields: Iterable[str]) -> bool:
         wanted = {str(item) for item in fields if str(item).strip()}
         return bool(wanted) and wanted <= set(self.safe_field_keys())
+
+    def facts_in_question_scope(
+        self, question: object
+    ) -> tuple["ProductFact", ...]:
+        """The safe facts this question's own wording puts in play.
+
+        Evidence and contradiction are different jobs and need different sets.
+        What the model may *read* is this listing's whole record -- which of
+        those rows bears on the question is its judgement. What a code-side
+        contradiction check may *speak for* is much narrower: it compares
+        stored polarities and quantities with no idea what either sentence is
+        about, so it can only be trusted where the customer named the topic.
+
+        Read whole, the record made that difference visible. An approved answer
+        saying "티비 자체에 OTT 어플은 설치가 불가능" was reported as
+        contradicted by ``set_top_box_ott_supported=YES`` -- the set-top box
+        does support OTT, and both statements are true -- and, on the same
+        pass, by ``free_delivery=YES``, which is about nothing the sentence
+        mentions. Both were then written into the sub-question as CONFLICT,
+        which refuses the answer.
+
+        Narrowing here does not narrow what reaches GPT ②, and it restores the
+        set the check ran on before the record was offered whole.
+        """
+
+        fields, _topics = fields_for_question(question)
+        allowed = set(fields)
+        for group in required_fact_groups(question):
+            allowed.update(group)
+        if not allowed:
+            return ()
+        return tuple(
+            item for item in self.safe_facts if item.field_key in allowed
+        )
 
     def supports_question(self, question: object) -> bool:
         """Whether safe facts cover every material claim in ``question``.
@@ -409,7 +513,19 @@ class ProductKnowledgeResult:
             "absent, unsupported or missing because it is not listed.\n"
             "- Never infer a value from another model, size or package.\n"
             "- If the customer asks for something not listed, say the exact "
-            "specification needs checking instead of estimating it."
+            "specification needs checking instead of estimating it.\n"
+            # The list is this product's record, not a shortlist someone
+            # prepared for this question. Saying so is what makes the wider
+            # list safe: the model has to choose, and choosing badly here
+            # means answering with a field nobody asked about.
+            "- 위 목록은 이 상품의 전체 검증 기록이며 질문에 맞춰 미리 고른 "
+            "것이 아니다. 질문에 실제로 필요한 항목만 골라서 사용하고, "
+            "나머지는 답변에 나열하지 마라.\n"
+            "- kind=DEVICE_SPECIFICATION은 상품 자체의 사양이고, "
+            "kind=LISTING_POLICY_SNAPSHOT은 이 판매 페이지의 현재 조건을 "
+            "수집한 값이다. 후자는 고객의 주문 상태·배송일·현재 진행 상황의 "
+            "근거가 될 수 없으며, 그런 질문은 주문/DPS 조회 근거를 따른다.\n"
+            "- 필요한 항목이 목록에 없으면 추측하지 말고 unresolved 로 남겨라."
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -823,10 +939,31 @@ class ProductKnowledgeService:
             texts.append(str(question))
         combined = " ".join(texts)
         fields, topics = fields_for_question(combined)
+        # Two different questions, answered from two different places.
+        #
+        # The model catalogue is a fixed, small ontology, so naming its fields
+        # is the only way to ask it anything: ``CATALOG_BACKED_FIELDS`` is the
+        # whole of what it can produce.
+        #
+        # The listing store is not like that. It holds this product's own
+        # record -- 216 distinct fields across the store, a median of 83 rows
+        # for one product -- and enumerating the subset worth reading was a
+        # keyword judgement about the customer's wording. That judgement is
+        # what decided, for a listing whose remote-control and installation
+        # facts were both stored, that a question about either reached the
+        # model without them. ``None`` asks for the record whole, and which
+        # rows bear on the question is then read by GPT ② from the rows.
+        #
+        # Only when GPT ① said this inquiry needs product evidence. Without a
+        # usable understanding the keyword topics remain the only thing
+        # keeping a specification out of a delivery prompt.
+        catalog_fields = fields
+        listing_fields: tuple[str, ...] | None = fields
         if include_all_catalog_fields:
-            fields = tuple(dict.fromkeys(
+            catalog_fields = tuple(dict.fromkeys(
                 (*fields, *sorted(CATALOG_BACKED_FIELDS))
             ))
+            listing_fields = None
 
         def _catalog() -> ProductKnowledgeResult:
             return self._catalog_facts_for_inquiry(
@@ -834,7 +971,7 @@ class ProductKnowledgeService:
                 product_name=product_name,
                 option_name=option_name,
                 model_code=model_code,
-                fields=fields,
+                fields=catalog_fields,
                 topics=topics,
                 combined=combined,
             )
@@ -858,7 +995,7 @@ class ProductKnowledgeService:
         # The catalogue is consulted only when the listing store has never
         # heard of the product, where there is no exclusion to defeat.
         db_result = self._repository_facts_for_inquiry(
-            key=key, fields=fields, topics=topics, combined=combined,
+            key=key, fields=listing_fields, topics=topics, combined=combined,
             model_code=model_code,
         )
         if db_result.matched:
@@ -874,24 +1011,32 @@ class ProductKnowledgeService:
         self,
         *,
         key: str,
-        fields: tuple[str, ...],
+        fields: tuple[str, ...] | None,
         topics: tuple[str, ...],
         combined: str,
         model_code: object,
     ) -> ProductKnowledgeResult:
-        """Verified facts for the exact listing the customer is writing from."""
+        """Verified facts for the exact listing the customer is writing from.
 
-        if not fields:
+        ``fields=None`` asks for this listing's record whole. ``()`` still
+        means "the customer's wording named no product topic", which is a
+        different situation and keeps its own reason.
+        """
+
+        if fields is not None and not fields:
             # Nothing in the question is a product-specification topic.
             return ProductKnowledgeResult(
                 product_id=key, listing_id=None, matched=False,
                 requested_fields=(), topics=(),
                 unavailable_reason="NO_PRODUCT_FACT_TOPIC",
             )
+        # What was asked for, for telemetry and ``covers_all``. A whole-record
+        # request has no field list until the rows come back.
+        requested: tuple[str, ...] = fields or ()
         if not self.repository.available():
             return ProductKnowledgeResult(
                 product_id=key, listing_id=None, matched=False,
-                requested_fields=fields, topics=topics,
+                requested_fields=requested, topics=topics,
                 unavailable_reason="PRODUCT_FACTS_DB_UNAVAILABLE",
             )
 
@@ -903,16 +1048,20 @@ class ProductKnowledgeService:
             # answering; the pipeline simply gets no product evidence.
             return ProductKnowledgeResult(
                 product_id=key, listing_id=None, matched=False,
-                requested_fields=fields, topics=topics,
+                requested_fields=requested, topics=topics,
                 unavailable_reason=f"LOOKUP_FAILED:{type(error).__name__}",
             )
         if listing is None:
             return ProductKnowledgeResult(
                 product_id=key, listing_id=None, matched=False,
-                requested_fields=fields, topics=topics,
+                requested_fields=requested, topics=topics,
                 unavailable_reason="PRODUCT_NOT_IN_PRODUCT_DB",
             )
 
+        if fields is None:
+            requested = tuple(dict.fromkeys(
+                str(row.get("field") or "") for row in rows
+            ))
         provenance = self._provenance_for(rows)
         safe: list[ProductFact] = []
         excluded: list[ProductFact] = []
@@ -932,7 +1081,7 @@ class ProductKnowledgeService:
             product_id=key,
             listing_id=str(listing.get("listing_id") or "") or None,
             matched=True,
-            requested_fields=fields,
+            requested_fields=requested,
             topics=topics,
             safe_facts=tuple(safe),
             excluded_facts=tuple(excluded),
@@ -1151,6 +1300,11 @@ class ProductKnowledgeService:
         volatility = str(row.get("volatility") or "")
         if volatility in UNUSABLE_VOLATILITY:
             return "VOLATILE_LISTING_FACT"
+        # Collector plumbing. Never reached the prompt while the keyword topics
+        # decided what to ask for; now that a listing's record is read whole,
+        # the row itself has to say it is not answerable material.
+        if _is_internal_metadata(str(row.get("field") or ""), value):
+            return "INTERNAL_LISTING_METADATA"
         # The listing could not be read as it stands today -- it was delisted,
         # blocked or otherwise unreadable at collection time. Anything that
         # describes the listing rather than the product is no longer current.

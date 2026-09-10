@@ -933,6 +933,7 @@ class AnswerService:
                 "source": "DETERMINISTIC_FALLBACK",
                 "need_template": None,
                 "need_product": None,
+                "offer_product_record": None,
                 "need_learning": None,
                 "need_order": None,
                 "need_dps": None,
@@ -959,6 +960,24 @@ class AnswerService:
             "source": "GPT_UNDERSTAND",
             "need_template": bool(actions & template_actions),
             "need_product": bool(actions & product_actions),
+            # Whether this inquiry may be shown the product's own record.
+            #
+            # ``need_product`` cannot answer that. It is a fixed list of three
+            # action names, and an action lands in exactly one bucket: an
+            # inquiry GPT ① read as INSTALLATION_METHOD is a template action,
+            # so "뱅걸이 설치에 추가 비용이 있나요" was answered with the
+            # listing's ``installation_method`` and ``installation_fee_applies``
+            # withheld -- the two rows in the store that bear on it. Adding
+            # INSTALLATION_METHOD to the list would fix that inquiry and leave
+            # the next action name to be discovered the same way.
+            #
+            # So the record is offered on the same terms as Learning, and for
+            # the same reason: it is context, the prompt says to use only what
+            # the question needs, and which rows bear on the question is GPT
+            # ②'s judgement. The one exclusion is the one Learning already
+            # makes -- a current-order schedule inquiry is answered from
+            # Order/DPS evidence, and a stored record has nothing to add to it.
+            "offer_product_record": not need_dps,
             # Learning is recall-oriented context.  It is intentionally
             # requested for all non-current-schedule questions so GPT ②,
             # rather than a keyword gate, decides whether it is useful.
@@ -1099,6 +1118,54 @@ class AnswerService:
             return coverage.status == COVERAGE_PASS
         except Exception:  # noqa: BLE001 - a measurement never blocks a route
             return True
+
+    # Rejection reasons that are facts about a stored row rather than
+    # judgements about this question. These are the removals CODE owns, and
+    # keeping them apart from the rest is what lets a reader see that the
+    # pipeline deleted nothing on semantic grounds.
+    _DATA_SAFETY_REJECTIONS: tuple[str, ...] = (
+        "FILTERED_BY_VALIDITY",
+        "REVOKED",
+        "NEGATIVE_EXCLUDED",
+        "REDACTION_TOKEN_CONTAMINATED",
+        "ORDER_SCOPE_MISMATCH",
+        "FILTERED_BY_RUNTIME_QUALITY",
+    )
+
+    @staticmethod
+    def _evidence_provenance(
+        learning: dict[str, Any], draft: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One place that says what happened to the retrieved evidence."""
+
+        def _ids(value: Any) -> list[int]:
+            found: list[int] = []
+            for item in value or ():
+                try:
+                    found.append(int(item))
+                except (TypeError, ValueError):
+                    continue
+            return list(dict.fromkeys(found))
+
+        delivered = _ids(learning.get("selected_learning_ids"))
+        used = _ids(draft.get("used_learning_ids"))
+        rejections = learning.get("rejection_counts")
+        rejections = rejections if isinstance(rejections, dict) else {}
+        return {
+            # Store-wide: every active row the repository offered.
+            "retrieved_pool": learning.get("candidate_count"),
+            # After the row-fact filters only.
+            "data_integrity_pool": learning.get("safe_candidate_count"),
+            "delivered_to_gpt": delivered,
+            "used_by_gpt": used,
+            "not_used": [item for item in delivered if item not in set(used)],
+            "filtered_for_data_safety": {
+                key: rejections[key]
+                for key in AnswerService._DATA_SAFETY_REJECTIONS
+                if rejections.get(key)
+            },
+            "used_source_of_truth": "GPT2_STRUCTURED_OUTPUT",
+        }
 
     @staticmethod
     def _usable_gpt_understanding(request: AnswerRequest) -> dict[str, Any] | None:
@@ -1351,6 +1418,23 @@ class AnswerService:
                     "requires_review": draft.get("requires_review"),
                     "can_auto_post": draft.get("can_auto_post"),
                 },
+                # Retrieved, delivered and used, told apart.
+                #
+                # All three numbers existed and none of them were beside each
+                # other: the pool size lived in the retrieval diagnostics, what
+                # reached the prompt in ``answer_learning_provenance``, and what
+                # the model said it used in the draft. A reader comparing "677
+                # candidates" with "2 used" could not tell which of the three
+                # differences they were looking at, and the store-wide exclusion
+                # counts sat in the same block as the per-inquiry ones.
+                #
+                # Nothing is inferred here. ``used_by_gpt`` is GPT ②'s own
+                # structured output and no lexical heuristic guesses at it; a
+                # delivered candidate the model did not name is NOT_USED, which
+                # is an ordinary outcome and not a fault.
+                "evidence_provenance": AnswerService._evidence_provenance(
+                    learning, draft
+                ),
             }
         except Exception:  # noqa: BLE001 - observability never blocks an answer
             result.metadata["pipeline_trace"] = {"status": "TRACE_FAILED"}
@@ -1989,7 +2073,7 @@ class AnswerService:
             understanding = self._usable_gpt_understanding(request)
             product_evidence_requested = bool(
                 understanding is not None
-                and understanding.get("need_product")
+                and understanding.get("offer_product_record")
             )
             product_knowledge = self.product_knowledge.facts_for_inquiry(
                 product_id=request.metadata.get("product_id"),

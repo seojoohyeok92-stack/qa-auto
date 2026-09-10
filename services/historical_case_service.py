@@ -18,6 +18,8 @@ from services.learning_privacy_service import LearningPrivacyService
 from services.historical_learning_quality_service import (
     HistoricalLearningQualityService,
 )
+from services.historical_learning_quality_service import is_data_unsafe
+from services.similar_answer_service import _evidence_origin
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
     extract_product_identity,
@@ -531,7 +533,22 @@ class HistoricalCaseService:
                 policy_risk=risk,
                 active=bool(item.get("active")),
             )
-            if not eligibility.context_eligible:
+            # Only a fact about the row itself may remove it.
+            #
+            # ``assess`` returns two kinds of finding through one flag, and the
+            # Learning path has separated them since v4: DATA_UNSAFE statuses
+            # are properties of the stored row -- inactive, policy risk, expired
+            # validity, one past customer's order fact -- and they stay.
+            # QUESTION_ANSWER_MISMATCH, LOW_RELEVANCE and LOW_INFORMATION_ANSWER
+            # are judgements about meaning made from concept overlap and four
+            # hand-tuned thresholds, and on this path they were still deleting
+            # candidates before GPT ② could read them. The finding now travels
+            # with the candidate instead.
+            semantic_finding_only = (
+                not eligibility.context_eligible
+                and not is_data_unsafe(eligibility)
+            )
+            if not eligibility.context_eligible and not semantic_finding_only:
                 rejection_counts[eligibility.status] = (
                     rejection_counts.get(eligibility.status, 0) + 1
                 )
@@ -542,6 +559,9 @@ class HistoricalCaseService:
                         "details": list(eligibility.reasons),
                     })
                 continue
+            if semantic_finding_only:
+                key = f"DEMOTED_{eligibility.status}"
+                rejection_counts[key] = rejection_counts.get(key, 0) + 1
             metadata = item.get("metadata_json")
             metadata = metadata if isinstance(metadata, dict) else {}
             candidate_product = extract_product_identity(
@@ -564,7 +584,14 @@ class HistoricalCaseService:
                 "human_verified": True,
                 **compatibility.to_dict(),
             }
-            if not compatibility.eligible:
+            # The same predicate the Learning search uses, for the same
+            # reason. ``hard_conflicts_only`` is production retrieval's mode:
+            # remove what is invalid, price the rest, and leave "does this case
+            # apply here" to the reader. Identity mismatch is reported through
+            # ``compatibility`` and ``evidence_origin`` below, not by deletion.
+            if not compatibility.eligible and not (
+                hard_conflicts_only and not compatibility.hard_reject
+            ):
                 reason = str(compatibility.reject_reason or "COMPATIBILITY_REJECTED")
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 diagnostic["reject_reason"] = reason
@@ -633,6 +660,11 @@ class HistoricalCaseService:
                 value["answer_support"] = round(answer_support, 4)
                 value["runtime_eligibility"] = eligibility.to_dict()
                 value["compatibility"] = compatibility.to_dict()
+                # Where this case's knowledge came from, in the same four words
+                # the Learning candidates use. A reader that cannot place a
+                # candidate cannot judge it, and these now reach the prompt
+                # with an identity verdict instead of being removed by one.
+                value["evidence_origin"] = _evidence_origin(compatibility)
                 value["reference_strength"] = "HISTORICAL_VERIFIED_LEARNING"
                 value["usage_notice"] = "과거 표현/대응 참고 전용. 현재 Rule·주문·DPS·상품DB·Template이 우선합니다."
                 ranked.append((relevance, value))

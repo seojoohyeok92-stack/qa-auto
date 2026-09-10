@@ -280,6 +280,41 @@ def test_remote_body_mismatch_fails_pipeline_and_pauses_runtime(tmp_path) -> Non
     assert AutoPostRepository(database).settings()["enabled"] is False
 
 
+def test_an_unconfirmed_post_is_still_queued_for_review(tmp_path) -> None:
+    """등록이 성공했으면 원격 확인이 안 돼도 사후검토 대기가 생긴다.
+
+    P0-1 이후 ``REMOTE_ANSWER_NOT_VISIBLE`` 은 정상적으로 발생하는 결과다
+    (PUT 이 204 를 받은 직후에는 네이버 읽기 모델에 답변이 아직 안 보인다).
+    그때 확인 실패가 ``create_review_after_post`` 를 건너뛰면, 고객에게는
+    답변이 올라갔는데 검토 대기열에는 아무것도 없다. 그 누락이 이 테스트가
+    막는 것이다.
+
+    P0-1 의 계약은 그대로 유지되어야 한다: 확인 실패는 여전히 실패로 집계되고
+    같은 예외가 같은 핸들러로 올라가며, 본문 불일치가 아닌 코드는 전역 pause
+    를 걸지 않는다.
+    """
+
+    database = make_database(tmp_path)
+    inquiry_id = make_inquiry(database)
+    make_draft(database, inquiry_id, route="TEMPLATE")
+    outcome = AutoPostPipelineService(
+        database,
+        post_service=post_service(database, MockClient()),
+        confirmation_service=MockConfirmation(
+            RuntimeError("REMOTE_ANSWER_NOT_VISIBLE")
+        ),
+    ).run_pending(run_id="RUN-1", owner_id="OWNER-1", max_retries=1)
+
+    assert outcome.succeeded_count == 0, "확인되지 않은 등록은 성공이 아니다"
+    assert outcome.failed_count == 1
+    review = PostReviewRepository(database).get(inquiry_id)
+    assert review is not None, "등록은 됐는데 사후검토 레코드가 없다"
+    assert str(review["status"]) == "AUTO_POSTED_UNREVIEWED", review
+    # 본문 불일치가 아니므로 전역 pause 가 걸리지 않는다 (P0-1 계약).
+    settings = AutoPostRepository(database).settings()
+    assert settings["pause_reason"] is None, settings
+
+
 @pytest.mark.parametrize("route", sorted(AUTO_POST_ROUTES))
 def test_every_supported_route_is_auto_finalized_posted_and_queued_for_review(
     tmp_path, route: str,

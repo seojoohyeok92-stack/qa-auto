@@ -307,8 +307,19 @@ def test_135_166_183_bad_historical_answers_are_retrieved_then_rejected(
     trace = service.search_detailed(question, store_code="OJE_PLUS")
     assert trace["candidate_count"] == 1
     assert trace["selected"] == []
-    assert trace["rejection_counts"][expected] == 1
-    assert trace["rejected_samples"][0]["historical_case_id"] == saved["id"]
+    # 행 자체의 사실(DATA_UNSAFE)은 계속 제거된다. 의미 판단은 제거가 아니라
+    # demote 로 기록되고 후보는 순위로 걸러진다 -- Learning 경로가 v4 부터
+    # 따르던 규칙을 Historical 에도 적용한 결과다. 위의 ``selected == []`` 가
+    # 그 후보가 실제로 채택되지 않았음을 계속 지킨다.
+    counts = trace["rejection_counts"]
+    if expected == "QUESTION_ANSWER_MISMATCH":
+        assert counts[f"DEMOTED_{expected}"] == 1, counts
+        assert expected not in counts, counts
+    else:
+        assert counts[expected] == 1, counts
+        assert (
+            trace["rejected_samples"][0]["historical_case_id"] == saved["id"]
+        )
 
 
 class _Tab:

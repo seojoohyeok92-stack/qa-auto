@@ -184,8 +184,23 @@ def test_unreviewed_case_is_automatic_answer_context_but_low_blocked_are_exclude
         IntentResult("GENERAL", ("사용 방법",), Emotion.NORMAL, "NORMAL", 0.9, False, ""),
     )
     historical = context["historical_cases"]
-    assert len(historical) == 1
-    assert "설명서의 순서" in historical[0]["answer_style_reference"]
+    # 정책 차단 케이스는 계속 제거된다. 이것이 이 테스트의 안전 계약이다.
+    answers = [str(item.get("answer_reference") or "") for item in historical]
+    assert any("설명서의 순서" in value for value in answers)
+    blocked_ids = {3}
+    assert not blocked_ids & {
+        int(item["historical_case_id"]) for item in historical
+    }, historical
+    # 정보량이 적은 답변("네")은 더 이상 삭제되지 않는다.
+    #
+    # ``assess`` 의 LOW_INFORMATION_ANSWER / LOW_RELEVANCE /
+    # QUESTION_ANSWER_MISMATCH 는 개념 중첩과 손으로 맞춘 임계값으로 내리는
+    # 의미 판단이고, Learning 경로는 v4 부터 이것을 삭제가 아니라 demote 로
+    # 다룬다. Historical 만 같은 판정으로 후보를 지우고 있었다. 지금 계약은
+    # "행 자체의 사실(DATA_UNSAFE)만 제거한다" 이며, 한 단어 답변이 근거가
+    # 되지 못하게 막는 것은 부재가 아니라 낮은 순위와 GPT ② 의 판단,
+    # 그리고 validator 의 ungrounded-claim 검사다.
+    assert len(historical) == 2, historical
     # ``current_authority_order`` 는 제거됐다. 어느 출처가 이기는지를 모델이
     # 근거를 읽기도 전에 정해두는 서열이었고, 같은 프롬프트의 블록 설명과
     # 어긋났다(historical 을 REFERENCE_ONLY 라 부르면서 동시에 검증된
@@ -205,9 +220,15 @@ def test_unreviewed_case_is_automatic_answer_context_but_low_blocked_are_exclude
             FROM answer_learning_provenance WHERE reference_kind='HISTORICAL'
             """
         ).fetchall()
-    assert [(row[0], row[1], row[2]) for row in provenance] == [
-        (safe_row["id"], "HISTORICAL_VERIFIED_LEARNING", 1)
-    ]
+    recorded = [(row[0], row[1], row[2]) for row in provenance]
+    # 프롬프트에 간 것은 전부 그렇게 기록된다. 정책 차단 케이스는 후보에도
+    # 없으므로 여기에도 없다 -- 그것이 이 단언이 지키는 것이다.
+    assert (safe_row["id"], "HISTORICAL_VERIFIED_LEARNING", 1) in recorded
+    assert all(
+        label == "HISTORICAL_VERIFIED_LEARNING" and included == 1
+        for _case_id, label, included in recorded
+    )
+    assert 3 not in {case_id for case_id, _label, _included in recorded}
 
 
 def test_auto_reference_can_be_disabled_and_reenabled_without_learning_promotion(tmp_path) -> None:

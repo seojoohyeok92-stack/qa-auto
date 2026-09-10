@@ -585,7 +585,10 @@ def _fact_quantity_text(value: object) -> str:
 
 
 def fact_conflicts(
-    items: Iterable[Mapping[str, Any]], safe_facts: Iterable[Any]
+    items: Iterable[Mapping[str, Any]],
+    safe_facts: Iterable[Any],
+    *,
+    scope_for: Any = None,
 ) -> tuple[dict[str, Any], ...]:
     """Approved answers contradicted by a VERIFIED product fact.
 
@@ -593,6 +596,15 @@ def fact_conflicts(
     disagree the answer is not "trust the DB" either -- both are evidence a
     person produced, and which of them is stale is not something this code can
     know.  It is reported as a conflict so a person decides.
+
+    ``scope_for`` maps one answer's matched sub-question to the field keys that
+    sub-question put in play, or ``None`` for no narrowing. A compound inquiry
+    needs it: this check compares a stored polarity with a stored value and
+    knows what neither is about, so on "폐가전 수거되나요? 설치는 누가 하나요?
+    해상도는요?" it reported the collection answer as contradicted by
+    ``resolution=4K UHD`` -- a fact belonging to the third sub-question and to
+    nothing the collection answer says. Each answer is now weighed only against
+    the facts its own sub-question asked for.
     """
 
     usable = _qualifying(items)
@@ -600,7 +612,12 @@ def fact_conflicts(
     found: list[dict[str, Any]] = []
     for item in usable:
         answer_polarity = detect_polarity(item.get("answer"))
+        allowed = None
+        if callable(scope_for):
+            allowed = scope_for(item.get("matched_subquestion"))
         for fact in facts:
+            if allowed is not None and getattr(fact, "field_key", "") not in allowed:
+                continue
             value = getattr(fact, "value", None)
             polarity = value_polarity(value)
             opposed_polarity = (
@@ -656,6 +673,7 @@ def evaluate(
     *,
     learning_context: Mapping[str, Any] | None,
     safe_facts: Iterable[Any] = (),
+    scope_for: Any = None,
 ) -> LearningEvidenceDecision:
     """Whether approved Learning may settle this inquiry's product facts."""
 
@@ -665,7 +683,7 @@ def evaluate(
     if not approved:
         return LearningEvidenceDecision(False, "NO_APPROVED_LEARNING")
 
-    against_facts = fact_conflicts(approved, safe_facts)
+    against_facts = fact_conflicts(approved, safe_facts, scope_for=scope_for)
     against_each_other = approved_conflicts(approved)
     if against_facts or against_each_other:
         return LearningEvidenceDecision(
