@@ -5,7 +5,7 @@ import os
 
 import re
 import uuid
-from typing import Any
+from typing import Any, Sequence
 
 from answer.evidence_support import coverage_label
 from answer.facts import AnswerFacts
@@ -258,6 +258,96 @@ _ORDER_SCOPED_ACTIONS: frozenset[str] = frozenset({
     "SCHEDULE_CHANGE",
     "DELIVERY_DEADLINE_CONFIRMATION",
 })
+
+
+# How deep each sub-question's own ranking is read.
+#
+# One number, and the same one whether the inquiry has one question or six.
+# That is the correction: the value used to be halved for compound inquiries
+# (5 alone, 3 when split), so decomposing a question -- the thing that is
+# supposed to let each part be answered properly -- reduced what each part
+# could be answered from. On 688393243 the store's own answer to the
+# installation question ranked 5th of the 630 candidates that cleared the
+# relevance floor for that atom, so a depth of 3 could not see it while a
+# depth of 5 can.
+#
+# It is not raised beyond the value single questions already used. Depth does
+# not decide delivery either: the prompt budget does, measured on the
+# assembled prompt (``DRAFT_PROMPT_BUDGET_CHARS``) and dropping the least
+# relevant entries one at a time.
+_RETRIEVAL_DEPTH_PER_ATOM = 5
+
+
+def _retrieval_depth(question_count: int) -> int:
+    """Per-sub-question consideration depth. Splitting never reduces it."""
+
+    del question_count
+    return _RETRIEVAL_DEPTH_PER_ATOM
+
+
+def interleave_by_rank(
+    groups: Sequence[Sequence[dict[str, Any]]],
+    *,
+    id_key: str,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """One ordered list from per-sub-question ranked lists.
+
+    Every group's best entry comes before any group's second, so depth is only
+    spent once each sub-question has been heard at that depth. The rest follow
+    in global relevance order. Duplicates are kept once, as their highest
+    scoring appearance.
+
+    The order matters because of what happens afterwards: the prompt budget
+    drops from the tail. Ranked globally, the sub-question whose best candidate
+    scores lowest loses it first however little else that sub-question has --
+    and a one-line answer to a narrow question scores below a long answer to a
+    broad one. Interleaved, shrinking the prompt costs depth evenly instead of
+    silencing one question.
+
+    ``limit`` is for callers that genuinely have a fixed allowance (style
+    references). Evidence passes None: how much of it fits is the prompt
+    budget's decision, measured on the assembled prompt.
+    """
+
+    best: dict[int, float] = {}
+    for group in groups:
+        for item in group:
+            try:
+                key = int(item[id_key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            score = float(item.get("relevance") or 0)
+            if score > best.get(key, float("-inf")):
+                best[key] = score
+    taken: set[int] = set()
+    ordered: list[dict[str, Any]] = []
+
+    def take(item: dict[str, Any]) -> None:
+        try:
+            key = int(item[id_key])
+        except (KeyError, TypeError, ValueError):
+            return
+        if key in taken:
+            return
+        if float(item.get("relevance") or 0) < best.get(key, 0.0):
+            # A lower scoring duplicate; its better appearance is taken later.
+            return
+        taken.add(key)
+        ordered.append(item)
+
+    for rank in range(max((len(group) for group in groups), default=0)):
+        for group in groups:
+            if rank < len(group):
+                take(group[rank])
+    # Anything whose better appearance sat further down its own group.
+    for item in sorted(
+        (item for group in groups for item in group),
+        key=lambda item: float(item.get("relevance") or 0),
+        reverse=True,
+    ):
+        take(item)
+    return ordered if limit is None else ordered[:limit]
 
 
 def _atomic_delivery_schedule_review(
@@ -659,42 +749,29 @@ class LearningContextService:
                     question_guard.sensitive
                     or (atomic is not None and atomic.action in PRODUCT_FACT_ACTIONS)
                 ),
-                # How many candidates one sub-question may show GPT ②.
+                # How deep this sub-question's own ranking is read.
                 #
-                # Two, on a compound inquiry, out of 669 that had already
-                # cleared validity, product identity and the relevance floor --
-                # and which two was settled by a lexical score. Choosing the
-                # evidence is the judgement being moved to GPT ②; the number of
-                # candidates is a budget question -- and the binding budget
-                # turned out to be the provider's 45s read timeout, not the
-                # 60,000-char prompt cap. At 4/6 the largest compound
-                # inquiry reached 39,350 chars and timed out; 35,619 had
-                # completed. These values keep the widening (2/3 -> 3/5)
-                # inside the envelope that is known to answer.
-                # Left at 3/5 deliberately, and the reason is latency rather
-                # than relevance.
+                # This is a *consideration* depth, not a delivery decision.
+                # What reaches the model is settled downstream by the prompt
+                # budget, which measures the real assembled prompt and drops
+                # the least relevant entries one at a time
+                # (``draft_generation_service`` -> ``apply_prompt_budget``).
+                # Separating the two is the fix: the old value decided both,
+                # so three atoms were read three deep each and the union was
+                # then cut to eight, and a question's direct answer could be
+                # discarded while the prompt sat at 38,802 of 60,000
+                # characters.
                 #
-                # This is a technical candidate budget, and on the evidence it
-                # is too small: after the scorer fix below, the store's own
-                # answer about the installation fee ranks 10th of 985 on the
-                # measured inquiry, so the cut -- not any judgement about the
-                # row -- is what keeps it from GPT ②. Raising it is the obvious
-                # next move and it was measured: 6/8 puts the prompt at 42,000
-                # to 46,000 characters and 4/6 at 35,700 to 40,500.
+                # Measured on 688393243 ("화면 크기 / 벽걸이 기사 설치 / 설치비"):
+                # 630 of 679 candidates cleared the relevance floor for the
+                # installation atom, the store's own answer to it ranked 5th,
+                # and a depth of 3 could not see it.
                 #
-                # What stops it is the note above. 4/6 is the configuration
-                # where the largest compound inquiry reached 39,350 characters
-                # and hit the provider's read timeout, and a timeout fails the
-                # whole inquiry -- strictly worse than one candidate going
-                # unread. The product record this release adds to every
-                # product prompt already costs about 9,500 characters of the
-                # same envelope.
-                #
-                # So the budget stays where it is known to answer, and the
-                # increase waits on latency measured against the real provider.
-                # Recorded in the P1 report as a server-validation item, not as
-                # a judgement that rank 10 does not matter.
-                limit=3 if len(questions) > 1 else 5,
+                # The same depth whatever the atom count, so decomposition
+                # cannot reduce what any part may be answered from. What the
+                # provider is asked to read still cannot run away: the prompt
+                # budget is measured on the assembled prompt.
+                limit=_retrieval_depth(len(questions)),
                 candidate_pool=candidate_pool,
                 candidate_diagnostics=candidate_diagnostics,
                 semantic_goal=semantic_goal,
@@ -760,24 +837,32 @@ class LearningContextService:
                 semantic_analysis, atomic,
             )
 
-        def merged(key: str, limit: int = 6) -> list[dict[str, Any]]:
-            by_id: dict[int, dict[str, Any]] = {}
-            for item_context in contexts:
-                for item in item_context[key]:
-                    learning_id = int(item["learning_example_id"])
-                    if learning_id not in by_id or float(item.get("relevance") or 0) > float(
-                        by_id[learning_id].get("relevance") or 0
-                    ):
-                        by_id[learning_id] = item
-            return sorted(
-                by_id.values(), key=lambda item: float(item.get("relevance") or 0),
-                reverse=True,
-            )[:limit]
+        def merged(key: str, limit: int | None = None) -> list[dict[str, Any]]:
+            """The union across sub-questions, ordered so trimming stays fair.
 
-        # The union across sub-questions. Raised with the per-question
-        # limit above so a three-part inquiry is not squeezed back to two
-        # candidates each by the merge.
-        approved = merged("similar_approved_answers", limit=8)
+            Two things were wrong with ranking the union globally and cutting
+            it to a fixed size.
+
+            The cut removed evidence the prompt had room for: on 688393243 the
+            union held nine rows, the cap was eight, and the row that was
+            dropped -- the store's answer about wall-mount installation, which
+            that inquiry's second question asked for -- was the only candidate
+            its sub-question had left. The prompt went to the provider at
+            38,802 of 60,000 characters.
+
+            The order was wrong for what happens next, which
+            ``interleave_by_rank`` explains.
+            """
+
+            return interleave_by_rank(
+                [item_context[key] for item_context in contexts],
+                id_key="learning_example_id",
+                limit=limit,
+            )
+
+        approved = merged("similar_approved_answers")
+        # Style references are not evidence: they show tone, and one per atom
+        # is enough to establish it. This cap stays.
         seller = merged(
             "seller_style_examples", limit=max(0, 4)
         )

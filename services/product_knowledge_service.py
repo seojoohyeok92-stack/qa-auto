@@ -31,6 +31,7 @@ from repositories.product_fact_repository import (
     ProductFactsUnavailableError,
 )
 from repositories.product_catalog_repository import ProductCatalogRepository
+from services.product_fact_guard import extract_model_code
 
 
 VERIFIED = "VERIFIED"
@@ -1331,7 +1332,37 @@ class ProductKnowledgeService:
             for item in active
         ):
             return "PROVENANCE_NOT_VERIFIED"
-        if expected_model and row_model and expected_model != row_model:
+        # Same model, written differently, is the same model.
+        #
+        # Both sides are canonicalised to a model code before they are
+        # compared, using the extractor the guard already applies to listing
+        # titles. The listing title gives ``LH50BEHHLGFXKR``; the label stored
+        # beside the fact gives "2026 LED 4K BE50H-H 125.7CM(50인치)
+        # (LH50BEHHLGFXKR) 스탠드". Compared as whole strings those are
+        # different, and on the measured catalogue that rejected 2,884 of the
+        # 5,261 verified facts -- 50 of 94 products lost every verified fact
+        # they had, including the screen size of the product being asked about.
+        #
+        # This is not a substring or similarity test: the two codes must be
+        # equal once extracted, so LH50BEHHLGFXKR and LH55BEHHLGFXKR remain a
+        # mismatch. A regional/SKU suffix that survives extraction
+        # (LS32DM501 vs LS32DM501EKXKR) also stays a mismatch -- the
+        # conservative outcome, since nothing here can prove a suffix is only
+        # regional.
+        #
+        # When a label carries no extractable code at all the comparison is
+        # not attempted, which is exactly what already happened for rows with
+        # no label: these rows were fetched by ``facts_for_product`` with
+        # ``WHERE cfl.product_id = ?``, so the strongest identity -- the exact
+        # Naver product_id -- is already established, and provenance,
+        # VERIFIED status and the resolution checks above still apply.
+        canonical_expected = extract_model_code(expected_model)
+        canonical_row = extract_model_code(row_model)
+        if (
+            canonical_expected
+            and canonical_row
+            and canonical_expected != canonical_row
+        ):
             return "MODEL_SCOPE_MISMATCH"
         # The conditions above ask "is this fact sound?". The two below ask
         # "does this fact answer *this* question?", so they run last, on a fact

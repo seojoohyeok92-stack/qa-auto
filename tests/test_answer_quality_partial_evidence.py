@@ -268,14 +268,40 @@ def test_corrective_regeneration_is_bounded_to_a_single_retry() -> None:
     ]
 
 
-def test_request_order_id_strategy_never_triggers_regeneration() -> None:
-    # The deterministic REQUEST_ORDER_ID draft never calls the provider for
-    # DRAFT/SELF_REVIEW, so no regeneration branch should fire even though
-    # this path is wired through the same generate() method.
+def test_request_order_id_strategy_no_longer_skips_the_answer_step() -> None:
+    """The strategy is context now, not a branch that answers by itself.
+
+    It used to short-circuit here: the learning context stayed empty, the
+    provider was never called, and the deterministic rule body became the
+    draft. The premise behind it -- "this inquiry needs the customer's order
+    number and does not have it" -- is a keyword-tier conclusion, and when the
+    understanding stage was unavailable nothing recomputed it, so a product or
+    policy question could lose retrieval and the answer step together.
+
+    Asking for an order number is still real behaviour; it belongs to the
+    execution route that owns it (AnswerService -> ORDER_ID_REQUEST), which
+    runs before generation.
+    """
+
     provider = ScriptedProvider(
         understanding=_understanding(("주문번호가 뭔가요?",), category="ORDER_ID"),
-        draft_sequence=[],
-        review_sequence=[],
+        draft_sequence=[
+            {
+                "answer": (
+                    "안녕하세요, 고객님.\n일반 주문번호를 남겨 주시면 확인해 "
+                    "드리겠습니다.\n감사합니다."
+                ),
+                "confidence": 0.9, "used_facts": [], "missing_information": [],
+                "requires_review": False, "warnings": [],
+            },
+        ],
+        review_sequence=[
+            {
+                "passed": True, "answered_all_questions": True,
+                "has_speculation": False, "facts_consistent": True,
+                "requires_review": False, "reason": "stub", "warnings": [],
+            },
+        ],
     )
     hybrid = HybridAnswerService(provider, learning_context_provider=lambda *_: {})
     request = _request("주문번호가 뭔가요?")
@@ -300,12 +326,14 @@ def test_request_order_id_strategy_never_triggers_regeneration() -> None:
         request,
         _rule_result("일반 주문번호를 남겨 주시면 확인해 드리겠습니다."),
     )
-    # The deterministic REQUEST_ORDER_ID branch never generates a draft via
-    # the provider, so the corrective-regeneration branch (which only
-    # triggers after a real DRAFT call fails validation) cannot fire either.
-    assert provider.calls.count("DRAFT") == 0
-    event_codes = [event.code for event in outcome.events]
-    assert "GPT_CORRECTIVE_REGENERATION_STARTED" not in event_codes
+    # The answer step runs, and the rule body is not handed out as the draft.
+    assert provider.calls.count("DRAFT") >= 1
+    assert str(outcome.result.answer).strip() != (
+        "일반 주문번호를 남겨 주시면 확인해 드리겠습니다."
+    )
+    # Corrective regeneration is reachable here now for the same reason: there
+    # is a generated draft for the validator to reject. It used to be withheld
+    # because no draft had been generated at all.
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,9 @@ REASON_LABELS: dict[str, str] = {
     "PRODUCT_COMPATIBILITY_NOT_VERIFIED": "호환 여부가 검증되지 않았습니다.",
     "PROCESSING_PLAN_REQUIRES_REVIEW": "문의 처리 계획상 직원 확인이 필요합니다.",
     "POLICY_OR_HIGH_RISK_REVIEW": "위험·분쟁 가능성이 있어 직원 판단이 필요합니다.",
+    "RETURN_OR_DAMAGE_POLICY_REVIEW": (
+        "반품·교환·파손 문의는 회사 정책상 자동 등록하지 않고 직원이 처리합니다."
+    ),
     "DRAFT_REVIEW_REQUIRED": "답변 초안이 직원 검토 대상으로 판정되었습니다.",
     # Evidence
     "EVIDENCE_CONFLICT": (
@@ -161,6 +164,7 @@ STAFF_REASON_LABELS: dict[str, str] = {
     "ANSWER_REQUIRES_MANUAL_REVIEW": "직원 확인 필요",
     "PROCESSING_PLAN_REQUIRES_REVIEW": "직원 검토 필요",
     "POLICY_OR_HIGH_RISK_REVIEW": "위험·분쟁 가능성",
+    "RETURN_OR_DAMAGE_POLICY_REVIEW": "반품·교환·파손 직원 처리",
     "DRAFT_REVIEW_REQUIRED": "초안 검토 필요",
     "PRODUCT_FACT_NOT_VERIFIED": "상품 정보 근거 부족",
     "PRODUCT_COMPATIBILITY_NOT_VERIFIED": "호환 여부 미확인",
@@ -271,6 +275,9 @@ STAFF_HEADLINES: dict[str, str] = {
     ),
     "POLICY_OR_HIGH_RISK_REVIEW": (
         "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "RETURN_OR_DAMAGE_POLICY_REVIEW": (
+        "반품·교환·파손 관련 문의는 직원이 직접 확인하고 답변합니다."
     ),
     "INTENT_NOT_AUTO_POSTABLE": (
         "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."

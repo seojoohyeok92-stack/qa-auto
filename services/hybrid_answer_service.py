@@ -16,7 +16,6 @@ from answer.hybrid_models import (
 )
 from answer.models import AnswerRequest, AnswerResult, AnswerStatus
 from answer.inquiry_analysis import InquiryAnalysis
-from answer.inquiry_analysis import AnswerStrategy
 from answer.providers.interfaces import JsonGptProvider
 from answer.text_utils import split_subquestions
 from answer.providers.provider_factory import create_gpt_provider
@@ -831,115 +830,118 @@ class HybridAnswerService:
             )
             learning_context: dict[str, Any] = {}
             evidence_verification: dict[str, Any] | None = None
-            if (
-                analysis is not None
-                and analysis.answer_strategy
-                is AnswerStrategy.REQUEST_ORDER_ID
-            ):
-                draft = DraftResult(
-                    answer=rule_result.answer,
-                    confidence=1.0,
-                    used_facts=(),
-                    missing_information=(),
-                    requires_review=False,
-                    warnings=(),
-                )
-            else:
-                try:
-                    if self._learning_context_provider is None:
-                        learning_context = {}
-                    else:
-                        try:
-                            # The semantic pass is a real understanding already
-                            # paid for before routing.  Keep it attached to the
-                            # retrieval request: otherwise atomic questions were
-                            # persisted for audit but retrieval still saw only
-                            # the old keyword split.
-                            learning_context = self._learning_context_provider(
-                                facts,
-                                intent,
-                                semantic_analysis=request.metadata.get(
-                                    "_semantic_routing_value"
-                                ),
-                            )
-                        except TypeError:
-                            # Existing integrations intentionally expose the
-                            # historical two-argument callable.  They are not
-                            # semantic-aware but remain safe, and must not be
-                            # silently converted into an empty context.
-                            learning_context = self._learning_context_provider(
-                                facts, intent
-                            )
-                except Exception:
-                    # Learning is an optional enrichment and can never block
-                    # GPT.  Computed once here (instead of inside
-                    # DraftGenerationService) so a bounded corrective
-                    # regeneration below can reuse it without a second
-                    # Learning/Historical DB lookup.
+            # REQUEST_ORDER_ID used to short-circuit here: ``learning_context``
+            # stayed empty, the provider was never called, and the deterministic
+            # rule body became the draft. The strategy is a keyword-tier
+            # conclusion -- "this inquiry needs the customer's order number and
+            # does not have it" -- and when the understanding stage was
+            # unavailable nothing recomputed that premise, so a product or
+            # policy question could lose Learning, Historical, the product
+            # record and the answer step together. Measured on 688393266: with
+            # a usable understanding the premise was withdrawn and the inquiry
+            # retrieved and answered normally, which is the only reason the
+            # branch did not fire.
+            #
+            # Asking the customer for an order number is still a real
+            # behaviour; it belongs to the execution route that owns it
+            # (``AnswerService`` -> ORDER_ID_REQUEST), which is reached before
+            # generation and is untouched. Inside semantic generation the
+            # strategy is now context like any other, not an answer.
+            try:
+                if self._learning_context_provider is None:
                     learning_context = {}
-                # Product facts travel alongside Learning, never merged into
-                # it: Learning carries tone, policy and past answers, product
-                # facts carry this product's verified specification. Both
-                # reach the prompt; neither overwrites the other.
-                learning_context.update(self._product_facts_context(request))
-                # AnswerEngine and Phase9 candidates are rendered by existing
-                # deterministic code, but a usable GPT① route does not let
-                # either one terminate a compound inquiry.  Carry their
-                # compact provenance into the same evidence context as
-                # Product and Learning so GPT② can choose, combine or reject
-                # them.  This is intentionally metadata reuse, not a second
-                # template selector.
-                template_candidates = request.metadata.get(
-                    "template_candidates"
+                else:
+                    try:
+                        # The semantic pass is a real understanding already
+                        # paid for before routing.  Keep it attached to the
+                        # retrieval request: otherwise atomic questions were
+                        # persisted for audit but retrieval still saw only
+                        # the old keyword split.
+                        learning_context = self._learning_context_provider(
+                            facts,
+                            intent,
+                            semantic_analysis=request.metadata.get(
+                                "_semantic_routing_value"
+                            ),
+                        )
+                    except TypeError:
+                        # Existing integrations intentionally expose the
+                        # historical two-argument callable.  They are not
+                        # semantic-aware but remain safe, and must not be
+                        # silently converted into an empty context.
+                        learning_context = self._learning_context_provider(
+                            facts, intent
+                        )
+            except Exception:
+                # Learning is an optional enrichment and can never block
+                # GPT.  Computed once here (instead of inside
+                # DraftGenerationService) so a bounded corrective
+                # regeneration below can reuse it without a second
+                # Learning/Historical DB lookup.
+                learning_context = {}
+            # Product facts travel alongside Learning, never merged into
+            # it: Learning carries tone, policy and past answers, product
+            # facts carry this product's verified specification. Both
+            # reach the prompt; neither overwrites the other.
+            learning_context.update(self._product_facts_context(request))
+            # AnswerEngine and Phase9 candidates are rendered by existing
+            # deterministic code, but a usable GPT① route does not let
+            # either one terminate a compound inquiry.  Carry their
+            # compact provenance into the same evidence context as
+            # Product and Learning so GPT② can choose, combine or reject
+            # them.  This is intentionally metadata reuse, not a second
+            # template selector.
+            template_candidates = request.metadata.get(
+                "template_candidates"
+            )
+            if isinstance(template_candidates, list):
+                learning_context["template_candidates"] = [
+                    dict(item)
+                    for item in template_candidates
+                    if isinstance(item, dict)
+                ]
+            # ...and they are evidence, not just prompt text. Applied
+            # before the conflict pass below so a product fact that
+            # contradicts an approved Learning answer is still resolved
+            # as a CONFLICT rather than silently winning.
+            learning_context = self._apply_product_fact_evidence(
+                request, learning_context
+            )
+            # PRE-GENERATION GATE (2/2) -- the retrieved evidence.
+            # Retrieval and the product-fact lookup are local reads, so
+            # both sides of a contradiction are known while the provider
+            # is still untouched. If the sources for a sub-question flatly
+            # disagree, no wording of an answer is publishable, and asking
+            # the model to write one would only mean handing it both sides
+            # of a dispute a person has to settle.
+            learning_context = self._apply_evidence_conflicts(
+                request, learning_context
+            )
+            # The evidence-level pre-generation gate used to run here: a
+            # sub-question whose sources disagreed skipped composition
+            # entirely, so one disputed atom erased the independently
+            # grounded answers beside it. A conflict holds publication, not
+            # composition -- it is marked on the evidence, the model reads
+            # both sides and leaves the disputed claim unresolved, and the
+            # publishing gate decides. The call is removed.
+            # The draft provider is the one final evidence reader in the
+            # production path.  The former selector/verifier pair made
+            # additional semantic provider calls after retrieval and
+            # before drafting, without changing the prompt.  They remain
+            # available for historical diagnostics, but no longer decide
+            # whether retrieved candidates reach GPT ANSWER.
+            if self._legacy_evidence_verification:
+                evidence_verification = self._verify_evidence(
+                    request, learning_context,
                 )
-                if isinstance(template_candidates, list):
-                    learning_context["template_candidates"] = [
-                        dict(item)
-                        for item in template_candidates
-                        if isinstance(item, dict)
-                    ]
-                # ...and they are evidence, not just prompt text. Applied
-                # before the conflict pass below so a product fact that
-                # contradicts an approved Learning answer is still resolved
-                # as a CONFLICT rather than silently winning.
-                learning_context = self._apply_product_fact_evidence(
-                    request, learning_context
-                )
-                # PRE-GENERATION GATE (2/2) -- the retrieved evidence.
-                # Retrieval and the product-fact lookup are local reads, so
-                # both sides of a contradiction are known while the provider
-                # is still untouched. If the sources for a sub-question flatly
-                # disagree, no wording of an answer is publishable, and asking
-                # the model to write one would only mean handing it both sides
-                # of a dispute a person has to settle.
-                learning_context = self._apply_evidence_conflicts(
-                    request, learning_context
-                )
-                # The evidence-level pre-generation gate used to run here: a
-                # sub-question whose sources disagreed skipped composition
-                # entirely, so one disputed atom erased the independently
-                # grounded answers beside it. A conflict holds publication, not
-                # composition -- it is marked on the evidence, the model reads
-                # both sides and leaves the disputed claim unresolved, and the
-                # publishing gate decides. The call is removed.
-                # The draft provider is the one final evidence reader in the
-                # production path.  The former selector/verifier pair made
-                # additional semantic provider calls after retrieval and
-                # before drafting, without changing the prompt.  They remain
-                # available for historical diagnostics, but no longer decide
-                # whether retrieved candidates reach GPT ANSWER.
-                if self._legacy_evidence_verification:
-                    evidence_verification = self._verify_evidence(
-                        request, learning_context,
-                    )
-                draft = self.drafts.generate(
-                    facts,
-                    intent,
-                    analysis=analysis,
-                    selected_facts=selected_facts,
-                    learning_context=learning_context,
-                    gpt_judged_evidence=self._gpt_judges_evidence(request),
-                )
+            draft = self.drafts.generate(
+                facts,
+                intent,
+                analysis=analysis,
+                selected_facts=selected_facts,
+                learning_context=learning_context,
+                gpt_judged_evidence=self._gpt_judges_evidence(request),
+            )
             events.append(
                 HybridEvent(
                     "GPT_RESPONSE_NORMALIZED",
@@ -1019,22 +1021,11 @@ class HybridAnswerService:
                     },
                 )
             )
-            if (
-                analysis is not None
-                and analysis.answer_strategy
-                is AnswerStrategy.REQUEST_ORDER_ID
-            ):
-                review = SelfReviewResult(
-                    passed=True,
-                    answered_all_questions=True,
-                    has_speculation=False,
-                    facts_consistent=True,
-                    requires_review=False,
-                    reason="안전한 주문번호 요청 템플릿을 사용했습니다.",
-                    warnings=(),
-                )
-            else:
-                review = self._neutral_self_review(intent.questions)
+            # The matching self-review shortcut is gone with the draft
+            # shortcut above: there is no longer a draft here that the
+            # deterministic path wrote, so there is nothing to declare
+            # pre-reviewed. The validator remains the decisive check.
+            review = self._neutral_self_review(intent.questions)
             events.append(
                 HybridEvent(
                     "GPT_PROVIDER_FINISHED",
@@ -1130,12 +1121,10 @@ class HybridAnswerService:
                         },
                     )
                 )
-            can_regenerate = not (
-                analysis is not None
-                and analysis.answer_strategy
-                is AnswerStrategy.REQUEST_ORDER_ID
-            )
-            if not validation.passed and can_regenerate:
+            # Regeneration was withheld for REQUEST_ORDER_ID because the
+            # draft had not been generated. It is generated now, so a rejected
+            # one gets the same single corrective attempt as any other.
+            if not validation.passed:
                 # Bounded, single corrective regeneration: a rejected draft is
                 # often a fixable blanket-uncertainty or speculation problem,
                 # not proof that no grounded answer exists.  Reuse the same

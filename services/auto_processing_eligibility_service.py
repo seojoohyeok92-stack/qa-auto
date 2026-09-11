@@ -150,6 +150,21 @@ _EVIDENCE_EXEMPT_ROUTES = frozenset({
     "DELIVERY_WITH_INSTALLATION_DATE",
 })
 
+# What the company does not let the system answer by itself.
+#
+# Named with GPT ①'s own action labels, from the closed set in
+# ``services/semantic_analysis.py``. Not a keyword list: "반품" appearing in a
+# question about delivery policy is not a return request, and the
+# understanding stage is what tells the two apart -- which is why this reads
+# the persisted understanding rather than the inquiry text.
+#
+# A draft is still written and staff can still send it. What closes is the
+# automatic path: a resolved, fully grounded answer about a return, an
+# exchange or damage is exactly the case this exists for, so the hold cannot
+# depend on GPT ② having withheld anything.
+POLICY_STAFF_ONLY_ACTIONS = frozenset({"CANCEL_RETURN", "DAMAGE_REPORT"})
+RETURN_OR_DAMAGE_POLICY_REVIEW = "RETURN_OR_DAMAGE_POLICY_REVIEW"
+
 # These values are persisted by ``InquiryProcessingPlanService`` while GPT①'s
 # already-authoritative understanding is in scope.  This allowlist deliberately
 # prevents arbitrary old metadata (intent, subtype, manual-review flags) from
@@ -716,6 +731,28 @@ class AutoProcessingEligibilityService:
             )
             if understanding.get("usable") is not True:
                 reasons.append(UNDERSTANDING_UNAVAILABLE)
+
+        # Company policy, read from the understanding rather than the wording.
+        #
+        # Checked outside the ``gpt_final_pipeline`` branch above on purpose:
+        # the policy holds whatever route produced the draft, and it must not
+        # become reachable only while the GPT path is healthy.
+        if semantic_routing is not None:
+            policy_understanding = semantic_routing.get("understanding")
+            policy_understanding = (
+                policy_understanding
+                if isinstance(policy_understanding, Mapping)
+                else {}
+            )
+            questions = policy_understanding.get("questions")
+            questions = questions if isinstance(questions, (list, tuple)) else ()
+            asked_actions = {
+                str(item.get("action") or "").strip().upper()
+                for item in questions
+                if isinstance(item, Mapping)
+            }
+            if asked_actions & POLICY_STAFF_ONLY_ACTIONS:
+                reasons.append(RETURN_OR_DAMAGE_POLICY_REVIEW)
 
         # Confidence remains operator telemetry only.  It is deliberately in
         # SOFT_REASONS and therefore cannot change publishability.
