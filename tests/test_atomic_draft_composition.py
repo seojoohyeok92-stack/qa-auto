@@ -57,7 +57,6 @@ from services.auto_processing_eligibility_service import (
 from services.draft_generation_service import _atomic_question_payload
 from services.hybrid_answer_service import HybridAnswerService
 from services.inquiry_analysis_service import InquiryAnalysisService
-from services.pre_generation_gate import PreGenerationGate
 from services.dps_lookup_policy import DpsLookupPolicy
 
 
@@ -100,49 +99,6 @@ def analyse(question: str, *, order_id: str = "", source_type: str = "PRODUCT_IN
             }
         )
     )
-
-
-# ==========================================================================
-# 1. CASE C -- a hold must not mean a blank reply
-# ==========================================================================
-
-
-def test_case_c_is_no_longer_skipped_before_generation() -> None:
-    analysis = analyse(CASE_C, source_type="CUSTOMER_INQUIRY")
-    decision = PreGenerationGate.evaluate_plan(
-        analysis=analysis.to_dict(),
-        plan={"needs_staff_review": True, "is_high_risk": False},
-    )
-
-    assert decision.skip_generation is False
-
-
-def test_unanswerable_legacy_subtype_does_not_skip_gpt_generation() -> None:
-    """Evidence insufficiency belongs to GPT②, not the legacy pre-gate."""
-
-    decision = PreGenerationGate.evaluate_plan(
-        analysis={
-            "inquiry_subtype": "CANCEL_RETURN_EXCHANGE",
-            "manual_review_required": True,
-            "delivery_question": False,
-        },
-        plan={"needs_staff_review": True, "is_high_risk": False},
-    )
-
-    assert decision.skip_generation is False
-
-
-def test_high_risk_legacy_metadata_does_not_skip_gpt_generation() -> None:
-    decision = PreGenerationGate.evaluate_plan(
-        analysis={
-            "inquiry_subtype": "SCHEDULE_CHANGE_REQUEST",
-            "manual_review_required": True,
-            "delivery_question": True,
-        },
-        plan={"needs_staff_review": True, "is_high_risk": True},
-    )
-
-    assert decision.skip_generation is False
 
 
 # ==========================================================================

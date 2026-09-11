@@ -56,14 +56,6 @@ from answer.providers.provider_factory import create_gpt_provider
 from services.gpt_semantic_analyzer_service import (
     GptSemanticAnalyzerService,
 )
-from services.requested_attribute_coverage import (
-    DETERMINISTIC_ROUTES as ATTRIBUTE_DETERMINISTIC_ROUTES,
-    METADATA_KEY as ATTRIBUTE_COVERAGE_KEY,
-    record as attribute_coverage_record,
-)
-from services.semantic_action_support import (
-    evaluate as evaluate_action_support,
-)
 from services.semantic_analysis import (
     SemanticAnalysis,
     is_enabled as semantic_analyzer_enabled,
@@ -207,7 +199,6 @@ def _template_unavailable_reason(
 # not be mistaken for one.
 _CARRIED_REJECTION_DIAGNOSTICS = frozenset({
     "semantic_rule_rejected",
-    "semantic_action_support",
     "rejected_rule_category",
     "rejected_template_match_kind",
     "safe_failure_code",
@@ -463,153 +454,6 @@ class AnswerService:
                 level="WARNING",
                 details={"error_type": type(error).__name__},
             )
-
-    def _record_requested_attribute_coverage(
-        self,
-        inquiry_id: int,
-        result: AnswerResult,
-        semantic: Any,
-    ) -> None:
-        """Record whether the property the customer asked for was answered.
-
-        The action gate above compares what the customer wanted *done* against
-        what the answer addresses. This compares something narrower and, on the
-        measured corpus, decisive: which *property* of that subject was asked.
-
-            "사다리차가 필요하면 비용은 누가 내나요?"  ← "사다리차는 유상입니다"
-            "설치 기사님 안 부르고 받아만 볼 수 있나요?" ← "기사님이 배송 후 설치합니다"
-
-        Both stored answers are about the right product and the right subject,
-        and both leave the asked property -- who bears the cost, whether
-        declining is allowed -- unstated. Four selector designs accepted them.
-
-        Nothing here decides publication. Like the action gate, it is written
-        down and read later by eligibility, which can only add a hold. A fault
-        of any kind leaves no record, and no record holds nothing: this
-        measurement must never be the reason a customer goes unanswered.
-        """
-
-        try:
-            atoms = getattr(semantic, "atomic_questions", ()) or ()
-            if not atoms:
-                return
-            # Nothing upstream establishes which property each piece of
-            # evidence supports yet, so the mismatch test has no input and the
-            # recorder is told so. Only the two conclusions that need no
-            # evidence are drawn. When a verification stage does supply it,
-            # this call is where it arrives.
-            route = str(result.metadata.get("selected_answer_route") or "").upper()
-            payload = attribute_coverage_record(
-                [
-                    {
-                        "atom_id": str(index),
-                        "requested_attribute": item.requested_attribute,
-                        "evidence": (),
-                    }
-                    for index, item in enumerate(atoms)
-                ],
-                evidence_attributes_available=False,
-                # An exact Template, a confirmed RULE and the product catalogue
-                # answered from a source settled before this gate existed. They
-                # keep their precedence untouched.
-                uses_learning_evidence=route not in ATTRIBUTE_DETERMINISTIC_ROUTES,
-            )
-            result.metadata[ATTRIBUTE_COVERAGE_KEY] = payload
-        except Exception:  # noqa: BLE001 - a measurement never blocks an answer
-            self.logs.record_inquiry(
-                inquiry_id,
-                "REQUESTED_ATTRIBUTE_COVERAGE_FAILED",
-                "요구 속성 충족 검사를 기록하지 못했습니다. 답변 처리는 계속합니다.",
-                level="WARNING",
-            )
-
-    def _record_semantic_action_support(
-        self,
-        inquiry_id: int,
-        request: AnswerRequest,
-        result: AnswerResult,
-        analysis: Any,
-    ) -> None:
-        """Understand the request, and record whether the answer addresses it.
-
-        Off unless ``OJE_SEMANTIC_ANALYZER_ENABLED`` says otherwise, because it
-        needs a real provider to mean anything and because turning a new model
-        dependency on for every deployment is not a decision this file gets to
-        make.
-
-        Even when on it is cheap: the router decides from text and the analysis
-        already in hand, and only the inquiries it flags -- 11.4% of the live
-        store -- reach the provider at all. Everything else returns here having
-        spent nothing.
-
-        Nothing below reads what is written except eligibility, which can only
-        add a hold. A fault of any kind is recorded and the answer proceeds:
-        this measurement must never be the reason a customer goes unanswered.
-        """
-
-        hybrid = result.metadata.get("hybrid")
-        if (
-            isinstance(hybrid, dict)
-            and hybrid.get("answer_pipeline") == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
-        ):
-            result.metadata["legacy_semantic_action_support"] = (
-                "PRODUCTION_PATH_UNUSED"
-            )
-            result.metadata["legacy_requested_attribute_coverage"] = (
-                "PRODUCTION_PATH_UNUSED"
-            )
-            return
-        prepared = request.metadata.get("semantic_routing")
-        prepared_value = request.metadata.get("_semantic_routing_value")
-        if isinstance(prepared, dict):
-            payload = dict(prepared)
-            semantic = (
-                prepared_value
-                if isinstance(prepared_value, SemanticAnalysis)
-                else None
-            )
-            if semantic is not None:
-                existing_support = result.metadata.get(
-                    "semantic_action_support"
-                )
-                if isinstance(existing_support, dict) and str(
-                    existing_support.get("status") or ""
-                ).upper() == "MISMATCH":
-                    # The candidate was rejected before answer selection.  A
-                    # review-safe draft has no answer label of its own, so
-                    # recomputing against it would erase the actual reason
-                    # that publishing was blocked.
-                    payload["support"] = dict(existing_support)
-                else:
-                    support = evaluate_action_support(
-                        semantic,
-                        route=str(result.metadata.get("selected_answer_route") or ""),
-                        template_id=result.metadata.get("template_id"),
-                        match_kind=result.metadata.get("template_match_kind"),
-                    )
-                    result.metadata["semantic_action_support"] = support.to_dict()
-                    payload["support"] = support.to_dict()
-            result.metadata["semantic_analysis"] = payload
-            self._record_requested_attribute_coverage(
-                inquiry_id, result, semantic,
-            )
-            self.logs.record_inquiry(
-                inquiry_id,
-                "SEMANTIC_ROUTING_RECORDED",
-                "문의 의미 분석 결과를 처리 경로와 답변 검증에 반영했습니다.",
-                level="INFO",
-                details=payload,
-            )
-            return
-        # No prepared record means nothing understood this inquiry.  A second
-        # semantic pass used to run right here: the legacy keyword router
-        # decided whether a model call was worth it, the analyzer was called
-        # again, and the outcome could add SEMANTIC_ACTION_MISMATCH to an
-        # answer no understanding stage had read.  Every current production run
-        # persists ``semantic_routing`` before routing, so that branch only
-        # ever saw drafts predating it -- and a keyword classifier is not what
-        # should judge those either.
-        result.metadata["legacy_semantic_action_support"] = "NO_SEMANTIC_RECORD"
 
     def _semantic_analyzer(self) -> GptSemanticAnalyzerService | None:
         """One analyzer per service, so its cache survives repeat questions."""
@@ -3266,17 +3110,21 @@ class AnswerService:
                 and prompt_included
                 and validator_cleared
             )
-            current_fact_verified = bool(
-                product_fact_guard.sensitive and final_route == "PRODUCT_DB"
-            ) or knowledge_verified or learning_verified or gpt_fact_verified
+            # Three ways a sensitive product claim can be verified, and the
+            # fourth is gone. PRODUCT_DB used to be a route that answered the
+            # customer directly from the catalogue, so being on it was itself
+            # proof that a verified fact had been used. Nothing produces that
+            # route now -- the catalogue reaches the model as evidence instead
+            # -- so the term could never be true and is removed rather than
+            # left to read as a live path.
+            current_fact_verified = (
+                knowledge_verified or learning_verified or gpt_fact_verified
+            )
             guard_metadata = {
                 **product_fact_guard.to_dict(),
                 "current_fact_verified": current_fact_verified,
                 "current_fact_source": (
-                    "PRODUCT_DB"
-                    if product_fact_guard.sensitive
-                    and final_route == "PRODUCT_DB"
-                    else "PRODUCT_CATALOG_JSON" if knowledge_verified
+                    "PRODUCT_CATALOG_JSON" if knowledge_verified
                     else "APPROVED_LEARNING" if learning_verified
                     else "GPT_SELECTED_PRODUCT_FACT" if gpt_fact_verified
                     else None
@@ -3448,9 +3296,6 @@ class AnswerService:
             # evaluator fault is recorded and the answer proceeds.
             self._record_atomic_questions(inquiry_id, phase9_analysis)
             self._record_semantic_coverage(inquiry_id, request, result)
-            self._record_semantic_action_support(
-                inquiry_id, request, result, phase9_analysis,
-            )
             # Persisted on the draft, not only on the in-memory request, so the
             # publishing gate can see whether GPT ① actually read this inquiry.
             # Automatic publication now requires that it did, and a gate that

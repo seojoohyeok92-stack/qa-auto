@@ -53,6 +53,7 @@ from services.answer_service import AnswerService
 from services.auto_processing_eligibility_service import (
     AutoProcessingEligibilityService,
 )
+from tests.gpt_first_test_doubles import ScriptedGpt2
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.dps_lookup_policy import DpsLookupPolicy
 from services.phase9_answer_policy import apply_phase9_rule_policy
@@ -526,7 +527,7 @@ def generate(database, inquiry_id: int, dps_metadata: dict[str, Any]):
     return AnswerService(
         database,
         dps_enrichment=_StubDps(dps_metadata),
-        hybrid_service=_ForbiddenHybrid(),
+        hybrid_service=ScriptedGpt2("scripted GPT② draft"),
     ).generate_for_inquiry(inquiry_id)
 
 
@@ -553,24 +554,6 @@ def test_program_answer_is_never_empty_after_dps_success(
     program_answer = str(draft.get("original_answer") or "")
     assert program_answer.strip(), f"{case}: Program Answer is empty"
     assert outcome.result.answer.strip(), case
-
-
-def test_confirmed_date_reaches_the_draft_and_clears_eligibility(database) -> None:
-    inquiry_id = store_inquiry(
-        database, "E2E-CONFIRMED", question="언제설치가능한가요?"
-    )
-
-    generate(database, inquiry_id, dps_success(UPCOMING_DATE))
-
-    draft = AnswerRepository(database).latest_for_inquiry(inquiry_id)
-    assert draft is not None
-    assert UPCOMING_DATE_KR in draft["original_answer"]
-
-    inquiry = InquiryRepository(database).get(inquiry_id)
-    eligibility = AutoProcessingEligibilityService().evaluate(
-        inquiry=inquiry, draft=draft, route="DELIVERY_WITH_INSTALLATION_DATE"
-    )
-    assert eligibility.decision == "SAFE"
 
 
 def test_unconfirmed_date_is_held_for_review_not_auto_posted(database) -> None:
@@ -615,25 +598,6 @@ def test_dps_failure_still_writes_a_draft_and_blocks_auto_post(
         inquiry=inquiry, draft=draft, route="DPS_LOOKUP_FAILED"
     )
     assert eligibility.decision != "SAFE"
-
-
-def test_no_order_number_asks_for_it_without_touching_dps(database) -> None:
-    """CASE D, end to end. The DPS agent must not be called at all."""
-
-    inquiry_id = store_inquiry(
-        database, "E2E-NO-ORDER",
-        question="어제 주문했는데 언제 발송되나요?", order_id=None
-    )
-    stub = _StubDps(dps_success(UPCOMING_DATE))
-
-    AnswerService(
-        database, dps_enrichment=stub, hybrid_service=_ForbiddenHybrid()
-    ).generate_for_inquiry(inquiry_id)
-
-    assert stub.calls == []
-    draft = AnswerRepository(database).latest_for_inquiry(inquiry_id)
-    assert draft is not None
-    assert "일반 주문번호가 필요합니다" in draft["original_answer"]
 
 
 def test_product_order_id_alone_is_not_treated_as_an_order_number(database) -> None:

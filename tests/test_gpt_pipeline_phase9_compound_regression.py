@@ -129,7 +129,6 @@ def test_usable_understanding_turns_rule_into_gpt_candidate() -> None:
             "similar_approved_answers": [{"learning_id": 101, "answer": "learning evidence"}],
             "subquestion_evidence": [],
         },
-        legacy_evidence_verification=False,
     )
     service.generate(request, rule)
 

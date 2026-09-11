@@ -85,6 +85,7 @@ from ui.answer_status_presenter import (
     build_answer_status,
     build_decision_trace,
     pipeline_route,
+    trace_stage_label,
 )
 from ui.rerun_profile import snapshot as rerun_profile_snapshot
 from ui.session_identity import can, current_actor
@@ -1455,10 +1456,19 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 + _field("문제 발생 단계", decision_trace.root_stage or "없음")
                 + _field("Root Cause", decision_trace.root_cause)
                 + _field("설명", decision_trace.root_message)
-                + _field("GPT①", decision_trace.gpt1)
-                + _field("Source", decision_trace.source)
-                + _field("Retrieval", decision_trace.retrieval)
-                + _field("GPT②", decision_trace.gpt2)
+                + _field(
+                    "GPT①", trace_stage_label("gpt1", decision_trace.gpt1)
+                )
+                + _field(
+                    "Source", trace_stage_label("source", decision_trace.source)
+                )
+                + _field(
+                    "Retrieval",
+                    trace_stage_label("retrieval", decision_trace.retrieval),
+                )
+                + _field(
+                    "GPT②", trace_stage_label("gpt2", decision_trace.gpt2)
+                )
                 + _field("Hard Safety", decision_trace.hard_safety)
                 + _field("Auto Post", decision_trace.auto_post)
                 + "</div>",
@@ -2313,7 +2323,20 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                             "적용 가능한 기존 템플릿이 없어 GPT로 새 답변을 "
                             f"생성했습니다. Draft ID: {int(draft['id'])}"
                         )
+                elif generation_mode == "SAFE_RULE":
+                    # Not a rule answering the customer -- that is gone. This
+                    # is the fixed safe body written for staff when the answer
+                    # step could not run, and the generic branch below reported
+                    # it as "생성 방식: SAFE_RULE", which reads like the
+                    # opposite of what happened.
+                    st.warning(
+                        "GPT 답변 생성 단계를 실행하지 못해 직원 검토용 "
+                        f"안전 초안을 작성했습니다. Draft ID: {int(draft['id'])}"
+                    )
                 elif generation_mode == "TEMPLATE":
+                    # A draft written by an earlier version; nothing produces
+                    # this route now. Kept so an old record still reads as what
+                    # it was.
                     st.success(
                         "기존 템플릿으로 답변을 생성했습니다. "
                         f"Draft ID: {int(draft['id'])}"

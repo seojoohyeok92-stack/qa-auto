@@ -191,10 +191,12 @@ def _reconcile_product_fact_names(
     The cost of guessing wrong is the whole answer. ``AnswerValidator`` resolves
     every ``used_facts`` entry and, finding no such path, records "존재하지 않는
     Fact를 사용했습니다: installation_fee_applies"; validation fails, the
-    corrective regeneration fails the same way, and the pipeline falls back to
-    the deterministic rule reply. Measured end to end: a correct answer is
-    discarded and the inquiry is published as RULE_FALLBACK with the Learning
-    and Product evidence unused.
+    corrective regeneration fails the same way, and the answer step ends with
+    nothing. Measured end to end: a correct answer is discarded and the inquiry
+    is held for staff with the Learning and Product evidence unused. (When this
+    was measured the pipeline published the deterministic rule reply instead,
+    which is where the cost was first seen; that substitution is now gone, so
+    the cost is a lost automation rather than a wrong answer to a customer.)
 
     This moves the name, and only a name the prompt actually delivered as a
     product fact. It is a reconciliation of two namespaces CODE created, not a

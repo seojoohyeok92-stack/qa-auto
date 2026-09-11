@@ -23,13 +23,6 @@ from services.draft_generation_service import DraftGenerationService
 from services import learning_evidence_policy
 from services.learning_evidence_policy import usable_as_factual_evidence
 from services.gpt_understanding_service import GptUnderstandingService
-from services.evidence_selection_service import EvidenceSelectionService
-from services.evidence_verification_service import (
-    METADATA_KEY as EVIDENCE_VERIFICATION_KEY,
-    EvidenceVerificationService,
-    record,
-    selected_pairs_from_context,
-)
 # ``required_fact_groups`` is no longer consulted here: see _product_fact_fields.
 from services.product_knowledge_service import SUBJECT_SENSITIVE_FIELDS
 from services.self_review_service import SelfReviewService
@@ -69,7 +62,6 @@ class HybridAnswerService:
         validator: AnswerValidator | None = None,
         fact_selection: FactSelectionService | None = None,
         learning_context_provider: Callable[..., dict[str, Any]] | None = None,
-        legacy_evidence_verification: bool = True,
     ) -> None:
         self.provider = provider or create_gpt_provider()
         self.understanding = GptUnderstandingService(self.provider)
@@ -81,9 +73,6 @@ class HybridAnswerService:
         self.validator = validator or AnswerValidator()
         self.fact_selection = fact_selection or FactSelectionService()
         self._learning_context_provider = learning_context_provider
-        # Retained only for direct compatibility diagnostics.  Production
-        # construction explicitly disables this extra selector/verifier pass.
-        self._legacy_evidence_verification = legacy_evidence_verification
         self._stage_seconds: dict[str, float] = {}
 
     def _provider_telemetry(
@@ -363,48 +352,6 @@ class HybridAnswerService:
         knowledge = request.metadata.get("product_knowledge")
         evidence = getattr(knowledge, "evidence_text", None)
         return evidence() if callable(evidence) else ""
-
-    def _verify_evidence(
-        self, request: AnswerRequest, learning_context: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Check the stored answers this generation is about to lean on.
-
-        Uses the same provider the rest of the pipeline already holds, so no
-        second semantic pass is made and no Learning row is re-derived. A
-        fault here returns nothing rather than raising: the verifier exists to
-        withhold automation, and it must never be the reason an inquiry fails
-        to produce a draft at all. Withholding then falls to the gate, which
-        reads a required-but-absent record as a hold.
-        """
-
-        try:
-            semantic = request.metadata.get("_semantic_routing_value")
-            if semantic is None:
-                return None
-            # The selector decides which retrieved candidates are worth a
-            # verifier call; the verifier still decides which of them may be
-            # used. Whatever the deterministic ladder already chose is kept
-            # either way, so a selector fault costs nothing.
-            selector = EvidenceSelectionService(self.provider)
-            pairs = selected_pairs_from_context(
-                learning_context, semantic, selector,
-                product=str(request.product_name or ""),
-            )
-            verifier = EvidenceVerificationService(self.provider)
-            verifications = []
-            for atom, candidates in pairs:
-                verifications.extend(
-                    verifier.verify_all(atom=atom, candidates=candidates)
-                )
-            if not verifications:
-                return None
-            payload = record(verifications)
-            payload["atom_count"] = len(pairs)
-            payload["call_count"] = verifier.call_count
-            payload["selector_calls"] = selector.call_count
-            return payload
-        except Exception:  # noqa: BLE001 - never blocks a draft
-            return None
 
     @staticmethod
     def _evidence_texts(learning_context: dict[str, Any]) -> str:
@@ -829,7 +776,6 @@ class HybridAnswerService:
                 )
             )
             learning_context: dict[str, Any] = {}
-            evidence_verification: dict[str, Any] | None = None
             # REQUEST_ORDER_ID used to short-circuit here: ``learning_context``
             # stayed empty, the provider was never called, and the deterministic
             # rule body became the draft. The strategy is a keyword-tier
@@ -924,16 +870,13 @@ class HybridAnswerService:
             # composition -- it is marked on the evidence, the model reads
             # both sides and leaves the disputed claim unresolved, and the
             # publishing gate decides. The call is removed.
-            # The draft provider is the one final evidence reader in the
-            # production path.  The former selector/verifier pair made
-            # additional semantic provider calls after retrieval and
-            # before drafting, without changing the prompt.  They remain
-            # available for historical diagnostics, but no longer decide
-            # whether retrieved candidates reach GPT ANSWER.
-            if self._legacy_evidence_verification:
-                evidence_verification = self._verify_evidence(
-                    request, learning_context,
-                )
+            # The draft provider is the one evidence reader in this path.
+            # A selector/verifier pair used to run here, making two further
+            # semantic provider calls after retrieval and before drafting
+            # without changing the prompt, and deciding which retrieved
+            # candidates the answer step was allowed to see. Production
+            # switched it off and then nothing turned it back on; choosing the
+            # evidence is GPT ②'s, so it is gone rather than disabled.
             draft = self.drafts.generate(
                 facts,
                 intent,
@@ -1289,25 +1232,13 @@ class HybridAnswerService:
                 "analysis": analysis.to_dict() if analysis else {},
                 "selected_facts": selected_facts.to_dict(),
             }
-            # Written at the top level, beside the other gate records, because
-            # eligibility reads the draft's metadata root. Absent when there
-            # was nothing to verify; absent-when-required is what the gate
-            # treats as a hold.
-            if evidence_verification is not None:
-                metadata[EVIDENCE_VERIFICATION_KEY] = evidence_verification
             product_facts_context = self._product_facts_context(request)
             metadata["hybrid"] = {
                 "enabled": True,
-                "answer_pipeline": (
-                    "LEGACY_SELECTOR_VERIFIER"
-                    if self._legacy_evidence_verification
-                    else "GPT_UNDERSTAND_RETRIEVE_ANSWER"
-                ),
-                "legacy_evidence_selector_verifier": (
-                    "ACTIVE_COMPATIBILITY_MODE"
-                    if self._legacy_evidence_verification
-                    else "PRODUCTION_PATH_UNUSED"
-                ),
+                # One pipeline now, so this is a statement rather than a
+                # choice. Historical drafts may still carry
+                # ``LEGACY_SELECTOR_VERIFIER``; readers keep recognising it.
+                "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
                 "provider": self.provider.name,
                 "fallback_used": False,
                 # Recorded from the context that was actually built for this

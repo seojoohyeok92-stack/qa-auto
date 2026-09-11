@@ -20,19 +20,40 @@ REVIEW_ROUTES = {
     "REVIEW_REQUIRED_SAFE_DRAFT",
 }
 
-AUTO_POSTABLE_ROUTES = {
-    "TEMPLATE",
-    "SAFE_RULE",
-    "PRODUCT_DB",
+# Routes a draft written today can actually carry.
+#
+# ``GPT_FALLBACK``/``GPT_DIRECT`` are the composed answer; the rest are the
+# deterministic execution routes, where the reply states only what a lookup or
+# a workflow established. A generated "please send us your order number" reply
+# asserts no order fact at all, so it is itself auto-postable; claiming an
+# order fact without a trusted lookup is still blocked by the order/DPS
+# reasons below.
+CURRENT_AUTO_POSTABLE_ROUTES = frozenset({
     "GPT_FALLBACK",
     "GPT_DIRECT",
     "DELIVERY_WITH_INSTALLATION_DATE",
-    # A generated "please send us your order number" reply asserts no order
-    # fact at all -- it is the safe response to a missing order id, so it is
-    # itself auto-postable. The unsafe case (claiming an order fact without a
-    # trusted lookup) is still blocked by the order/DPS reasons below.
     "ORDER_ID_REQUEST",
-}
+})
+
+# Routes that only exist in drafts written by earlier versions.
+#
+# TEMPLATE, SAFE_RULE and PRODUCT_DB were final-answer routes: a keyword rule,
+# a safe rule or a catalogue fact answered the customer directly. Nothing
+# produces them now -- the same material reaches GPT ② as evidence -- but rows
+# in the operational database still carry them, and the dashboard re-evaluates
+# those rows to show why each one was or was not posted. Recognising a stored
+# value is not the same as being able to choose it: ``selected_answer_route``
+# is set only from the list above, which
+# ``tests/test_p2b_legacy_route_compatibility.py`` pins.
+HISTORICAL_AUTO_POSTABLE_ROUTES = frozenset({
+    "TEMPLATE",
+    "SAFE_RULE",
+    "PRODUCT_DB",
+})
+
+AUTO_POSTABLE_ROUTES = (
+    CURRENT_AUTO_POSTABLE_ROUTES | HISTORICAL_AUTO_POSTABLE_ROUTES
+)
 
 # Conditions worth recording, but which do not on their own indicate that
 # answering the customer is unsafe. Operating philosophy: auto-post by
@@ -139,15 +160,25 @@ _NO_SOURCE_STATUS = "NO_RELIABLE_SOURCE"
 # Routes whose answer comes from a source settled before retrieval ran, so an
 # empty retrieval verdict says nothing about them. ORDER_ID_REQUEST is the safe
 # "please send your order number" reply, which asserts no fact at all.
+# Routes that do not require a persisted GPT ② evidence decision, because
+# nothing on them was composed: the reply is an order-number request, or a date
+# copied from a validated DPS snapshot. Both keep their own order/DPS trust
+# checks below.
+#
+# SAFE_RULE and PRODUCT_DB are here for the historical reason given above --
+# each was its own final answer with no GPT ② record to read, and stored rows
+# must still be readable. ``TEMPLATE`` is deliberately *not* in this set even
+# though it is legacy in exactly the same way: a generic template is candidate
+# evidence rather than a statement about this customer, so a stored draft on
+# that route still has to show the evidence decision. Spelling the two legacy
+# names out rather than reusing ``HISTORICAL_AUTO_POSTABLE_ROUTES`` is what
+# keeps that distinction; ``tests/test_p2b_legacy_route_compatibility.py`` pins
+# both sets against the values they held before they were split.
 _EVIDENCE_EXEMPT_ROUTES = frozenset({
-    # A generic template is candidate evidence, not a semantic final answer.
-    # It therefore still needs the persisted GPT② evidence decision.  Only
-    # fixed mechanical routes below may legitimately bypass that decision.
-    "SAFE_RULE", "PRODUCT_DB", "ORDER_ID_REQUEST",
-    # A date copied from a validated DPS snapshot is a fixed verified
-    # workflow result, not a GPT-composed answer.  It has its own order/DPS
-    # trust checks below and must not require a GPT② trace after persistence.
+    "ORDER_ID_REQUEST",
     "DELIVERY_WITH_INSTALLATION_DATE",
+    "SAFE_RULE",
+    "PRODUCT_DB",
 })
 
 # What the company does not let the system answer by itself.
@@ -401,10 +432,16 @@ class AutoProcessingEligibilityService:
             or _coverage_incomplete(coverage_metadata)
         ):
             return False
-        # Rendered templates are validated by the route-specific template
-        # validator and never have GPT-only draft/self-review/evidence blocks.
-        # Independent product/order/DPS/privacy and route reasons are still
-        # evaluated below and remain hard blockers.
+        # Historical compatibility, not a live shortcut. A rendered template
+        # was its own final answer, validated by a template validator and
+        # carrying no GPT draft/self-review record to read -- so for a stored
+        # row on that route the GPT-shaped checks below would report a hold
+        # that never happened. No generation path selects TEMPLATE any more
+        # (see ``HISTORICAL_AUTO_POSTABLE_ROUTES``), so this cannot grant a
+        # new answer anything; ``ui/answer_status_presenter.py`` re-evaluates
+        # old rows through here, which is the only reader left. Independent
+        # product/order/DPS/privacy and route reasons are still evaluated
+        # below and remain hard blockers either way.
         if str(route or "").upper() == "TEMPLATE":
             return True
         if not cls._evidence_fully_supported(hybrid):

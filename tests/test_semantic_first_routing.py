@@ -7,7 +7,6 @@ from repositories.answer_repository import AnswerRepository
 from repositories.inquiry_repository import InquiryRepository
 from answer.models import AnswerResult, AnswerStatus
 from services.inquiry_processing_plan_service import InquiryProcessingPlanService
-from services.semantic_action_support import MISMATCH, evaluate
 from services.semantic_analysis import parse
 
 
@@ -236,12 +235,3 @@ def test_the_same_question_without_a_stated_purchase_is_held(tmp_path) -> None:
     assert plan.analysis.requires_order_id is False
     assert plan.analysis.manual_review_required is True
     assert plan.selected_answer_route != "ORDER_ID_REQUEST"
-
-
-def test_fixed_event_rule_cannot_answer_order_identification_question() -> None:
-    decision = evaluate(
-        semantic("ORDER_IDENTIFICATION", order=True),
-        route="TEMPLATE", template_id="", match_kind="FIXED_EVENT_ONNURI",
-    )
-
-    assert decision.status == MISMATCH

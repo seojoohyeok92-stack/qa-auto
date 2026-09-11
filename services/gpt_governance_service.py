@@ -272,12 +272,19 @@ class GovernedHybridAnswerService:
                 },
             )
         ]
+        # ``GPT_ANSWER_STEP_UNAVAILABLE`` is what these six events used to call
+        # ``GPT_RULE_FALLBACK``, and the messages used to say a Rule Answer had
+        # been used. Neither is true: ``_gpt_unavailable_outcome`` produces no
+        # answer at all, and the inquiry goes to staff. Rows written before this
+        # still carry the old code, which is why nothing here maps or rewrites
+        # them -- the code is a log value read by people, not a schema, and an
+        # operator reading an old row should see what that version actually did.
         if settings.mode is GptMode.DISABLED or not settings.enabled:
             governance["fallback_reason"] = "DISABLED"
             events.append(
                 HybridEvent(
-                    "GPT_RULE_FALLBACK",
-                    "GPT 계층이 비활성화되어 Rule Answer를 사용했습니다.",
+                    "GPT_ANSWER_STEP_UNAVAILABLE",
+                    "GPT 계층이 비활성화되어 답변 생성 단계를 실행하지 않았습니다. 직원 검토로 처리됩니다.",
                     details={"reason": "DISABLED"},
                 )
             )
@@ -309,8 +316,8 @@ class GovernedHybridAnswerService:
                         {"issues": list(issues)},
                     ),
                     HybridEvent(
-                        "GPT_RULE_FALLBACK",
-                        "Provider 설정 오류로 Rule Answer를 사용했습니다.",
+                        "GPT_ANSWER_STEP_UNAVAILABLE",
+                        "Provider 설정 오류로 답변 생성 단계를 실행하지 않았습니다. 직원 검토로 처리됩니다.",
                         "WARNING",
                         {"reason": "CONFIGURATION_INVALID"},
                     ),
@@ -343,8 +350,8 @@ class GovernedHybridAnswerService:
                         {"blocking_issue_count": len(privacy.blocking_issues)},
                     ),
                     HybridEvent(
-                        "GPT_RULE_FALLBACK",
-                        "Privacy 검사 차단으로 Rule Answer를 사용했습니다.",
+                        "GPT_ANSWER_STEP_UNAVAILABLE",
+                        "Privacy 검사 차단으로 답변 생성 단계를 실행하지 않았습니다. 직원 검토로 처리됩니다.",
                         "WARNING",
                         {"reason": "PRIVACY_BLOCKED"},
                     ),
@@ -381,8 +388,8 @@ class GovernedHybridAnswerService:
                 [
                     HybridEvent(code, str(limit_error), "WARNING"),
                     HybridEvent(
-                        "GPT_RULE_FALLBACK",
-                        "Provider 운영 한도로 Rule Answer를 사용했습니다.",
+                        "GPT_ANSWER_STEP_UNAVAILABLE",
+                        "Provider 운영 한도로 답변 생성 단계를 실행하지 않았습니다. 직원 검토로 처리됩니다.",
                         "WARNING",
                         {"reason": governance["fallback_reason"]},
                     ),
@@ -435,8 +442,8 @@ class GovernedHybridAnswerService:
                 governance["fallback_reason"] = "CANARY_EXCLUDED"
                 events.append(
                     HybridEvent(
-                        "GPT_RULE_FALLBACK",
-                        "고위험 또는 Privacy 조건으로 Rule Answer를 사용했습니다.",
+                        "GPT_ANSWER_STEP_UNAVAILABLE",
+                        "Canary 제외 조건으로 답변 생성 단계를 실행하지 않았습니다. 직원 검토로 처리됩니다.",
                         "WARNING",
                         {"reason": "CANARY_EXCLUDED"},
                     )
@@ -473,7 +480,6 @@ class GovernedHybridAnswerService:
             hybrid = HybridAnswerService(
                 provider,
                 learning_context_provider=learning_context.build,
-                legacy_evidence_verification=False,
             ).generate(
                 request, rule_result
             )
@@ -614,8 +620,8 @@ class GovernedHybridAnswerService:
                         },
                     ),
                     HybridEvent(
-                        "GPT_RULE_FALLBACK",
-                        "Provider 장애로 Rule Answer를 사용했습니다.",
+                        "GPT_ANSWER_STEP_UNAVAILABLE",
+                        "Provider 장애로 답변 생성 단계를 실행하지 않았습니다. 직원 검토로 처리됩니다.",
                         "WARNING",
                         {"reason": "TIMEOUT" if timeout else "PROVIDER_FAILED"},
                     ),

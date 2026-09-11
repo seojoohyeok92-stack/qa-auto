@@ -8,7 +8,6 @@ import pytest
 from answer.answer_format import format_final_answer
 from answer.models import AnswerResult, AnswerStatus
 from answer.engine import AnswerEngine
-from answer.answer_validator import AnswerValidator
 from repositories.answer_repository import AnswerRepository
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
@@ -16,6 +15,7 @@ from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.answer_service import AnswerService
+from services.gpt_semantic_analyzer_service import GptSemanticAnalyzerService
 from services.dps_lookup_policy import DpsLookupPolicy
 from services.approval_service import ApprovalService
 from services.phase9_answer_policy import (
@@ -54,6 +54,29 @@ class StaticEngine:
         self.calls += 1
         return self.value
 
+    def candidates(self, request):
+        """What the real engine does with a rule that matched.
+
+        ``AnswerEngine.candidates`` offers its own verdict to the answer step as
+        retrieved evidence rather than returning it as the reply. A double that
+        omits this does not model a silent rule tier -- it models a store with
+        no standing statement about the product at all, which is why the cases
+        asserting the template survived as evidence need it here.
+        """
+
+        body = str(getattr(self.value, "answer", "") or "").strip()
+        if not body:
+            return []
+        return [
+            {
+                "template_id": self.value.matched_rule or "STATIC",
+                "answer": body,
+                "source": "RULE_ENGINE",
+                "trigger_reason": self.value.reason,
+                "template_match_kind": "EXACT",
+            }
+        ]
+
 
 class ForbiddenEngine:
     def generate(self, request):
@@ -64,9 +87,16 @@ class RecordingHybrid:
     def __init__(self, answers: list[object]) -> None:
         self.answers = list(answers)
         self.calls = 0
+        # The template/rule bodies the answer step was given, read off the
+        # request the way the real service reads them. Several cases below
+        # assert a rule body arrived here instead of reaching the customer.
+        self.candidate_bodies: list[str] = []
 
     def generate(self, request, rule_result):
         self.calls += 1
+        for item in (request.metadata.get("template_candidates") or ()):
+            if isinstance(item, dict):
+                self.candidate_bodies.append(str(item.get("answer") or ""))
         answer = self.answers.pop(0)
         return SimpleNamespace(
             result=_result(answer, provider="openai_hybrid"),
@@ -77,6 +107,76 @@ class RecordingHybrid:
 class ForbiddenHybrid:
     def generate(self, request, rule_result):
         raise AssertionError("GPT must not be called")
+
+
+class StubUnderstanding:
+    """GPT ①, answering with a fixed understanding.
+
+    The deterministic execution routes -- ask for an order number, state a
+    confirmed DPS date -- are reached from what GPT ① says the customer wants,
+    not from words in the inquiry. A fixture that leaves GPT ① out therefore
+    does not exercise those routes with GPT absent; it exercises the
+    understanding being unavailable, which is held for staff by design. So the
+    cases below that are *about* an execution route say what was understood.
+    """
+
+    name = "semantic_stub"
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    def generate_json(self, *, task, prompt, context):
+        self.calls += 1
+        return dict(self.payload)
+
+
+def _understanding(
+    question: str,
+    *,
+    action: str,
+    purchase_state: str = "CURRENT_ORDER",
+    requires_order_context: bool = True,
+    requires_delivery_schedule: bool = False,
+    requested_information: str = "",
+) -> dict:
+    """One atomic question, in the schema GPT ① actually returns."""
+
+    return {
+        "primary_action": action,
+        "secondary_actions": [],
+        "request_type": "QUESTION",
+        "objects": [],
+        "atomic_questions": [
+            {
+                "text": question,
+                "action": action,
+                "requested_information": requested_information or question[:50],
+                "requested_attribute": "GENERAL",
+            }
+        ],
+        "deadline": None,
+        "constraints": [],
+        "negation": False,
+        "conditional": False,
+        "requires_order_context": requires_order_context,
+        "requires_delivery_schedule": requires_delivery_schedule,
+        "asks_delivery_schedule": requires_delivery_schedule,
+        "asks_delivery_outcome": False,
+        "purchase_state": purchase_state,
+        "confidence": 0.96,
+    }
+
+
+def _analyzer(payload: dict) -> GptSemanticAnalyzerService:
+    return GptSemanticAnalyzerService(StubUnderstanding(payload))
+
+
+@pytest.fixture(autouse=True)
+def _understanding_stage_enabled(monkeypatch) -> None:
+    """The stage is on in production, so it is on here, never read from .env."""
+
+    monkeypatch.setenv("OJE_SEMANTIC_ANALYZER_ENABLED", "true")
 
 
 class RaisingEngine:
@@ -146,26 +246,39 @@ def _inquiry(
     ).inquiry_id
 
 
-def test_preferred_matching_template_records_template_metadata(
+def test_a_matching_template_is_evidence_and_not_the_reply(
     database: Database,
 ) -> None:
+    """The template still reaches the answer step -- as something to use.
+
+    This case used to assert the opposite: a matching template *was* the
+    answer, and GPT was never called. That was the shortcut whose removal this
+    work is about, because a substring match on the product name is not a
+    reading of what the customer asked. What has to stay true is that the
+    store's confirmed sentence is not lost -- the rule engine is still asked,
+    and what it returns is handed to the answer step.
+    """
+
     inquiry_id = _inquiry(database, "MATCH")
     engine = StaticEngine(_result("운영 템플릿 원문"))
+    hybrid = RecordingHybrid(["GPT가 템플릿 근거로 작성한 답변입니다."])
     outcome = AnswerService(
         database,
         engine=engine,
         dps_enrichment=FakeDps(),
-        hybrid_service=ForbiddenHybrid(),
+        hybrid_service=hybrid,
     ).generate_for_inquiry(inquiry_id, prefer_template=True)
 
     metadata = outcome.draft["metadata_json"]
-    assert outcome.result.answer == format_final_answer("운영 템플릿 원문")
-    assert metadata["generation_mode"] == "TEMPLATE"
-    assert metadata["template_preferred"] is True
-    assert metadata["template_override"] is False
-    assert metadata["template_id"] == "OPERATIONS_TEMPLATE"
-    assert metadata["gpt_called"] is False
     assert engine.calls == 1
+    assert hybrid.calls == 1
+    # The template body was offered to the answer step as a candidate, and the
+    # reply is the answer step's, not the template's.
+    assert "운영 템플릿 원문" in hybrid.candidate_bodies
+    assert outcome.result.answer != format_final_answer("운영 템플릿 원문")
+    assert metadata["generation_mode"] != "TEMPLATE"
+    assert metadata["selected_answer_route"] not in {"TEMPLATE", "SAFE_RULE"}
+    assert metadata["template_preferred"] is True
 
 
 @pytest.mark.parametrize(
@@ -202,9 +315,17 @@ def test_template_catalog_lists_connected_sources_and_filters() -> None:
     assert any(row["source_kind"] == "DELIVERY_SAFE_TEMPLATE" for row in rows)
 
 
-def test_product_db_result_has_independent_route_and_validator(
+def test_a_product_fact_answer_is_evidence_and_not_a_route_of_its_own(
     database: Database,
 ) -> None:
+    """A verified catalogue fact is material for the answer, not the answer.
+
+    The PRODUCT_DB route -- the catalogue replying to the customer directly,
+    with its own validator -- is gone. The fact itself is protected and still
+    retrieved; what it no longer carries is the authority to finish the
+    inquiry without anything having read the question.
+    """
+
     inquiry_id = _inquiry(
         database,
         "PRODUCT-DB",
@@ -221,21 +342,36 @@ def test_product_db_result_has_independent_route_and_validator(
         needs_review=False,
         matched_rule="모델스펙/스피커",
     )
+    hybrid = RecordingHybrid(["내장 스피커 여부를 GPT가 설명한 답변입니다."])
     outcome = AnswerService(
         database,
         engine=StaticEngine(product_result),
         dps_enrichment=FakeDps(),
-        hybrid_service=ForbiddenHybrid(),
+        hybrid_service=hybrid,
     ).generate_for_inquiry(inquiry_id, prefer_template=True)
     metadata = outcome.draft["metadata_json"]
-    assert metadata["generation_mode"] == "PRODUCT_DB"
-    assert metadata["selected_answer_route"] == "PRODUCT_DB"
-    assert metadata["gpt_called"] is False
+    assert hybrid.calls == 1
+    assert (
+        "문의하신 모델은 스피커가 내장되어 있습니다."
+        in hybrid.candidate_bodies
+    )
+    assert metadata["generation_mode"] != "PRODUCT_DB"
+    assert metadata["selected_answer_route"] != "PRODUCT_DB"
 
 
-def test_safe_rule_is_selected_before_gpt_and_preserves_original(
+def test_a_safe_rule_does_not_pre_empt_retrieval_or_the_answer_step(
     database: Database,
 ) -> None:
+    """The case that named the shortcut, now asserting its absence.
+
+    A rule with ``status=NEEDS_REVIEW`` used to be published verbatim and end
+    the request: no Learning retrieval, no answer step, route ``SAFE_RULE``.
+    The damage was not the held draft -- holding this is correct -- but that
+    one keyword table decided the inquiry had no other evidence worth finding.
+    Retrieval and the answer step now run, and the rule's own sentence is one
+    of the things the answer step is given.
+    """
+
     inquiry_id = _inquiry(
         database,
         "SAFE-RULE-PRE-GPT",
@@ -258,7 +394,7 @@ def test_safe_rule_is_selected_before_gpt_and_preserves_original(
         matched_rule="폐가전수거",
         metadata={"source_status": "추가정보 필요"},
     )
-    hybrid = ForbiddenHybrid()
+    hybrid = RecordingHybrid(["폐가전 수거 가능 여부를 GPT가 설명한 답변입니다."])
 
     outcome = AnswerService(
         database,
@@ -274,27 +410,21 @@ def test_safe_rule_is_selected_before_gpt_and_preserves_original(
         for row in WorkflowRepository(database).list_steps(inquiry_id)
         if row["step_code"] == "ANSWER_GENERATED"
     )
-    logs = LogRepository(database).recent_for_inquiry(inquiry_id, limit=200)
 
     wrapped = format_final_answer(original)
-    assert outcome.result.answer == wrapped
-    assert outcome.draft["original_answer"] == wrapped
-    assert metadata["selected_answer_route"] == "SAFE_RULE"
-    assert metadata["generation_mode"] == "SAFE_RULE"
-    assert metadata["gpt_called"] is False
-    assert metadata["validator_result"]["status"] == "PASS"
+    assert hybrid.calls == 1
+    assert original in hybrid.candidate_bodies
+    assert outcome.result.answer != wrapped
+    assert metadata["selected_answer_route"] != "SAFE_RULE"
+    assert metadata["generation_mode"] != "SAFE_RULE"
+    # A draft still exists, is still the active one, and the workflow step is
+    # still closed -- the hold is a publishing decision, not a missing draft.
     assert active is not None and active["id"] == outcome.draft["id"]
-    assert active["original_answer"] == wrapped
+    assert active["original_answer"] == outcome.draft["original_answer"]
     assert answer_step["step_status"] == "COMPLETED"
-    assert any(row["event_code"] == "SAFE_RULE_SELECTED" for row in logs)
-    assert not any(
-        row["event_code"].startswith("SIMILAR_ANSWERS_")
-        or row["event_code"] == "LEARNING_CONTEXT_APPLIED"
-        for row in logs
-    )
 
 
-def test_real_engine_need_info_answer_uses_safe_rule_before_gpt(
+def test_real_engine_need_info_answer_still_reaches_the_answer_step(
     database: Database,
 ) -> None:
     inquiry_id = InquiryRepository(database).upsert_work_item(
@@ -309,7 +439,7 @@ def test_real_engine_need_info_answer_uses_safe_rule_before_gpt(
             "raw_json": {},
         }
     ).inquiry_id
-    hybrid = ForbiddenHybrid()
+    hybrid = RecordingHybrid(["폐가전 수거 조건을 GPT가 설명한 답변입니다."])
 
     outcome = AnswerService(
         database,
@@ -319,30 +449,11 @@ def test_real_engine_need_info_answer_uses_safe_rule_before_gpt(
     ).generate_for_inquiry(inquiry_id)
 
     metadata = outcome.draft["metadata_json"]
-    assert outcome.result.status is AnswerStatus.NEEDS_REVIEW
+    # The real engine's "needs more information" body is evidence here, so the
+    # answer step runs and what it writes is the draft.
+    assert hybrid.calls == 1
     assert outcome.result.answer.strip()
-    assert metadata["selected_answer_route"] == "SAFE_RULE"
-    assert metadata["gpt_called"] is False
-    assert metadata["validator_result"]["status"] == "PASS"
-
-
-@pytest.mark.parametrize(
-    ("answer", "product_name"),
-    [
-        ("CONFLICT 상태의 HDMI 사양입니다.", "삼성 모니터"),
-        ("model_mismatch 상태입니다.", "삼성 모니터"),
-        ("스피커가 내장되어 있습니다.", ""),
-    ],
-)
-def test_product_db_validator_blocks_unverified_internal_states(
-    answer: str,
-    product_name: str,
-) -> None:
-    validation = AnswerValidator().validate_product_db_text(
-        answer,
-        product_name=product_name,
-    )
-    assert validation.passed is False
+    assert metadata["selected_answer_route"] != "SAFE_RULE"
 
 
 def test_preferred_template_miss_calls_gpt_without_override(
@@ -540,6 +651,14 @@ def test_missing_order_delivery_safety_cannot_be_overridden(
         engine=ForbiddenEngine(),
         dps_enrichment=dps,
         hybrid_service=ForbiddenHybrid(),
+        semantic_analyzer=_analyzer(
+            _understanding(
+                "주문했는데 배송 일정 알려주세요.",
+                action="DELIVERY_STATUS",
+                requires_delivery_schedule=True,
+                requested_information="배송 일정",
+            )
+        ),
     ).generate_for_inquiry(
         inquiry_id,
         prefer_template=prefer_template,
@@ -585,6 +704,14 @@ def test_delivery_with_order_always_uses_dps(
         engine=ForbiddenEngine(),
         dps_enrichment=dps,
         hybrid_service=ForbiddenHybrid(),
+        semantic_analyzer=_analyzer(
+            _understanding(
+                "배송은 언제 오나요?",
+                action="DELIVERY_STATUS",
+                requires_delivery_schedule=True,
+                requested_information="배송 예정일",
+            )
+        ),
     ).generate_for_inquiry(
         inquiry_id,
         prefer_template=prefer_template,
@@ -863,10 +990,20 @@ def test_apptest_empty_gpt_result_has_no_success_and_keeps_program_answer(
     assert program.value == format_final_answer("보존할 기존 Program Answer")
 
 
-def test_apptest_checked_general_inquiry_uses_template_and_survives_rerun(
+def test_apptest_general_inquiry_draft_survives_a_rerun(
     database: Database,
     monkeypatch,
 ) -> None:
+    """What this case is really for: the panel does not lose the draft.
+
+    It used to assert the route as well -- ``TEMPLATE``, GPT never called --
+    and that half is now false by design: the probe's fake provider gives no
+    usable understanding, so the inquiry is held with a safe draft instead of
+    being answered from a keyword table. The part worth keeping is the UI
+    behaviour around it: whatever was stored is what the textarea shows, and a
+    second rerun does not replace or blank it.
+    """
+
     inquiry_id = _inquiry(
         database,
         "APPTEST-TEMPLATE",
@@ -888,8 +1025,9 @@ def test_apptest_checked_general_inquiry_uses_template_and_survives_rerun(
 
     assert not app.exception
     active = AnswerRepository(database).active_for_inquiry(inquiry_id)
-    assert active["metadata_json"]["generation_mode"] == "TEMPLATE"
-    assert active["metadata_json"]["gpt_called"] is False
+    # A draft exists and is not published from the legacy keyword route.
+    assert str(active["original_answer"]).strip()
+    assert active["metadata_json"]["generation_mode"] != "TEMPLATE"
     expected = active["original_answer"]
     program = next(
         area for area in app.text_area if area.label == "Program Answer"
@@ -991,7 +1129,13 @@ def test_apptest_unchecked_delivery_still_uses_safe_template(
     assert active["original_answer"] != ORDER_ID_REQUEST_ANSWER
     assert active["metadata_json"]["answer_source"] != "ORDER_ID_REQUEST"
     assert active["metadata_json"]["template_preferred"] is False
-    assert active["metadata_json"]["template_override"] is False
+    # ``template_override`` used to be False here because the unchecked
+    # delivery case was answered by a safe template, which is not an override
+    # of anything. It is now True, and that is a label rather than a decision:
+    # with the template tier no longer able to answer, "did the operator ask
+    # for a non-template answer" is simply the inverse of the checkbox. The
+    # safety claim this case exists for is the line above -- the order-number
+    # request must not be published for an inquiry that never asked for it.
     program = next(
         area for area in app.text_area if area.label == "Program Answer"
     )

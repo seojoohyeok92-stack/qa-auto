@@ -378,7 +378,13 @@ def routing_section(metadata: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def semantic_section(metadata: Mapping[str, Any]):
+    # ``semantic_analysis`` was the post-answer copy written by the legacy
+    # action-support recorder, which no longer exists. The understanding itself
+    # has always been persisted as ``semantic_routing``; historical drafts keep
+    # the old key and are still read from it.
     analysis = metadata.get("semantic_analysis")
+    if not isinstance(analysis, Mapping):
+        analysis = metadata.get("semantic_routing")
     support = metadata.get("semantic_action_support")
     if not isinstance(analysis, Mapping) and not isinstance(support, Mapping):
         return NOT_AVAILABLE

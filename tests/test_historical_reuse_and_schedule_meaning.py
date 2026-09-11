@@ -29,7 +29,6 @@ import pytest
 from services.historical_learning_quality_service import (
     HistoricalLearningQualityService,
 )
-from services.semantic_action_support import COMPATIBLE, MISMATCH, evaluate
 from services.semantic_analysis import (
     SCHEDULE_QUESTION_ACTIONS,
     parse,
@@ -163,36 +162,6 @@ def _schedule_semantic(action: str):
         "requires_delivery_schedule": True, "purchase_state": "CURRENT_ORDER",
         "asks_delivery_schedule": True, "confidence": 0.95,
     })
-
-
-@pytest.mark.parametrize("action", sorted(SCHEDULE_QUESTION_ACTIONS))
-def test_a_confirmed_date_answers_every_way_of_asking_when(action: str) -> None:
-    decision = evaluate(
-        _schedule_semantic(action),
-        route="DELIVERY_WITH_INSTALLATION_DATE", template_id="", match_kind=None,
-    )
-
-    assert decision.status == COMPATIBLE, action
-
-
-def test_a_request_to_move_the_date_is_still_a_mismatch() -> None:
-    """현재 날짜를 알려주는 것은 날짜를 옮겨달라는 요청을 들어준 것이 아니다."""
-
-    decision = evaluate(
-        _schedule_semantic("SCHEDULE_CHANGE"),
-        route="DELIVERY_WITH_INSTALLATION_DATE", template_id="", match_kind=None,
-    )
-
-    assert decision.status == MISMATCH
-
-
-def test_an_unrelated_action_is_still_a_mismatch() -> None:
-    decision = evaluate(
-        _schedule_semantic("COLLECTION"),
-        route="DELIVERY_WITH_INSTALLATION_DATE", template_id="", match_kind=None,
-    )
-
-    assert decision.status == MISMATCH
 
 
 def test_schedule_change_is_deliberately_outside_the_shared_set() -> None:

@@ -35,7 +35,6 @@ from services.answer_service import AnswerService
 from services.auto_processing_eligibility_service import (
     AutoProcessingEligibilityService,
 )
-from services.semantic_action_support import REASON_CODE
 from services.inquiry_processing_plan_service import InquiryProcessingPlanService
 from services.dps_lookup_policy import DpsLookupPolicy
 from services.gpt_governance_service import GovernedHybridAnswerService
@@ -43,6 +42,11 @@ import services.answer_service as answer_service_module
 
 
 PRODUCT = "삼성 125.7cm(50인치) UHD 4K 1등급 비즈니스TV LH50BEFHLGFXKR 스탠드형"
+
+# The legacy action-support verdict. Its producer is gone; historical drafts
+# still carry it, and the assertions below pin that it can never again become a
+# reason the publishing gate acts on.
+REASON_CODE = "SEMANTIC_ACTION_MISMATCH"
 
 FAST_QUESTION = "배송은 보통 며칠 걸리나요?"
 COMPATIBLE_QUESTION = "고장난 TV 수리해주세요"

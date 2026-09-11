@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import pytest
 
-from answer.exceptions import GenerationSkippedError
 from answer.governance_models import GptProviderSettings
 from answer.models import AnswerResult, AnswerStatus
 from answer.providers.fake_gpt_provider import FakeGptProvider
@@ -22,7 +21,6 @@ from answer.providers.resilient_json_provider import ResilientJsonProvider
 from answer.source_adapter import answer_request_from_inquiry
 from services.hybrid_answer_service import HybridAnswerService
 from services.inquiry_analysis_service import InquiryAnalysisService
-from services.pre_generation_gate import PreGenerationGate
 
 ANALYSIS = InquiryAnalysisService()
 
@@ -131,61 +129,6 @@ def run(request, provider, rule_result, context=None):
 
 def calls(provider: FakeGptProvider) -> int:
     return len(getattr(provider, "calls", []) or [])
-
-
-# =========================================================== gate unit
-def test_gate_keeps_legacy_high_risk_metadata_out_of_generation_authority():
-    """A legacy label is telemetry; GPT②/evidence and workflow decide later."""
-
-    decision = PreGenerationGate.evaluate_plan(
-        analysis={"manual_review_required": True,
-                  "manual_review_sources": ["HIGH_RISK_OR_DISPUTE"],
-                  "inquiry_subtype": "HIGH_RISK_OR_DISPUTE"},
-        plan={"needs_staff_review": True, "is_high_risk": True},
-    )
-    assert decision.skip_generation is False
-    assert decision.reasons == ()
-
-
-def test_gate_never_skips_a_classifier_gap():
-    """The hold an answer plus a clean validator is allowed to clear."""
-
-    decision = PreGenerationGate.evaluate_plan(
-        analysis={"manual_review_required": True,
-                  "manual_review_sources": ["UNCLASSIFIED"],
-                  "inquiry_subtype": "UNCLASSIFIED"},
-        plan={"needs_staff_review": True},
-    )
-    assert decision.skip_generation is False
-
-
-def test_gate_never_skips_a_compound_inquiry():
-    """Five answerable parts are not worthless because a sixth is high risk."""
-
-    decision = PreGenerationGate.evaluate_plan(
-        analysis={"manual_review_required": True,
-                  "inquiry_subtype": "COMPOUND_MULTI_INTENT",
-                  "manual_review_sources": ["UNCLASSIFIED", "HIGH_RISK_OR_DISPUTE"]},
-        plan={"needs_staff_review": True},
-    )
-    assert decision.skip_generation is False
-
-
-def test_gate_ignores_soft_signals():
-    for analysis in ({"confidence": 0.1}, {"question_category": "UNKNOWN"}):
-        assert PreGenerationGate.evaluate_plan(
-            analysis=analysis, plan={}
-        ).skip_generation is False
-
-
-@pytest.mark.parametrize("status", ["NO_RELIABLE_SOURCE", "NEEDS_DPS", "ANSWERABLE"])
-def test_gate_only_skips_on_conflict_not_on_a_gap(status):
-    """A missing source may still be answered by asking the customer."""
-
-    decision = PreGenerationGate.evaluate_evidence(
-        {"subquestion_evidence": [{"subquestion": "q", "status": status}]}
-    )
-    assert decision.skip_generation is False
 
 
 # ================================================= A. hard review, no provider
@@ -487,9 +430,6 @@ def test_H_a_missing_order_number_still_takes_the_template_path():
     # 구매 사실이 확인되는 문의여야 주문번호 요청 경로에 도달한다.
     analysis = _analysis_for("어제 주문했는데 배송 언제 오나요?")
     assert analysis["answer_strategy"] == "REQUEST_ORDER_ID"
-    assert PreGenerationGate.evaluate_plan(
-        analysis=analysis, plan={}
-    ).skip_generation is False
 
 
 def test_I_686352380_is_not_blocked_by_the_gate():
@@ -501,10 +441,6 @@ def test_I_686352380_is_not_blocked_by_the_gate():
     )
     assert analysis["order_id_status"] == "VALIDATED"
     assert analysis["answer_strategy"] != "REQUEST_ORDER_ID"
-    assert PreGenerationGate.evaluate_plan(
-        analysis=analysis,
-        plan={"needs_staff_review": bool(analysis["manual_review_required"])},
-    ).skip_generation is False
 
 
 def test_J_a_schedule_change_request_with_no_order_is_still_drafted():
@@ -524,26 +460,6 @@ def test_J_a_schedule_change_request_with_no_order_is_still_drafted():
     analysis = _analysis_for("설치일 변경 가능한가요?")
     assert analysis["inquiry_subtype"] == "SCHEDULE_CHANGE_REQUEST"
     assert analysis["can_execute_dps_lookup"] is False
-    decision = PreGenerationGate.evaluate_plan(
-        analysis=analysis, plan={"needs_staff_review": True}
-    )
-    assert decision.skip_generation is False
-
-
-def test_J_a_schedule_change_request_with_an_order_reaches_workflow_gate():
-    """Generation is not the action; the post-generation workflow owns it."""
-
-    analysis = _analysis_for("설치일 변경 가능한가요?")
-    analysis = {
-        **analysis,
-        "can_execute_dps_lookup": True,
-        "order_id_validated": True,
-    }
-    decision = PreGenerationGate.evaluate_plan(
-        analysis=analysis, plan={"needs_staff_review": True}
-    )
-    assert decision.skip_generation is False
-    assert decision.reasons == ()
 
 
 def test_J_a_classifier_gap_is_generated_without_legacy_publish_veto():
@@ -563,9 +479,6 @@ def test_J_a_classifier_gap_is_generated_without_legacy_publish_veto():
     content = "배송 좀 땡겨주실 수 없나요?"
     analysis = _analysis_for(content)
     plan = {"needs_staff_review": True, "analysis": analysis}
-    assert PreGenerationGate.evaluate_plan(
-        analysis=analysis, plan=plan
-    ).skip_generation is False
 
     passed = {"status": "PASS", "passed": True, "errors": [],
               "review_signals": [], "warnings": []}
@@ -588,21 +501,15 @@ def test_J_a_classifier_gap_is_generated_without_legacy_publish_veto():
     assert not verdict.reasons
 
 
-def test_the_gate_and_the_publishing_gate_share_their_vocabulary():
-    """A reason invented here would be untranslatable in the notification."""
+def test_every_publishing_hold_has_a_staff_readable_sentence():
+    """A reason code with no sentence is untranslatable in the notification."""
 
-    from answer.hold_reasons import REASON_LABELS
+    from answer.hold_reasons import REASON_LABELS, STAFF_HEADLINES
 
-    for analysis, plan in (
-        ({"manual_review_required": True,
-          "manual_review_sources": ["HIGH_RISK_OR_DISPUTE"]},
-         {"needs_staff_review": True, "is_high_risk": True}),
-    ):
-        for code in PreGenerationGate.evaluate_plan(
-            analysis=analysis, plan=plan
-        ).reasons:
-            assert code in REASON_LABELS, code
-    assert "EVIDENCE_CONFLICT" in REASON_LABELS
+    for code in ("EVIDENCE_CONFLICT", "GPT_REPORTED_UNRESOLVED",
+                 "RETURN_OR_DAMAGE_POLICY_REVIEW", "UNDERSTANDING_UNAVAILABLE"):
+        assert code in REASON_LABELS, code
+        assert code in STAFF_HEADLINES, code
 
 
 # ================ the contract the product-fact guard feeds the final gate

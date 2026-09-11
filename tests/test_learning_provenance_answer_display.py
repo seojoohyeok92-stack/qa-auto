@@ -106,8 +106,23 @@ def test_a_colliding_id_is_dropped_rather_than_guessed():
     }) == {}
 
 
-def test_every_verdict_in_the_contract_has_an_operator_label():
-    from services.evidence_verification_service import VERDICTS
+def test_every_stored_verdict_has_an_operator_label():
+    """The labels are a reader for drafts written by an earlier version.
+
+    The service that produced these verdicts is gone -- choosing which evidence
+    the answer step may see is GPT ②'s, not a separate verifier's -- but drafts
+    in the database still carry the four values it wrote, and the dashboard
+    shows them against those rows. The contract is therefore fixed history, so
+    it is stated here as the literal set rather than imported from a producer
+    that no longer exists. Nothing writes these today; a new value appearing
+    would mean the deleted pass came back.
+    """
+
     from ui.learning_performance import VERDICT_LABELS
 
-    assert set(VERDICT_LABELS) == set(VERDICTS)
+    assert set(VERDICT_LABELS) == {
+        "SUPPORTED",
+        "PARTIALLY_SUPPORTED",
+        "NOT_SUPPORTED",
+        "CONTEXT_INCOMPATIBLE",
+    }

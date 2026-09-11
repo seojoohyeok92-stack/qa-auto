@@ -144,6 +144,46 @@ class DecisionTraceView:
     root_message: str
 
 
+# What each stage's code means, for the operator reading the row.
+#
+# Kept beside the codes rather than in the page, because the page renders six
+# of these fields and the meaning belongs with the thing that produced it.
+# ``build_decision_trace`` still returns the codes: these are for display only.
+TRACE_STAGE_LABELS = {
+    "gpt1": {
+        "RECORDED": "문의를 이해했습니다",
+        "NOT_RECORDED": "이해 기록이 없습니다",
+        "UNAVAILABLE": "이해 단계를 실행하지 못했습니다",
+    },
+    "source": {
+        "SUFFICIENT": "모든 질문에 신뢰 가능한 근거가 검색되었습니다",
+        "PARTIAL": "일부 질문에만 근거가 검색되었습니다",
+        "NONE": "신뢰 가능한 근거가 없습니다",
+        "UNKNOWN": "근거 검색 기록이 없습니다",
+    },
+    "retrieval": {
+        "DELIVERED": "검색된 근거가 GPT②에 전달되었습니다",
+        "MISSING": "근거가 있으나 GPT②에 전달되지 않았습니다",
+        "NOT_RECORDED": "전달 기록이 없습니다",
+    },
+    "gpt2": {
+        # The pair that looked like a contradiction: a question can have a
+        # trusted source and still not be answerable from it.
+        "RESOLVED": "GPT가 모든 질문에 답했습니다",
+        "UNRESOLVED": "근거가 검색되었더라도 GPT가 일부 질문은 답할 수 없다고 판단했습니다",
+        "NOT_RECORDED": "답변 단계 기록이 없습니다",
+    },
+}
+
+
+def trace_stage_label(stage: str, code: str) -> str:
+    """``CODE`` on its own, or ``CODE — what it means`` when we can say."""
+
+    text = str(code or "").strip()
+    meaning = TRACE_STAGE_LABELS.get(stage, {}).get(text.upper())
+    return f"{text} — {meaning}" if meaning else text
+
+
 _TRACE_MESSAGES = {
     "NONE": "최초 실패 원인이 기록되지 않았습니다.",
     "TRACE_NOT_RECORDED": "과거 문의에는 처리 진단 기록이 없습니다.",

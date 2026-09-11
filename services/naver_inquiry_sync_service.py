@@ -31,7 +31,10 @@ from services.inquiry_sync_trace import InquirySyncTrace
 from services.naver_inquiry_normalizer import InquiryNormalizer
 
 
-SUPPORTED_INQUIRY_TYPES = ("PRODUCT_INQUIRY", "CUSTOMER_INQUIRY")
+# Q&A Auto owns Smart Store's 상품문의 board only.  고객문의 is a separate
+# Naver endpoint and must never enter this ingestion service: accepting it here
+# would create an Inquiry row and enqueue the entire answer/auto-post pipeline.
+SUPPORTED_INQUIRY_TYPES = ("PRODUCT_INQUIRY",)
 
 
 @dataclass(frozen=True)

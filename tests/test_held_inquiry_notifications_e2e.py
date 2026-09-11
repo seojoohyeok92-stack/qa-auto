@@ -1,10 +1,12 @@
-"""The gate through the real service, and what the operator is told.
+"""What happens to a held inquiry, and what the operator is told about it.
 
-The unit tests pin the decision; this pins what actually happens to an inquiry
-that hits it -- what gets stored, what the provider is asked, and what the
-notification says. Every provider, poster and notifier here is a fake, and the
-counts are asserted, because "we skipped the call" is only true if nothing
-called it.
+This began as the end-to-end half of a pre-generation gate that no longer
+exists: nothing now decides, before the model is called, that no answer it
+could write would be publishable. What the file pins is what outlived that --
+the draft a held inquiry still gets, the reason codes recorded against it, and
+the sentence a staff member actually reads. Every provider, poster and notifier
+here is a fake, and the counts are asserted, because "nothing called it" is
+only true if nothing called it.
 """
 from __future__ import annotations
 
@@ -377,53 +379,6 @@ def test_the_processing_plan_carries_the_fields_the_gate_reads(database):
     assert "manual_review_required" in serialised["analysis"]
     assert "manual_review_sources" in serialised["analysis"]
     assert "inquiry_subtype" in serialised["analysis"]
-
-
-def test_a_schedule_change_request_is_skipped_through_the_real_plan(database):
-    """End to end on real objects, not a hand-built dict."""
-
-    from services.inquiry_processing_plan_service import (
-        InquiryProcessingPlanService,
-    )
-    from services.pre_generation_gate import PreGenerationGate
-
-    plan = InquiryProcessingPlanService(database).create({
-        "id": 2, "source_question_id": "PLAN-2", "store_code": "OJE_PLUS",
-        "inquiry_type": "CUSTOMER_INQUIRY", "title": "설치일 변경 가능한가요?",
-        "content": "설치일 변경 가능한가요?", "product_name": "삼성 TV",
-        "raw_json": {},
-    })
-    serialised = plan.to_dict()
-    decision = PreGenerationGate.evaluate_plan(
-        analysis=serialised["analysis"], plan=serialised
-    )
-    # Updated expectation: with no order number there is nothing to look up,
-    # so generation costs no external call and produces the deterministic safe
-    # template instead of leaving staff a blank reply. The hold is unchanged --
-    # the publishing gate still refuses it, which the golden auto-post suite
-    # asserts end to end.
-    assert decision.skip_generation is False
-    assert serialised["analysis"]["can_execute_dps_lookup"] is False
-
-
-def test_an_ordinary_product_question_is_not_skipped_through_the_real_plan(
-    database,
-):
-    from services.inquiry_processing_plan_service import (
-        InquiryProcessingPlanService,
-    )
-    from services.pre_generation_gate import PreGenerationGate
-
-    plan = InquiryProcessingPlanService(database).create({
-        "id": 3, "source_question_id": "PLAN-3", "store_code": "OJE_PLUS",
-        "inquiry_type": "PRODUCT_INQUIRY", "title": "HDMI 포트 몇 개인가요?",
-        "content": "HDMI 포트 몇 개인가요?", "product_name": "삼성 TV",
-        "raw_json": {},
-    })
-    serialised = plan.to_dict()
-    assert PreGenerationGate.evaluate_plan(
-        analysis=serialised["analysis"], plan=serialised
-    ).skip_generation is False
 
 
 # --------------------- staff-readable message, traceable internal record

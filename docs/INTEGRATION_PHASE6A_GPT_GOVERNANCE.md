@@ -12,15 +12,25 @@ OpenAI 호출을 활성화하지 않는다.
 
 | 모드 | Program Answer | Provider 동작 |
 |---|---|---|
-| `FAKE` | Fake GPT Validator 통과 결과, 실패 시 Rule | 네트워크 없음 |
-| `SHADOW` | 항상 Rule Answer | GPT 결과는 비교 지표로만 저장 |
+| `FAKE` | Fake GPT Validator 통과 결과, 실패 시 직원 검토 | 네트워크 없음 |
+| `SHADOW` | `ACTIVE`와 동일 (아래 주의) | 비교 전용 동작 없음 |
 | `CANARY` | 선정 건만 GPT 후보, 직원 검토 필수 | 결정적 일부 문의 |
 | `ACTIVE` | GPT Validator 통과 후보 | 직원 승인 필수 |
-| `DISABLED` | Rule Answer | GPT 계층 건너뜀 |
+| `DISABLED` | 답변 생성 단계 미실행 → 직원 검토 | GPT 계층 건너뜀 |
 
-Shadow 결과는 `answer_drafts.original_answer`를 덮어쓰지 않으며 승인/등록에
-사용할 수 없다. Canary 선정 건은 Validator 통과 후에도
-`NEEDS_REVIEW`와 `auto_answerable=false`다.
+Canary 선정 건은 Validator 통과 후에도 `NEEDS_REVIEW`와
+`auto_answerable=false`다.
+
+어떤 모드에서도 Rule Answer가 고객 답변으로 발행되지 않는다. Provider를
+호출할 수 없는 경우(DISABLED / 설정 오류 / Privacy 차단 / 한도 초과 /
+Canary 제외 / Provider 장애) 답변 생성 단계를 실행하지 않고 직원 검토용
+안전 초안을 작성한다. Rule / Template / Product Fact는 GPT②가 읽는 근거이며
+그 자체로 최종 답변이 되지 않는다.
+
+> **주의 — `SHADOW`**: GPT를 호출한 뒤 Rule Answer를 발행하던 비교 전용
+> 동작은 제거되었다. 현재 `SHADOW`는 `ACTIVE`와 동일하게 동작하므로, 발행을
+>막을 의도로 이 값을 설정해서는 안 된다. 발행을 막으려면 `DISABLED`를
+> 사용한다. `QNA_GPT_SHADOW_ENABLED`는 더 이상 읽히지 않는다.
 
 ## Provider 설정
 
@@ -152,7 +162,9 @@ backoff는 `base * 2^(attempt-1)`이며 sleeper와 clock을 주입할 수 있어
 - 동일 문의 재생성 cooldown
 
 초과 시 Provider를 호출하지 않고 `GPT_PROVIDER_RATE_LIMITED`와
-`GPT_RULE_FALLBACK`을 기록한다. 앱 전체 오류로 승격하지 않는다.
+`GPT_ANSWER_STEP_UNAVAILABLE`을 기록한다. 앱 전체 오류로 승격하지 않는다.
+(이 event code는 과거 `GPT_RULE_FALLBACK`이었다. 이름을 바꾼 이유는 더 이상
+Rule Answer를 사용하지 않기 때문이며, 과거 row는 옛 code를 그대로 유지한다.)
 
 ## 비용 관리
 
@@ -268,10 +280,9 @@ GPT_PROVIDER_TIMEOUT
 GPT_PROVIDER_RATE_LIMITED
 GPT_PROVIDER_COST_LIMITED
 GPT_PRIVACY_BLOCKED
-GPT_SHADOW_COMPLETED
 GPT_CANARY_SELECTED
 GPT_CANARY_SKIPPED
-GPT_RULE_FALLBACK
+GPT_ANSWER_STEP_UNAVAILABLE
 GPT_CONFIGURATION_INVALID
 ```
 
@@ -293,11 +304,10 @@ Prompt/응답 전문은 기록하지 않고 오류 문자열은 중앙 마스킹
 Windows fixture 검증:
 
 - API key 없음 + FAKE: Fake 결과와 Validator 정상, API key 오류 없음
-- 회사 승인 없음 + ACTIVE: 실제 호출 차단, Rule fallback, 앱 유지
-- SHADOW: Program Answer는 Rule 유지, 비교 metadata와 run만 저장
+- 회사 승인 없음 + ACTIVE: 실제 호출 차단, 직원 검토 초안, 앱 유지
 - CANARY 100% fixture: 결정적 선정, Validator 통과, 직원 검토 필수,
   posted 아님
-- Provider timeout: Rule fallback, timeout event 기록, 기존 DPS metadata와
+- Provider timeout: 직원 검토 초안, timeout event 기록, 기존 DPS metadata와
   기존 draft 보존
 
 실제 외부 Provider 네트워크 호출은 회사 승인과 API key가 없으므로 수행하지

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Iterable
+from uuid import UUID
 
 from repositories.database import Database
 from repositories.inquiry_repository import deserialize_json, serialize_json
@@ -69,7 +70,12 @@ def mask_sensitive_data(
         result: dict[str, Any] = {}
         for key, item in value.items():
             normalized_key = str(key).lower().replace("-", "_")
-            if any(
+            # Trace correlation IDs are generated UUIDs, not customer data.
+            # Preserve only syntactically valid UUIDs so the second masking pass
+            # does not turn a numeric UUID segment into a masked long number.
+            if normalized_key == "correlation_id" and _is_uuid(item):
+                result[str(key)] = item
+            elif any(
                 marker in normalized_key
                 for marker in (
                     "password",
@@ -96,6 +102,15 @@ def mask_sensitive_data(
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return mask_sensitive_text(value, customer_names=names)
+
+
+def _is_uuid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(UUID(value)) == value.lower()
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 class LogRepository:

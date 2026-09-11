@@ -509,12 +509,3 @@ def test_case_n_end_to_end_partial_answer_is_not_replaced() -> None:
 
 
 # ------------------------------------------------------------ CASE O
-
-def test_case_o_provider_failure_still_falls_back_to_the_safe_draft() -> None:
-    provider = FakeGptProvider(fail_tasks={"DRAFT"})
-    outcome = HybridAnswerService(provider).generate(request(), rule())
-    assert outcome.fallback_used is True
-    assert outcome.result.answer
-    hybrid = outcome.result.metadata["hybrid"]
-    assert hybrid["fallback_used"] is True
-    assert hybrid["fallback_reason"]

@@ -423,53 +423,6 @@ def test_naver_post_is_gated_by_disabled_by_default_setting() -> None:
     assert "not settings.enabled" in source
 
 
-def test_order_info_required_service_never_calls_dps_agent(
-    tmp_path,
-) -> None:
-    database = Database(tmp_path / "order-info.db")
-    database.initialize()
-    inquiry_id = InquiryRepository(database).upsert_work_item(
-        {
-            "store_code": "S",
-            "source_type": "NAVER",
-            "source_question_id": "NO-ORDER",
-            "content": "어제 주문했는데 설치 일정은 언제인가요?",
-            "raw_json": {},
-        }
-    ).inquiry_id
-    calls: list[object] = []
-
-    def forbidden_client(*args, **kwargs):
-        calls.append((args, kwargs))
-        raise AssertionError("DPS Agent must not be called")
-
-    class StaticEngine:
-        def generate(self, answer_request):
-            result = rule()
-            result.status = AnswerStatus.NEEDS_REVIEW
-            result.auto_answerable = False
-            result.needs_review = True
-            return result
-
-    outcome = AnswerService(
-        database,
-        engine=StaticEngine(),
-        dps_enrichment=DpsEnrichmentService(
-            database,
-            client=forbidden_client,
-        ),
-        hybrid_service=HybridAnswerService(FakeGptProvider()),
-    ).generate_for_inquiry(inquiry_id)
-    saved = InquiryRepository(database).get(inquiry_id)
-    assert calls == []
-    assert outcome.result.status is AnswerStatus.GENERATED
-    assert "네이버쇼핑의 주문·배송 조회 화면" in outcome.draft[
-        "original_answer"
-    ]
-    assert saved["phase9_status"] == "ORDER_INFO_REQUIRED"
-    assert outcome.draft["validation_status"] == "PASS"
-
-
 def test_private_flag_round_trips_through_migration_v10(tmp_path) -> None:
     database = Database(tmp_path / "private.db")
     database.initialize()

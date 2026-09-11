@@ -360,13 +360,28 @@ def render_answer_learning_provenance(
     signal_note = (
         f" · Feedback Signal {len(signal_rows)}건" if signal_rows else ""
     )
+    # Product Facts are a separate evidence channel and were never in this
+    # count, which is why an answer grounded only in a verified fact looked
+    # unsupported here. Counted, and named, rather than folded into the
+    # Learning total.
+    product_facts = generated.get("used_product_facts")
+    product_fact_count = (
+        len(product_facts) if isinstance(product_facts, (list, tuple, set)) else 0
+    )
+    fact_note = (
+        f" · Product Fact {product_fact_count}건" if product_fact_count else ""
+    )
     st.caption(
         (
-            f"Learning 참고: 선택 {len(rows)}건 · 답변 근거 사용 "
-            f"{used_count}건{signal_note}"
+            f"Learning 참고: 선택 {len(rows)}건 · 답변에 사용된 Learning/Historical "
+            f"{used_count}건{fact_note}{signal_note}"
         )
-        if rows or signal_rows
-        else "Learning 참고: 없음"
+        if rows or signal_rows or product_fact_count
+        else (
+            f"Learning 참고: 없음{fact_note}"
+            if product_fact_count
+            else "Learning 참고: 없음"
+        )
     )
     if not rows and not signal_rows:
         return

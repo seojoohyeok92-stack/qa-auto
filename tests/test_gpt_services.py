@@ -123,19 +123,6 @@ def test_draft_parser_rejects_invalid_confidence(confidence: float) -> None:
         )
 
 
-def test_empty_rule_answer_marks_missing_information() -> None:
-    empty = AnswerFacts(
-        inquiry={"question": "모르는 문의"},
-        rule={"answer": "", "needs_review": True},
-        dps={},
-    )
-    result = DraftGenerationService(FakeGptProvider()).generate(
-        empty, intent()
-    )
-    assert result.missing_information == ("rule.answer",)
-    assert result.requires_review is True
-
-
 def test_self_review_passes_grounded_answer() -> None:
     draft = DraftGenerationService(FakeGptProvider()).generate(
         facts(), intent()

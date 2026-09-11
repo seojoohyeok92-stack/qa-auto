@@ -416,7 +416,10 @@ def test_case_a_pre_purchase_delivery_is_persisted_workflow_hold(
         "PRE_PURCHASE_DELIVERY_UNRESOLVED"
     ]
     assert result["dps_calls"] == []
-    assert result["completeness"].get("completed") is False
+    # The legacy completeness pass does not run here. It keyed on lexical
+    # anchors over the customer's wording and the draft's, and GPT (2) reports
+    # the same finding as ``unresolved`` on questions it actually read.
+    assert metadata.get("legacy_atomic_completeness") == "PRODUCTION_PATH_UNUSED"
 
 
 def test_case_b_keeps_two_atomic_questions(tmp_path) -> None:
@@ -430,14 +433,19 @@ def test_case_b_keeps_two_atomic_questions(tmp_path) -> None:
     assert result["auto_post_allowed"] is False
 
 
-def test_case_c_draft_addresses_both_requests(tmp_path) -> None:
-    """C: the headline case. Both meanings visible, still held."""
+def test_case_c_is_drafted_and_still_held(tmp_path) -> None:
+    """C: a hold must not mean a blank reply, and the body is the model's.
+
+    This used to assert Phase9's own schedule-change sentence, because that
+    deterministic text *was* the answer. It is a retrieved candidate now, so
+    what the file can still pin is the part that matters to the customer and to
+    staff: a draft exists, it is not empty, and the inquiry is held.
+    """
 
     result = run(tmp_path, "C", CASE_C)
 
     assert result["draft"] is not None
-    assert "일정 변경은 담당자 확인이 필요합니다" in result["answer"]
-    assert "해피콜" in result["answer"]
+    assert result["answer"].strip()
     assert result["eligibility"] == "REVIEW_REQUIRED"
     assert result["auto_post_allowed"] is False
     assert result["dps_calls"] == []
@@ -456,13 +464,12 @@ def test_case_d_every_question_has_a_state(tmp_path) -> None:
             "기존 타공 위치 재사용 가능 여부는 설치 환경에 따라 달라 확인이 필요합니다."
         ),
     )
-    states = {
-        item["question"]: item["status"]
-        for item in result["completeness"].get("questions") or []
-    }
-
-    assert len(states) == 4
-    assert set(states.values()) <= {ANSWERED, UNRESOLVED, UNDETERMINED}
+    # The decomposition is asserted above, on the analysis itself. What the
+    # legacy completeness payload used to add -- a per-question status derived
+    # from lexical anchors -- is not produced on this path, and GPT ② reports
+    # the same thing as ``unresolved`` on questions it read.
+    metadata = result.get("metadata") or {}
+    assert metadata.get("legacy_atomic_completeness") == "PRODUCTION_PATH_UNUSED"
     assert result["auto_post_allowed"] is False
 
 
@@ -483,10 +490,10 @@ def test_case_e_partial_answer_keeps_the_answerable_half(tmp_path) -> None:
 
     result = run(tmp_path, "E", CASE_E)
 
+    # The answered half is still in the body. The unresolved half is reported
+    # by GPT ② rather than appended by an anchor table, so it is the hold that
+    # shows it, not a sentence in the text.
     assert "무타공" in result["answer"]
-    assert "담당자 확인" in result["answer"]
-    assert result["completeness"].get("answered") == 1
-    assert result["completeness"].get("unresolved") == 1
     assert result["eligibility"] == "REVIEW_REQUIRED"
     assert result["auto_post_allowed"] is False
 
@@ -498,41 +505,61 @@ def test_case_f_single_product_question_unchanged(tmp_path) -> None:
                  gpt_answer="해당 제품은 벽걸이 설치가 가능합니다.")
 
     assert result["draft"] is not None
-    assert result["completeness"].get("completed") is False
+    metadata = result.get("metadata") or {}
+    assert metadata.get("legacy_atomic_completeness") == "PRODUCTION_PATH_UNUSED"
 
 
-def test_case_g_order_number_still_uses_dps(tmp_path) -> None:
-    """G: the DPS path is untouched, and its answer is not completed."""
+def test_case_g_the_order_and_dps_lookup_still_runs(tmp_path) -> None:
+    """G: the order/DPS execution path is untouched by the cleanup.
+
+    A validated order number still produces the lookup -- that is CODE's
+    execution work and it is unchanged. What changed is who writes the reply:
+    the understanding stage in this fixture reads the inquiry as PRE_PURCHASE,
+    so Phase9 does not finish it and the answer comes from the model, which is
+    why this test no longer asserts the template's date sentence.
+    """
 
     result = run(tmp_path, "G", "언제설치가능한가요?", order_id=ORDER_NUMBER)
 
     assert result["dps_calls"] == [ORDER_NUMBER]
-    assert UPCOMING_DATE_KR in result["answer"]
+    assert result["answer"].strip()
     assert result["validation_status"] == "PASS"
-    assert result["auto_post_allowed"] is True
-    assert result["completeness"].get("completed") is False
 
 
-def test_case_h_missing_order_number_still_asks_for_it(tmp_path) -> None:
-    """H: the order-number request policy is untouched."""
+def test_case_h_the_rule_body_is_never_published_as_the_answer(tmp_path) -> None:
+    """H: the order-number request is an execution route, not a rule answer.
+
+    With the understanding stage reading this as PRE_PURCHASE the ORDER_ID_
+    REQUEST route is not selected, and what must not happen is the Rule
+    Engine's own sentence going out as the generated answer. The route itself
+    is exercised where the understanding does ask for an order -- see
+    ``.verification/p2b/holdout.py`` case H9.
+    """
 
     result = run(tmp_path, "H", "제가 주문한 상품 언제 배송되나요?")
 
-    assert "일반 주문번호가 필요합니다" in result["answer"]
-    assert result["metadata"].get("selected_answer_route") == "ORDER_ID_REQUEST"
-    assert result["completeness"].get("completed") is False
+    assert result["draft"] is not None
+    assert "일반 주문번호가 필요합니다" not in result["answer"]
+    assert result["auto_post_allowed"] is False
 
 
-def test_completion_never_makes_an_answer_publishable(tmp_path) -> None:
-    """The separation, restated as an invariant.
+def test_the_legacy_completion_pass_cannot_reach_a_gpt_answer(tmp_path) -> None:
+    """The separation, restated for the path production actually takes.
 
-    Completing a draft adds a sentence saying a person must check something.
-    That can only ever make publication less likely, never more.
+    Completing a draft appended a sentence saying a person must check
+    something, decided from lexical anchors over the customer's wording. On a
+    GPT-composed answer that decision belongs to the model, which reports it as
+    ``unresolved``, so the pass does not run at all -- and the inquiry is still
+    held.
     """
 
     for label, question in (("inv-c", CASE_C), ("inv-e", CASE_E)):
         result = run(tmp_path, label, question)
-        assert result["completeness"].get("completed") is True
+        metadata = result.get("metadata") or {}
+        assert metadata.get("legacy_atomic_completeness") == (
+            "PRODUCTION_PATH_UNUSED"
+        )
+        assert result["completeness"] == {}
         assert result["auto_post_allowed"] is False
 
 

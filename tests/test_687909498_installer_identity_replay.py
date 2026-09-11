@@ -338,7 +338,12 @@ def test_687909498_installer_identity_full_replay(tmp_path, monkeypatch):
     # --- no binding instruction survives in the prompt ---------------------
     assert "subquestion_evidence_is_binding" not in prompt
     assert "Only this item may request confirmation" not in prompt
-    assert "retrieval_candidates_are_not_approved_evidence" in prompt
+    # This old duplicate marker was removed: it repeated the current GPT②
+    # handoff below as a caution rather than granting GPT② the authority to
+    # judge relevance and applicability itself.
+    assert "retrieval_candidates_are_not_approved_evidence" not in prompt
+    assert "relevance_and_answer_support_are_hints_not_permission" in prompt
+    assert "you_decide_which_candidates_apply" in prompt
 
     # --- GPT ① understanding is what GPT ② was asked about -----------------
     assert len(run.semantic_calls) == 1

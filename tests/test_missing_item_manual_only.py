@@ -280,18 +280,6 @@ def test_missing_item_is_held_after_generation_not_preemptively_blocked(store) -
     assert str(draft.get("original_answer") or "").strip()
 
 
-def test_staff_are_told_which_policy_blocked_it(store) -> None:
-    """A missing shipment shown as "고위험·분쟁" sends the reader hunting."""
-
-    from services.answer_service import _POLICY_BLOCK_MESSAGES
-
-    message = _POLICY_BLOCK_MESSAGES[SUBTYPE]
-
-    assert "누락" in message or "미수령" in message
-    assert "직원" in message
-    assert "미답변" in message
-
-
 @pytest.mark.parametrize("question,key", [
     ("오베닉 스탠드는 어떤 모델인가요?", "model"),
     ("스탠드 포함인가요?", "contents"),
@@ -305,21 +293,6 @@ def test_an_ordinary_inquiry_still_gets_its_draft(store, question, key) -> None:
     assert outcome.status == "CREATED"
     assert draft is not None
     assert str(draft.get("original_answer") or "").strip()
-
-
-def test_the_stand_model_answer_still_reaches_the_question_it_is_for(
-    store,
-) -> None:
-    _, draft, _, _ = process(
-        store, ask(store, "오베닉 스탠드는 어떤 모델인가요?", key="stand-model",
-                   order_id=None))
-
-    assert "오베닉" in str(draft.get("original_answer") or "")
-
-
-# ==========================================================================
-# 4. The auto-post invariant, under every repeat
-# ==========================================================================
 
 
 def test_repeat_processing_never_posts_an_evidence_held_draft(store) -> None:

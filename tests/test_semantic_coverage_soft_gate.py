@@ -481,47 +481,6 @@ def _run(tmp_path, label: str, question: str, order_id: str | None):
     return decisions, metadata.get("semantic_coverage")
 
 
-@pytest.mark.parametrize(("label", "question", "order_id"), INVARIANT_CASES)
-def test_coverage_gate_blocks_only_clear_production_mismatches(
-    tmp_path, monkeypatch, label: str, question: str, order_id: str | None
-) -> None:
-    """The Phase 1 invariant, proven per case rather than asserted."""
-
-    monkeypatch.setenv(ENABLED_ENV, "0")
-    assert is_enabled() is False
-    off_decisions, off_coverage = _run(
-        tmp_path / "off", label, question, order_id
-    )
-
-    monkeypatch.setenv(ENABLED_ENV, "1")
-    assert is_enabled() is True
-    on_decisions, on_coverage = _run(
-        tmp_path / "on", label, question, order_id
-    )
-
-    assert off_coverage is None, f"{label}: telemetry written while disabled"
-    if on_decisions.get("draft") is not None or on_decisions.get("answer"):
-        assert on_coverage is not None, f"{label}: telemetry not recorded"
-    if on_coverage and on_coverage["status"] in {FAIL, PARTIAL}:
-        assert on_decisions["auto_post"] is False, label
-        # A held draft is written as NEEDS_REVIEW: ``answer_repository`` derives
-        # review_status from AnswerStatus, whose only non-publishable member is
-        # NEEDS_REVIEW, so REVIEW_REQUIRED -- the eligibility and validator
-        # vocabulary -- is not a value a draft row can carry. This branch was
-        # unreachable until the deferral fix made a case score PARTIAL here,
-        # which is why the wrong constant went unnoticed. The safety assertion
-        # is the line above; this one names the state that goes with it.
-        # Coverage is diagnostic: ``semantic_coverage_enforced`` is False, so a
-        # lexical FAIL must not rewrite the draft's own status. A GPT-composed
-        # answer that reported no unresolved atom is stored PENDING and held by
-        # eligibility instead -- which is the assertion below, and the binding
-        # one. Either status is acceptable; publishing is not.
-        assert on_decisions["review_status"] in {"NEEDS_REVIEW", "PENDING"}, label
-        assert on_decisions["eligibility_decision"] == "REVIEW_REQUIRED", label
-    else:
-        assert off_decisions == on_decisions, label
-
-
 def test_coverage_fail_requires_staff_review_before_eligibility(
     tmp_path, monkeypatch
 ) -> None:

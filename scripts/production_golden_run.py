@@ -313,7 +313,11 @@ def describe(connection: sqlite3.Connection, local_id: int) -> dict[str, Any]:
             # Observation only: these objects were persisted by the real
             # production pipeline before this runner reads them.
             "processing_plan": plan,
-            "semantic_analysis": metadata.get("semantic_analysis") or {},
+            "semantic_analysis": (
+                metadata.get("semantic_analysis")
+                or metadata.get("semantic_routing")
+                or {}
+            ),
             "analysis": analysis,
             "subquestion_evidence": evidence,
             "product_fact_guard": guard,

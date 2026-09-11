@@ -445,7 +445,6 @@ def _hybrid_run(*, strategy_analysis: dict | None):
     outcome = HybridAnswerService(
         _Provider(),
         learning_context_provider=learning_context,
-        legacy_evidence_verification=False,
     ).generate(request, rule)
     return outcome, calls, retrieved
 

@@ -369,7 +369,7 @@ def test_same_store_lock_blocks_duplicate_api_call(
     assert persisted["failed_count"] == 0
 
 
-def test_product_order_id_is_not_promoted_and_no_dps_is_called(
+def test_customer_inquiry_is_rejected_before_fetch_or_db_ingestion(
     database: Database,
 ) -> None:
     customer = {
@@ -379,28 +379,24 @@ def test_product_order_id_is_not_promoted_and_no_dps_is_called(
         "answered": False,
         "inquiryRegistrationDateTime": "2026-07-30T11:00:00+09:00",
     }
+    customer_fetches: list[object] = []
     service = NaverInquirySyncService(
         database,
         settings=_settings(),
         token_provider=lambda **kwargs: "read-token",
         product_fetch=lambda **kwargs: _page([]),
-        customer_fetch=lambda **kwargs: {
-            "content": [customer],
-            "totalPages": 1,
-            "last": True,
-        },
+        customer_fetch=lambda **kwargs: customer_fetches.append(kwargs),
     )
     end = datetime(2026, 7, 31, tzinfo=UTC)
-    result = service.sync_inquiries(
-        stores=[_store()],
-        inquiry_types=["CUSTOMER_INQUIRY"],
-        from_datetime=end - timedelta(days=7),
-        to_datetime=end,
-    )
-    stored = InquiryRepository(database).list()[0]
-    assert result.inserted_count == 1
-    assert stored["product_order_id"] == "PRODUCT-ONLY"
-    assert stored["order_id"] is None
+    with pytest.raises(ValueError, match="inquiry_type"):
+        service.sync_inquiries(
+            stores=[_store()],
+            inquiry_types=["CUSTOMER_INQUIRY"],
+            from_datetime=end - timedelta(days=7),
+            to_datetime=end,
+        )
+    assert customer_fetches == []
+    assert InquiryRepository(database).list() == []
     with database.connection() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM dps_lookup_results"

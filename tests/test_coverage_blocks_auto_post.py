@@ -97,6 +97,7 @@ def run(question: str, *, label: str = "cov") -> dict:
     coverage = metadata.get("semantic_coverage") or {}
     return {
         "coverage": str(coverage.get("status") or ""),
+        "legacy_coverage": str(metadata.get("legacy_semantic_coverage") or ""),
         "requires_manual_review": bool(metadata.get("requires_manual_review")),
         "decision": verdict.decision,
         "reasons": tuple(verdict.reasons),
@@ -112,20 +113,24 @@ def coverage_enabled(monkeypatch):
 
 
 # ============================================== 하나의 실행에서 네 값을 함께 증명
-def test_a_partial_coverage_inquiry_cannot_auto_post():
-    """The four values the previous tests never checked together."""
+def test_a_partially_answered_inquiry_cannot_auto_post():
+    """The values that decide publication, checked together in one run.
+
+    The lexical coverage classifier is not among them any more: on the GPT path
+    it is not even computed, so there is nothing for it to be mistaken for a
+    gate. What holds this inquiry is the absence of a GPT-first decision trace.
+    """
     outcome = run(INQUIRY_687718601, label="p1")
 
-    assert outcome["coverage"] == "PARTIAL"
+    assert outcome["legacy_coverage"] == "PRODUCTION_PATH_UNUSED"
+    assert outcome["coverage"] == ""
     assert outcome["requires_manual_review"] is False
-    # This legacy fixture has no GPT① trace, so its hold is workflow integrity,
-    # not the lexical coverage classifier.
     assert outcome["decision"] != "SAFE"
     assert outcome["auto_post"] is False
 
 
-def test_legacy_coverage_is_telemetry_not_the_gate_reason():
-    """A no-GPT trace is held as workflow, never as lexical coverage."""
+def test_legacy_coverage_is_never_the_gate_reason():
+    """A missing GPT decision trace is held as workflow, never as coverage."""
     outcome = run(INQUIRY_687718601, label="p2")
     assert SEMANTIC_COVERAGE_INCOMPLETE not in outcome["reasons"]
     assert "UNDERSTANDING_UNAVAILABLE" in outcome["reasons"]
@@ -183,20 +188,27 @@ def test_a_draft_without_coverage_telemetry_is_untouched():
 
 
 # ======================================================= positive control
-def test_a_fully_answered_legacy_fixture_needs_a_gpt_decision_trace():
-    """Coverage PASS alone is not a substitute for GPT② evidence verdict."""
+def test_an_answered_inquiry_still_needs_a_gpt_decision_trace():
+    """A readable answer is not a substitute for GPT (2)'s evidence verdict.
+
+    This used to assert the coverage evaluator scored the run PASS. It could
+    not: the fixture's provider returns one fixed sentence about wall-mount
+    installation whatever the question, so the pair it was scoring never
+    matched. The evaluator is right to score it FAIL, and on this path it is
+    not scored at all -- which is the point the test exists to make.
+    """
     outcome = run("설치일 알림톡 언제 오나요?", label="ok1")
 
-    assert outcome["coverage"] == "PASS"
+    assert outcome["legacy_coverage"] == "PRODUCTION_PATH_UNUSED"
     assert outcome["auto_post"] is False
     assert SEMANTIC_COVERAGE_INCOMPLETE not in outcome["reasons"]
     assert "UNDERSTANDING_UNAVAILABLE" in outcome["reasons"]
 
 
-def test_a_compound_legacy_fixture_needs_a_gpt_decision_trace():
-    """Compound is not the hold; absent GPT-first trace is."""
+def test_a_compound_inquiry_needs_a_gpt_decision_trace_too():
+    """Being compound is not the hold; an absent GPT-first trace is."""
     outcome = run("설치일 알림톡 언제 오나요? 배송비는 얼마인가요?", label="ok2")
 
-    assert outcome["coverage"] == "PASS"
+    assert outcome["legacy_coverage"] == "PRODUCTION_PATH_UNUSED"
     assert outcome["auto_post"] is False
     assert "UNDERSTANDING_UNAVAILABLE" in outcome["reasons"]

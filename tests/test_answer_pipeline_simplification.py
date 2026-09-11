@@ -224,34 +224,6 @@ def test_case_a_single_general_product_inquiry_is_answered() -> None:
     assert telemetry["provider_call_count"] == 1
 
 
-def test_case_b_schedule_question_without_order_id_requests_it() -> None:
-    """No order id: the safe order-number request template is used, and the
-    provider is not asked to invent a schedule."""
-
-    # 구매 사실이 확인되는 문의여야 주문번호 요청 템플릿이 선택된다.
-    request = request_for("어제 주문했는데 설치예정일은 언제인가요?")
-    analysis = ANALYSIS.analyze(request)
-    assert analysis.requires_order_id is True
-    assert analysis.requires_dps_lookup is True
-
-    provider = provider_for("무시되어야 하는 GPT 초안")
-    outcome, hybrid, telemetry = run(
-        request, provider, rule(answer=ORDER_ID_REQUEST_ANSWER)
-    )
-    # The customer gets the canonical order-number request...
-    assert "일반 주문번호" in outcome.result.answer
-    assert "상품주문번호가 아닌" in outcome.result.answer
-    # ...the provider's draft is not used for this route...
-    assert "무시되어야 하는" not in outcome.result.answer
-    # ...no schedule is invented without an order and a DPS result...
-    import re
-
-    assert not re.search(r"20\d{2}[-.년]", outcome.result.answer)
-    # ...and the route costs no provider round trip at all.
-    assert telemetry["provider_call_count"] == 0
-    assert provider.calls == []
-
-
 def test_case_c_confirmed_dps_date_may_be_answered() -> None:
     dps = {
         "lookup_required": True,
@@ -387,19 +359,6 @@ def test_speculation_is_still_blocked() -> None:
 
 
 # ----------------------------------------------------------- CASE J--K
-
-def test_case_j_provider_timeout_falls_back_without_pretending_success() -> None:
-    request = request_for(SIX_PART)
-    provider = FakeGptProvider(fail_tasks={"DRAFT"})
-    outcome, hybrid, telemetry = run(request, provider, rule())
-
-    assert hybrid["fallback_used"] is True
-    assert hybrid["fallback_reason"]
-    assert outcome.result.answer.strip(), "a Program Answer must still exist"
-    assert outcome.result.needs_review is True
-    # The failed attempt is still on the record.
-    assert telemetry["provider_call_count"] >= 1
-
 
 def test_case_k_transient_errors_keep_their_retry_policy() -> None:
     class Flaky:

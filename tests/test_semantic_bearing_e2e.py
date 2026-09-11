@@ -148,7 +148,9 @@ def run(
         "route": str(metadata.get("selected_answer_route") or ""),
         # Persisted under "semantic_analysis" by _record_semantic_action_support;
         # "semantic_routing" lives on the in-memory request only.
-        "semantic_routing": metadata.get("semantic_analysis") or {},
+        # ``semantic_analysis`` was the legacy post-answer copy; the
+        # understanding itself is persisted as ``semantic_routing``.
+        "semantic_routing": metadata.get("semantic_routing") or {},
         "coverage": str((metadata.get("semantic_coverage") or {}).get("status") or ""),
         "answer": str(record.get("original_answer") or ""),
     }
@@ -200,7 +202,11 @@ def test_the_semantic_result_is_persisted_with_the_draft():
     routing = outcome["semantic_routing"]
     assert routing.get("called") is True
     assert routing.get("usable") is True
-    assert routing.get("semantic", {}).get("atomic_questions")
+    # The raw provider payload is deliberately not persisted; the understanding
+    # contract derived from it is, and that is what downstream reads.
+    understanding = routing.get("understanding") or {}
+    assert understanding.get("usable") is True
+    assert understanding.get("questions")
 
 
 def test_the_payload_goes_through_the_production_parser():
@@ -421,12 +427,22 @@ def test_the_measured_inquiry_reaches_the_evidence_pipeline():
     assert outcome["metadata"].get("hybrid")
 
 
-def test_the_measured_inquiry_is_still_held_from_auto_post():
-    """Continuation must not become a way around the coverage gate."""
+def test_no_lexical_classifier_decides_this_inquiry_either_way():
+    """Continuation is not a way around a gate, because there is no such gate.
+
+    This used to assert a hold, and the hold it asserted came from the legacy
+    era: a lexical coverage verdict of PARTIAL, and a missing GPT-first decision
+    trace. Neither exists on this path now -- coverage is not computed, and the
+    trace is always present -- so what the test can still pin is that the
+    publishing decision carries no lexical reason and follows what GPT (2)
+    reported. Here the provider resolves the inquiry, so it publishes.
+    """
     from services.auto_processing_eligibility_service import AutoProcessingEligibilityService
 
     outcome = run(INQUIRY_687718601, _payload_687718601(), label="m3")
-    assert outcome["coverage"] == "PARTIAL"
+    assert outcome["coverage"] == ""
+    assert (outcome["metadata"].get("legacy_semantic_coverage")
+            == "PRODUCTION_PATH_UNUSED")
 
     verdict = AutoProcessingEligibilityService().evaluate(
         inquiry={"source_answered": 0, "post_status": "NOT_POSTED"},
@@ -437,9 +453,12 @@ def test_the_measured_inquiry_is_still_held_from_auto_post():
         },
         route=outcome["route"],
     )
-    assert "SEMANTIC_COVERAGE_INCOMPLETE" not in verdict.reasons
-    assert "UNDERSTANDING_UNAVAILABLE" in verdict.reasons
-    assert verdict.decision != "SAFE"
+    for legacy in ("SEMANTIC_COVERAGE_INCOMPLETE", "SEMANTIC_ACTION_MISMATCH",
+                   "REQUESTED_ATTRIBUTE_NOT_COVERED"):
+        assert legacy not in verdict.reasons, legacy
+    gpt_draft = (outcome["metadata"].get("hybrid") or {}).get("draft") or {}
+    assert not gpt_draft.get("unresolved")
+    assert verdict.decision == "SAFE"
 
 
 # ============================ 복합문의에서 deterministic 지름길은 증명이 필요하다

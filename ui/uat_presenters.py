@@ -34,7 +34,11 @@ def answer_source_label(
         or run.get("fallback_used")
     )
     if fallback:
-        return "RULE_FALLBACK"
+        # Not a rule answer: when the provider could not be used, no answer is
+        # composed at all and the draft is the safe one written for staff. The
+        # label said RULE_FALLBACK, which told the operator the opposite of
+        # what the draft in front of them was.
+        return "GPT_UNAVAILABLE_STAFF_DRAFT"
     if provider in {"rules", "rule", "rule_provider"}:
         return "RULE"
     if provider in {"fake", "fake_gpt", "fake_gpt_hybrid"}:

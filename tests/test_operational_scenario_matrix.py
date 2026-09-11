@@ -628,7 +628,7 @@ def generate_gpt_first(
         database,
         dps_enrichment=FakeDpsEnrichment(),
         hybrid_service=HybridAnswerService(
-            provider, legacy_evidence_verification=False,
+            provider,
         ),
         semantic_analyzer=GptSemanticAnalyzerService(provider),
     ).generate_for_inquiry(inquiry_id)

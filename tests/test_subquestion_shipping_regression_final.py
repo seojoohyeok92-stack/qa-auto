@@ -138,36 +138,6 @@ def test_real_shipping_questions_keep_the_shipping_rule(question: str) -> None:
     assert result.match_kind == "FIXED_POLICY_SHIPPING"
 
 
-def test_as_question_rejects_shipping_only_template() -> None:
-    result = AnswerValidator().validate_route(
-        SHIPPING_ANSWER,
-        route="TEMPLATE",
-        question="A/S 받을 수 있나요?",
-    )
-    assert result.passed is False
-    assert result.status == "FAILED_INVALID_CONTENT"
-    assert any(
-        rule.code == "TEMPLATE_SEMANTIC_ALIGNMENT" and rule.status == "BLOCK"
-        for rule in result.rules
-    )
-
-
-def test_as_answer_and_shipping_pair_each_remain_valid() -> None:
-    validator = AnswerValidator()
-    as_result = validator.validate_route(
-        "제품 고장은 삼성전자 서비스센터를 통해 A/S 접수해 주세요.",
-        route="TEMPLATE",
-        question="A/S 받을 수 있나요?",
-    )
-    shipping_result = validator.validate_route(
-        SHIPPING_ANSWER,
-        route="TEMPLATE",
-        question="배송은 언제 되나요?",
-    )
-    assert as_result.passed is True
-    assert shipping_result.passed is True
-
-
 def test_template_selection_cannot_bypass_semantic_alignment() -> None:
     request = AnswerRequest(
         inquiry_id=1,

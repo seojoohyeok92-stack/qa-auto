@@ -526,7 +526,6 @@ def test_gs06_verified_hdmi_fact_reaches_post_for_exact_product(database):
         database,
         hybrid_service=HybridAnswerService(
             _provider("HDMI 단자는 2개입니다."),
-            legacy_evidence_verification=False,
         ),
         dps_enrichment=RecordingDps(),
         order_lookup_service=RecordingOrderLookup(),
@@ -574,7 +573,6 @@ def test_gs07_to_gs09_learning_scope_and_conflict(
     hybrid = HybridAnswerService(
         _provider(answer),
         learning_context_provider=lambda *_: context,
-        legacy_evidence_verification=False,
     )
     service = AnswerService(
         database,

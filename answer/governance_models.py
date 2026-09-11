@@ -57,7 +57,6 @@ class GptProviderSettings:
     regeneration_cooldown_seconds: int = 10
     daily_cost_limit_krw: float = 0.0
     canary_percentage: float = 0.0
-    shadow_enabled: bool = False
     enabled: bool = True
     approved_by_company: bool = False
     api_key_present: bool = False
@@ -132,7 +131,6 @@ class GptProviderSettings:
             canary_percentage=_float_env(
                 "QNA_GPT_CANARY_PERCENTAGE", 0.0
             ),
-            shadow_enabled=_bool_env("QNA_GPT_SHADOW_ENABLED"),
             enabled=_bool_env("QNA_GPT_ENABLED", True),
             approved_by_company=_bool_env("QNA_GPT_COMPANY_APPROVED"),
             api_key_present=bool(os.getenv("QNA_GPT_API_KEY")),

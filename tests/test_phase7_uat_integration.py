@@ -389,7 +389,9 @@ def test_dps_agent_can_be_running_while_tab_is_missing() -> None:
         (
             {"metadata_json": {"governance": {"fallback_reason": "TIMEOUT"}}},
             None,
-            "RULE_FALLBACK",
+            # No rule answer is published on this path any more; the draft the
+            # operator sees is the safe staff one, and the label says so.
+            "GPT_UNAVAILABLE_STAFF_DRAFT",
         ),
         ({}, {"provider": "openai", "mode": "SHADOW"}, "OPENAI_SHADOW"),
         ({}, {"provider": "openai", "mode": "CANARY"}, "OPENAI_CANARY"),

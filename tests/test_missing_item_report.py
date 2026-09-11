@@ -37,9 +37,6 @@ from __future__ import annotations
 import pytest
 
 from answer.engine import AnswerEngine
-from services.semantic_action_support import (
-    ANSWER_ACTION_SUPPORT, COMPATIBLE, MISMATCH, UNDETERMINED, evaluate,
-)
 from services.semantic_analysis import (
     ACTIONS,
     MISSING_ITEM_REPORT,
@@ -141,44 +138,6 @@ def test_a_missing_item_is_kept_distinct_from_its_neighbours() -> None:
 
 
 # ==========================================================================
-# 3. The mismatch gate recognises the substitution
-# ==========================================================================
-
-
-def test_a_product_description_does_not_address_a_missing_item() -> None:
-    decision = evaluate(
-        understanding(MISSING_ITEM_REPORT),
-        route="TEMPLATE", template_id="스탠드모델",
-    )
-
-    assert decision.status == MISMATCH
-    assert decision.question_action == MISSING_ITEM_REPORT
-
-
-def test_a_model_question_is_still_compatible_with_that_answer() -> None:
-    decision = evaluate(
-        understanding("PRODUCT_SPEC", states=()),
-        route="TEMPLATE", template_id="스탠드모델",
-    )
-
-    assert decision.status == COMPATIBLE
-
-
-def test_no_label_still_means_no_verdict() -> None:
-    assert evaluate(
-        understanding(MISSING_ITEM_REPORT),
-        route="GPT_FALLBACK", template_id=None,
-    ).status == UNDETERMINED
-
-
-def test_the_added_labels_describe_answers_we_own() -> None:
-    for label in ("스탠드모델", "스탠드호환", "스탠드사용법", "배터리호환"):
-        assert label in ANSWER_ACTION_SUPPORT
-        assert MISSING_ITEM_REPORT not in ANSWER_ACTION_SUPPORT[label], (
-            f"{label} cannot resolve a missing item"
-        )
-
-
 # ==========================================================================
 # 4. The router: a confident classifier can still be wrong
 # ==========================================================================

@@ -242,23 +242,24 @@ class AnswerValidator:
         route: str,
         installation_date: str | None = None,
         installation_time: str | None = None,
-        product_name: str = "",
         question: str = "",
         existing: ValidationResult | None = None,
     ) -> ValidationResult:
         """Single validator entry point selected only by the final route."""
 
+        # TEMPLATE and PRODUCT_DB used to be dispatched here. Both were
+        # final-answer routes -- a keyword template, or the catalogue answering
+        # the customer directly -- and no generation path selects either one
+        # any more, so neither branch could be reached. Validation runs at
+        # generation time and is never re-run over a stored draft, so unlike
+        # the route *names* in eligibility there is no historical reader to
+        # keep them for. The TEMPLATE branch was also already redundant: the
+        # composed-answer branch below calls the same validator.
         normalized_route = str(route or "").upper()
         if existing is not None:
             result = existing
-        elif normalized_route == "TEMPLATE":
-            result = self.validate_template_text(answer, question=question)
         elif normalized_route == "ORDER_ID_REQUEST":
             result = self.validate_order_id_request(answer)
-        elif normalized_route == "PRODUCT_DB":
-            result = self.validate_product_db_text(
-                answer, product_name=product_name
-            )
         elif normalized_route in {
             "ORDER_LOOKUP_FAILED",
             "DELIVERY_ORDER_NOT_FOUND",
@@ -392,58 +393,6 @@ class AnswerValidator:
             errors=errors,
             warnings=(),
             checked_facts=(),
-            status="PASS" if not errors else "BLOCK",
-            rules=tuple(rules),
-        )
-
-    def validate_product_db_text(
-        self,
-        answer: str,
-        *,
-        product_name: str,
-    ) -> ValidationResult:
-        """Validate a Product DB answer independently from templates/GPT."""
-
-        base = self.validate_template_text(answer)
-        rules = list(base.rules)
-
-        def add(code: str, passed: bool, message: str) -> None:
-            rules.append(
-                ValidationRuleResult(
-                    code,
-                    "PASS" if passed else "BLOCK",
-                    message,
-                )
-            )
-
-        text = str(answer or "").strip()
-        internal_states = re.search(
-            r"(?i)(?:\bCONFLICT\b|\bMISSING\b|needs_review|model_mismatch)",
-            text,
-        )
-        add(
-            "PRODUCT_DB_PRODUCT_CONTEXT",
-            bool(str(product_name or "").strip()),
-            "Product DB 답변에 사용할 상품 컨텍스트가 존재합니다.",
-        )
-        add(
-            "PRODUCT_DB_INTERNAL_STATE_BLOCK",
-            not bool(internal_states),
-            "Product DB 내부 상태값을 고객 답변에 노출하지 않았습니다.",
-        )
-        add(
-            "PRODUCT_DB_SPECULATION_BLOCK",
-            not bool(SPECULATION_PATTERN.search(text)),
-            "Product DB에 없는 사양을 추측하지 않았습니다.",
-        )
-        errors = tuple(
-            rule.message for rule in rules if rule.status == "BLOCK"
-        )
-        return ValidationResult(
-            passed=not errors,
-            errors=errors,
-            warnings=(),
-            checked_facts=("product.name",),
             status="PASS" if not errors else "BLOCK",
             rules=tuple(rules),
         )

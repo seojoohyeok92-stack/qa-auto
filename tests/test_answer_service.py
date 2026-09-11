@@ -113,7 +113,11 @@ def test_service_generates_from_inquiry_and_saves_draft(
 ) -> None:
     inquiry_id = create_inquiry(database, "SERVICE-1")
     engine = StaticEngine(generated_result())
-    outcome = AnswerService(database, engine=engine).generate_for_inquiry(
+    outcome = AnswerService(
+        database,
+        engine=engine,
+        hybrid_service=StaticHybrid(generated_result()),
+    ).generate_for_inquiry(
         inquiry_id
     )
     assert outcome.draft["original_answer"] == format_final_answer(
@@ -142,6 +146,7 @@ def test_saved_active_draft_is_enqueued_for_kakao(
     outcome = AnswerService(
         database,
         engine=StaticEngine(generated_result("카카오 공유 답변")),
+        hybrid_service=StaticHybrid(generated_result("카카오 공유 답변")),
     ).generate_for_inquiry(inquiry_id)
 
     # A successful draft is an intermediate state.  The confirmed Naver post
@@ -173,6 +178,7 @@ def test_kakao_failure_does_not_fail_saved_answer(
     outcome = AnswerService(
         database,
         engine=StaticEngine(generated_result()),
+        hybrid_service=StaticHybrid(generated_result()),
     ).generate_for_inquiry(inquiry_id)
 
     assert outcome.draft["is_active"] == 1
@@ -192,6 +198,7 @@ def test_success_completes_step_and_sets_review_pending(
     AnswerService(
         database,
         engine=StaticEngine(generated_result()),
+        hybrid_service=StaticHybrid(generated_result()),
     ).generate_for_inquiry(inquiry_id)
     step = WorkflowRepository(database).get_step(
         inquiry_id,
@@ -257,6 +264,7 @@ def test_one_inquiry_failure_does_not_affect_another(
     outcome = AnswerService(
         database,
         engine=StaticEngine(generated_result()),
+        hybrid_service=StaticHybrid(generated_result()),
     ).generate_for_inquiry(success_id)
     assert safe.result.metadata["selected_answer_route"] == (
         "REVIEW_REQUIRED_SAFE_DRAFT"
@@ -275,11 +283,13 @@ def test_regeneration_keeps_history_and_restarts_completed_step(
     service = AnswerService(
         database,
         engine=StaticEngine(generated_result("첫 답변")),
+        hybrid_service=StaticHybrid(generated_result("첫 답변")),
     )
     service.generate_for_inquiry(inquiry_id)
     service = AnswerService(
         database,
         engine=StaticEngine(generated_result("둘째 답변")),
+        hybrid_service=StaticHybrid(generated_result("둘째 답변")),
     )
     service.generate_for_inquiry(inquiry_id)
     history = AnswerRepository(database).history_for_inquiry(inquiry_id)
@@ -323,6 +333,7 @@ def test_success_and_review_events_are_logged(
     AnswerService(
         database,
         engine=StaticEngine(generated_result()),
+        hybrid_service=StaticHybrid(generated_result()),
     ).generate_for_inquiry(success_id)
     AnswerService(
         database,
@@ -341,26 +352,3 @@ def test_success_and_review_events_are_logged(
     }
     assert "ANSWER_DRAFT_NEEDS_REVIEW" in review_codes
     assert "ANSWER_ROUTED_AND_SAVED" in review_codes
-
-
-def test_real_rule_engine_persists_a_draft_end_to_end(
-    database: Database,
-) -> None:
-    inquiry_id = InquiryRepository(database).upsert_work_item(
-        {
-            "store_code": "OJE_PLUS",
-            "source_type": "CUSTOMER_INQUIRY",
-            "source_question_id": "SERVICE-REAL",
-            "inquiry_type": "상품",
-            "content": "온누리상품권 신청 방법이 궁금합니다.",
-            "product_name": "삼성 TV",
-            "raw_json": {},
-        }
-    ).inquiry_id
-    outcome = AnswerService(database).generate_for_inquiry(inquiry_id)
-    assert outcome.result.status is AnswerStatus.GENERATED
-    assert outcome.result.provider == "rules"
-    assert outcome.result.metadata["answer_type"] == "existing_template"
-    assert outcome.result.metadata["gpt_called"] is False
-    assert outcome.result.category == "행사/신청방법"
-    assert outcome.draft["original_answer"] == outcome.result.answer

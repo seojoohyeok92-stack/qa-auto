@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -188,21 +189,27 @@ def test_repository_sync_watermarks_are_isolated_by_store_and_source(
 
 def test_orchestrator_persists_source_failure_stage_and_correlation(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     database = Database(tmp_path / "sync.db")
     database.initialize()
+    correlation_id = "12345678-1234-4abc-8def-123456789012"
+    monkeypatch.setattr(
+        "services.inquiry_sync_orchestrator.uuid.uuid4",
+        lambda: correlation_id,
+    )
 
     def loader(**kwargs):
         kwargs["event_callback"](
             "NAVER_SYNC_API_REQUEST_STARTED",
-            {"store_code": "STORE", "source": "CUSTOMER_INQUIRY", "page": 1},
+            {"store_code": "STORE", "source": "PRODUCT_INQUIRY", "page": 1},
         )
         return [], [
             {
                 "store_code": "STORE",
                 "store_name": "테스트 스토어",
-                "stage": "고객문의 조회",
-                "source": "CUSTOMER_INQUIRY",
+                "stage": "상품문의 조회",
+                "source": "PRODUCT_INQUIRY",
                 "inquiry_id": None,
                 "message": "ReadTimeout",
             }
@@ -228,7 +235,10 @@ def test_orchestrator_persists_source_failure_stage_and_correlation(
         "NAVER_SYNC_API_REQUEST_STARTED",
         "NAVER_SYNC_SOURCE_FAILED",
     ]
-    assert all(result.correlation_id in row["details_json"] for row in rows)
+    assert result.correlation_id == correlation_id
+    assert [
+        json.loads(row["details_json"])["correlation_id"] for row in rows
+    ] == [correlation_id, correlation_id]
 
 
 def test_partial_sync_is_not_presented_as_success() -> None:
