@@ -153,7 +153,10 @@ def _atomic_question_payload(
 ATOMIC_QUESTION_INSTRUCTIONS = (
     "문의에 포함된 각 질문을 하나도 빠뜨리지 말고 순서대로 다룬다.",
     "evidence가 있는 질문만 사실로 답한다.",
-    "review_required 또는 근거가 없는 질문은 추측하지 않고 확인이 필요하다고만 안내한다.",
+    # ``review_required`` is the keyword classifier's pre-generation flag, not
+    # a finding about the evidence GPT ② is about to read.
+    "review_required 는 규칙 분류기의 사전 표시일 뿐이다. 제공된 근거로 답할 수"
+    " 있으면 답하고, 근거가 없는 질문만 확인이 필요하다고 안내한다.",
     "확인이 필요한 질문 때문에 답변 가능한 다른 질문까지 회피하지 않는다.",
     # The per-question map is what retrieval matched, not a fence.
     #
@@ -331,65 +334,34 @@ class DraftGenerationService:
                 # asserts no product facts reached the model checks for
                 # exactly that string.
                 "PRODUCT_CATALOG_JSON": "이 상품에 대해 검증된 사양.",
+                # Provenance only. Every label on a Learning row -- identity,
+                # knowledge, authority, hedge -- used to arrive with an
+                # instruction attached ("자동 적용하지 마라", "사실 근거로는
+                # 검증되지 않은 것", "확정 표현의 수준을 맞춰라"), and on the
+                # server GPT ② quoted those instructions back as its reason for
+                # not using the row: LID 72 (리모컨 포함) and LID 117 (벽걸이
+                # 설치비 미청구) came from a 50-inch listing of the same model and
+                # were set aside as "다른 상품의 미검증 자료". The labels stay;
+                # what they mean for this question is GPT ②'s judgement.
                 "APPROVED_LEARNING": (
-                    "사람이 승인한 과거 답변. 사실 근거로 사용 가능."
-                    " 각 후보의 evidence_origin.identity가 출처를 알려준다:"
-                    " SAME_PRODUCT는 현재 상품에서 나온 자료,"
-                    " OTHER_PRODUCT_OR_MODEL은 다른 상품/모델에서 나온 자료,"
-                    " POLICY_OR_GENERAL은 상품과 무관한 정책·운영 안내,"
-                    " UNKNOWN_IDENTITY는 출처 상품을 특정하지 못한 자료다."
-                    " evidence_origin.knowledge가 PRODUCT_SPECIFIC이면 그 내용은"
-                    " 특정 모델의 사양·구성이므로 다른 상품에 자동 적용하지 마라."
-                    " 다른 상품에서 나온 자료라고 해서 무조건 버리지도 마라:"
-                    " 질문의 성격, 정책 공통성, PRODUCT_CATALOG_JSON,"
-                    " 다른 근거와 함께 현재 문의에 적용 가능한지 직접 판단하고,"
-                    " 적용했다면 그 근거를 답변 근거로 보고하라."
-                    # Two more provenance fields, for the same reason the
-                    # identity label exists: the row is offered, so the model
-                    # has to be able to tell what kind of thing it is holding.
-                    " evidence_authority는 이 답변의 출처 권위다:"
-                    " APPROVED는 담당자가 검수·승인한 답변이고,"
-                    " SELLER_POSTED_NOT_VERIFIED는 과거에 판매자가 실제로 고객에게"
-                    " 보낸 답변이지만 사실 근거로는 검증되지 않은 것이며,"
-                    " AUTO는 파이프라인이 생성한 기록이다."
-                    # Provenance, not permission.
-                    #
-                    # These two lines used to read "only APPROVED may be cited
-                    # as a definite fact" and "when the source is unverified or
-                    # hedged, say it needs checking or leave it unresolved".
-                    # Measured against the live store that is an instruction to
-                    # give up: 624 of 1,047 active rows are the seller's own
-                    # posted answers (SELLER_POSTED_NOT_VERIFIED) and 510 carry
-                    # a hedge flag, so for most real questions every candidate
-                    # the retrieval found was pre-labelled unusable.
-                    #
-                    # Four server inquiries show the effect. 688292805 asked
-                    # whether the wall-mount installation fee is extra and was
-                    # handed the store's own answer saying it is not charged;
-                    # 688292840 asked whether the remote is included and was
-                    # handed two answers saying it is. Both atoms came back
-                    # unresolved with used_learning_ids empty -- the model did
-                    # exactly what it was told.
-                    #
-                    # So the authority label stays and its meaning stays: it
-                    # says where the sentence came from, and the model has to
-                    # weigh that. What it no longer does is decide the outcome
-                    # in advance.
-                    " evidence_authority는 출처를 알려주는 정보이며 사용 허가가"
-                    " 아니다. 어느 근거가 이 질문에 답하는지는 내용을 읽고"
-                    " 판단하라."
-                    " hedge_reason이 비어 있지 않으면 그 답변은 스스로 추정임을"
-                    " 밝힌 문장이다."
-                    " SENTENCE 단위로 읽어라: 추정 표현이 있다고 해서 그 답변의"
-                    " 다른 정책·사실 내용까지 버리지 말고, 반대로 추정인 부분을"
-                    " 확정 사실처럼 단정하지도 마라."
-                    " 근거가 질문에 답하고 있으면 그 내용으로 답하고 어떤 근거를"
-                    " 썼는지 보고하라. 출처가 검수 전이거나 다른 상품에서 온"
-                    " 경우에는 확정 표현의 수준을 그 근거가 실제로 뒷받침하는"
-                    " 만큼으로 맞춰라."
+                    "과거에 고객에게 실제로 보낸 답변. 사실 근거로 사용할 수 있다."
+                    " evidence_origin(identity, reason, source_*/current_* 의"
+                    " product_id·상품명·모델코드·크기·카테고리),"
+                    " evidence_authority, hedge_reason, source_question 은"
+                    " 이 답변이 어디서 왔는지 알려주는 출처 정보이며 사용 허가나"
+                    " 금지가 아니다."
+                    " identity: SAME_PRODUCT=현재 상품, OTHER_LISTING=다른 판매"
+                    " 페이지(같은 모델일 수 있음), OTHER_PRODUCT_OR_MODEL=모델코드·"
+                    "크기·카테고리 중 명시된 값이 다름, UNKNOWN_IDENTITY=비교할"
+                    " 정보 없음. source_* 와 current_* 를 직접 비교하라."
+                    " evidence_authority: APPROVED=담당자 승인,"
+                    " SELLER_POSTED=판매자가 고객에게 게시한 답변,"
+                    " AUTO=파이프라인 기록."
+                    " hedge_reason 이 있으면 그 답변의 일부 문장이 추정이라는 표시다."
+                    " 내용을 읽고 현재 질문과 현재 상품에 적용되는지 직접 판단하라."
+                    " 적용되면 그 내용으로 답하고 사용한 learning_id 를 보고하라."
                     " 전달된 근거 중 어느 것도 그 질문에 답하지 않을 때에만"
-                    " unresolved 로 남겨라. 없는 사양이나 정책을 추측해서"
-                    " 만들어내지는 마라."
+                    " unresolved 로 남겨라."
                 ),
                 "HISTORICAL_CASES": (
                     "과거 상담 기록. 안정적인 운영 지식이면 사실 근거로 사용 가능하며,"
@@ -399,7 +371,10 @@ class DraftGenerationService:
                     "결정적 규칙이 낸 후보 문안. 다른 후보와 같은 자격의 후보이며"
                     " 우선 적용되는 답변이 아니다."
                 ),
-                "SELLER_STYLE_EXAMPLES": "문체 참고용. 사실 근거가 아니다.",
+                "SELLER_STYLE_EXAMPLES": (
+                    "판매자 답변의 문체 참고. 같은 답변이 APPROVED_LEARNING 에도"
+                    " 있으면 내용은 그 항목에서 판단한다."
+                ),
                 "OJE_STYLE_RULES": "표현 규칙.",
             },
             **evidence,
@@ -670,8 +645,6 @@ class DraftGenerationService:
                 if selected is None:
                     continue
                 matched = str(item.get("matched_subquestion") or "")
-                if matched != str(selected.get("matched_subquestion") or ""):
-                    continue
                 valid.append({
                     "historical_case_id": case_id,
                     "matched_subquestion": matched,
@@ -743,8 +716,6 @@ class DraftGenerationService:
                 if selected is None:
                     continue
                 matched = str(item.get("matched_subquestion") or "")
-                if matched != str(selected.get("matched_subquestion") or ""):
-                    continue
                 valid.append({
                     "signal_id": signal_id,
                     "matched_subquestion": matched,
@@ -814,14 +785,13 @@ class DraftGenerationService:
                     learning_id = int(item.get("learning_id"))
                 except (TypeError, ValueError):
                     continue
+                # Attachment is the only check: the row must have been in the
+                # prompt. Which sub-question it answers is GPT ②'s reading --
+                # one stored answer routinely settles two atoms.
                 selected = approved.get(learning_id)
                 if selected is None:
                     continue
                 matched = str(item.get("matched_subquestion") or "")
-                if matched != str(
-                    selected.get("matched_subquestion") or ""
-                ):
-                    continue
                 valid_usage.append(
                     {
                         "learning_id": learning_id,

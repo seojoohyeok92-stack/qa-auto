@@ -24,12 +24,11 @@ once before an approved answer may settle a product-fact question:
   definite      the answer states something.  A hedged answer is a person
                 declining to commit, and inheriting that as a verified fact
                 would publish a guess wearing a verified label
-  undisputed    no other approved answer in scope contradicts it, and no
-                VERIFIED product fact contradicts it
+  undisputed    no VERIFIED product fact contradicts it
 
-Conflicts are never resolved here -- not by recency, not by score.  Two
-approved answers that disagree are a record-keeping problem a person has to
-settle, and picking one would publish a coin flip.
+A Learning answer contradicted by a verified Product Fact is reported as a
+conflict for a person to settle.  Two Learning answers that disagree are not
+a data conflict: both reach GPT ②, which judges which one applies.
 """
 from __future__ import annotations
 
@@ -38,7 +37,7 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable, Mapping
 
 from answer.answer_format import extract_answer_body
-from answer.learning_signal import detect_polarity, facts_conflict
+from answer.learning_signal import detect_polarity
 from services.auto_post_validation_service import INTERNAL_PLACEHOLDER
 
 # Product identity verdicts the compatibility gate issues when it resolved the
@@ -532,43 +531,6 @@ def _qualifying(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return kept
 
 
-def approved_conflicts(
-    items: Iterable[Mapping[str, Any]]
-) -> tuple[dict[str, Any], ...]:
-    """Approved answers for the same sub-question that flatly disagree.
-
-    Uses the same polarity comparison the verified-signal path already uses, so
-    "가능합니다" against "불가능합니다" is a conflict and two differently worded
-    agreeing answers are not.  Only candidates that passed the identity and
-    support checks are compared -- a rejected candidate is not evidence, so it
-    cannot create a conflict either.
-    """
-
-    usable = _qualifying(items)
-    found: list[dict[str, Any]] = []
-    for index, left in enumerate(usable):
-        for right in usable[index + 1:]:
-            if left.get("matched_subquestion") != right.get(
-                "matched_subquestion"
-            ):
-                continue
-            if not facts_conflict(
-                left.get("answer"), right.get("answer")
-            ) and not quantities_conflict(
-                left.get("answer"), right.get("answer")
-            ):
-                continue
-            found.append({
-                "left_learning_id": left.get("learning_example_id"),
-                "right_learning_id": right.get("learning_example_id"),
-                "left_text": _text(left.get("answer"))[:200],
-                "right_text": _text(right.get("answer"))[:200],
-                "subquestion": left.get("matched_subquestion"),
-                "kind": "APPROVED_LEARNING_VS_APPROVED_LEARNING",
-            })
-    return tuple(found)
-
-
 def _fact_quantity_text(value: object) -> str:
     """The numbers a fact value states, whatever shape it is stored in.
 
@@ -683,17 +645,17 @@ def evaluate(
     if not approved:
         return LearningEvidenceDecision(False, "NO_APPROVED_LEARNING")
 
+    # Only a verified Product Fact can make a Learning answer a data conflict.
+    # Two Learning answers that disagree are two candidates, and which one
+    # fits this product and this time is GPT ②'s reading -- marking the
+    # sub-question CONFLICT here decided it for the model.
     against_facts = fact_conflicts(approved, safe_facts, scope_for=scope_for)
-    against_each_other = approved_conflicts(approved)
-    if against_facts or against_each_other:
+    if against_facts:
         return LearningEvidenceDecision(
             False,
-            (
-                "PRODUCT_FACT_VS_LEARNING_CONFLICT" if against_facts
-                else "APPROVED_LEARNING_CONFLICT"
-            ),
+            "PRODUCT_FACT_VS_LEARNING_CONFLICT",
             conflict=True,
-            conflicts=(*against_facts, *against_each_other),
+            conflicts=against_facts,
         )
 
     usable = _qualifying(approved)

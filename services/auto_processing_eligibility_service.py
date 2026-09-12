@@ -614,8 +614,13 @@ class AutoProcessingEligibilityService:
         product_guard = (
             product_guard_value if isinstance(product_guard_value, dict) else {}
         )
+        # ``auto_post_allowed`` is the guard's own verdict, which already
+        # knows whether GPT ② composed the answer. Reading
+        # ``current_fact_verified`` here instead let the keyword ``sensitive``
+        # flag hold GPT ②'s answers the guard had cleared. Older drafts without
+        # the field keep the previous reading.
         if product_guard.get("sensitive") and not product_guard.get(
-            "current_fact_verified"
+            "auto_post_allowed", product_guard.get("current_fact_verified")
         ):
             reasons.append("PRODUCT_FACT_NOT_VERIFIED")
         # "this inquiry is high risk" and "the keyword classifier had no rule

@@ -426,11 +426,9 @@ def test_687932860_each_atomic_question_keeps_its_own_evidence(
             assert origin.get("identity") != "SAME_PRODUCT", (
                 "다른 모델 Learning 이 현재 상품 자료로 표시됐다", source
             )
-            if origin.get("knowledge") == "PRODUCT_SPECIFIC":
-                assert origin.get("note"), (
-                    "다른 모델의 사양 Learning 에 자동 적용 금지 안내가 없다",
-                    source,
-                )
+            assert "note" not in origin, (
+                "Learning 출처 라벨에 사용 지시가 붙었다", source,
+            )
 
 
 # ---------------------------------------------------------------------------

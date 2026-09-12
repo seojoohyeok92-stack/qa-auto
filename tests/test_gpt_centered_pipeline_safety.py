@@ -186,7 +186,8 @@ def test_a_different_models_spec_never_becomes_a_candidate(tmp_path):
         origin = item.get("evidence_origin") or {}
         assert origin.get("identity") == "OTHER_PRODUCT_OR_MODEL", origin
         assert origin.get("reason"), origin
-        assert origin.get("note"), "다른 모델 사양에 자동 적용 금지 안내가 없다"
+        # 출처만 표시하고 적용 여부 지시는 붙이지 않는다 -- 판단은 GPT ②.
+        assert "note" not in origin, origin
     # identity 판정 자체는 그대로 강하다 -- 삭제만 하지 않는다.
     verdicts = {
         str((item.get("compatibility") or {}).get("product_match") or "")

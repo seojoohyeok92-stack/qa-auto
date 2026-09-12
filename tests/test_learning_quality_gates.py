@@ -147,17 +147,19 @@ def test_style_only_spec_never_grounds_a_fact(database) -> None:
     # 후보로는 도달한다. 판매자가 실제로 보낸 답변이 코퍼스의 59.6% 이고,
     # 그것을 채널에서 지우는 것은 GPT ② 가 읽을 기회를 없애는 일이었다.
     assert factual_answers(context) == ["HDMI 단자는 4개입니다."]
-    # 그러나 사실을 증명하지는 못한다 -- 이 테스트의 이름이 말하는 불변식.
-    assert "4개" not in grounding_corpus(context)
+    # 전달된 텍스트이므로 validator 의 수치 대조에서도 보인다. 그 수치가
+    # 이 질문의 근거가 되는지는 GPT ② 가 판단한다.
+    assert "4개" in grounding_corpus(context)
+    # 제품사실 hold 를 단독으로 해제하지는 못한다 (_qualifying 은 그대로).
     assert all(
         not usable_as_factual_evidence(item)
         for item in context["similar_approved_answers"]
     )
-    # 그리고 모델에게도 그렇게 표시된다.
+    # 모델에게는 출처만 표시된다.
     assert [
         item["evidence_authority"]
         for item in context["similar_approved_answers"]
-    ] == ["SELLER_POSTED_NOT_VERIFIED"]
+    ] == ["SELLER_POSTED"]
     assert not usable_as_factual_evidence(
         {"style_only": True, "answer": "HDMI 단자는 4개입니다."}
     )
@@ -173,7 +175,7 @@ def test_style_only_remains_available_as_a_tone_reference(database) -> None:
     context = retrieve(database, "HDMI 단자가 몇 개인가요?")
 
     assert any("HDMI" in answer for answer in style_answers(context))
-    assert context["oje_style_rules"]["seller_examples_are_style_only"] is True
+    assert "seller_examples_are_style_only" not in context["oje_style_rules"]
 
 
 # ==========================================================================
@@ -254,8 +256,9 @@ def test_hedged_answer_with_rating_five_is_not_factual_evidence(
     assert [
         item["hedge_reason"] for item in context["similar_approved_answers"]
     ] == ["보입니다"]
-    # 증명에는 쓰일 수 없다 -- 승인은 권위이고 확정성은 아니다.
-    assert "전날" not in grounding_corpus(context)
+    # 전달된 텍스트이므로 validator 수치 대조에는 보인다. 추정인지 여부는
+    # hedge_reason 으로 GPT ② 에 전달되고, 판단은 GPT ② 가 한다.
+    assert "전날" in grounding_corpus(context)
     assert estimation_reason("설치 기사님이 전날 연락드릴 것으로 보입니다.") is not None
 
 
@@ -267,9 +270,9 @@ def test_hedged_answer_is_demoted_not_discarded(database) -> None:
     )
     context = retrieve(database, "기사님이 언제 연락주시나요?")
 
-    # demote 의 의미가 바뀌었다: 채널에서 빼는 것이 아니라 증명 자격을 빼는 것.
+    # demote 는 라벨(hedge_reason)일 뿐 채널·코퍼스에서 빼지 않는다.
     assert any("전날" in answer for answer in factual_answers(context))
-    assert "전날" not in grounding_corpus(context)
+    assert "전날" in grounding_corpus(context)
     assert context["learning_retrieval"]["HEDGED_FACTUAL_DEMOTED"] >= 1
 
 

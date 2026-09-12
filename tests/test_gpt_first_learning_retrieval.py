@@ -714,13 +714,11 @@ def test_extra_queries_do_not_let_another_model_fact_through(
             "다른 모델 Learning 이 현재 상품 자료로 표시됐다",
             item.get("source_product_name"),
         )
-        # 다른 상품의 '사양·구성' 자료에는 자동 적용 금지 안내가 붙는다.
-        # 정책성 자료(수거·배송 등)는 상품이 달라도 그대로 적용되므로 제외한다.
-        if origin.get("knowledge") == "PRODUCT_SPECIFIC":
-            assert origin.get("note"), (
-                "다른 모델의 사양 Learning 에 자동 적용 금지 안내가 없다",
-                item.get("source_product_name"),
-            )
+        # 라벨은 출처 정보일 뿐 적용 금지 지시가 붙지 않는다.
+        assert "note" not in origin, (
+            "Learning 출처 라벨에 사용 지시가 붙었다",
+            item.get("source_product_name"),
+        )
 
 
 def test_a_question_with_no_stored_answer_still_goes_unresolved(

@@ -131,8 +131,9 @@ def test_similar_search_limits_results_and_separates_factual_authority(tmp_path)
     )
     assert len(context["similar_approved_answers"]) <= 3
     assert context["similar_approved_answers"]
-    assert context["oje_style_rules"]["seller_examples_are_style_only"] is True
-    assert context["oje_style_rules"]["facts_priority"][0] == "PRODUCT_DB"
+    # 문체 규칙은 문체만 담는다: 판매자 답변에 대한 판정이나 근거 서열 없음.
+    assert "seller_examples_are_style_only" not in context["oje_style_rules"]
+    assert "facts_priority" not in context["oje_style_rules"]
 
 
 def test_similar_search_prefers_approved_then_legacy_rule_then_legacy_gpt(tmp_path) -> None:
@@ -227,7 +228,7 @@ def test_gpt_prompt_receives_approved_style_context_in_declared_priority() -> No
         "APPROVED_LEARNING", "HISTORICAL_CASES", "TEMPLATE_CANDIDATE",
         "SELLER_STYLE_EXAMPLES", "OJE_STYLE_RULES",
     }
-    # 문체 예시는 여전히 사실 근거가 아니라고 명시된다.
-    assert "사실 근거가 아니" in sources["SELLER_STYLE_EXAMPLES"]
+    # 문체 예시 블록은 금지 문구 없이, 내용 판단은 APPROVED_LEARNING 쪽이라고만 말한다.
+    assert "사실 근거가 아니" not in sources["SELLER_STYLE_EXAMPLES"]
+    assert "APPROVED_LEARNING" in sources["SELLER_STYLE_EXAMPLES"]
     assert prompt_input["similar_approved_answers"][0]["answer"] == "승인 답변"
-    assert prompt_input["oje_style_rules"]["seller_examples_are_style_only"] is True

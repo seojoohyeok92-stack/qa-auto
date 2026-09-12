@@ -206,15 +206,18 @@ class EmptyProductKnowledge:
         )
 
 
-def _provider(answer: str) -> FakeGptProvider:
+def _provider(answer: str, unresolved: list[str] | None = None) -> FakeGptProvider:
+    draft = {
+        "answer": answer,
+        "used_facts": [],
+        "missing_information": [],
+        "requires_review": False,
+        "confidence": 0.96,
+    }
+    if unresolved:
+        draft["unresolved"] = list(unresolved)
     return FakeGptProvider(responses={
-        "DRAFT": {
-            "answer": answer,
-            "used_facts": [],
-            "missing_information": [],
-            "requires_review": False,
-            "confidence": 0.96,
-        },
+        "DRAFT": draft,
         "SELF_REVIEW": {
             "passed": True,
             "answered_all_questions": True,
@@ -570,8 +573,12 @@ def test_gs07_to_gs09_learning_scope_and_conflict(
         "기본 스탠드 다리는 탈부착 가능합니다."
         if not conflict else "정확한 탈부착 가능 여부는 확인이 필요합니다."
     )
+    # GS-08/GS-09: another model's answer, or two disagreeing answers, reach
+    # GPT ② unjudged by CODE; the hold is GPT ②'s own verdict that it cannot
+    # apply them (the keyword product-fact flag no longer holds GPT ②).
+    gpt_unresolved = conflict or match != "EXACT_MODEL"
     hybrid = HybridAnswerService(
-        _provider(answer),
+        _provider(answer, unresolved=[question] if gpt_unresolved else None),
         learning_context_provider=lambda *_: context,
     )
     service = AnswerService(
@@ -590,8 +597,9 @@ def test_gs07_to_gs09_learning_scope_and_conflict(
             "approved_learning_evidence", {}
         )
         if evidence:
-            assert evidence.get("usable") is (expected_post == 1)
-            assert evidence.get("conflict") is conflict
+            assert evidence.get("conflict") is False
+            if not conflict:
+                assert evidence.get("usable") is (expected_post == 1)
         else:
             # Evidence conflict may stop generation before a product guard is
             # assembled; the separate policy assertion below pins its cause.
@@ -773,4 +781,6 @@ def test_learning_policy_exact_model_other_model_and_conflict():
     )
     assert exact.usable is True
     assert other.usable is False
-    assert conflict.usable is False and conflict.conflict is True
+    # Two Learning answers that disagree are not a CODE conflict; both reach
+    # GPT ②, which decides (GS-09 holds through GPT ②'s own unresolved).
+    assert conflict.conflict is False

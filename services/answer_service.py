@@ -3110,6 +3110,30 @@ class AnswerService:
                 and prompt_included
                 and validator_cleared
             )
+            # The same reading for Learning. ``learning_verified`` above asks
+            # for an approved row resolved to this exact product id -- the
+            # Product Fact identity standard -- so a same-model answer from a
+            # sibling listing could never settle the hold however directly it
+            # answered. GPT ② read the rows and named the ones it used; the
+            # only checks CODE keeps are that each id was actually delivered
+            # and that no verified Product Fact contradicts the Learning.
+            delivered_learning = {
+                str(item)
+                for item in (
+                    (hybrid_metadata.get("retrieval") or {}).get("learning") or {}
+                ).get("selected_learning_ids") or ()
+            }
+            gpt_used_learning = {
+                str(item)
+                for item in gpt_draft_metadata.get("used_learning_ids") or ()
+            }
+            gpt_learning_verified = bool(
+                product_fact_guard.sensitive
+                and gpt_understanding_usable
+                and delivered_learning & gpt_used_learning
+                and not learning_evidence.get("conflict")
+                and validator_cleared
+            )
             # Three ways a sensitive product claim can be verified, and the
             # fourth is gone. PRODUCT_DB used to be a route that answered the
             # customer directly from the catalogue, so being on it was itself
@@ -3119,6 +3143,7 @@ class AnswerService:
             # left to read as a live path.
             current_fact_verified = (
                 knowledge_verified or learning_verified or gpt_fact_verified
+                or gpt_learning_verified
             )
             guard_metadata = {
                 **product_fact_guard.to_dict(),
@@ -3127,13 +3152,23 @@ class AnswerService:
                     "PRODUCT_CATALOG_JSON" if knowledge_verified
                     else "APPROVED_LEARNING" if learning_verified
                     else "GPT_SELECTED_PRODUCT_FACT" if gpt_fact_verified
+                    else "GPT_SELECTED_LEARNING" if gpt_learning_verified
                     else None
                 ),
                 "approved_learning_evidence": dict(learning_evidence),
+                # Read by the eligibility gate. On the GPT-composed path the
+                # keyword ``sensitive`` flag no longer holds GPT ②'s answer;
+                # what still holds it is a VERIFIED Product Fact contradicting
+                # the Learning (data conflict), or GPT ②'s own unresolved.
                 "auto_post_allowed": (
                     not product_fact_guard.sensitive
                     or current_fact_verified
-                    or gpt_understanding_usable
+                    or (
+                        gpt_understanding_usable
+                        and hybrid_metadata.get("answer_pipeline")
+                        == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+                        and not learning_evidence.get("conflict")
+                    )
                 ),
                 "enforced_by": (
                     "GPT_CONTRACT_AND_GROUNDING"

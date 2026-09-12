@@ -21,7 +21,6 @@ from answer.text_utils import split_subquestions
 from answer.providers.provider_factory import create_gpt_provider
 from services.draft_generation_service import DraftGenerationService
 from services import learning_evidence_policy
-from services.learning_evidence_policy import usable_as_factual_evidence
 from services.gpt_understanding_service import GptUnderstandingService
 # ``required_fact_groups`` is no longer consulted here: see _product_fact_fields.
 from services.product_knowledge_service import SUBJECT_SENSITIVE_FIELDS
@@ -355,41 +354,22 @@ class HybridAnswerService:
 
     @staticmethod
     def _evidence_texts(learning_context: dict[str, Any]) -> str:
-        """The texts that may *prove* a factual claim, for grounding checks.
+        """Every retrieved text GPT ② was handed, for the grounding check.
 
-        The validator can see the facts but not the retrieved answers, so
-        without this a claim taken straight from an approved learning example
-        would look unsupported. What belongs here is therefore exactly what
-        the pipeline is willing to call evidence -- and three kinds of
-        retrieved text are not:
+        The validator asks one data question of the answer: does a number or
+        date it states appear in *something the pipeline supplied*? Which of
+        those sources is trustworthy for this question is GPT ②'s reading, so
+        the corpus no longer pre-filters Learning by authority or hedging --
+        doing so turned a quantity GPT ② took from a seller-posted answer into
+        an "ungrounded" error on the answer it had just judged grounded.
 
-        ``seller_style_examples``
-            Learning harvested from past Naver answers with no review. The
-            prompt already tells the model these are not facts
-            (``seller_style_examples_are_facts: false``) and
-            ``learning_evidence_policy`` refuses them outright, but this
-            corpus admitted them anyway -- so an unreviewed sentence could
-            ground a claim the two other layers had already rejected. They
-            still reach the prompt for tone; they no longer prove anything.
-
-        ``good_patterns`` / ``bad_patterns``
-            Guidance about how to write, never about the product.
-
-        hedged and redaction-contaminated answers
-            An answer that declines to commit cannot establish a definite
-            claim, and one containing a ``<masked-...>`` token is a record of
-            something removed, not a statement about the product.
-
-        Narrowing this corpus can only make the validator stricter: a claim
-        it can no longer find becomes an ungrounded-claim error.
+        ``bad_patterns`` stay out: they are the claim a person marked wrong.
         """
 
         parts: list[str] = []
         for key in ("similar_approved_answers", "historical_cases"):
             for item in learning_context.get(key) or []:
                 if not isinstance(item, dict):
-                    continue
-                if not usable_as_factual_evidence(item):
                     continue
                 parts.extend(
                     str(value) for value in item.values()

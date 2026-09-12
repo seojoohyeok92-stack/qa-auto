@@ -114,19 +114,18 @@ class PromptBuilder:
         " 다른 주문에 재사용하지 않는다. 그 값은 현재 Order/DPS 결과에서만 온다.",
         "상품에 대해 일반적으로 성립하는 안정적 운영 지식(설치 방식, A/S 절차,"
         " 상시 정책)은 과거 문의에서 나왔더라도 현재 상품에 적용되면 사용할 수 있다.",
-        # "만료되었거나 다른 모델/변형을 가리키는 후보는 사용하지 않는다" 를
-        # 제거했다. 만료는 CODE 가 이미 후보에서 빼고, 뒤쪽의 "다른 모델/상품의
-        # 사양을 현재 상품의 사실로 전환하지 않는다" 가 필요한 경계를 정확히
-        # 말한다. 두 줄을 함께 두면 교차상품 후보 전체가 사용 금지로 읽히고,
-        # 그것이 서버에서 LID 117/72/19554 가 쓰이지 않은 이유와 같은 종류의
-        # 지시다.
-        "후보들이 서로 충돌하면 한쪽을 고르지 말고 unresolved로 남긴다.",
+        # No rule here names a *kind* of candidate as unusable. "다른 모델/
+        # 상품의 사양을 현재 상품의 사실로 전환하지 않는다" was read as a ban on
+        # every cross-listing candidate -- LID 117/72/19554 were set aside with
+        # that sentence as the reason. Whether a candidate applies to this
+        # product is the reading the second rule above already asks for.
+        "후보들이 서로 충돌하면 어느 쪽이 현재 상품·시점·질문에 맞는지 판단하고,"
+        " 판단할 수 없을 때만 unresolved로 남긴다.",
         "근거가 실제로 말하지 않는 것을 확장하지 않는다."
         " 예: installation_method=PROFESSIONAL_TECHNICIAN_REQUIRED 는"
         " '전문 기사 설치'까지만 말하며, 기사의 소속 브랜드는 말하지 않는다.",
         "검색 결과는 후보이며 코드가 관련성을 보증하지 않는다. 각 후보를 직접"
         " 읽고 현재 atomic question 에 실제로 도움이 되는 것만 사용한다.",
-        "다른 모델/상품의 사양을 현재 상품의 사실로 전환하지 않는다.",
         "LISTING METADATA(판매 페이지 표기)와 VERIFIED PRODUCT CATALOG FACTS"
         "(검증 사양)를 구분한다. product_information_tiers 를 따른다.",
         "사용한 후보와 사용하지 않은 후보를 모두 이유와 함께 보고한다.",
@@ -386,7 +385,6 @@ class PromptBuilder:
                     "current order status", "current delivery status",
                     "current installation date",
                 ],
-                "seller_style_examples_are_facts": False,
                 "safe_historical_learning_allowed_for_stable_knowledge": True,
                 "historical_learning_forbidden_for_current_order_facts": True,
                 "partial_answer_required_for_supported_subquestions": True,

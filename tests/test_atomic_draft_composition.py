@@ -275,7 +275,7 @@ def test_the_prompt_carries_the_breakdown_and_its_rules() -> None:
     joined = " ".join(ATOMIC_QUESTION_INSTRUCTIONS)
 
     assert "빠뜨리지" in joined
-    assert "추측" in joined
+    assert "근거가 없는 질문" in joined
     assert "회피" in joined
 
 

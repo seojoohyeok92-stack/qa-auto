@@ -151,47 +151,49 @@ _IDENTITY_ORIGINS: dict[str, str] = {
     "EXACT_MODEL": "SAME_PRODUCT",
     "EXACT_PRODUCT": "SAME_PRODUCT",
     "EXACT_NAME": "SAME_PRODUCT",
+    # A different listing id and nothing else known to differ.
+    "DIFFERENT_LISTING": "OTHER_LISTING",
+    # A stated model code, size, category or brand differs.
     "MISMATCH": "OTHER_PRODUCT_OR_MODEL",
     "POLICY_COMPATIBLE": "POLICY_OR_GENERAL",
     "CATEGORY_UNCERTAIN": "UNKNOWN_IDENTITY",
+    "IDENTITY_UNKNOWN": "UNKNOWN_IDENTITY",
 }
 
 
+def _identity_fields(prefix: str, product: Any) -> dict[str, Any]:
+    return {
+        f"{prefix}_product_id": getattr(product, "product_id", None),
+        f"{prefix}_product_name": getattr(product, "product_name", None),
+        f"{prefix}_model_code": getattr(product, "model_code", None),
+        f"{prefix}_size_inches": getattr(product, "size_inches", None),
+        f"{prefix}_category": getattr(product, "category", None),
+    }
+
+
 def _evidence_origin(compatibility: Any) -> dict[str, Any]:
+    """Where a candidate came from, beside the product being asked about.
+
+    Provenance only. The lexical labels that used to ride here -- a
+    "PRODUCT_SPECIFIC"/"POLICY_OR_GENERAL" knowledge kind and a topic match,
+    both read off keyword tables -- were CODE's reading of the row's meaning,
+    and a "자동으로 적용하지 말고" note sat on 105 of 128 cross-listing rows.
+    GPT ② reads the row itself; it gets the identifiers to compare.
+    """
+
     identity = _IDENTITY_ORIGINS.get(
         str(getattr(compatibility, "product_match", "") or ""), "UNKNOWN_IDENTITY"
     )
-    scope = str(getattr(compatibility, "product_scope", "") or "")
-    candidate = getattr(compatibility, "candidate_product", None)
-    current = getattr(compatibility, "current_product", None)
-    origin: dict[str, Any] = {
+    return {
         "identity": identity,
-        "knowledge": (
-            "PRODUCT_SPECIFIC" if scope in {"MODEL", "VARIANT"}
-            else "POLICY_OR_GENERAL"
-        ),
-        "product_scope": scope or None,
-        "source_product_name": getattr(candidate, "product_name", None),
-        "source_model_code": getattr(candidate, "model_code", None),
-        "current_product_name": getattr(current, "product_name", None),
         "reason": getattr(compatibility, "product_match_reason", None),
-        "topic_match": getattr(compatibility, "topic_match", None),
+        **_identity_fields(
+            "source", getattr(compatibility, "candidate_product", None)
+        ),
+        **_identity_fields(
+            "current", getattr(compatibility, "current_product", None)
+        ),
     }
-    # The caution applies to another listing's *product* knowledge only.
-    #
-    # A 폐가전 수거 or 배송 answer written against a different listing is
-    # company policy and reads the same here -- 688218171 is answered from
-    # exactly such rows today. Attaching "do not apply automatically" to those
-    # would teach the model to hedge on the one path that already works, so
-    # the note is scoped to candidates whose content is a model's own
-    # specification or components.
-    if identity != "SAME_PRODUCT" and origin["knowledge"] == "PRODUCT_SPECIFIC":
-        origin["note"] = (
-            "다른 상품/모델의 사양·구성 자료입니다. 현재 상품에 자동으로"
-            " 적용하지 말고, 질문의 성격·정책 공통성·Product Fact·다른 근거와"
-            " 함께 적용 가능한지 판단하세요."
-        )
-    return origin
 
 
 class SimilarAnswerService:
@@ -818,27 +820,15 @@ class SimilarAnswerService:
             # both. A phrase in an answer is not a verdict on everything else
             # the answer says.
             #
-            # So both become labels and the row is offered either way. What
-            # they still do is exactly what they did before: neither an
-            # unreviewed seller answer nor a hedged sentence may *prove* a
-            # claim. ``style_only`` is now on the payload, so
-            # ``usable_as_factual_evidence`` keeps them out of the validator's
-            # grounding corpus as it always has, and ``_qualifying`` keeps them
-            # from settling the auto-post product-fact hold. Prompt, policy and
-            # validator therefore still say the same thing; only the deletion
-            # is gone.
+            # So both are labels and the row is offered either way. They say
+            # where the sentence came from; GPT ② decides what it proves.
             payload["style_only"] = bool(item["style_only"])
-            # ``style_only`` is read first, and that order is the point.
-            #
-            # A row can be both human_verified and style_only -- approved as a
-            # tone reference -- and labelling it APPROVED told the model it was
-            # a reviewed fact source while ``usable_as_factual_evidence`` was
-            # still refusing it from the grounding corpus. Three layers saying
-            # different things about the same row is the failure mode this
-            # project has already paid for once. Only APPROVED may ground a
-            # definite claim, which is exactly what that function allows.
+            # ``style_only`` is read first: a row can be both human_verified
+            # and style_only, and the label should say it was posted by the
+            # seller. Named for the provenance only -- "NOT_VERIFIED" in the
+            # label was read by GPT ② as "not usable as a fact".
             payload["evidence_authority"] = (
-                "SELLER_POSTED_NOT_VERIFIED" if item["style_only"]
+                "SELLER_POSTED" if item["style_only"]
                 else "APPROVED" if payload["authority"] == "APPROVED"
                 else "AUTO"
             )
@@ -877,9 +867,10 @@ class SimilarAnswerService:
         return {
             "similar_approved_answers": approved,
             "seller_style_examples": seller,
+            # Tone only. This block used to also carry a fixed source ranking
+            # and "seller examples are style only" -- a verdict on rows that
+            # the same prompt offers as evidence under APPROVED_LEARNING.
             "oje_style_rules": {
-                "seller_examples_are_style_only": True,
-                "facts_priority": ["PRODUCT_DB", "POLICY", "VALIDATOR", "TEMPLATE"],
                 "typical_greeting": next((v for (k, v), _ in features.most_common() if k == "greeting"), ""),
                 "typical_closing": next((v for (k, v), _ in features.most_common() if k == "closing"), ""),
                 "average_sentence_length": round(sum(lengths) / len(lengths), 1) if lengths else None,

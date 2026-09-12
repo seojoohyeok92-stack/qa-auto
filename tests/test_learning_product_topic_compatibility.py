@@ -545,6 +545,7 @@ def test_identity_mismatch_provenance_is_preserved():
         candidate_question="벽걸이추가만하면 설치비랑다포함되는건가요? 추가비용은업는거죠?",
         candidate_answer="벽걸이용 브라켓이 함께 출고되며, 설치비는 청구되지 않습니다.",
     )
+    # 크기가 명시적으로 다르다(50 vs 43) -- 사실로서의 identity 차이.
     assert decision.product_match == "MISMATCH"
     assert decision.reject_reason is not None
     assert decision.candidate_product.product_name
@@ -552,12 +553,40 @@ def test_identity_mismatch_provenance_is_preserved():
     assert decision.candidate_product.product_name != (
         decision.current_product.product_name
     )
-    # 삭제 대신 감점으로만 반영된다.
+    # 삭제는 없다. 명시된 크기가 다른 경우에만 기존 순위 감점이 유지된다.
     assert decision.score_adjustment < 0
 
 
-def test_same_product_candidate_outranks_cross_product_candidate():
-    """identity 를 무시하는 것이 아니라 순위로 반영한다."""
+def test_a_different_listing_alone_is_labelled_as_such_without_penalty():
+    """product_id 만 다르면 '다른 판매 페이지'일 뿐 다른 모델로 확정하지 않는다."""
+
+    service = LearningCompatibilityService()
+    current = extract_product_identity(
+        product_id="listing-A", product_name="삼성 비즈니스 TV 50인치",
+    )
+    common = dict(
+        current_question="리모컨이 기본 구성품으로 포함되나요?",
+        current_product=current,
+        candidate_question="리모컨은 포함인가요",
+        candidate_answer="문의하신 제품에는 리모컨이 포함되어 있습니다.",
+        candidate_metadata={},
+        query_is_product_fact=True,
+    )
+    other = service.evaluate(
+        candidate_product=extract_product_identity(
+            product_id="listing-B", product_name="삼성 사이니지 TV 50인치",
+        ),
+        **common,
+    )
+    same = service.evaluate(candidate_product=current, **common)
+    assert other.product_match == "DIFFERENT_LISTING"
+    # 순위는 같은 상품과 동일하다 -- 다른 판매 페이지라는 이유로 감점하지 않는다.
+    assert other.score_adjustment == same.score_adjustment
+
+
+def test_stated_size_contradiction_still_ranks_below_same_product():
+    """명시된 크기(43 vs 50)가 다른 후보만 순위가 낮다. product_id 만 다른
+    경우는 test_a_different_listing_alone_... 참조."""
 
     service = LearningCompatibilityService()
     current = extract_product_identity(
@@ -591,10 +620,17 @@ def test_evidence_origin_labels_reach_the_prompt_projection():
     )
     origin = _evidence_origin(other)
     assert origin["identity"] == "OTHER_PRODUCT_OR_MODEL"
-    assert origin["knowledge"] == "PRODUCT_SPECIFIC"
+    # 비교할 identity 값 자체가 양쪽 모두 전달된다.
+    assert origin["source_product_id"] == "listing-43"
+    assert origin["current_product_id"] == "listing-50"
+    assert origin["source_size_inches"] == 43
+    assert origin["current_size_inches"] == 50
     assert origin["source_product_name"]
     assert origin["current_product_name"]
-    assert "자동으로" in origin["note"]
+    # 키워드로 추론한 의미 라벨은 전달하지 않는다.
+    assert "knowledge" not in origin and "topic_match" not in origin
+    # 출처 정보만 전달한다. 적용 여부 지시는 붙이지 않는다.
+    assert "note" not in origin
 
     policy = _cross_product_decision(
         question="기존 TV 수거가 가능한가요?",
@@ -604,7 +640,6 @@ def test_evidence_origin_labels_reach_the_prompt_projection():
     )
     policy_origin = _evidence_origin(policy)
     assert policy_origin["identity"] == "POLICY_OR_GENERAL"
-    assert policy_origin["knowledge"] == "POLICY_OR_GENERAL"
     assert "note" not in policy_origin
 
 

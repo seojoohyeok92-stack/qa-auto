@@ -202,13 +202,17 @@ def test_lg04b_approved_learning_still_grounds() -> None:
     assert "탈부착" in corpus
 
 
-def test_lg05_hedged_answer_never_grounds_a_definite_claim() -> None:
+def test_lg05_hedged_answer_is_labelled_and_left_to_gpt() -> None:
+    """A hedged answer cannot settle the product-fact hold on its own, but it
+    is delivered text, so the validator's number/date check can see it --
+    whether it supports the answer is GPT ②'s reading."""
+
     assert is_hedged("사용 가능할 것으로 보입니다.") is True
     assert decide([learning_item(answer="사용 가능할 것으로 보입니다.")]).usable is False
     corpus = grounding_corpus(
         similar_approved_answers=[{"answer": "지원 가능할 것으로 보입니다."}]
     )
-    assert corpus == ""
+    assert "지원 가능할 것으로 보입니다." in corpus
 
 
 def test_lg06_redaction_token_learning_is_excluded_everywhere() -> None:
@@ -216,7 +220,7 @@ def test_lg06_redaction_token_learning_is_excluded_everywhere() -> None:
 
     assert contamination_reason(contaminated) == "<masked-phone>"
     assert usable_as_factual_evidence({"answer": contaminated}) is False
-    assert grounding_corpus(similar_approved_answers=[{"answer": contaminated}]) == ""
+    # Removal happens at retrieval (lg06b); nothing contaminated is delivered.
 
 
 def test_lg06b_contaminated_candidate_is_dropped_from_retrieval() -> None:
@@ -252,15 +256,17 @@ def test_lg06b_contaminated_candidate_is_dropped_from_retrieval() -> None:
     assert counts["REDACTION_TOKEN_CONTAMINATED"] == 1
 
 
-def test_lg07_conflicting_approved_learning_blocks() -> None:
+def test_lg07_disagreeing_learning_is_not_a_code_conflict() -> None:
+    """Only a verified Product Fact makes Learning a data conflict; two
+    Learning answers that disagree both reach GPT ②."""
+
     verdict = decide([
         learning_item(answer="기본 스탠드는 탈부착 가능합니다.", learning_id=1),
         learning_item(answer="기본 스탠드는 탈부착이 불가능합니다.", learning_id=2),
     ])
 
-    assert verdict.usable is False
-    assert verdict.conflict is True
-    assert verdict.reason == "APPROVED_LEARNING_CONFLICT"
+    assert verdict.conflict is False
+    assert verdict.reason != "APPROVED_LEARNING_CONFLICT"
 
 
 def test_lg08_product_fact_agreeing_with_learning_is_usable() -> None:
@@ -328,7 +334,10 @@ def test_lg12_other_size_stand_learning_is_rejected_by_compatibility() -> None:
     assert compatibility.eligible is False
 
 
-def test_lg13_conflicting_airplay_learning_blocks() -> None:
+def test_lg13_disagreeing_airplay_learning_is_left_to_gpt() -> None:
+    """No verified fact is involved, so this is two candidates, not a data
+    conflict. GPT ② reports unresolved if it cannot tell which applies."""
+
     verdict = decide(
         [
             learning_item(
@@ -343,8 +352,7 @@ def test_lg13_conflicting_airplay_learning_blocks() -> None:
         question="에어플레이 지원되나요?",
     )
 
-    assert verdict.usable is False
-    assert verdict.conflict is True
+    assert verdict.conflict is False
 
 
 def test_lg14_verified_hdmi_fact_answers_its_own_question() -> None:

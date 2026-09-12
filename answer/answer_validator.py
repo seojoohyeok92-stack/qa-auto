@@ -60,9 +60,12 @@ INTERNAL_CUSTOMER_TERMS = (
     "DB",
     "내부 조회 시스템",
 )
-FORBIDDEN_CLAIMS = (
+ORDER_STATE_CLAIMS = (
     "배송 완료되었습니다",
     "설치 완료되었습니다",
+)
+FORBIDDEN_CLAIMS = (
+    *ORDER_STATE_CLAIMS,
     "반품 가능합니다",
     "기사님이 방문합니다",
 )
@@ -624,7 +627,10 @@ class AnswerValidator:
             errors.append("답변에 개인정보 형태의 값이 포함되어 있습니다.")
         if SECRET_PATTERN.search(draft.answer):
             errors.append("답변에 인증정보 형태의 문구가 포함되어 있습니다.")
-        if SPECULATION_PATTERN.search(draft.answer):
+        # Wording rules that read the answer's *meaning* from a phrase list run
+        # only where no reader judged the evidence. On the GPT path GPT ② (and
+        # its self-review's has_speculation) already made these calls.
+        if not gpt_judged_evidence and SPECULATION_PATTERN.search(draft.answer):
             errors.append("답변에 추측 표현이 포함되어 있습니다.")
         known_dates = {
             str(value)
@@ -671,7 +677,10 @@ class AnswerValidator:
                 errors.append(
                     "확정된 설치예정일이 있는데 확인할 수 없다고 답했습니다."
                 )
-            if schedule_question and str(
+            # "Was this a schedule question" is read from keywords; on the GPT
+            # path GPT ② decided what was asked. A wrong or unconfirmed date
+            # is still blocked by the two checks around this one.
+            if not gpt_judged_evidence and schedule_question and str(
                 confirmed_installation_date
             ) not in answer_dates:
                 errors.append(
@@ -704,7 +713,13 @@ class AnswerValidator:
         if not facts.delivery.get("status") and not facts.installation.get(
             "status"
         ):
-            for claim in FORBIDDEN_CLAIMS:
+            # Completion of the customer's own delivery/installation is an
+            # order fact and is blocked on every path without a DPS status.
+            # The policy phrases are the legacy keyword reading.
+            claims = (
+                ORDER_STATE_CLAIMS if gpt_judged_evidence else FORBIDDEN_CLAIMS
+            )
+            for claim in claims:
                 if claim in draft.answer:
                     errors.append(f"근거 없는 확정 문장입니다: {claim}")
         if not review.passed:
@@ -764,7 +779,11 @@ class AnswerValidator:
                 draft.answer, corpus, lexical_claims=not gpt_judged_evidence,
             )
         )
-        errors.extend(ungrounded_feature_claims(draft.answer, corpus))
+        # A keyword test for "지원/가능" near a feature name. On the GPT path
+        # GPT ② judged which delivered source supports the claim; quantities
+        # and dates above are still checked against that same corpus.
+        if not gpt_judged_evidence:
+            errors.extend(ungrounded_feature_claims(draft.answer, corpus))
         if not review.answered_all_questions and intent.questions:
             review_signals.append("복합 질문 일부의 답변 누락 가능성이 있습니다.")
         phase9_rules = self._phase9_rules(

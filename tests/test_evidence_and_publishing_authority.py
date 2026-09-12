@@ -237,7 +237,14 @@ class _Knowledge:
 
 
 # ================================ E. approved learning contradicting itself
-def test_E_two_approved_answers_that_disagree_are_never_picked_between():
+def test_E_two_disagreeing_learning_answers_are_not_a_code_conflict():
+    """Two Learning answers that disagree are two candidates for GPT ②.
+
+    Only a verified Product Fact makes a Learning answer a data conflict
+    (test_D). Which of two stored answers fits this product and this time is
+    the reading GPT ② is asked to make, so CODE no longer marks it CONFLICT.
+    """
+
     from services.learning_evidence_policy import evaluate
 
     decision = evaluate(
@@ -246,20 +253,18 @@ def test_E_two_approved_answers_that_disagree_are_never_picked_between():
         ),
         safe_facts=(),
     )
-    assert decision.conflict is True
-    assert decision.reason == "APPROVED_LEARNING_CONFLICT"
-    # Neither was chosen -- not the newer one, not the higher scoring one.
-    assert decision.learning_ids == ()
+    assert decision.conflict is False
+    assert decision.reason != "APPROVED_LEARNING_CONFLICT"
 
 
-def test_E_conflicting_learning_reaches_gpt_without_being_selected_by_code():
+def test_E_disagreeing_learning_reaches_gpt_and_code_decides_nothing():
     request = request_for(STAND_Q)
     provider = provider_for(STAND_YES)
     _, hybrid = run(
         request, provider, rule(), learning(approved(11, STAND_YES), approved(12, STAND_NO))
     )
     assert calls(provider) >= 1
-    assert hybrid["approved_learning_evidence"]["conflict"] is True
+    assert hybrid["approved_learning_evidence"]["conflict"] is False
 
 
 def test_E_agreeing_answers_are_not_a_conflict():
@@ -276,8 +281,13 @@ def test_E_agreeing_answers_are_not_a_conflict():
 
 
 # ========================================================= K. AirPlay conflict
-def test_K_contradicting_airplay_learning_is_exposed_to_gpt_as_conflict():
-    """지원/미지원 both approved, no verified fact -- a person decides."""
+def test_K_contradicting_airplay_learning_reaches_gpt_without_a_code_verdict():
+    """지원/미지원 both approved, no verified fact -- GPT ② reads both.
+
+    A disagreement between two Learning answers is not a data conflict; only a
+    verified Product Fact makes one (test_D). GPT ② reports unresolved if it
+    cannot tell which applies.
+    """
 
     question = "아이폰 데이터로 미러링하면 인터넷 연결 없이 가능한가요?"
     context = learning(
@@ -289,7 +299,7 @@ def test_K_contradicting_airplay_learning_is_exposed_to_gpt_as_conflict():
     provider = provider_for("가능합니다.")
     _, hybrid = run(request, provider, rule(), context)
     assert calls(provider) >= 1
-    assert hybrid["approved_learning_evidence"]["conflict"] is True
+    assert hybrid["approved_learning_evidence"]["conflict"] is False
 
 
 # ============================================== governance / authority tiers
@@ -640,13 +650,13 @@ def test_expired_learning_is_filtered_before_it_reaches_this_policy():
     assert callable(is_learning_usable) and callable(validity_status)
 
 
-def test_the_policy_reuses_the_existing_conflict_detector():
-    """Not a second opinion on what "conflict" means."""
+def test_the_policy_reuses_the_existing_polarity_detector():
+    """Not a second opinion on what a polarity is (Product Fact conflicts)."""
 
-    from answer.learning_signal import facts_conflict
+    from answer.learning_signal import detect_polarity
     from services import learning_evidence_policy
 
-    assert learning_evidence_policy.facts_conflict is facts_conflict
+    assert learning_evidence_policy.detect_polarity is detect_polarity
 
 
 def test_the_policy_no_longer_gates_on_the_support_threshold():

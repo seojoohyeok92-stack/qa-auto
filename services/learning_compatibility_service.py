@@ -50,8 +50,16 @@ GENERIC_TOPICS = {"OTHER", "GENERAL_POLICY", "PRODUCT_SPEC"}
 # the ordering is the point, not a second threshold.
 TOPIC_MISMATCH_PENALTY = -0.20
 
-# What a product-identity mismatch costs a Learning candidate now that it no
-# longer deletes one.
+# What a *stated* identity contradiction costs a Learning candidate: the model
+# code, size, category or brand on the row differs from the current product's.
+# A different listing id alone, or no identity to compare, costs nothing -- that
+# is not evidence of a different product, and GPT ② reads the identifiers.
+#
+# Kept for stated contradictions because it was measured: removing it outright
+# dropped the content-defined top-3 recall of the retrieval benchmark
+# (tests/test_gpt_first_learning_retrieval.py) from 23/25 to 21/25, as 27/32-inch
+# M5 rows and stand-accessory listings displaced the same-model answer.
+IDENTITY_MISMATCH_PENALTY = -0.20
 #
 # Identity used to return ``hard_reject=True``, which is the one verdict that
 # survives ``hard_conflicts_only`` -- production retrieval's mode -- so a
@@ -65,15 +73,8 @@ TOPIC_MISMATCH_PENALTY = -0.20
 #
 # A Learning row is candidate evidence, not a VERIFIED product fact: whether
 # another listing's answer applies here is a judgement about meaning, and it
-# belongs to GPT ②, which is told the candidate's origin and instructed not to
-# transfer it automatically. Product Fact identity safety is unchanged and
-# lives in ``product_knowledge_service`` -- nothing here touches it.
-#
-# The magnitude deliberately reuses the topic penalty rather than inventing a
-# new one: an on-topic candidate from another listing and an off-topic one
-# from this listing are equally uncertain, and which is worth reading is then
-# settled by question relevance, where it should be.
-IDENTITY_MISMATCH_PENALTY = -0.20
+# belongs to GPT ②, which is told the candidate's origin. Product Fact identity
+# safety is unchanged and lives in ``product_knowledge_service``.
 
 # Topics say what an answer is *about*; these say what is being asked *of* it.
 #
@@ -661,25 +662,33 @@ class LearningCompatibilityService:
         candidate = candidate_product
 
         def reject(reason: str, product_reason: str) -> CompatibilityDecision:
-            """Identity does not match. Report it; do not delete the candidate.
+            """Identity is not established. Report what differs; decide nothing.
 
-            ``eligible`` stays False, so every caller that gates on it -- the
-            historical and feedback-signal paths -- behaves exactly as before.
-            What changes is ``hard_reject``: it is now soft, so the production
-            retrieval mode (``hard_conflicts_only``) keeps the row, carries its
-            identity verdict into the prompt, and lets GPT ② decide whether
-            another listing's answer applies here.
+            ``eligible`` stays False, so the feedback-signal path -- where a
+            VERIFIED fact would otherwise be applied by CODE -- behaves exactly
+            as before. For Learning, production retrieval keeps the row
+            (``hard_reject`` is soft) and the identity facts travel to GPT ②
+            as provenance.
 
-            See ``IDENTITY_MISMATCH_PENALTY`` for the measured failures this
-            addresses.
+            The label says only what is known: a different listing id is not
+            a different model, and no identity at all is not a different
+            product -- neither costs rank. Only a stated contradiction
+            (``MISMATCH``) keeps ``IDENTITY_MISMATCH_PENALTY``.
             """
 
+            product_match = {
+                "SOURCE_PRODUCT_ID_MISMATCH": "DIFFERENT_LISTING",
+                "STRICT_FACT_REQUIRES_EXACT_PRODUCT_MODEL_OR_VARIANT": (
+                    "IDENTITY_UNKNOWN"
+                ),
+            }.get(product_reason, "MISMATCH")
+            identity_penalty = (
+                IDENTITY_MISMATCH_PENALTY if product_match == "MISMATCH" else 0.0
+            )
             return CompatibilityDecision(
                 False, False, reason,
-                IDENTITY_MISMATCH_PENALTY + (
-                    0.0 if topic_ok else TOPIC_MISMATCH_PENALTY
-                ),
-                profile.scope, "MISMATCH",
+                identity_penalty + (0.0 if topic_ok else TOPIC_MISMATCH_PENALTY),
+                profile.scope, product_match,
                 product_reason, query_topics, profile.topics, topic_match,
                 topic_reason, current, candidate,
             )
