@@ -159,3 +159,23 @@ def test_case_10_catalog_only_product_remains_usable_when_no_integrated_record_m
     )
     assert result.matched and result.safe_facts
     assert all(f.verification_status == "CATALOG_JSON" for f in result.safe_facts)
+
+
+def test_listing_with_exact_api_model_provenance_reaches_integrated_model_facts():
+    """A listing-only catalog miss may still have one exact API model identity."""
+    result = _service().facts_for_inquiry(
+        product_id="11815213767",
+        product_name="삼성 삼탠바이미 50인치(125cm) 4K UHD 무빙 스마트 비즈니스TV 이동식 거치대",
+        question="해상도 HDMI USB Wi-Fi 블루투스 스피커 무게를 알려주세요",
+        include_all_catalog_fields=True,
+    )
+    assert result.identity_status == "LISTING_EXACT_API_MODEL"
+    assert any(
+        fact.subject == "MAIN_PRODUCT" and fact.model_code == "LH50BEHHLGFXKR"
+        for fact in result.safe_facts
+    )
+    shaks = [
+        fact for fact in result.safe_facts
+        if fact.subject == "BUNDLED_SET_TOP_BOX" and fact.model_code == "SHAKS G1"
+    ]
+    assert shaks and all(fact.component_scope == "BUNDLE_ACCESSORY" for fact in shaks)

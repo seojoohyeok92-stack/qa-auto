@@ -307,8 +307,11 @@ def test_687932845_listing_metadata_survives_the_keyword_classifier(
     identity = run.prompt["input"]["product_identity"]
     assert identity["status"] in {
         "NOT_FOUND", "AMBIGUOUS", "UNIQUE_MATCH", "EXACT", "LISTING_EXACT",
+        "LISTING_EXACT_API_MODEL",
     }
-    assert identity["matched"] is (identity["status"] == "LISTING_EXACT")
+    assert identity["matched"] is (
+        identity["status"] in {"LISTING_EXACT", "LISTING_EXACT_API_MODEL"}
+    )
 
     assert run.order.calls == 0
 

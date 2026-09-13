@@ -1034,6 +1034,25 @@ class ProductKnowledgeService:
             model_code=model_code,
         )
         if not match.record or not match.model_key:
+            exact_model_key = self._integrated_exact_model_for_listing(product_id)
+            if exact_model_key:
+                integrated, excluded = self._integrated_product_knowledge_facts(
+                    product_id=product_id, model_key=exact_model_key,
+                    fields=fields,
+                    include_all=bool(fields and set(CATALOG_BACKED_FIELDS).issubset(fields)),
+                )
+                if integrated:
+                    return ProductKnowledgeResult(
+                        product_id=product_id or None,
+                        listing_id=product_id or None,
+                        matched=True,
+                        requested_fields=fields,
+                        topics=topics,
+                        safe_facts=tuple(integrated),
+                        excluded_facts=tuple(excluded),
+                        collection_status="INTEGRATED_PRODUCT_KNOWLEDGE_JSON",
+                        identity_status="LISTING_EXACT_API_MODEL",
+                    )
             integrated, excluded = self._integrated_product_knowledge_facts(
                 product_id=product_id, model_key="", fields=fields,
                 include_all=bool(fields and set(CATALOG_BACKED_FIELDS).issubset(fields)),
@@ -1082,6 +1101,47 @@ class ProductKnowledgeService:
             component_subject=component_subject,
             identity_status=match.status,
         )
+
+    def _integrated_exact_model_for_listing(self, product_id: str) -> str | None:
+        """Return one exact MAIN_PRODUCT model proven by this listing's API.
+
+        This is deliberately narrower than alias or prefix matching: the
+        integrated model-code record must preserve an API ``modelName``
+        provenance for this exact product ID, its value must equal its model
+        code, and it cannot be a compound/multi-model identifier.
+        """
+        key = str(product_id or "").strip()
+        if not key:
+            return None
+        knowledge = self.catalog_repository.product_knowledge()
+        candidates: set[str] = set()
+        for row in knowledge.get("model_facts", ()):
+            if not isinstance(row, dict):
+                continue
+            model = str(row.get("model_code") or "").strip()
+            value = str(row.get("value") or "").strip()
+            if (
+                row.get("subject") != "MAIN_PRODUCT"
+                or row.get("field") != "model_code"
+                or row.get("scope") != "EXACT_MODEL"
+                or row.get("scope_status") != "RESOLVED"
+                or not model
+                or normalize_model(value) != normalize_model(model)
+                or any(marker in model for marker in ("+", ",", "/"))
+            ):
+                continue
+            for provenance in row.get("provenance", ()):
+                if not isinstance(provenance, dict):
+                    continue
+                if (
+                    str(provenance.get("source_product_id") or "") == key
+                    and provenance.get("source_type") == "API"
+                    and str(provenance.get("source_text") or "")
+                    == f"modelName: {model}"
+                ):
+                    candidates.add(model)
+                    break
+        return next(iter(candidates)) if len(candidates) == 1 else None
 
     def _integrated_product_knowledge_facts(
         self, *, product_id: str, model_key: str, fields: Sequence[str],
