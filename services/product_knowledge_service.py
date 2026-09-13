@@ -26,12 +26,7 @@ import json
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable, Sequence
 
-from repositories.product_fact_repository import (
-    ProductFactRepository,
-    ProductFactsUnavailableError,
-)
-from repositories.product_catalog_repository import ProductCatalogRepository
-from services.product_fact_guard import extract_model_code
+from repositories.product_catalog_repository import ProductCatalogRepository, normalize_model
 
 
 VERIFIED = "VERIFIED"
@@ -123,6 +118,17 @@ SUBJECT_SENSITIVE_FIELDS = frozenset({
 
 BASE_DEVICE_SCOPE = "BASE_DEVICE"
 ACCESSORY_SCOPE = "ACCESSORY"
+
+# These are the integrated JSON's own operational decisions.  Candidate is
+# deliberately not renamed to approved: its stored status travels with every
+# prompt fact.  WITHHELD/EXCLUDED rows remain in the JSON for audit only.
+_RUNTIME_PRODUCT_KNOWLEDGE_STATUSES = frozenset({
+    "CANDIDATE_NOT_APPROVED", "CANDIDATE_REVIEW_RESOLVED",
+})
+_PRODUCT_KNOWLEDGE_SECTIONS = (
+    "model_facts", "listing_facts", "bundle_accessory_facts", "policy_facts",
+)
+_PRODUCT_KNOWLEDGE_PROMPT_LIMIT = 120
 
 # Rows that exist so the collector can join its own tables, not because a
 # customer could ever be told them: surrogate keys, the SEO title, and the
@@ -321,6 +327,9 @@ class ProductFact:
     provenance: tuple[dict[str, Any], ...] = ()
     safe_for_answer: bool = False
     exclusion_reason: str | None = None
+    subject: str | None = None
+    applies_to_product_id: str | None = None
+    source_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -342,6 +351,9 @@ class ProductFact:
             ],
             "safe_for_answer": self.safe_for_answer,
             "exclusion_reason": self.exclusion_reason,
+            "subject": self.subject,
+            "applies_to_product_id": self.applies_to_product_id,
+            "source_type": self.source_type,
         }
 
     @property
@@ -358,6 +370,7 @@ class ProductFact:
             f"  value: {_render_value(self.value)}\n"
             f"  verification: {self.verification_status}\n"
             f"  kind: {self.knowledge_kind}\n"
+            f"  subject: {self.subject or 'MAIN_PRODUCT'}\n"
             f"  product_scope: {self.component_scope}"
             f" ({self.model_code or self.product_id})\n"
             f"  evidence_id: {self.canonical_fact_id}"
@@ -382,9 +395,18 @@ class ProductFact:
             "verification": self.verification_status,
             "kind": self.knowledge_kind,
             "product_scope": self.component_scope,
+            "scope": self.scope,
         }
+        if self.model_code:
+            fact["model_code"] = self.model_code
         if self.unit:
             fact["unit"] = self.unit
+        if self.subject:
+            fact["subject"] = self.subject
+        if self.applies_to_product_id:
+            fact["applies_to_product_id"] = self.applies_to_product_id
+        if self.source_type:
+            fact["source_type"] = self.source_type
         return fact
 
 
@@ -506,15 +528,38 @@ class ProductKnowledgeResult:
             return ""
         lines = "\n".join(item.as_prompt_line() for item in self.safe_facts)
         return (
+            # The header stays as it was. Rewriting it to say the list is not
+            # the product's complete attribute set was measured and reverted:
+            # on 688536978 it cost the answer that already worked (2/2 runs
+            # used LID 117 + 169371 and resolved with the original header, 0/2
+            # with the reworded one), and on 688536966 it changed nothing. What
+            # an absent field means is stated in the rules below instead.
             "PRODUCT_CATALOG_JSON (exact matched product catalog evidence):\n"
             f"{lines}\n"
             "RULES:\n"
             "- Only the fields listed above may be stated as product fact.\n"
             "- A field that is not listed is UNKNOWN. Never say a feature is "
             "absent, unsupported or missing because it is not listed.\n"
-            "- Never infer a value from another model, size or package.\n"
-            "- If the customer asks for something not listed, say the exact "
-            "specification needs checking instead of estimating it.\n"
+            # Scoped to this block. Read as a global instruction, it forbade
+            # GPT ② from applying a Learning answer from another listing even
+            # when that answer was the evidence for the question.
+            "- Within this PRODUCT_CATALOG_JSON block, never carry a value "
+            "from another model, size or package over as this product's fact.\n"
+            # What an absent field means, and what it does not.
+            #
+            # These two lines used to read "say the exact specification needs
+            # checking instead of estimating it" and "필요한 항목이 목록에
+            # 없으면 추측하지 말고 unresolved 로 남겨라". Measured on the server
+            # (688536966 / 688536991, build 323f5c7): this listing's verified
+            # record holds 20 fields and none of them is about the remote
+            # control, so GPT ② followed this rule and returned unresolved while
+            # the same prompt carried approved answers saying the remote is
+            # included. A/B replay with only this block differing: 4/4
+            # unresolved with it, 4/4 answered from Learning without it.
+            "- 이 목록에 없는 항목은 '이 Product Knowledge가 그 사실을 제공하지 "
+            "않는다'는 뜻일 뿐이다. 그런 항목은 Learning/Historical 등 이 "
+            "프롬프트의 다른 근거를 읽고 적용 가능한지 직접 판단해서 답하라. "
+            "모든 근거를 봐도 충분하지 않을 때에만 unresolved 로 남겨라.\n"
             # The list is this product's record, not a shortlist someone
             # prepared for this question. Saying so is what makes the wider
             # list safe: the model has to choose, and choosing badly here
@@ -525,8 +570,7 @@ class ProductKnowledgeResult:
             "- kind=DEVICE_SPECIFICATION은 상품 자체의 사양이고, "
             "kind=LISTING_POLICY_SNAPSHOT은 이 판매 페이지의 현재 조건을 "
             "수집한 값이다. 후자는 고객의 주문 상태·배송일·현재 진행 상황의 "
-            "근거가 될 수 없으며, 그런 질문은 주문/DPS 조회 근거를 따른다.\n"
-            "- 필요한 항목이 목록에 없으면 추측하지 말고 unresolved 로 남겨라."
+            "근거가 될 수 없으며, 그런 질문은 주문/DPS 조회 근거를 따른다."
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -875,29 +919,18 @@ class ProductKnowledgeService:
 
     def __init__(
         self,
-        repository: ProductFactRepository | None = None,
         catalog_repository: ProductCatalogRepository | None = None,
     ) -> None:
-        # ``product_facts.db`` is the production source again.
+        # One Product Knowledge source: ``data/model_data_with_color.json``.
         #
-        # The default was None, with a comment saying production never reads
-        # this file. The consequence was measured on the Golden set: of the
-        # inquiries where GPT ① asked for product evidence, *none* received a
-        # single verified fact, and the auto-post gate then held them with
-        # PRODUCT_FACT_NOT_VERIFIED -- blaming a fact source the pipeline had
-        # been told not to open.
-        #
-        # The catalogue is keyed on a model code parsed out of the listing
-        # title, which 42% of this store's listings do not contain
-        # ("삼성 삼탠바이미 50인치(125cm) ... 이동식 거치대"). ``product_facts.db``
-        # is keyed on the Naver ``product_id`` -- the exact listing the customer
-        # is writing from -- so it identifies the product where the title
-        # cannot. The two are complements, and ``facts_for_inquiry`` now falls
-        # through from one to the other rather than choosing at construction.
-        if repository is None:
-            candidate = ProductFactRepository()
-            repository = candidate if candidate.available() else None
-        self.repository = repository
+        # ``product_facts.db`` was a second store keyed on the Naver
+        # product_id, and for a while it was consulted first. It is retired.
+        # Its connection and component attributes came from image OCR and
+        # stayed unverified (wifi_present 2 of 19 listings usable,
+        # remote_control_included 2 of 21), and being first meant a listing it
+        # merely knew about blocked the catalogue even when it had nothing
+        # usable to say. Nothing here opens that file and no path falls back
+        # to it, so a stray copy on disk cannot revive it.
         self.catalog_repository = catalog_repository or ProductCatalogRepository()
 
     # ------------------------------------------------------------------
@@ -977,124 +1010,7 @@ class ProductKnowledgeService:
                 combined=combined,
             )
 
-        if self.repository is None or not key:
-            return _catalog()
-
-        # One source per product, never a blend.
-        #
-        # The listing store is asked first because it identifies the product by
-        # the Naver ``product_id`` the customer is actually writing from. If it
-        # knows the listing, its answer stands -- *including* when that answer
-        # is "these facts exist and none of them may be used". Those exclusions
-        # are the NEEDS_REVIEW / CONFLICT / superseded / foreign-model checks,
-        # and an earlier version of this fall-through read "no safe facts" as
-        # "nothing found" and went to the catalogue, which happily supplied the
-        # same fields from a model-code match. That turned every deliberate
-        # exclusion into a lookup in a different table: the wrong-model
-        # specification the listing store had just refused arrived anyway.
-        #
-        # The catalogue is consulted only when the listing store has never
-        # heard of the product, where there is no exclusion to defeat.
-        db_result = self._repository_facts_for_inquiry(
-            key=key, fields=listing_fields, topics=topics, combined=combined,
-            model_code=model_code,
-        )
-        if db_result.matched:
-            return db_result
-        catalog_result = _catalog()
-        if catalog_result.matched or catalog_result.candidate_models:
-            return catalog_result
-        # Neither source knows it. Report the listing store's reason: it is the
-        # one keyed on the identifier this inquiry actually carries.
-        return db_result
-
-    def _repository_facts_for_inquiry(
-        self,
-        *,
-        key: str,
-        fields: tuple[str, ...] | None,
-        topics: tuple[str, ...],
-        combined: str,
-        model_code: object,
-    ) -> ProductKnowledgeResult:
-        """Verified facts for the exact listing the customer is writing from.
-
-        ``fields=None`` asks for this listing's record whole. ``()`` still
-        means "the customer's wording named no product topic", which is a
-        different situation and keeps its own reason.
-        """
-
-        if fields is not None and not fields:
-            # Nothing in the question is a product-specification topic.
-            return ProductKnowledgeResult(
-                product_id=key, listing_id=None, matched=False,
-                requested_fields=(), topics=(),
-                unavailable_reason="NO_PRODUCT_FACT_TOPIC",
-            )
-        # What was asked for, for telemetry and ``covers_all``. A whole-record
-        # request has no field list until the rows come back.
-        requested: tuple[str, ...] = fields or ()
-        if not self.repository.available():
-            return ProductKnowledgeResult(
-                product_id=key, listing_id=None, matched=False,
-                requested_fields=requested, topics=topics,
-                unavailable_reason="PRODUCT_FACTS_DB_UNAVAILABLE",
-            )
-
-        try:
-            listing = self.repository.listing_for_product(key)
-            rows = self.repository.facts_for_product(key, fields)
-        except (ProductFactsUnavailableError, Exception) as error:  # noqa: BLE001
-            # A knowledge source that cannot be read must never break
-            # answering; the pipeline simply gets no product evidence.
-            return ProductKnowledgeResult(
-                product_id=key, listing_id=None, matched=False,
-                requested_fields=requested, topics=topics,
-                unavailable_reason=f"LOOKUP_FAILED:{type(error).__name__}",
-            )
-        if listing is None:
-            return ProductKnowledgeResult(
-                product_id=key, listing_id=None, matched=False,
-                requested_fields=requested, topics=topics,
-                unavailable_reason="PRODUCT_NOT_IN_PRODUCT_DB",
-            )
-
-        if fields is None:
-            requested = tuple(dict.fromkeys(
-                str(row.get("field") or "") for row in rows
-            ))
-        provenance = self._provenance_for(rows)
-        safe: list[ProductFact] = []
-        excluded: list[ProductFact] = []
-        expected_model = str(model_code or "").strip().upper() or None
-        collection_status = str(listing.get("collection_status") or "") or None
-        component_subject = asks_about_a_bundled_component(combined)
-        product_lines = _product_line_terms_in(combined)
-        for row in rows:
-            fact = self._judge(
-                row, provenance, expected_model=expected_model,
-                collection_status=collection_status,
-                component_subject=component_subject,
-                product_lines=product_lines,
-            )
-            (safe if fact.safe_for_answer else excluded).append(fact)
-        return ProductKnowledgeResult(
-            product_id=key,
-            listing_id=str(listing.get("listing_id") or "") or None,
-            matched=True,
-            requested_fields=requested,
-            topics=topics,
-            safe_facts=tuple(safe),
-            excluded_facts=tuple(excluded),
-            collection_status=collection_status,
-            component_subject=component_subject,
-            # These rows were stored against this Naver product_id, so the
-            # identity is the listing itself rather than a model code guessed
-            # from the title. Left at the "NOT_FOUND" default, the prompt told
-            # the model the product was unidentified while handing it that
-            # product's verified specification.
-            identity_status="LISTING_EXACT",
-        )
+        return _catalog()
 
     def _catalog_facts_for_inquiry(
         self,
@@ -1118,6 +1034,18 @@ class ProductKnowledgeService:
             model_code=model_code,
         )
         if not match.record or not match.model_key:
+            integrated, excluded = self._integrated_product_knowledge_facts(
+                product_id=product_id, model_key="", fields=fields,
+                include_all=bool(fields and set(CATALOG_BACKED_FIELDS).issubset(fields)),
+            )
+            if integrated:
+                return ProductKnowledgeResult(
+                    product_id=product_id or None, listing_id=product_id or None,
+                    matched=True, requested_fields=fields, topics=topics,
+                    safe_facts=tuple(integrated), excluded_facts=tuple(excluded),
+                    collection_status="INTEGRATED_PRODUCT_KNOWLEDGE_JSON",
+                    identity_status="LISTING_EXACT",
+                )
             # AMBIGUOUS carries the models the listing could have meant. They
             # travel as candidates and never as facts: which of two 85-inch
             # panels a title means is not something this lookup can settle, and
@@ -1133,24 +1061,128 @@ class ProductKnowledgeService:
                     for key, record in match.candidates
                 ),
             )
-        if asks_about_a_bundled_component(combined):
-            return ProductKnowledgeResult(
-                product_id=product_id or match.model_key, listing_id=match.model_key,
-                matched=True, requested_fields=fields, topics=topics,
-                collection_status="CATALOG_JSON", component_subject=True,
-                unavailable_reason="COMPONENT_SUBJECT_UNRESOLVED",
-                identity_status=match.status,
-            )
-        facts = self._catalog_facts(
+        component_subject = asks_about_a_bundled_component(combined)
+        facts = [] if component_subject else self._catalog_facts(
             product_id=product_id or match.model_key,
             model_key=match.model_key, record=match.record, fields=fields,
         )
+        integrated, excluded = self._integrated_product_knowledge_facts(
+            product_id=product_id, model_key=match.model_key, fields=fields,
+            include_all=bool(fields and set(CATALOG_BACKED_FIELDS).issubset(fields)),
+        )
+        facts.extend(integrated)
         return ProductKnowledgeResult(
-            product_id=product_id or match.model_key, listing_id=match.model_key,
+            product_id=product_id or match.model_key,
+            # The inquiry's listing identity remains distinct from the model
+            # key; model-level facts still carry their own model_code/scope.
+            listing_id=(f"listing_{product_id}" if product_id else match.model_key),
             matched=True, requested_fields=fields, topics=topics,
-            safe_facts=tuple(facts), collection_status="CATALOG_JSON",
+            safe_facts=tuple(facts), excluded_facts=tuple(excluded),
+            collection_status="CATALOG_JSON",
+            component_subject=component_subject,
             identity_status=match.status,
         )
+
+    def _integrated_product_knowledge_facts(
+        self, *, product_id: str, model_key: str, fields: Sequence[str],
+        include_all: bool,
+    ) -> tuple[list[ProductFact], list[ProductFact]]:
+        """Read candidate evidence from the same catalog JSON.
+
+        This is identity/scope/status filtering only.  It does not score a
+        question or choose which fact answers it; the GPT prompt receives the
+        retained evidence and makes that judgement.  The fixed cap is solely a
+        technical prompt-size bound.
+        """
+        knowledge = self.catalog_repository.product_knowledge()
+        if not knowledge:
+            return [], []
+        key = str(product_id or "").strip()
+        model_norm = normalize_model(model_key)
+        withheld = {
+            (normalize_model(item.get("model_code")), str(item.get("field") or ""))
+            for item in knowledge.get("v7_final_decisions", ())
+            if isinstance(item, dict)
+            and item.get("final_decision") == "UNRESOLVED_WITHHELD"
+        }
+        safe: list[ProductFact] = []
+        excluded: list[ProductFact] = []
+        requested = {str(item) for item in fields}
+        for section in _PRODUCT_KNOWLEDGE_SECTIONS:
+            rows = knowledge.get(section, ())
+            if not isinstance(rows, list):
+                continue
+            for index, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    continue
+                subject = str(row.get("subject") or "")
+                scope = str(row.get("scope") or "")
+                field_key = str(row.get("field") or "")
+                row_model = normalize_model(row.get("model_code"))
+                applies = str(
+                    row.get("applies_to_product_id") or row.get("product_id") or ""
+                )
+                model_scoped = section == "model_facts"
+                identity_matches = (
+                    bool(model_norm and row_model == model_norm)
+                    if model_scoped else bool(
+                        key and key in {
+                            applies,
+                            *(str(item) for item in row.get("source_product_ids", ()) if item),
+                        }
+                    )
+                )
+                if not identity_matches:
+                    continue
+                # MULTI_MODEL evidence is never elected for one model.
+                if scope in {"UNKNOWN_SCOPE", "MULTI_MODEL"} or row.get("scope_status") != "RESOLVED":
+                    continue
+                if (row_model, field_key) in withheld:
+                    continue
+                value = row.get("runtime_value", row.get("value"))
+                status = str(row.get("operational_status") or "")
+                value_state = row.get("value_state")
+                if (
+                    status not in _RUNTIME_PRODUCT_KNOWLEDGE_STATUSES
+                    or value_state == "EXPLICIT_NA" or _is_empty(value)
+                ):
+                    continue
+                # Keyword mode retains its legacy bounded behavior.  The GPT
+                # evidence route intentionally receives the whole retained
+                # product/listing record and decides relevance itself.
+                if not include_all and field_key not in requested:
+                    continue
+                component_scope = (
+                    "POLICY" if subject.endswith("_POLICY") else
+                    "BUNDLE_ACCESSORY" if subject.startswith("BUNDLED_") or subject == "ACCESSORY" else
+                    "LISTING" if subject in {"LISTING", "OPTION"} else BASE_DEVICE_SCOPE
+                )
+                provenance = tuple(
+                    item for item in row.get("provenance", ())
+                    if isinstance(item, dict)
+                )
+                source_type = str(
+                    row.get("source_type") or (provenance[0].get("source_type") if provenance else "")
+                ) or None
+                safe.append(ProductFact(
+                    product_id=key or applies or model_key,
+                    listing_id=applies or key or model_key,
+                    model_code=str(row.get("model_code") or model_key) or None,
+                    field_key=field_key, value=value, raw_value=row.get("value"),
+                    unit=row.get("unit"), scope=scope,
+                    scope_key=str(row.get("model_code") or applies or key or model_key),
+                    component_scope=component_scope,
+                    volatility=("SEMI_STATIC_POLICY_FACT" if component_scope == "POLICY" else "STATIC_PRODUCT_FACT"),
+                    verification_status=status, resolution_status=str(row.get("scope_status") or ""),
+                    lifecycle_status=ACTIVE,
+                    canonical_fact_id=f"integrated:{section}:{index}", value_id=None,
+                    provenance=provenance, safe_for_answer=True,
+                    subject=subject, applies_to_product_id=(applies or key or None),
+                    source_type=source_type,
+                ))
+                if len(safe) >= _PRODUCT_KNOWLEDGE_PROMPT_LIMIT:
+                    return safe, excluded
+        return safe, excluded
 
     @staticmethod
     def _catalog_facts(
@@ -1192,6 +1224,14 @@ class ProductKnowledgeService:
             value = direct.get(field_key)
             if _is_empty(value):
                 continue
+            # A stored ``false`` in this catalogue is an absence of evidence,
+            # not evidence of absence: 805 of the 1,586 records carry
+            # ``speaker: false`` and not one of their specs says the speaker
+            # is missing. Offering it as a fact published "스피커 없음" from a
+            # blank field, so a negative is quoted only where the source
+            # states one -- which this catalogue never does.
+            if value is False:
+                continue
             result.append(ProductFact(
                 product_id=product_id, listing_id=model_key, model_code=model_key,
                 field_key=field_key, value=value, raw_value=value,
@@ -1205,199 +1245,6 @@ class ProductKnowledgeService:
         return result
 
     # ------------------------------------------------------------------
-    def _provenance_for(
-        self, rows: Sequence[dict[str, Any]]
-    ) -> dict[tuple[str, str], list[dict[str, Any]]]:
-        pairs = [
-            (str(row.get("canonical_fact_id")), str(row.get("selected_value_id")))
-            for row in rows
-            if row.get("canonical_fact_id") and row.get("selected_value_id")
-        ]
-        if not pairs:
-            return {}
-        try:
-            return self.repository.provenance_for_values(pairs)
-        except Exception:  # noqa: BLE001 - absence of provenance blocks anyway
-            return {}
-
-    def _judge(
-        self,
-        row: dict[str, Any],
-        provenance: dict[tuple[str, str], list[dict[str, Any]]],
-        *,
-        expected_model: str | None,
-        collection_status: str | None = None,
-        component_subject: bool = False,
-        product_lines: tuple[str, ...] = (),
-    ) -> ProductFact:
-        field_key = str(row.get("field") or "")
-        fact_id = str(row.get("canonical_fact_id") or "")
-        value_id = row.get("selected_value_id")
-        value = _decode(row.get("normalized_value_json"))
-        raw_value = _decode(row.get("raw_value_json"))
-        rows_provenance = tuple(
-            provenance.get((fact_id, str(value_id)), ())
-            if value_id else ()
-        )
-        component_scope = (
-            ACCESSORY_SCOPE
-            if field_key.startswith(ACCESSORY_FIELD_PREFIX)
-            else BASE_DEVICE_SCOPE
-        )
-        row_model = str(row.get("model_code") or "").strip().upper() or None
-
-        reason = self._exclusion_reason(
-            row=row, value=value, provenance=rows_provenance,
-            expected_model=expected_model, row_model=row_model,
-            collection_status=collection_status,
-            component_scope=component_scope,
-            component_subject=component_subject,
-            product_lines=product_lines,
-        )
-        return ProductFact(
-            product_id=str(row.get("product_id") or ""),
-            listing_id=str(row.get("listing_id") or ""),
-            model_code=row.get("model_code"),
-            field_key=field_key,
-            value=value,
-            raw_value=raw_value,
-            unit=_unit_for(field_key),
-            scope=str(row.get("scope") or ""),
-            scope_key=str(row.get("scope_key") or ""),
-            component_scope=component_scope,
-            volatility=str(row.get("volatility") or ""),
-            verification_status=str(row.get("verification_status") or ""),
-            resolution_status=str(row.get("resolution_status") or ""),
-            lifecycle_status=str(row.get("lifecycle_status") or ""),
-            canonical_fact_id=fact_id,
-            value_id=str(value_id) if value_id else None,
-            provenance=rows_provenance,
-            safe_for_answer=reason is None,
-            exclusion_reason=reason,
-        )
-
-    @staticmethod
-    def _exclusion_reason(
-        *,
-        row: dict[str, Any],
-        value: Any,
-        provenance: Sequence[dict[str, Any]],
-        expected_model: str | None,
-        row_model: str | None,
-        collection_status: str | None = None,
-        component_scope: str = BASE_DEVICE_SCOPE,
-        component_subject: bool = False,
-        product_lines: tuple[str, ...] = (),
-    ) -> str | None:
-        """The first condition this fact fails, or None when usable."""
-
-        if str(row.get("lifecycle_status") or "") != ACTIVE:
-            return "SUPERSEDED_BY_LATER_RUN"
-        if str(row.get("verification_status") or "").upper() != VERIFIED:
-            return f"VERIFICATION_{row.get('verification_status') or 'UNKNOWN'}"
-        resolution = str(row.get("resolution_status") or "").upper()
-        if resolution in UNUSABLE_RESOLUTIONS:
-            return f"RESOLUTION_{resolution}"
-        volatility = str(row.get("volatility") or "")
-        if volatility in UNUSABLE_VOLATILITY:
-            return "VOLATILE_LISTING_FACT"
-        # Collector plumbing. Never reached the prompt while the keyword topics
-        # decided what to ask for; now that a listing's record is read whole,
-        # the row itself has to say it is not answerable material.
-        if _is_internal_metadata(str(row.get("field") or ""), value):
-            return "INTERNAL_LISTING_METADATA"
-        # The listing could not be read as it stands today -- it was delisted,
-        # blocked or otherwise unreadable at collection time. Anything that
-        # describes the listing rather than the product is no longer current.
-        # Unknown, empty and unexpected statuses take this branch too: a status
-        # we cannot recognise is not evidence that the listing is live.
-        if str(collection_status or "").strip().upper() != COLLECTION_SUCCESS:
-            if volatility in STALE_WHEN_NOT_CURRENT:
-                return "COLLECTION_STATUS_NOT_CURRENT"
-        if not row.get("selected_value_id"):
-            return "NO_SELECTED_VALUE"
-        if _is_empty(value):
-            # Explicitly *not* turned into a negative claim: an empty value
-            # means the extractor found nothing, not that the feature is
-            # absent.
-            return "VALUE_EMPTY_OR_UNKNOWN"
-        active = [
-            item for item in provenance
-            if str(item.get("lifecycle_status") or "") == ACTIVE
-        ]
-        if not active:
-            return "NO_ACTIVE_PROVENANCE"
-        if not any(
-            str(item.get("source_status") or "").upper() == VERIFIED
-            for item in active
-        ):
-            return "PROVENANCE_NOT_VERIFIED"
-        # Same model, written differently, is the same model.
-        #
-        # Both sides are canonicalised to a model code before they are
-        # compared, using the extractor the guard already applies to listing
-        # titles. The listing title gives ``LH50BEHHLGFXKR``; the label stored
-        # beside the fact gives "2026 LED 4K BE50H-H 125.7CM(50인치)
-        # (LH50BEHHLGFXKR) 스탠드". Compared as whole strings those are
-        # different, and on the measured catalogue that rejected 2,884 of the
-        # 5,261 verified facts -- 50 of 94 products lost every verified fact
-        # they had, including the screen size of the product being asked about.
-        #
-        # This is not a substring or similarity test: the two codes must be
-        # equal once extracted, so LH50BEHHLGFXKR and LH55BEHHLGFXKR remain a
-        # mismatch. A regional/SKU suffix that survives extraction
-        # (LS32DM501 vs LS32DM501EKXKR) also stays a mismatch -- the
-        # conservative outcome, since nothing here can prove a suffix is only
-        # regional.
-        #
-        # When a label carries no extractable code at all the comparison is
-        # not attempted, which is exactly what already happened for rows with
-        # no label: these rows were fetched by ``facts_for_product`` with
-        # ``WHERE cfl.product_id = ?``, so the strongest identity -- the exact
-        # Naver product_id -- is already established, and provenance,
-        # VERIFIED status and the resolution checks above still apply.
-        canonical_expected = extract_model_code(expected_model)
-        canonical_row = extract_model_code(row_model)
-        if (
-            canonical_expected
-            and canonical_row
-            and canonical_expected != canonical_row
-        ):
-            return "MODEL_SCOPE_MISMATCH"
-        # The conditions above ask "is this fact sound?". The two below ask
-        # "does this fact answer *this* question?", so they run last, on a fact
-        # already known to be verified and backed.
-        field_key = str(row.get("field") or "")
-        # A bundled component's maker is not the listing's maker. Withheld, not
-        # denied: the field simply becomes unknown for this question.
-        if (
-            component_subject
-            and component_scope == BASE_DEVICE_SCOPE
-            and field_key in IDENTITY_FIELDS | SUBJECT_SENSITIVE_FIELDS
-        ):
-            return "COMPONENT_SUBJECT_UNRESOLVED"
-        # And the same boundary from the other side. Nothing here was asked
-        # about the stand, so the stand's own weight -- or the load it is rated
-        # to carry, which is not a weight at all -- may not stand in for the
-        # display's. Withheld, never denied.
-        if (
-            not component_subject
-            and component_scope == ACCESSORY_SCOPE
-            and field_key in SUBJECT_SENSITIVE_FIELDS
-        ):
-            return "ACCESSORY_SUBJECT_NOT_ASKED"
-        # A product-line question may only be grounded by a stored value that
-        # actually spells the line out. Absence stays unknown and never becomes
-        # "this is not an 오디세이".
-        if (
-            product_lines
-            and field_key in {"brand", "model_name"}
-            and not _mentions_line(value, product_lines)
-        ):
-            return "PRODUCT_LINE_NOT_IN_VALUE"
-        return None
-
-
 _UNITS = {
     "hdmi_port_count": "개", "usb_port_count": "개", "ethernet_port_count": "개",
     "refresh_rate": "Hz", "response_time_ms": "ms",

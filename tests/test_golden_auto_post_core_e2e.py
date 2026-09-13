@@ -34,7 +34,6 @@ from config import NaverPostSettings, StoreConfig
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
-from repositories.product_fact_repository import ProductFactRepository
 from services import learning_evidence_policy
 from services.answer_service import AnswerService
 from services.auto_post_pipeline_service import AutoPostPipelineService
@@ -52,7 +51,6 @@ from services.product_knowledge_service import (
 )
 
 
-REAL_PRODUCT_DB = Path("data") / "product_facts.db"
 M5_PRODUCT_ID = "10198648691"
 M5_NAME = "삼성 M5 LS32DM501EKXKR 스마트모니터"
 
@@ -518,36 +516,6 @@ def test_gs05o_current_order_schedule_without_lookup_context_stays_review(
     )
 
 
-# GS-06
-@pytest.mark.skipif(not REAL_PRODUCT_DB.is_file(), reason="product facts DB absent")
-def test_gs06_verified_hdmi_fact_reaches_post_for_exact_product(database):
-    inquiry_id = _insert(
-        database, "GS-06", "이 제품 HDMI 단자가 몇 개 있나요?",
-        product_id=M5_PRODUCT_ID, product_name=M5_NAME,
-    )
-    service = AnswerService(
-        database,
-        hybrid_service=HybridAnswerService(
-            _provider("HDMI 단자는 2개입니다."),
-        ),
-        dps_enrichment=RecordingDps(),
-        order_lookup_service=RecordingOrderLookup(),
-        product_knowledge=ProductKnowledgeService(
-            ProductFactRepository(REAL_PRODUCT_DB)
-        ),
-        semantic_analyzer=GptSemanticAnalyzerService(GoldenUnderstandingProvider()),
-    )
-    outcome, client, draft = _run(database, inquiry_id, service)
-    guard = draft["metadata_json"]["product_fact_guard"]
-    assert outcome.succeeded_count == 1 and client.calls == 1
-    assert guard["current_fact_verified"] is True
-    assert guard["product_fact_claims_supported"] is True
-    assert any(
-        item["field_key"] == "hdmi_port_count"
-        for item in guard["product_knowledge"]["safe_facts"]
-    )
-
-
 # GS-07 / GS-08 / GS-09
 @pytest.mark.parametrize(
     "scenario,match,conflict,expected_post",
@@ -604,38 +572,6 @@ def test_gs07_to_gs09_learning_scope_and_conflict(
             # Evidence conflict may stop generation before a product guard is
             # assembled; the separate policy assertion below pins its cause.
             assert conflict is True
-
-
-# GS-10
-@pytest.mark.skipif(not REAL_PRODUCT_DB.is_file(), reason="product facts DB absent")
-def test_gs10_unrelated_facts_do_not_ground_airplay_or_staff_assertion(database):
-    question = "아이폰 AirPlay 지원되나요? 와이파이 없이도 미러링 가능한가요?"
-    inquiry_id = _insert(
-        database, "GS-10", question,
-        product_id=M5_PRODUCT_ID, product_name=M5_NAME,
-    )
-    knowledge = ProductKnowledgeService(
-        ProductFactRepository(REAL_PRODUCT_DB)
-    ).facts_for_inquiry(product_id=M5_PRODUCT_ID, question=question)
-    assert knowledge.has_safe_facts
-    assert knowledge.supports_question(question) is False
-    service = AnswerService(
-        database,
-        hybrid_service=HybridAnswerService(
-            _provider("AirPlay를 지원합니다. 와이파이 없이 미러링 가능합니다.")
-        ),
-        dps_enrichment=RecordingDps(),
-        order_lookup_service=RecordingOrderLookup(),
-        product_knowledge=ProductKnowledgeService(
-            ProductFactRepository(REAL_PRODUCT_DB)
-        ),
-    )
-    outcome, client, draft = _run(database, inquiry_id, service)
-    assert outcome.succeeded_count == 0 and client.calls == 0
-    if draft is not None:
-        text = str(draft["original_answer"])
-        assert "AirPlay를 지원합니다" not in text
-        assert "미러링 가능합니다" not in text
 
 
 # GS-11 / GS-12

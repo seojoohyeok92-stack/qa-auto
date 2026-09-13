@@ -13,7 +13,8 @@ from answer.exceptions import AnswerConfigError
 
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / "answer_data"
 DEFAULT_PRODUCT_CATALOG_PATH = (
-    Path(__file__).resolve().parents[1] / "data" / "model_data_with_color.json"
+    Path(__file__).resolve().parents[1]
+    / "data" / "model_data_with_color.json"
 )
 
 # Files whose content decides an answer. Their modification time is part of the

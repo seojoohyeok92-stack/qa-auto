@@ -1,7 +1,7 @@
 """The four boundaries P2-B had to fix, each pinned where it actually lives.
 
 Every case here was measured on real production data first (the 688393xxx
-inquiries, and a read-only pass over product_facts.db); the numbers quoted in
+inquiries); the numbers quoted in
 the docstrings are from those measurements. No inquiry id or customer wording is
 a condition in production code, and none is one here either -- these tests
 describe behaviour, and the ids only say where the behaviour was observed.
@@ -21,9 +21,6 @@ from services.learning_context_service import (
     _retrieval_depth,
     interleave_by_rank,
 )
-from services.product_knowledge_service import ProductKnowledgeService
-
-
 # ===========================================================================
 # 1. Learning candidate budget
 # ===========================================================================
@@ -122,134 +119,6 @@ def test_a_caller_with_a_real_allowance_still_gets_one():
     )) == 3
 
 
-# ===========================================================================
-# 2. Product model identity
-# ===========================================================================
-
-def _exclusion(expected: str | None, row_model: str | None) -> str | None:
-    """Only the model-scope question: everything else is made to pass."""
-
-    return ProductKnowledgeService._exclusion_reason(
-        row={
-            "lifecycle_status": "ACTIVE",
-            "verification_status": "VERIFIED",
-            "resolution_status": "SINGLE_SOURCE",
-            "volatility": "STABLE",
-            "field": "screen_size",
-            "selected_value_id": "v1",
-        },
-        value={"inch": 50},
-        provenance=({"lifecycle_status": "ACTIVE", "source_status": "VERIFIED"},),
-        expected_model=expected,
-        row_model=row_model,
-        collection_status="COLLECTION_SUCCESS",
-    )
-
-
-MISMATCH = "MODEL_SCOPE_MISMATCH"
-
-
-def test_the_same_model_written_out_in_full_is_the_same_model():
-    """The measured failure: 2,884 of 5,261 verified facts were refused.
-
-    The listing title gives a code; the label stored beside the fact gives a
-    sentence that contains that code. Compared whole, 50 of 94 products lost
-    every verified fact they had.
-    """
-
-    assert _exclusion(
-        "LH50BEHHLGFXKR",
-        "2026 LED 4K BE50H-H 125.7CM(50인치) (LH50BEHHLGFXKR) 스탠드",
-    ) is None
-
-
-def test_a_different_model_is_still_refused():
-    assert _exclusion("LH50BEHHLGFXKR", "LH55BEHHLGFXKR") == MISMATCH
-
-
-def test_a_different_model_inside_a_descriptive_label_is_still_refused():
-    assert _exclusion(
-        "LH50BEHHLGFXKR",
-        "2026 LED 4K BE55H-H 138.7CM(55인치) (LH55BEHHLGFXKR) 스탠드",
-    ) == MISMATCH
-
-
-def test_a_suffix_that_survives_extraction_stays_a_mismatch():
-    """Deliberately conservative: nothing here can prove a suffix is regional."""
-
-    assert _exclusion("LS32DM501", "LS32DM501EKXKR") == MISMATCH
-
-
-def test_no_expected_model_means_the_question_is_not_asked():
-    """A title that names no model -- the 688393xxx product -- is not evidence
-    of a different one, and product_id identity already holds."""
-
-    assert _exclusion(None, "삼성 50인치 비즈니스TV + 무빙 이동식 스탠드") is None
-    assert _exclusion("", "LH50BEHHLGFXKR") is None
-
-
-def test_no_row_model_means_the_question_is_not_asked():
-    assert _exclusion("LH50BEHHLGFXKR", None) is None
-    assert _exclusion("LH50BEHHLGFXKR", "") is None
-
-
-def test_a_label_with_no_extractable_code_is_not_read_as_a_model_claim():
-    """A marketing name is not a competing identity; the rows were fetched
-    ``WHERE cfl.product_id = ?``, which is the stronger identity."""
-
-    assert _exclusion(
-        "LH50BEHHLGFXKR", "삼성전자 2024 LED 4K 125.7CM 비즈니스TV",
-    ) is None
-    assert _exclusion("LH50BEHHLGFXKR", "12022024182") is None
-
-
-def test_a_prefix_is_not_treated_as_a_match():
-    """Substring logic was rejected on purpose, so this must not pass.
-
-    ``LH50BE`` is a prefix of ``LH50BEHHLGFXKR`` and both extract cleanly as
-    codes. Equality is the rule, so the prefix is still a mismatch.
-    """
-
-    assert _exclusion("LH50BE", "LH50BEHHLGFXKR") == MISMATCH
-    assert _exclusion("LH50BEHHLGFXKR", "LH50BE") == MISMATCH
-
-
-@pytest.mark.parametrize("status,expected_reason", [
-    ("NEEDS_REVIEW", "VERIFICATION_NEEDS_REVIEW"),
-    ("CONFLICT", "VERIFICATION_CONFLICT"),
-])
-def test_an_unverified_fact_is_still_refused_whatever_the_model_says(
-    status, expected_reason,
-):
-    """Canonicalisation must not become a way past the VERIFIED requirement."""
-
-    assert ProductKnowledgeService._exclusion_reason(
-        row={
-            "lifecycle_status": "ACTIVE", "verification_status": status,
-            "resolution_status": "SINGLE_SOURCE", "volatility": "STABLE",
-            "field": "screen_size", "selected_value_id": "v1",
-        },
-        value={"inch": 50},
-        provenance=({"lifecycle_status": "ACTIVE", "source_status": "VERIFIED"},),
-        expected_model="LH50BEHHLGFXKR",
-        row_model="2026 LED 4K (LH50BEHHLGFXKR) 스탠드",
-        collection_status="COLLECTION_SUCCESS",
-    ) == expected_reason
-
-
-def test_unverified_provenance_is_still_refused():
-    assert ProductKnowledgeService._exclusion_reason(
-        row={
-            "lifecycle_status": "ACTIVE", "verification_status": "VERIFIED",
-            "resolution_status": "SINGLE_SOURCE", "volatility": "STABLE",
-            "field": "screen_size", "selected_value_id": "v1",
-        },
-        value={"inch": 50},
-        provenance=({"lifecycle_status": "ACTIVE", "source_status": "PENDING"},),
-        expected_model="LH50BEHHLGFXKR",
-        row_model="2026 LED 4K (LH50BEHHLGFXKR) 스탠드",
-        collection_status="COLLECTION_SUCCESS",
-    ) == "PROVENANCE_NOT_VERIFIED"
 
 
 # ===========================================================================

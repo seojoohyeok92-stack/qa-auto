@@ -397,7 +397,7 @@ def test_product_facts_are_a_verdict_not_a_dump(document) -> None:
     facts = document["product_facts"]
 
     assert facts["classification"] == "COMMON_OR_NON_PRODUCT_FACT"
-    assert "product_facts.db is not read" in facts["note"]
+    assert "model_data_with_color.json" in facts["note"]
 
 
 def test_the_export_names_no_machine_or_path(document, store) -> None:

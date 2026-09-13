@@ -218,48 +218,48 @@ def test_a_field_the_catalog_does_not_carry_stays_unknown(
 
 
 # ==========================================================================
-# 4. 운영 경로는 listing store 와 JSON 카탈로그 두 곳이다
+# 4. 운영 Product Knowledge 는 JSON 카탈로그 하나다
 # ==========================================================================
 #
-# 이 절은 원래 "운영은 product_facts.db 를 절대 열지 않는다" 를 고정하고
-# 있었다. 그 은퇴는 되돌려졌다: 카탈로그는 상품명에서 뽑은 model code 로만
-# 식별하는데 이 매장 상품명의 42% 에는 model code 가 없어, GPT ① 이 상품
-# 근거를 요청한 문의에서 검증 사실이 한 건도 GPT ② 에 닿지 않았다
-# (Golden 측정: need_product=true 5건 중 5건이 0건).
+# 한동안 product_facts.db(listing store)가 1순위였고 카탈로그는 그 뒤였다.
+# 그 방식은 은퇴했다: 연결·구성품 속성이 이미지 OCR 에서 와서 대부분 미검증
+# 상태였고(wifi_present 19개 중 2개, remote_control_included 21개 중 2개만
+# usable), listing store 가 상품을 '알기만 해도' 쓸 수 있는 사실이 하나도
+# 없을 때까지 카탈로그를 막았다.
 #
-# 확정된 상품 식별 계약은 다음과 같고, 아래 테스트는 그 계약을 고정한다.
-#   1) product_id 가 가장 강한 식별자
-#   2) product_id 가 없으면 상품명 fallback 허용
-#   3) 이름이 AMBIGUOUS 여도 정확한 product_id 가 이긴다
-#   4) 둘 다 특정 못 하면 VERIFIED 로 확정하지 않는다
-#   5) listing store 가 배제한 사실을 카탈로그로 되살리지 않는다
-#   6) 카탈로그는 listing store 가 그 상품을 모를 때만 쓴다
+# 확정된 계약:
+#   1) Product Knowledge source 는 model_data_with_color.json 하나뿐이다
+#   2) 상품 식별은 명시 model code > 제목의 model token > alias 순이다
+#   3) 특정하지 못하면 VERIFIED 로 확정하지 않고 후보로만 전달한다
+#   4) product_facts.db 파일이 디스크에 있어도 런타임은 열지 않는다
 
 
-def test_both_knowledge_sources_are_available_to_production() -> None:
-    """운영 기본 구성은 listing store 와 카탈로그를 모두 갖는다."""
+def test_the_catalogue_is_the_only_knowledge_source() -> None:
+    """운영 기본 구성은 카탈로그 하나이며 listing store 는 존재하지 않는다."""
 
     from repositories.product_catalog_repository import (
         DEFAULT_PRODUCT_CATALOG_PATH,
     )
+    import services.product_knowledge_service as module
 
     service = ProductKnowledgeService()
 
-    # listing store 는 파일이 있을 때만 연결된다 -- 없으면 조용히 카탈로그만.
-    if service.repository is not None:
-        assert service.repository.available()
-        assert service.repository.path.name == "product_facts.db"
     assert service.catalog_repository.path == DEFAULT_PRODUCT_CATALOG_PATH.resolve()
-    assert service.catalog_repository.path.name == "model_data_with_color.json"
+    assert service.catalog_repository.path.name == (
+        "model_data_with_color.json"
+    )
+    # 은퇴한 저장소로 가는 연결 자체가 없다 -- 속성도, import 도.
+    assert not hasattr(service, "repository")
+    assert not hasattr(module, "ProductFactRepository")
 
 
-def test_a_listing_the_store_does_not_know_falls_through_to_the_catalogue(
+def test_no_product_facts_database_is_opened_for_an_inquiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """계약 6번 -- listing store 가 모르는 상품이면 카탈로그가 답한다.
+    """계약 4번 -- 답변 경로에서 product_facts.db 를 열지 않는다.
 
-    listing store 를 열어보는 것 자체는 이제 정상이다. 지켜야 할 것은
-    '모르는 상품에서 멈추지 않는다' 이고, 그것을 결과로 확인한다.
+    파일이 개발 PC 에 남아 있더라도 런타임이 조용히 다시 쓰기 시작하는 일이
+    없어야 하므로, sqlite 연결을 감시해 결과와 함께 확인한다.
     """
 
     import sqlite3
@@ -280,10 +280,10 @@ def test_a_listing_the_store_does_not_know_falls_through_to_the_catalogue(
         option_name=None,
     )
 
-    # listing-4 는 listing store 에 없다. 그래서 멈추지 않고 카탈로그가
-    # 상품명에서 모델을 식별해 검증 사양을 돌려준다 -- 이것이 계약 6번이
-    # 지키려는 동작이고, 은퇴 상태에서는 이 경로가 유일했다.
+    # 카탈로그가 상품명에서 모델을 식별해 검증 사양을 돌려준다.
     assert result.matched is True
     assert result.identity_status in {"EXACT", "UNIQUE_MATCH"}
     assert result.collection_status == "CATALOG_JSON"
     assert result.has_safe_facts
+    # 그리고 그 과정에서 product_facts 계열 파일은 한 번도 열리지 않는다.
+    assert not [name for name in opened if "product_facts" in name], opened

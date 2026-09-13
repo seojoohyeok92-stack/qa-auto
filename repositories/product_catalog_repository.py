@@ -35,7 +35,8 @@ from typing import Any
 
 
 DEFAULT_PRODUCT_CATALOG_PATH = (
-    Path(__file__).resolve().parents[1] / "data" / "model_data_with_color.json"
+    Path(__file__).resolve().parents[1]
+    / "data" / "model_data_with_color.json"
 )
 
 
@@ -98,6 +99,13 @@ def _load_catalog(path_text: str, mtime_ns: int, size: int) -> dict[str, Any]:
     return {
         "catalog": catalog,
         "aliases": aliases,
+        # Optional, integrated evidence.  Keeping it on the same cached JSON
+        # object preserves the existing catalog source and does not create a
+        # second runtime store.
+        "product_knowledge": (
+            value.get("PRODUCT_KNOWLEDGE")
+            if isinstance(value.get("PRODUCT_KNOWLEDGE"), dict) else {}
+        ),
         "normalized_catalog": {
             normalize_model(key): str(key) for key in catalog
             if normalize_model(key)
@@ -114,6 +122,14 @@ class ProductCatalogRepository:
     def catalog(self) -> dict[str, Any]:
         stat = self.path.stat()
         return _load_catalog(str(self.path), stat.st_mtime_ns, stat.st_size)
+
+    def product_knowledge(self) -> dict[str, Any]:
+        """Integrated Product Knowledge section, or an empty mapping.
+
+        The legacy catalog-only file remains a valid input, so this is an
+        additive read rather than a new required top-level schema contract.
+        """
+        return dict(self.catalog().get("product_knowledge") or {})
 
     def match(
         self, *, product_name: object = "", option_name: object = "",
@@ -138,24 +154,22 @@ class ProductCatalogRepository:
             key for normalized, key in normalized_catalog.items()
             if len(normalized) >= MIN_IDENTIFYING_LENGTH and normalized in haystack
         }
-        if not candidates:
-            for alias, target in aliases.items():
-                normalized = normalize_model(alias)
-                if len(normalized) < MIN_IDENTIFYING_LENGTH or normalized not in haystack:
-                    continue
-                target_key = str(target)
-                if target_key in catalog:
-                    candidates.add(target_key)
         if len(candidates) == 1:
             key = next(iter(candidates))
             return CatalogMatch(key, dict(catalog[key]), status=EXACT)
         if candidates:
             return self._ambiguous(catalog, candidates)
 
-        # Nothing in the listing spells a catalog key out in full. Many titles
-        # carry a truncated one -- "LH43B" for LH43BEDHLGFXKR -- and the whole
-        # store's 43-inch business TVs share that stem, so this narrows and
-        # then reports rather than choosing.
+        # What the title itself says about the model outranks an alias.
+        #
+        # Aliases are matched as text, and 34 of the 72 in this catalogue carry
+        # no model code at all -- "삼성 107.9cm(43인치)" -> LH43BEDH. Trying
+        # them before reading the title's own model token let a size phrase
+        # elect a model while the title named a different one: measured over
+        # the server's inquiries, 21 listings whose title said LH43BEF were
+        # matched to LH43BEDH, and 96 more had an alias pick one of several
+        # models the title's token narrowed to. A truncated code -- "LH43B" for
+        # LH43BEDHLGFXKR -- narrows and then reports rather than choosing.
         partial = self._partial_key_candidates(
             normalized_catalog, f"{product_name} {option_name}",
         )
@@ -168,6 +182,22 @@ class ProductCatalogRepository:
                 key = next(iter(narrowed))
                 return CatalogMatch(key, dict(catalog[key]), status=UNIQUE_MATCH)
             return self._ambiguous(catalog, narrowed or partial)
+
+        # Only now, with nothing in the title naming a model, may an alias
+        # speak for the listing.
+        alias_keys = set()
+        for alias, target in aliases.items():
+            normalized = normalize_model(alias)
+            if len(normalized) < MIN_IDENTIFYING_LENGTH or normalized not in haystack:
+                continue
+            target_key = str(target)
+            if target_key in catalog:
+                alias_keys.add(target_key)
+        if len(alias_keys) == 1:
+            key = next(iter(alias_keys))
+            return CatalogMatch(key, dict(catalog[key]), status=EXACT)
+        if alias_keys:
+            return self._ambiguous(catalog, alias_keys)
         return CatalogMatch(
             None, None, "PRODUCT_CATALOG_MODEL_NOT_FOUND", status=NOT_FOUND,
         )

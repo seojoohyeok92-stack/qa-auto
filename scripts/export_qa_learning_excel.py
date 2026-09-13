@@ -40,7 +40,6 @@ from openpyxl.utils import get_column_letter  # noqa: E402
 
 from answer.hold_reasons import primary_reason  # noqa: E402
 from repositories.database import get_database_path  # noqa: E402
-from repositories.product_fact_repository import get_product_facts_path  # noqa: E402
 from services.auto_post_pipeline_service import AutoPostPipelineService  # noqa: E402
 from services.auto_processing_eligibility_service import (  # noqa: E402
     AutoProcessingEligibilityService,
@@ -732,8 +731,7 @@ def export(
     """Build the workbook and return its path plus the per-sheet row counts."""
 
     db_path = Path(get_database_path()).resolve()
-    facts_path = Path(get_product_facts_path()).resolve()
-    before = {"qa": fingerprint(db_path), "facts": fingerprint(facts_path)}
+    before = {"qa": fingerprint(db_path)}
 
     connection = open_readonly(db_path)
     try:
@@ -757,7 +755,7 @@ def export(
     path = target_dir / f"Q&A_Auto_운영데이터_{stamp}.xlsx"
     workbook.save(path)
 
-    after = {"qa": fingerprint(db_path), "facts": fingerprint(facts_path)}
+    after = {"qa": fingerprint(db_path)}
     if before != after:
         raise RuntimeError(
             "DB_MODIFIED_DURING_EXPORT: 운영 데이터가 변경되었습니다. "

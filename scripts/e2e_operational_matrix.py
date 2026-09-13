@@ -1,7 +1,7 @@
 r"""Production-like decision matrix across every branch this pipeline routes on.
 
 Each scenario states what should happen before it is run, and the run uses the
-real classifier, the real ``product_facts.db``, the real compatibility gate and
+real classifier, the integrated JSON Product Knowledge source, the real compatibility gate and
 the real evidence policy. Nothing is stubbed and no expectation is written by
 copying back what the code returned.
 

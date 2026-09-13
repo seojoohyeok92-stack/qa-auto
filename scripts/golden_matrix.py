@@ -1,7 +1,7 @@
 r"""Golden matrix: the decisions the five production inquiries alone can't pin.
 
 Fixing five real inquiries proves nothing about the sixth, so every branch each
-fix touches is exercised here against the *real* ``product_facts.db`` and the
+fix touches is exercised here against the integrated JSON Product Knowledge source and the
 real deterministic classifier, policy and evidence code.  No component is
 stubbed, and no expected value is asserted by restating what the code returned.
 

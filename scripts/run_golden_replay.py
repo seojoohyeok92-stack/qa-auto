@@ -32,7 +32,7 @@ from golden import population as population_module  # noqa: E402
 from golden import selection as selection_module  # noqa: E402
 from golden.runner import GoldenReplayWorkspace, run_case  # noqa: E402
 
-DEFAULT_DB = PROJECT_ROOT / "data" / "서버pc_data" / "data" / "oje_automation.db"
+DEFAULT_DB = PROJECT_ROOT / "data" / "oje_automation.db"
 CASES_DIR = PROJECT_ROOT / "golden" / "cases"
 BASELINE_DIR = PROJECT_ROOT / "golden" / "baselines"
 

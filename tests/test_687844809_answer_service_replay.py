@@ -307,7 +307,9 @@ def test_687844809_full_answer_service_replay(tmp_path, monkeypatch):
     product_result = product.results[-1]
     assert product_result.matched is True
     assert product_result.listing_id == "listing_9645661432"
-    assert product_result.identity_status == "LISTING_EXACT"
+    # The single integrated JSON has no separate listing fact store; this
+    # replay's product title resolves deterministically to its catalog model.
+    assert product_result.identity_status == "EXACT"
     catalog_fields = {fact.field_key: fact.value for fact in product_result.safe_facts}
     assert catalog_fields, "식별된 listing 인데 검증 사실이 하나도 없다"
     instructions = context["product_catalog"]["instructions"]
