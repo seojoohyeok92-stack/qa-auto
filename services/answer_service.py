@@ -1201,7 +1201,7 @@ class AnswerService:
             correlation_id=correlation_id,
         )
 
-    def _start_generation_step(self, inquiry_id: int) -> None:
+    def _start_generation_step(self, inquiry_id: int) -> dict[str, Any] | None:
         self.workflows.initialize_steps(inquiry_id)
         step = self.workflows.get_step(
             inquiry_id,
@@ -1228,13 +1228,17 @@ class AnswerService:
                 metadata={"provider": "rules", "regeneration": True},
             )
         elif status is StepStatus.RUNNING:
-            raise AnswerGenerationInProgressError(
-                "Answer generation is already running."
-            )
+            recovery = self.workflows.recover_stale_answer_generation(inquiry_id)
+            if recovery is None:
+                raise AnswerGenerationInProgressError(
+                    "Answer generation is already running."
+                )
+            return recovery
         else:
             raise AnswerGenerationError(
                 f"답변 생성 단계가 {status.value} 상태여서 실행할 수 없습니다."
             )
+        return None
 
     def _set_order_id_request_workflow(self, inquiry_id: int) -> None:
         """Persist the expected non-error workflow for customer confirmation."""
@@ -1497,8 +1501,24 @@ class AnswerService:
 
         step_started = False
         try:
-            self._start_generation_step(inquiry_id)
+            stale_recovery = self._start_generation_step(inquiry_id)
             step_started = True
+            if stale_recovery is not None:
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "ANSWER_GENERATION_STALE_RECOVERED",
+                    "Stale answer generation was recovered for retry.",
+                    level="WARNING",
+                    details={
+                        "previous_started_at": stale_recovery[
+                            "previous_started_at"
+                        ],
+                        "previous_attempt_count": stale_recovery[
+                            "previous_attempt_count"
+                        ],
+                        "recovered_at": stale_recovery["recovered_at"],
+                    },
+                )
             initial_request = answer_request_from_inquiry(inquiry)
             deterministic_analysis = self.analysis.analyze(initial_request)
             routing_semantic, semantic_routing = self._semantic_for_routing(

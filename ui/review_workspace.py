@@ -400,6 +400,66 @@ def _warning_summary(status: AnswerStatusView) -> str:
     return f"{total}건 (참고)"
 
 
+def _generation_failure_context(
+    database: Database,
+    inquiry_id: int,
+    draft: dict[str, Any] | None,
+) -> dict[str, str] | None:
+    """Return persisted generation-failure evidence for a draft-less inquiry."""
+
+    if draft:
+        return None
+    try:
+        step = WorkflowRepository(database).get_step(
+            inquiry_id, "ANSWER_GENERATED"
+        )
+    except LookupError:
+        return None
+    status = str(step.get("step_status") or "").upper()
+    rows = LogRepository(database).recent_for_inquiry(inquiry_id, limit=20)
+    failure_codes = {
+        "AUTOMATIC_DRAFT_FAILED",
+        "ANSWER_GENERATION_FAILED",
+        "PROCESSING_PLAN_FAILED",
+    }
+    failure_row = next(
+        (row for row in rows if row.get("event_code") in failure_codes), None
+    )
+    recovered_row = next(
+        (
+            row
+            for row in rows
+            if row.get("event_code") == "ANSWER_GENERATION_STALE_RECOVERED"
+        ),
+        None,
+    )
+    if status in {"FAILED", "NEEDS_REVIEW"}:
+        return {
+            "label": "자동 답변 생성 실패",
+            "message": "답변 생성 작업이 실패하여 재시도 또는 확인이 필요합니다.",
+            "error_code": str(step.get("last_error_code") or "GENERATION_FAILED"),
+            "last_attempt": str(step.get("updated_at") or ""),
+        }
+    if status == "RUNNING" and (failure_row or recovered_row):
+        details = (
+            failure_row.get("details_json")
+            if isinstance(failure_row, dict)
+            and isinstance(failure_row.get("details_json"), dict)
+            else {}
+        )
+        return {
+            "label": "자동 답변 생성 재시도 중",
+            "message": "이전 답변 생성이 중단되어 안전하게 재시도 중입니다.",
+            "error_code": str(
+                details.get("safe_error_code")
+                or details.get("error_code")
+                or "ANSWER_GENERATION_RETRY"
+            ),
+            "last_attempt": str(step.get("started_at") or ""),
+        }
+    return None
+
+
 def _render_registration_reasons(status: AnswerStatusView) -> None:
     """Explain the auto-registration outcome in the operator's words."""
 
@@ -1432,7 +1492,15 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         draft=draft,
         route=pipeline_route(draft),
     )
+    generation_failure = _generation_failure_context(
+        database, inquiry_id, draft
+    )
     with analysis_column:
+        generation_failure_field = (
+            _field("자동 답변 상태", generation_failure["label"])
+            if generation_failure
+            else ""
+        )
         st.markdown(
             '<div class="compact-analysis-card"><h4>분석 결과</h4>'
             f'{_field("문의 유형", intent.get("category") or inquiry.get("inquiry_type"))}'
@@ -1446,10 +1514,22 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             f'{_field("Provider", governance.get("provider") or (provider_run or {}).get("provider"))}'
             f'{_field("사용 Rule", (diagnostics or {}).get("hybrid", {}).get("rule_id"))}'
             f'{_field("경고", _warning_summary(answer_status))}'
+            f"{generation_failure_field}"
             "</div>",
             unsafe_allow_html=True,
         )
         _render_registration_reasons(answer_status)
+        if generation_failure:
+            last_attempt = generation_failure.get("last_attempt")
+            details = generation_failure.get("error_code") or "-"
+            suffix = (
+                f" (마지막 시도: {format_datetime_kst(last_attempt)})"
+                if last_attempt
+                else ""
+            )
+            st.warning(
+                f"{generation_failure['message']}{suffix} · Error: {details}"
+            )
         with st.expander("처리 진단", expanded=True):
             st.markdown(
                 '<div class="compact-analysis-card">'

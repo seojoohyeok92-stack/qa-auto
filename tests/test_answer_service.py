@@ -8,6 +8,7 @@ from answer.answer_format import format_final_answer
 from answer.exceptions import (
     AnswerAlreadyPostedError,
     AnswerGenerationError,
+    AnswerGenerationInProgressError,
 )
 from answer.models import AnswerResult, AnswerStatus
 from repositories.answer_repository import AnswerRepository
@@ -207,6 +208,77 @@ def test_success_completes_step_and_sets_review_pending(
     inquiry = InquiryRepository(database).get(inquiry_id)
     assert step["step_status"] == "COMPLETED"
     assert inquiry["workflow_status"] == "REVIEW_PENDING"
+
+
+def _make_answer_generation_stale(
+    database: Database, inquiry_id: int
+) -> None:
+    WorkflowRepository(database).start_step(
+        inquiry_id, StepCode.ANSWER_GENERATED
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE workflow_steps
+            SET started_at = '2000-01-01T00:00:00+00:00'
+            WHERE inquiry_id = ? AND step_code = ?
+            """,
+            (inquiry_id, StepCode.ANSWER_GENERATED.value),
+        )
+
+
+def test_fresh_running_generation_remains_protected(
+    database: Database,
+) -> None:
+    inquiry_id = create_inquiry(database, "SERVICE-FRESH-RUNNING")
+    WorkflowRepository(database).start_step(
+        inquiry_id, StepCode.ANSWER_GENERATED
+    )
+
+    with pytest.raises(AnswerGenerationInProgressError):
+        AnswerService(database)._start_generation_step(inquiry_id)
+
+
+def test_stale_running_generation_recovers_and_completes(
+    database: Database,
+) -> None:
+    inquiry_id = create_inquiry(database, "SERVICE-STALE-RUNNING")
+    _make_answer_generation_stale(database, inquiry_id)
+
+    AnswerService(
+        database,
+        engine=StaticEngine(generated_result()),
+        hybrid_service=StaticHybrid(generated_result()),
+    ).generate_for_inquiry(inquiry_id)
+
+    step = WorkflowRepository(database).get_step(
+        inquiry_id, StepCode.ANSWER_GENERATED
+    )
+    events = {
+        row["event_code"]
+        for row in LogRepository(database).recent_for_inquiry(inquiry_id)
+    }
+    assert step["step_status"] == "COMPLETED"
+    assert step["attempt_count"] == 2
+    assert "ANSWER_GENERATION_STALE_RECOVERED" in events
+
+
+def test_stale_recovery_failure_does_not_leave_running(
+    database: Database,
+) -> None:
+    inquiry_id = create_inquiry(database, "SERVICE-STALE-FAILURE")
+    _make_answer_generation_stale(database, inquiry_id)
+
+    AnswerService(
+        database,
+        engine=FailingEngine(),
+        hybrid_service=FailingHybrid(),
+    ).generate_for_inquiry(inquiry_id)
+
+    step = WorkflowRepository(database).get_step(
+        inquiry_id, StepCode.ANSWER_GENERATED
+    )
+    assert step["step_status"] != "RUNNING"
 
 
 def test_review_result_completes_draft_step_and_waits_for_staff_review(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from repositories.database import Database
@@ -16,6 +17,12 @@ from workflow.models import (
 
 
 class WorkflowRepository:
+    # Auto-post events use a 10-minute processing lease.  Answer generation
+    # may also include product/learning retrieval and DPS, so this deliberately
+    # waits longer than that lease before treating a RUNNING workflow step as
+    # abandoned.
+    ANSWER_GENERATION_STALE_SECONDS = 15 * 60
+
     def __init__(self, database: Database) -> None:
         self.database = database
 
@@ -359,6 +366,83 @@ class WorkflowRepository:
                 ),
             )
         return self.get_step(inquiry_id, code)
+
+    def recover_stale_answer_generation(
+        self,
+        inquiry_id: int,
+        *,
+        stale_after_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically take over an abandoned ``ANSWER_GENERATED`` step.
+
+        ``RUNNING`` is intentionally not generally retryable: a fresh row is
+        owned by another worker.  This narrow recovery is only for an answer
+        generation row whose recorded start time is older than the conservative
+        lease.  The conditional update makes two concurrent recovery attempts
+        deterministic: exactly one can replace the old start timestamp.
+        """
+
+        stale_seconds = max(
+            60,
+            int(stale_after_seconds or self.ANSWER_GENERATION_STALE_SECONDS),
+        )
+        now_datetime = datetime.now(UTC)
+        now = now_datetime.isoformat(timespec="milliseconds")
+        cutoff = now_datetime - timedelta(seconds=stale_seconds)
+        with self.database.transaction() as connection:
+            row = self._get_row(
+                connection, inquiry_id, StepCode.ANSWER_GENERATED
+            )
+            if validate_step_status(row["step_status"]) is not StepStatus.RUNNING:
+                return None
+            previous_started_at = str(row["started_at"] or "")
+            try:
+                started_at = datetime.fromisoformat(
+                    previous_started_at.replace("Z", "+00:00")
+                )
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=UTC)
+            except ValueError:
+                # A malformed historical timestamp must never make a live
+                # generation stealable.  An operator can still inspect it.
+                return None
+            if started_at.astimezone(UTC) > cutoff:
+                return None
+
+            previous_attempt_count = int(row["attempt_count"] or 0)
+            recovery_metadata = {
+                "provider": "rules",
+                "stale_recovery": {
+                    "previous_started_at": previous_started_at,
+                    "previous_attempt_count": previous_attempt_count,
+                    "recovered_at": now,
+                },
+            }
+            cursor = connection.execute(
+                """
+                UPDATE workflow_steps
+                SET started_at = ?, completed_at = NULL,
+                    attempt_count = attempt_count + 1,
+                    last_error_code = NULL, last_error_message = NULL,
+                    metadata_json = ?, updated_at = ?
+                WHERE id = ? AND step_status = ? AND started_at = ?
+                """,
+                (
+                    now,
+                    serialize_json(recovery_metadata),
+                    now,
+                    row["id"],
+                    StepStatus.RUNNING.value,
+                    row["started_at"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        return {
+            "previous_started_at": previous_started_at,
+            "previous_attempt_count": previous_attempt_count,
+            "recovered_at": now,
+        }
 
     def get_step(
         self,
