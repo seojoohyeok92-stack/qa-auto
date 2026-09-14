@@ -196,8 +196,13 @@ class CoupangProductMappingService:
     def _attribute_values(value: object) -> list[str]:
         if not isinstance(value, list):
             return []
-        return [
-            str(item.get("attributeValueName") or "")
-            for item in value
-            if isinstance(item, dict)
-        ]
+        allowed = {"모델", "모델명", "모델번호", "모델코드", "model", "modelno", "modelnumber", "modelcode"}
+        result: list[str] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("attributeTypeName") or item.get("attributeName") or "")
+            normalized = "".join(name.lower().split()).replace("_", "")
+            if normalized in allowed:
+                result.append(str(item.get("attributeValueName") or ""))
+        return result

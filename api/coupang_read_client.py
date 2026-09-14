@@ -206,6 +206,26 @@ class CoupangReadClient:
         )
         return self._get(path, {})
 
+    def list_seller_products(
+        self, *, next_token: int | str | None = None, max_per_page: int = 100,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """Page registered products using Coupang's official seller-product API."""
+        if not 1 <= int(max_per_page) <= 100:
+            raise CoupangReadError("INVALID_PARAMETER")
+        parameters: dict[str, Any] = {
+            "vendorId": self.vendor_id,
+            "maxPerPage": int(max_per_page),
+        }
+        if next_token not in (None, ""):
+            parameters["nextToken"] = str(next_token)
+        if status:
+            parameters["status"] = str(status).upper()
+        return self._get(
+            "/v2/providers/seller_api/apis/api/v1/marketplace/seller-products",
+            parameters,
+        )
+
     def _validate_date_range(
         self,
         inquiry_start_at: date | str,

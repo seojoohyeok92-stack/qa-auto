@@ -2100,6 +2100,48 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        31,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS coupang_catalog_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_code TEXT NOT NULL,
+                seller_product_id TEXT NOT NULL,
+                product_id TEXT,
+                seller_product_name TEXT,
+                display_product_name TEXT,
+                general_product_name TEXT,
+                status_name TEXT,
+                raw_status TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE(account_code, seller_product_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS coupang_catalog_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_code TEXT NOT NULL,
+                vendor_item_id TEXT NOT NULL,
+                seller_product_id TEXT NOT NULL,
+                seller_product_item_id TEXT,
+                item_name TEXT,
+                external_vendor_sku TEXT,
+                model_no TEXT,
+                attributes_json TEXT NOT NULL DEFAULT '[]',
+                bundle_info_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE(account_code, vendor_item_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_coupang_catalog_options_parent
+            ON coupang_catalog_options(account_code, seller_product_id)
+            """,
+        ),
+    ),
 )
 
 

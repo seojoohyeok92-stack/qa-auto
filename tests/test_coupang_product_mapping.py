@@ -176,3 +176,23 @@ def test_bundle_item_keeps_only_base_model_mapping(tmp_path: Path) -> None:
     result = mapping_service.resolve(seller_product_id=10001, vendor_item_id=7)
     assert result.mapping["canonical_model"] == "32DM501"
     assert result.bundle_detected is True
+
+
+def test_real_attribute_spec_noise_is_not_model_evidence(tmp_path: Path) -> None:
+    client = FakeProductClient(product(item(1, model_no="LS32DM501EKXKR", sku="32DM501", attributes=[
+        {"attributeTypeName": "주사율", "attributeValueName": "60HZ"},
+        {"attributeTypeName": "화면크기", "attributeValueName": "81CM"},
+        {"attributeTypeName": "밝기", "attributeValueName": "350CD"},
+    ])))
+    mapping, _ = service(tmp_path, client)
+    result = mapping.resolve(seller_product_id=10001, vendor_item_id=1)
+    assert result.mapping["mapping_source"] == AUTO_EXACT
+    assert result.mapping["canonical_model"] == "32DM501"
+
+
+def test_model_designated_attribute_keeps_conflict(tmp_path: Path) -> None:
+    client = FakeProductClient(product(item(1, model_no="32DM501", attributes=[
+        {"attributeTypeName": "모델명", "attributeValueName": "32DM500"},
+    ])))
+    mapping, _ = service(tmp_path, client)
+    assert mapping.resolve(seller_product_id=10001, vendor_item_id=1).reason == "MODEL_EVIDENCE_CONFLICT"
