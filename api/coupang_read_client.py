@@ -194,6 +194,18 @@ class CoupangReadClient:
             },
         )
 
+    def get_seller_product(self, seller_product_id: int | str) -> dict[str, Any]:
+        """Read one registered seller product and its option-level items."""
+
+        identifier = str(seller_product_id or "").strip()
+        if not identifier.isdigit():
+            raise CoupangReadError("INVALID_PARAMETER")
+        path = (
+            "/v2/providers/seller_api/apis/api/v1/marketplace/"
+            f"seller-products/{identifier}"
+        )
+        return self._get(path, {})
+
     def _validate_date_range(
         self,
         inquiry_start_at: date | str,
@@ -220,7 +232,9 @@ class CoupangReadClient:
     def _get(self, path: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
         self._require_configuration()
         query_string = serialize_query(parameters)
-        url = f"{COUPANG_API_BASE_URL}{path}?{query_string}"
+        url = f"{COUPANG_API_BASE_URL}{path}"
+        if query_string:
+            url = f"{url}?{query_string}"
         attempts = self.max_retries + 1
         last_error: CoupangReadError | None = None
 

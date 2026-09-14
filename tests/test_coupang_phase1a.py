@@ -175,6 +175,24 @@ def test_read_client_signs_the_exact_transmitted_query() -> None:
     })
 
 
+def test_read_client_gets_seller_product_with_the_exact_signed_path() -> None:
+    transport = FakeTransport([FakeResponse(200, {"code": "SUCCESS", "data": {}})])
+    read_client = client(transport)
+    assert read_client.get_seller_product(123456789)["code"] == "SUCCESS"
+    call = transport.calls[0]
+    parsed = urlsplit(call["url"])
+    expected_path = (
+        "/v2/providers/seller_api/apis/api/v1/marketplace/"
+        "seller-products/123456789"
+    )
+    assert call["method"] == "GET"
+    assert parsed.path == expected_path
+    assert parsed.query == ""
+    assert call["headers"]["Authorization"] == build_authorization(
+        "GET", expected_path, "", "test-access-key", "test-secret-key", FIXED_NOW
+    )
+
+
 @pytest.mark.parametrize(
     ("status_code", "code"),
     [(400, "INVALID_PARAMETER"), (401, "AUTH_FAILED"), (403, "PERMISSION_DENIED"),

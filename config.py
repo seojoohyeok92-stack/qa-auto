@@ -118,6 +118,88 @@ class CoupangReadSettings:
         return bool(self.access_key and self.secret_key and self.vendor_id)
 
 
+COUPANG_OJE_NS = "OJE_NS"
+COUPANG_OJE_PLUS = "OJE_PLUS"
+
+
+@dataclass(frozen=True)
+class CoupangAccountSettings:
+    """One opt-in Coupang seller account, without startup validation."""
+
+    account_code: str
+    display_name: str
+    access_key: str = ""
+    secret_key: str = ""
+    vendor_id: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.access_key and self.secret_key and self.vendor_id)
+
+    @property
+    def partially_configured(self) -> bool:
+        return any((self.access_key, self.secret_key, self.vendor_id)) and not self.configured
+
+    def missing_variables(self) -> tuple[str, ...]:
+        prefix = "COUPANG_2" if self.account_code == COUPANG_OJE_PLUS else "COUPANG"
+        names = (f"{prefix}_ACCESS_KEY", f"{prefix}_SECRET_KEY", f"{prefix}_VENDOR_ID")
+        values = (self.access_key, self.secret_key, self.vendor_id)
+        return tuple(name for name, value in zip(names, values) if not value)
+
+
+def get_coupang_accounts() -> tuple[CoupangAccountSettings, ...]:
+    """Return configured accounts only; the optional second account is inert when absent."""
+
+    accounts = (
+        CoupangAccountSettings(
+            account_code=COUPANG_OJE_NS,
+            display_name="오제앤에스",
+            access_key=os.getenv("COUPANG_ACCESS_KEY", "").strip(),
+            secret_key=os.getenv("COUPANG_SECRET_KEY", "").strip(),
+            vendor_id=os.getenv("COUPANG_VENDOR_ID", "").strip(),
+        ),
+        CoupangAccountSettings(
+            account_code=COUPANG_OJE_PLUS,
+            display_name="오제플러스",
+            access_key=os.getenv("COUPANG_2_ACCESS_KEY", "").strip(),
+            secret_key=os.getenv("COUPANG_2_SECRET_KEY", "").strip(),
+            vendor_id=os.getenv("COUPANG_2_VENDOR_ID", "").strip(),
+        ),
+    )
+    return tuple(account for account in accounts if account.configured)
+
+
+def get_coupang_account(account_code: str) -> CoupangAccountSettings:
+    """Return one configured account and reject a partial optional configuration clearly."""
+
+    target = str(account_code or "").strip().upper()
+    all_accounts = {
+        COUPANG_OJE_NS: CoupangAccountSettings(
+            COUPANG_OJE_NS, "오제앤에스",
+            os.getenv("COUPANG_ACCESS_KEY", "").strip(),
+            os.getenv("COUPANG_SECRET_KEY", "").strip(),
+            os.getenv("COUPANG_VENDOR_ID", "").strip(),
+        ),
+        COUPANG_OJE_PLUS: CoupangAccountSettings(
+            COUPANG_OJE_PLUS, "오제플러스",
+            os.getenv("COUPANG_2_ACCESS_KEY", "").strip(),
+            os.getenv("COUPANG_2_SECRET_KEY", "").strip(),
+            os.getenv("COUPANG_2_VENDOR_ID", "").strip(),
+        ),
+    }
+    account = all_accounts.get(target)
+    if account is None:
+        raise ValueError(f"Unknown Coupang account: {target}")
+    if account.partially_configured:
+        raise ValueError(
+            f"Incomplete Coupang configuration for {account.account_code}: "
+            + ", ".join(account.missing_variables())
+        )
+    if not account.configured:
+        raise ValueError(f"Coupang account is not configured: {account.account_code}")
+    return account
+
+
 @dataclass(frozen=True)
 class NaverPostSettings:
     """Manual answer-posting safety settings; disabled by default."""

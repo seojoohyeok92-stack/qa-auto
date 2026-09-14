@@ -2066,6 +2066,40 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        30,
+        (
+            """
+            CREATE TABLE IF NOT EXISTS coupang_product_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_code TEXT NOT NULL,
+                vendor_item_id TEXT NOT NULL,
+                seller_product_id TEXT,
+                seller_product_item_id TEXT,
+                product_id TEXT,
+                canonical_model TEXT,
+                mapping_source TEXT CHECK (mapping_source IN (
+                    'AUTO_EXACT','AUTO_ALIAS','MANUAL'
+                ) OR mapping_source IS NULL),
+                mapping_status TEXT NOT NULL CHECK (mapping_status IN (
+                    'CONFIRMED','NEEDS_REVIEW'
+                )),
+                model_evidence_field TEXT,
+                model_evidence_value TEXT,
+                raw_model_candidates_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT
+                    (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE(account_code, vendor_item_id)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_coupang_product_mappings_model
+            ON coupang_product_mappings(canonical_model, mapping_status)
+            """,
+        ),
+    ),
 )
 
 
