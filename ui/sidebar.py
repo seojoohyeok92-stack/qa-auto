@@ -122,6 +122,7 @@ def render_sidebar(
                 ("Activity", "activity", "activity"),
                 ("UAT", "uat", "uat"),
                 ("Settings", "settings", "settings"),
+                ("쿠팡 관리", "coupang", "coupang"),
             ):
                 _menu_button(
                     label, page_code, current_page,

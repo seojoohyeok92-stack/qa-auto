@@ -54,6 +54,7 @@ from ui.auto_post_panel import render_auto_post_controls
 from ui.learning_manager import render_learning_manager
 from ui.gpt_copilot import render_gpt_copilot
 from ui.historical_case_manager import render_historical_case_manager
+from ui.coupang_management import render_coupang_management
 from ui.learning_performance import render_learning_performance
 from ui.rerun_profile import (
     begin as begin_rerun_profile,
@@ -1157,6 +1158,9 @@ def main() -> None:
         return
     if current_page == "historical":
         render_historical_case_manager(database)
+        return
+    if current_page == "coupang":
+        render_coupang_management(database)
         return
 
     st.session_state["current_page"] = "dashboard"

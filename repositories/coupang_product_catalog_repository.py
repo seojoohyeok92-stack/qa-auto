@@ -28,3 +28,20 @@ class CoupangProductCatalogRepository:
             c.execute("""INSERT INTO coupang_catalog_options(account_code,vendor_item_id,seller_product_id,seller_product_item_id,item_name,external_vendor_sku,model_no,attributes_json,bundle_info_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(account_code,vendor_item_id) DO UPDATE SET seller_product_id=excluded.seller_product_id,seller_product_item_id=excluded.seller_product_item_id,item_name=excluded.item_name,external_vendor_sku=excluded.external_vendor_sku,model_no=excluded.model_no,attributes_json=excluded.attributes_json,bundle_info_json=excluded.bundle_info_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",values)
             row=dict(c.execute("SELECT * FROM coupang_catalog_options WHERE account_code=? AND vendor_item_id=?",(account,vendor)).fetchone())
         return row, not existed
+
+    def grouped_products(self, *, account_code: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        clauses=[]; values=[]
+        if account_code and account_code != "ALL": clauses.append("p.account_code=?"); values.append(account_code)
+        where=(" WHERE " + " AND ".join(clauses)) if clauses else ""
+        query="""SELECT p.*, o.vendor_item_id, o.item_name, m.canonical_model, m.mapping_source, m.mapping_status
+        FROM coupang_catalog_products p LEFT JOIN coupang_catalog_options o ON o.account_code=p.account_code AND o.seller_product_id=p.seller_product_id
+        LEFT JOIN coupang_product_mappings m ON m.account_code=o.account_code AND m.vendor_item_id=o.vendor_item_id""" + where + " ORDER BY p.account_code,p.seller_product_id,o.vendor_item_id"
+        grouped: dict[tuple[str,str],dict[str,Any]]={}
+        with self.database.connection() as c: rows=c.execute(query,values).fetchall()
+        for row in rows:
+            r=dict(row); key=(r['account_code'],r['seller_product_id']); product=grouped.setdefault(key,{k:r[k] for k in r if k not in {'vendor_item_id','item_name','canonical_model','mapping_source','mapping_status'}}|{'options':[]})
+            if r['vendor_item_id']:
+                complete=r['mapping_status']=='CONFIRMED'; option={'vendor_item_id':r['vendor_item_id'],'item_name':r['item_name'],'canonical_model':r['canonical_model'],'mapping_source':r['mapping_source'],'mapping_status':r['mapping_status'],'complete':complete}
+                if status in {'COMPLETE','REVIEW'} and (complete != (status=='COMPLETE')): continue
+                product['options'].append(option)
+        return [p for p in grouped.values() if p['options'] or status not in {'COMPLETE','REVIEW'}]
