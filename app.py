@@ -773,7 +773,7 @@ def _render_admin_details(database: Database, operations: dict[str, Any]) -> Non
         return
     with st.expander("관리자 상세", expanded=False):
         st.caption("Scheduler · Activity Log · Migration · Debug · UAT · Settings")
-        columns = st.columns(8, gap="small")
+        columns = st.columns(9, gap="small")
         destinations = (
             ("Learning Manager", "learning"),
             ("Historical Cases", "historical"),
@@ -783,6 +783,7 @@ def _render_admin_details(database: Database, operations: dict[str, Any]) -> Non
             ("Debug", "uat"),
             ("UAT", "uat"),
             ("Settings", "settings"),
+            ("쿠팡 관리", "coupang"),
         )
         for index, (label, page) in enumerate(destinations):
             if columns[index].button(
