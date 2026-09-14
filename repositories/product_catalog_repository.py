@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 DEFAULT_PRODUCT_CATALOG_PATH = (
@@ -42,6 +42,79 @@ DEFAULT_PRODUCT_CATALOG_PATH = (
 
 def normalize_model(value: object) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+_MODEL_CODE_TEXT = re.compile(r"^[A-Za-z0-9-]+$")
+_SAMSUNG_DISPLAY_CORE = re.compile(r"^\d{2}[A-Z]+\d[A-Z0-9]*$")
+_KOREAN_REGION_SUFFIX = re.compile(r"[A-Z]{0,3}KXKR$")
+
+
+def _model_code_aliases(aliases: Mapping[object, object] | None) -> dict[str, str]:
+    """Return only explicit aliases that are themselves model-code-shaped.
+
+    ``MODEL_ALIASES`` also intentionally contains operator-maintained listing
+    titles such as colour/size descriptions.  Those remain catalog matching
+    hints; they must never become model identities.
+    """
+
+    result: dict[str, str] = {}
+    for alias, target in (aliases or {}).items():
+        alias_text = str(alias or "").strip()
+        target_text = str(target or "").strip()
+        if not (_MODEL_CODE_TEXT.fullmatch(alias_text) and _MODEL_CODE_TEXT.fullmatch(target_text)):
+            continue
+        normalized_alias = normalize_model(alias_text)
+        normalized_target = normalize_model(target_text)
+        if (
+            len(normalized_alias) >= MIN_IDENTIFYING_LENGTH
+            and _MODEL_TOKEN.fullmatch(normalized_alias)
+            and normalized_target
+        ):
+            result[normalized_alias] = normalized_target
+    return result
+
+
+def canonical_model_identity(
+    raw_model: object,
+    *,
+    aliases: Mapping[object, object] | None = None,
+) -> str | None:
+    """Return a safe canonical Samsung display-model identity, if stated.
+
+    This is a notation normalizer, not a product classifier.  It accepts only
+    a single model-code token; bundle keys, listing titles, family names and
+    option text return ``None``.  For the Samsung display codes present in the
+    catalog, ``LS32DM501EKXKR``, ``S32DM501``, ``LS32DM501`` and
+    ``32DM501EKXKR`` therefore all become ``32DM501``.  Screen size and the
+    complete core remain part of the identity, so DM500/DM501 and 22D400/24D400
+    cannot collapse.
+
+    Explicit model-code aliases still participate first.  Manual aliases that
+    are listing descriptions deliberately do not: resolving ``M50D 32`` to a
+    colour variant would be an unsupported product inference.
+    """
+
+    text = str(raw_model or "").strip()
+    if not text or not _MODEL_CODE_TEXT.fullmatch(text):
+        return None
+    normalized = normalize_model(text)
+    if not normalized or not _MODEL_TOKEN.fullmatch(normalized):
+        return None
+
+    mapped = _model_code_aliases(aliases).get(normalized, normalized)
+    # Samsung display codes in this catalog either state LS before the core,
+    # state S before it, or state the core directly.  Other Samsung families
+    # (LH/KQ/etc.) retain their recorded code unless an explicit alias maps
+    # them; the display rule must not guess their internal structure.
+    candidate = mapped
+    if candidate.startswith("LS"):
+        candidate = candidate[2:]
+    elif candidate.startswith("S") and len(candidate) > 1 and candidate[1].isdigit():
+        candidate = candidate[1:]
+    candidate = _KOREAN_REGION_SUFFIX.sub("", candidate)
+    if _SAMSUNG_DISPLAY_CORE.fullmatch(candidate):
+        return candidate
+    return mapped
 
 
 EXACT = "EXACT"
@@ -198,6 +271,45 @@ class ProductCatalogRepository:
             return CatalogMatch(key, dict(catalog[key]), status=EXACT)
         if alias_keys:
             return self._ambiguous(catalog, alias_keys)
+
+        # A bare Samsung display core (``32DM501``) is neither a catalog key
+        # nor a listing-title alias, but it is an exact notation of a model
+        # whose recorded keys may be ``S32DM501`` and/or
+        # ``LS32DM501EKXKR``.  This fallback only accepts the shared
+        # model-code normalizer's safe token form; it does not inspect a
+        # marketing title or elect a family/size collection.
+        canonical = canonical_model_identity(model_code, aliases=aliases)
+        if canonical:
+            canonical_keys = {
+                key for key in catalog
+                if canonical_model_identity(key, aliases=aliases) == canonical
+            }
+            if canonical_keys:
+                # The explicit alias target, where present, is the existing
+                # operator-maintained representative.  Otherwise a catalog
+                # record whose own ``model`` field names one candidate is a
+                # deterministic representative.  Multiple remaining records
+                # stay AMBIGUOUS rather than being selected by key ordering.
+                targets = {
+                    str(target) for target in aliases.values()
+                    if str(target) in canonical_keys
+                    and canonical_model_identity(target, aliases=aliases) == canonical
+                }
+                if len(targets) == 1:
+                    key = next(iter(targets))
+                    return CatalogMatch(key, dict(catalog[key]), status=UNIQUE_MATCH)
+                representatives = {
+                    key for key in canonical_keys
+                    if normalize_model((catalog.get(key) or {}).get("model"))
+                    == normalize_model(key)
+                }
+                if len(representatives) == 1:
+                    key = next(iter(representatives))
+                    return CatalogMatch(key, dict(catalog[key]), status=UNIQUE_MATCH)
+                if len(canonical_keys) == 1:
+                    key = next(iter(canonical_keys))
+                    return CatalogMatch(key, dict(catalog[key]), status=UNIQUE_MATCH)
+                return self._ambiguous(catalog, canonical_keys)
         return CatalogMatch(
             None, None, "PRODUCT_CATALOG_MODEL_NOT_FOUND", status=NOT_FOUND,
         )

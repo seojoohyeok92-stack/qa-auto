@@ -26,7 +26,11 @@ import json
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Iterable, Sequence
 
-from repositories.product_catalog_repository import ProductCatalogRepository, normalize_model
+from repositories.product_catalog_repository import (
+    ProductCatalogRepository,
+    canonical_model_identity,
+    normalize_model,
+)
 
 
 VERIFIED = "VERIFIED"
@@ -1159,6 +1163,11 @@ class ProductKnowledgeService:
             return [], []
         key = str(product_id or "").strip()
         model_norm = normalize_model(model_key)
+        aliases = self.catalog_repository.catalog().get("aliases")
+        canonical_model = canonical_model_identity(
+            model_key,
+            aliases=aliases,
+        )
         withheld = {
             (normalize_model(item.get("model_code")), str(item.get("field") or ""))
             for item in knowledge.get("v7_final_decisions", ())
@@ -1179,12 +1188,25 @@ class ProductKnowledgeService:
                 scope = str(row.get("scope") or "")
                 field_key = str(row.get("field") or "")
                 row_model = normalize_model(row.get("model_code"))
+                row_canonical = canonical_model_identity(
+                    row.get("model_code"),
+                    aliases=aliases,
+                )
                 applies = str(
                     row.get("applies_to_product_id") or row.get("product_id") or ""
                 )
                 model_scoped = section == "model_facts"
                 identity_matches = (
-                    bool(model_norm and row_model == model_norm)
+                    bool(
+                        model_norm
+                        and (
+                            row_model == model_norm
+                            or (
+                                canonical_model is not None
+                                and row_canonical == canonical_model
+                            )
+                        )
+                    )
                     if model_scoped else bool(
                         key and key in {
                             applies,

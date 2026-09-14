@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
+from repositories.product_catalog_repository import canonical_model_identity
 from services.product_fact_guard import (
     DIMENSION_TOKEN,
     extract_model_code,
@@ -352,7 +353,7 @@ def _model_code(*values: object) -> str | None:
         if explicit:
             code = explicit.upper()
             if code not in MODEL_STOPWORDS and not _is_dimension_token(code):
-                return code
+                return canonical_model_identity(code) or code
     for value in values[2:]:
         text = str(value or "").upper()
         candidates = [
@@ -362,7 +363,8 @@ def _model_code(*values: object) -> str | None:
             and extract_model_code(match) is not None
         ]
         if candidates:
-            return max(candidates, key=len).upper()
+            code = max(candidates, key=len).upper()
+            return canonical_model_identity(code) or code
     return None
 
 

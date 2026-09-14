@@ -92,6 +92,33 @@ class NaverSyncSettings:
 
 
 @dataclass(frozen=True)
+class CoupangReadSettings:
+    """Credentials for the opt-in, read-only Coupang inquiry client.
+
+    These values are deliberately not validated at application startup.  The
+    Coupang client validates them only when a caller actually performs a read,
+    so adding the integration cannot prevent the existing Naver application
+    from starting on a host that has not yet been configured for Coupang.
+    """
+
+    access_key: str = ""
+    secret_key: str = ""
+    vendor_id: str = ""
+
+    @classmethod
+    def from_environment(cls) -> "CoupangReadSettings":
+        return cls(
+            access_key=os.getenv("COUPANG_ACCESS_KEY", "").strip(),
+            secret_key=os.getenv("COUPANG_SECRET_KEY", "").strip(),
+            vendor_id=os.getenv("COUPANG_VENDOR_ID", "").strip(),
+        )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.access_key and self.secret_key and self.vendor_id)
+
+
+@dataclass(frozen=True)
 class NaverPostSettings:
     """Manual answer-posting safety settings; disabled by default."""
 
