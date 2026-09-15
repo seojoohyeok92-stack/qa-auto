@@ -249,6 +249,17 @@ class NaverPostService:
             return self._blocked(
                 inquiry_id, "LOCAL_STATE_MISSING", "문의 또는 Draft가 없습니다."
             )
+        answer_field, answer_source = self.answers.posting_answer(
+            draft, manual=not automatic
+        )
+        post_answer = str(draft.get(answer_field) or "").strip()
+        if not post_answer:
+            return self._blocked(
+                inquiry_id,
+                "POST_ANSWER_REQUIRED",
+                "등록할 답변이 없습니다.",
+                automatic=automatic,
+            )
         try:
             target = self.payload_builder.resolve_target(
                 inquiry,
@@ -266,7 +277,7 @@ class NaverPostService:
             )
             request = self.payload_builder.build_for_target(
                 target=target,
-                final_answer=str(draft.get("final_answer") or ""),
+                final_answer=post_answer,
             )
         except NaverPostTargetError as error:
             return self._blocked(
@@ -316,7 +327,12 @@ class NaverPostService:
                 final_answer_hash=request.final_answer_hash,
                 payload_hash=request.payload_hash,
                 actor=str(actor or "").strip() or "operator",
-                allow_unapproved=automatic,
+                answer_field=answer_field,
+                # Automatic posting already reached this boundary through its
+                # own Final Answer/eligibility pipeline.  For an explicit
+                # manual request the click is the approval; acquire must not
+                # reapply the old Final Answer/approval gate.
+                allow_unapproved=True,
                 auto_post_run_id=auto_post_run_id,
             )
         except NaverPostAlreadyAnsweredError:
@@ -483,6 +499,7 @@ class NaverPostService:
                 "response_id": response.response_id,
                 "final_answer_hash": request.final_answer_hash,
                 "draft_id": draft["id"],
+                "answer_source": answer_source,
                 "network_call_count": 1,
                 "auto_post_run_id": auto_post_run_id,
             },

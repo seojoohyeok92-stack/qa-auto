@@ -74,6 +74,7 @@ class NaverPostRepository:
         final_answer_hash: str,
         payload_hash: str,
         actor: str,
+        answer_field: str = "final_answer",
         allow_unapproved: bool = False,
         auto_post_run_id: str | None = None,
     ) -> dict[str, Any]:
@@ -91,7 +92,8 @@ class NaverPostRepository:
             ).fetchone()
             draft = connection.execute(
                 """
-                SELECT id, inquiry_id, final_answer, posted, is_active
+                SELECT id, inquiry_id, original_answer, edited_answer,
+                       final_answer, posted, is_active
                 FROM answer_drafts WHERE id=?
                 """,
                 (int(draft_id),),
@@ -100,6 +102,10 @@ class NaverPostRepository:
                 raise LookupError(f"Inquiry not found: {inquiry_id}")
             if draft is None or int(draft["inquiry_id"]) != int(inquiry_id):
                 raise LookupError(f"Draft not found: {draft_id}")
+            if answer_field not in {
+                "original_answer", "edited_answer", "final_answer"
+            }:
+                raise ValueError("UNSUPPORTED_POST_ANSWER_SOURCE")
             if (
                 not allow_unapproved
                 and str(inquiry["approval_status"]).upper() != "APPROVED"
@@ -112,10 +118,10 @@ class NaverPostRepository:
                 raise NaverPostAlreadyAnsweredError("ALREADY_ANSWERED")
             if bool(draft["posted"]):
                 raise NaverPostStateError("ALREADY_POSTED")
-            if not str(draft["final_answer"] or "").strip():
-                raise NaverPostStateError("FINAL_ANSWER_REQUIRED")
+            if not str(draft[answer_field] or "").strip():
+                raise NaverPostStateError("POST_ANSWER_REQUIRED")
             current_answer = (
-                str(draft["final_answer"])
+                str(draft[answer_field])
                 .replace("\r\n", "\n")
                 .replace("\r", "\n")
                 .strip()

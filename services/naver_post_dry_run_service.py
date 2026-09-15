@@ -46,6 +46,7 @@ class NaverPostDryRunResult:
     validations: tuple[dict[str, Any], ...]
     reasons: tuple[str, ...]
     post_locked: bool = True
+    answer_source: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -105,7 +106,10 @@ class NaverPostDryRunService:
         ).strip()
         store = str(inquiry.get("store_code") or "").strip()
         source_type = str(inquiry.get("source_type") or "").strip().upper()
-        final_answer = str((draft or {}).get("final_answer") or "").strip()
+        answer_field, answer_source = self.answers.posting_answer(
+            draft, manual=manual_confirmed
+        )
+        final_answer = str((draft or {}).get(answer_field) or "").strip()
         approval_status = str(
             approval.get("approval_status") or "PENDING"
         ).upper()
@@ -125,8 +129,16 @@ class NaverPostDryRunService:
             if not passed:
                 reasons.append(reason)
 
-        check("approval", approval_status == "APPROVED", "승인되지 않음")
-        check("final_answer", bool(final_answer), "Final Answer 없음")
+        check(
+            "approval",
+            manual_confirmed or approval_status == "APPROVED",
+            "승인되지 않음",
+        )
+        check(
+            "post_answer",
+            bool(final_answer),
+            "등록할 답변 없음",
+        )
         check(
             "post_status",
             post_status in {"NOT_POSTED", "POST_FAILED"}
@@ -147,7 +159,7 @@ class NaverPostDryRunService:
             technical.passed,
             technical.errors[0] if technical.errors else "VALIDATOR_NOT_PASS",
         )
-        if draft is not None and final_answer:
+        if not manual_confirmed and draft is not None and final_answer:
             current_draft = dict(draft)
             current_draft["original_answer"] = final_answer
             eligibility = self.eligibility.evaluate(
@@ -253,6 +265,7 @@ class NaverPostDryRunService:
             "store": store or None,
             "source_type": source_type or None,
             "final_answer_length": len(final_answer),
+            "answer_source": answer_source,
             "method": method,
             "endpoint": endpoint,
             "validation_count": len(checks),

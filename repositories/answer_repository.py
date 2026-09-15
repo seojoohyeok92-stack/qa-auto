@@ -18,6 +18,29 @@ class AnswerRepository:
         self.database = database
 
     @staticmethod
+    def posting_answer(
+        draft: dict[str, Any] | None, *, manual: bool
+    ) -> tuple[str, str]:
+        """Return the stored answer field authorized for this post mode.
+
+        An explicit operator post uses the text the operator is looking at:
+        staff edit first, then the Program Answer.  Automatic posting remains
+        intentionally limited to the approved Final Answer.
+        """
+
+        value = draft or {}
+        fields = (
+            ("edited_answer", "STAFF_EDITED"),
+            ("original_answer", "PROGRAM_ANSWER"),
+            ("final_answer", "FINAL_ANSWER"),
+        ) if manual else (("final_answer", "FINAL_ANSWER"),)
+        for field, source in fields:
+            answer = str(value.get(field) or "").strip()
+            if answer:
+                return field, answer
+        return ("", "")
+
+    @staticmethod
     def _row_to_dict(row: Any) -> dict[str, Any] | None:
         if row is None:
             return None

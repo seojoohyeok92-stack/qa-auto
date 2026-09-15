@@ -158,7 +158,7 @@ def test_unapproved_and_missing_final_answer_are_not_eligible(
         database, store_resolver=_store
     ).run(missing_final_id)
     assert missing.eligible is False
-    assert "Final Answer 없음" in missing.reasons
+    assert "등록할 답변 없음" in missing.reasons
     events = {
         row["event_code"]
         for row in LogRepository(database).recent_for_inquiry(

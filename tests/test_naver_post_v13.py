@@ -82,6 +82,47 @@ def _approved(
     return inquiry_id
 
 
+def _manual_program(
+    database: Database,
+    *,
+    external_id: str = "MANUAL-12345",
+    edited_answer: str | None = None,
+) -> int:
+    """A Program Answer awaiting an operator's explicit registration."""
+
+    inquiry_id = InquiryRepository(database).upsert_work_item(
+        {
+            "store_code": "STORE",
+            "source_type": "PRODUCT_INQUIRY",
+            "source_question_id": external_id,
+            "external_inquiry_id": external_id,
+            "raw_json": {
+                "source": "PRODUCT_INQUIRY",
+                "questionId": external_id,
+                "source_payload": {"questionId": external_id},
+            },
+            "content": "manual registration question",
+        }
+    ).inquiry_id
+    draft = AnswerRepository(database).create_program_draft(
+        inquiry_id,
+        AnswerResult(
+            status=AnswerStatus.NEEDS_REVIEW,
+            category="manual",
+            reason="operator review",
+            answer="Program Answer body",
+            provider="rules",
+            auto_answerable=False,
+            needs_review=True,
+        ),
+    )
+    if edited_answer is not None:
+        AnswerRepository(database).save_edited_answer(
+            int(draft["id"]), edited_answer
+        )
+    return inquiry_id
+
+
 class RecordingClient:
     def __init__(self, outcome=None) -> None:
         self.requests = []
@@ -162,6 +203,71 @@ def test_manual_post_uses_official_method_and_raw_json_text(
     assert AnswerRepository(database).active_for_inquiry(inquiry_id)[
         "posted"
     ] == 1
+
+
+def test_manual_post_allows_unapproved_program_answer_without_final_answer(
+    database: Database,
+) -> None:
+    inquiry_id = _manual_program(database)
+    client = RecordingClient()
+
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="operator", confirmed=True
+    )
+
+    assert result.status == "POSTED"
+    assert len(client.requests) == 1
+    assert client.requests[0][0].payload == {
+        "commentContent": format_final_answer("Program Answer body")
+    }
+
+
+def test_manual_post_prefers_staff_edit_over_program_answer(
+    database: Database,
+) -> None:
+    inquiry_id = _manual_program(
+        database, edited_answer="Staff edited answer body"
+    )
+    client = RecordingClient()
+
+    result = _service(database, client, enabled=True).post(
+        inquiry_id, actor="operator", confirmed=True
+    )
+
+    assert result.status == "POSTED"
+    assert client.requests[0][0].payload == {
+        "commentContent": format_final_answer("Staff edited answer body")
+    }
+
+
+def test_manual_post_blocks_empty_program_and_preserves_auto_requirements(
+    database: Database,
+) -> None:
+    inquiry_id = _manual_program(database)
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE answer_drafts
+            SET original_answer='', edited_answer=NULL, final_answer=NULL
+            WHERE id=?
+            """,
+            (int(draft["id"]),),
+        )
+    manual_client = RecordingClient()
+    manual = _service(database, manual_client, enabled=True).post(
+        inquiry_id, actor="operator", confirmed=True
+    )
+    assert manual.status == "BLOCKED"
+    assert manual.error_code == "DRY_RUN_FAILED"
+    assert manual_client.requests == []
+
+    auto_client = RecordingClient()
+    automatic = _service(database, auto_client, enabled=True).post(
+        inquiry_id, actor="auto", confirmed=True, automatic=True
+    )
+    assert automatic.status == "BLOCKED"
+    assert auto_client.requests == []
 
 
 def test_confirmed_post_enqueues_verified_registered_answer_for_kakao(
@@ -267,14 +373,14 @@ def test_store_credential_mapping_mismatch_is_blocked_before_network(
     assert client.requests == []
 
 
-def test_manual_post_rechecks_current_final_answer_validator(
+def test_manual_post_keeps_hard_safety_validation_for_selected_answer(
     database: Database,
 ) -> None:
     inquiry_id = _approved(database)
     draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
     with database.transaction() as connection:
         connection.execute(
-            "UPDATE answer_drafts SET final_answer=? WHERE id=?",
+            "UPDATE answer_drafts SET original_answer=? WHERE id=?",
             ("<masked-phone>로 연락해 주세요.", int(draft["id"])),
         )
     client = RecordingClient()
@@ -306,7 +412,7 @@ def test_staff_approved_manual_post_only_bypasses_processing_plan_review(
     assert len(manual_client.requests) == 1
 
 
-def test_manual_post_cannot_bypass_required_dps(
+def test_manual_post_can_publish_after_operator_review_despite_dps_gate(
     database: Database,
 ) -> None:
     inquiry_id = _approved(database)
@@ -336,12 +442,11 @@ def test_manual_post_cannot_bypass_required_dps(
     result = _service(database, client, enabled=True).post(
         inquiry_id, actor="tester", confirmed=True
     )
-    assert result.status == "BLOCKED"
-    assert "DPS_RESULT_NOT_TRUSTED" in result.message
-    assert client.requests == []
+    assert result.status == "POSTED"
+    assert len(client.requests) == 1
 
 
-def test_manual_post_cannot_bypass_missing_item_review_route(
+def test_manual_post_can_publish_after_operator_review_despite_review_route(
     database: Database,
 ) -> None:
     inquiry_id = _approved(database)
@@ -369,9 +474,8 @@ def test_manual_post_cannot_bypass_missing_item_review_route(
     result = _service(database, client, enabled=True).post(
         inquiry_id, actor="tester", confirmed=True
     )
-    assert result.status == "BLOCKED"
-    assert "ROUTE_BLOCKED_REVIEW_REQUIRED" in result.message
-    assert client.requests == []
+    assert result.status == "POSTED"
+    assert len(client.requests) == 1
 
 
 def test_past_review_queue_does_not_permanently_block_current_safe_answer(
@@ -448,9 +552,6 @@ def test_local_already_answered_blocks_before_network(
 @pytest.mark.parametrize(
     "mutation",
     [
-        "approval",
-        "final_none",
-        "final_blank",
         "store",
         "external_id",
         "source_type",
@@ -504,7 +605,7 @@ def test_invalid_local_conditions_block_before_network(
             )
         elif mutation == "too_long":
             connection.execute(
-                "UPDATE answer_drafts SET final_answer=? WHERE inquiry_id=?",
+                "UPDATE answer_drafts SET original_answer=? WHERE inquiry_id=?",
                 ("가" * 4001, inquiry_id),
             )
     client = RecordingClient()
