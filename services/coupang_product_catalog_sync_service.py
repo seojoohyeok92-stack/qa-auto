@@ -49,6 +49,8 @@ class CoupangProductCatalogSyncService:
                     merged={**listed,**data,"sellerProductId":data.get("sellerProductId",seller_id)}
                     _, created=self.catalog_repository.upsert_product(account_code=self.account_code,data=merged,sync_token=sync_token)
                     result.products_new += int(created); result.products_updated += int(not created)
+                    sale_states: list[bool] = []
+                    sale_status_complete = True
                     for item in data.get("items") if isinstance(data.get("items"),list) else []:
                         if not isinstance(item,dict) or not item.get("vendorItemId"): continue
                         result.options_seen += 1
@@ -59,6 +61,19 @@ class CoupangProductCatalogSyncService:
                         if mapping.reused: result.confirmed_reused += 1
                         elif status_value == "CONFIRMED": result.auto_exact += 1
                         else: result.needs_review += 1
+                        try:
+                            inventory = self.read_client.get_vendor_item_inventory(item["vendorItemId"])
+                            inventory_data = inventory.get("data") if isinstance(inventory, dict) else None
+                            on_sale = inventory_data.get("onSale") if isinstance(inventory_data, dict) else None
+                            if not isinstance(on_sale, bool):
+                                raise ValueError("MALFORMED_ON_SALE")
+                            self.catalog_repository.record_option_sale_status(account_code=self.account_code, vendor_item_id=item["vendorItemId"], on_sale=on_sale)
+                            sale_states.append(on_sale)
+                        except Exception as exc:
+                            sale_status_complete = False
+                            result.errors.append(f"{seller_id}:inventory:{type(exc).__name__}")
+                    if sale_status_complete:
+                        self.catalog_repository.set_product_active(account_code=self.account_code, seller_product_id=seller_id, is_active=any(sale_states))
                 except Exception as exc:
                     result.errors.append(f"{seller_id}:{type(exc).__name__}")
             next_value=page.get("nextToken")

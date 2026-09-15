@@ -22,9 +22,13 @@ class CoupangProductCatalogRepository:
         values=(account,seller,self._text(data.get("productId")),self._text(data.get("sellerProductName")),self._text(data.get("displayProductName")),self._text(data.get("generalProductName")),self._text(data.get("statusName")),self._text(data.get("status")),self._text(sync_token))
         with self.database.transaction() as c:
             existed=c.execute("SELECT 1 FROM coupang_catalog_products WHERE account_code=? AND seller_product_id=?",(account,seller)).fetchone() is not None
-            c.execute("""INSERT INTO coupang_catalog_products(account_code,seller_product_id,product_id,seller_product_name,display_product_name,general_product_name,status_name,raw_status,is_active,last_seen_sync) VALUES(?,?,?,?,?,?,?,?,1,?) ON CONFLICT(account_code,seller_product_id) DO UPDATE SET product_id=excluded.product_id,seller_product_name=excluded.seller_product_name,display_product_name=excluded.display_product_name,general_product_name=excluded.general_product_name,status_name=excluded.status_name,raw_status=excluded.raw_status,is_active=1,last_seen_sync=excluded.last_seen_sync,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",values)
+            c.execute("""INSERT INTO coupang_catalog_products(account_code,seller_product_id,product_id,seller_product_name,display_product_name,general_product_name,status_name,raw_status,is_active,last_seen_sync) VALUES(?,?,?,?,?,?,?,?,0,?) ON CONFLICT(account_code,seller_product_id) DO UPDATE SET product_id=excluded.product_id,seller_product_name=excluded.seller_product_name,display_product_name=excluded.display_product_name,general_product_name=excluded.general_product_name,status_name=excluded.status_name,raw_status=excluded.raw_status,last_seen_sync=excluded.last_seen_sync,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",values)
             row=dict(c.execute("SELECT * FROM coupang_catalog_products WHERE account_code=? AND seller_product_id=?",(account,seller)).fetchone())
         return row, not existed
+
+    def set_product_active(self, *, account_code: object, seller_product_id: object, is_active: bool) -> None:
+        with self.database.transaction() as c:
+            c.execute("UPDATE coupang_catalog_products SET is_active=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_code=? AND seller_product_id=?", (int(bool(is_active)), self._text(account_code), self._text(seller_product_id)))
 
     def deactivate_products_not_seen(
         self, *, account_code: object, sync_token: object
@@ -59,6 +63,10 @@ class CoupangProductCatalogRepository:
             c.execute("""INSERT INTO coupang_catalog_options(account_code,vendor_item_id,seller_product_id,seller_product_item_id,item_name,external_vendor_sku,model_no,attributes_json,bundle_info_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(account_code,vendor_item_id) DO UPDATE SET seller_product_id=excluded.seller_product_id,seller_product_item_id=excluded.seller_product_item_id,item_name=excluded.item_name,external_vendor_sku=excluded.external_vendor_sku,model_no=excluded.model_no,attributes_json=excluded.attributes_json,bundle_info_json=excluded.bundle_info_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",values)
             row=dict(c.execute("SELECT * FROM coupang_catalog_options WHERE account_code=? AND vendor_item_id=?",(account,vendor)).fetchone())
         return row, not existed
+
+    def record_option_sale_status(self, *, account_code: object, vendor_item_id: object, on_sale: bool) -> None:
+        with self.database.transaction() as c:
+            c.execute("UPDATE coupang_catalog_options SET on_sale=?, sale_status_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_code=? AND vendor_item_id=?", (int(bool(on_sale)), self._text(account_code), self._text(vendor_item_id)))
 
     def grouped_products(self, *, account_code: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
         clauses=[]; values=[]

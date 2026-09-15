@@ -206,6 +206,17 @@ class CoupangReadClient:
         )
         return self._get(path, {})
 
+    def get_vendor_item_inventory(self, vendor_item_id: int | str) -> dict[str, Any]:
+        """Read the option-level sale state used by Coupang Wing."""
+        identifier = str(vendor_item_id or "").strip()
+        if not identifier.isdigit():
+            raise CoupangReadError("INVALID_PARAMETER")
+        return self._get(
+            "/v2/providers/seller_api/apis/api/v1/marketplace/"
+            f"vendor-items/{identifier}/inventories",
+            {},
+        )
+
     def list_seller_products(
         self, *, next_token: int | str | None = None, max_per_page: int = 100,
         status: str | None = None,

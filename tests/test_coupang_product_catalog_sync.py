@@ -18,6 +18,7 @@ class Client:
         models={"1":"LS25HG400EKXKR","2":"M50F 27"}
         model=models[str(seller_product_id)]
         return {"data":{"sellerProductId":str(seller_product_id),"productId":f"p{seller_product_id}","displayProductName":f"product {seller_product_id}","items":[{"vendorItemId":f"v{seller_product_id}","sellerProductItemId":f"i{seller_product_id}","itemName":model,"modelNo":model,"externalVendorSku":model,"attributes":[{"attributeValueName":model}],"bundleInfo":{} }]}}
+    def get_vendor_item_inventory(self, vendor_item_id): return {"data":{"onSale":True}}
 
 def test_catalog_sync_preserves_all_products_and_options(tmp_path: Path):
     db=Database(tmp_path/"catalog.db"); db.initialize()
@@ -78,15 +79,18 @@ class ApprovedClient:
             }
         }
 
+    def get_vendor_item_inventory(self, vendor_item_id):
+        return {"data": {"onSale": True}}
 
-def _approved_sync_service(db: Database, client: ApprovedClient):
+
+def _approved_sync_service(db: Database, client: ApprovedClient, account_code: str = "OJE_NS"):
     catalog = CoupangProductCatalogRepository(db)
     mappings = CoupangProductMappingRepository(db)
     mapping = CoupangProductMappingService(
-        account_code="OJE_NS", read_client=client, repository=mappings,
+        account_code=account_code, read_client=client, repository=mappings,
     )
     return CoupangProductCatalogSyncService(
-        account_code="OJE_NS", read_client=client,
+        account_code=account_code, read_client=client,
         catalog_repository=catalog, mapping_service=mapping,
     )
 
@@ -138,6 +142,59 @@ def test_grouped_products_never_mix_accounts(tmp_path: Path) -> None:
             account_code=account, seller_product_id=seller,
             item={"vendorItemId": vendor, "itemName": account},
         )
+        catalog.set_product_active(
+            account_code=account, seller_product_id=seller, is_active=True,
+        )
 
     assert [row["account_code"] for row in catalog.grouped_products(account_code="OJE_NS")] == ["OJE_NS"]
     assert [row["account_code"] for row in catalog.grouped_products(account_code="OJE_PLUS")] == ["OJE_PLUS"]
+
+
+class SaleStateClient(ApprovedClient):
+    def __init__(self, states: dict[str, list[bool | Exception]]) -> None:
+        super().__init__(list(states))
+        self.states = states
+
+    def get_seller_product(self, seller_product_id):
+        product_id = str(seller_product_id)
+        return {"data": {"sellerProductId": product_id, "items": [
+            {"vendorItemId": f"{product_id}-{index}", "itemName": "option"}
+            for index, _ in enumerate(self.states[product_id])
+        ]}}
+
+    def get_vendor_item_inventory(self, vendor_item_id):
+        product_id, index = str(vendor_item_id).rsplit("-", 1)
+        value = self.states[product_id][int(index)]
+        if isinstance(value, Exception):
+            raise value
+        return {"data": {"onSale": value}}
+
+
+def test_active_requires_any_option_on_sale_and_preserves_inactive_mapping(tmp_path: Path) -> None:
+    db = Database(tmp_path / "catalog.db"); db.initialize()
+    service = _approved_sync_service(db, SaleStateClient({"active": [False, True], "inactive": [False, False]}))
+    assert service.sync_account().errors == []
+    catalog = CoupangProductCatalogRepository(db)
+    assert {row["seller_product_id"] for row in catalog.grouped_products(account_code="OJE_NS")} == {"active"}
+    with db.connection() as c:
+        states = dict(c.execute("SELECT seller_product_id, is_active FROM coupang_catalog_products"))
+    assert states == {"active": 1, "inactive": 0}
+
+
+def test_inventory_failure_does_not_change_existing_active_state(tmp_path: Path) -> None:
+    db = Database(tmp_path / "catalog.db"); db.initialize(); catalog = CoupangProductCatalogRepository(db)
+    catalog.upsert_product(account_code="OJE_NS", data={"sellerProductId": "safe"})
+    catalog.set_product_active(account_code="OJE_NS", seller_product_id="safe", is_active=True)
+    service = _approved_sync_service(db, SaleStateClient({"safe": [RuntimeError("network")]}))
+    assert service.sync_account().errors
+    with db.connection() as c:
+        assert c.execute("SELECT is_active FROM coupang_catalog_products WHERE seller_product_id='safe'").fetchone()[0] == 1
+
+
+def test_sale_state_sync_is_account_scoped(tmp_path: Path) -> None:
+    db = Database(tmp_path / "catalog.db"); db.initialize()
+    _approved_sync_service(db, SaleStateClient({"same": [True]}), "OJE_NS").sync_account()
+    _approved_sync_service(db, SaleStateClient({"same": [False]}), "OJE_PLUS").sync_account()
+    catalog = CoupangProductCatalogRepository(db)
+    assert [row["account_code"] for row in catalog.grouped_products(account_code="OJE_NS")] == ["OJE_NS"]
+    assert catalog.grouped_products(account_code="OJE_PLUS") == []

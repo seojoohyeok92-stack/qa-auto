@@ -2160,6 +2160,20 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        33,
+        (
+            """
+            ALTER TABLE coupang_catalog_options
+            ADD COLUMN on_sale INTEGER
+            CHECK (on_sale IN (0, 1) OR on_sale IS NULL)
+            """,
+            """
+            ALTER TABLE coupang_catalog_options
+            ADD COLUMN sale_status_checked_at TEXT
+            """,
+        ),
+    ),
 )
 
 
