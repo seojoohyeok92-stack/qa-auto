@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from services.naver_inquiry_sync_service import NaverInquirySyncService
 
 SUPPORTED_INQUIRY_TYPES = ("PRODUCT_INQUIRY", "CUSTOMER_INQUIRY")
+COUPANG_ONLINE_INQUIRY = "COUPANG_ONLINE_INQUIRY"
 
 
 TIME_DEPENDENT = re.compile(
@@ -266,22 +267,32 @@ class HistoricalCaseService:
             created_at=item.get("source_created_at") or item.get("registered_at"),
             repeated=repeated,
         )
-        flags["learning_signal_type"] = "POSITIVE"
+        supplied_metadata = item.get("historical_metadata")
+        if isinstance(supplied_metadata, dict):
+            flags.update(supplied_metadata)
+        candidate_only = bool(flags.get("candidate_only"))
+        flags["learning_signal_type"] = "EXCLUDED" if candidate_only else "POSITIVE"
         flags["answer_provenance"] = "HISTORICAL_VERIFIED"
-        case_key = self._digest("NAVER_HISTORY", store, source_type, external_id, normalized)
+        source = (
+            "COUPANG_ONLINE_HISTORY"
+            if source_type == COUPANG_ONLINE_INQUIRY
+            else "NAVER_HISTORY"
+        )
+        case_key = self._digest(source, store, source_type, external_id, normalized)
         fingerprint = self._digest(case_key, answer)
         raw = item.get("raw_payload") if isinstance(item.get("raw_payload"), dict) else {}
         safe_raw = {
             key: raw.get(key)
             for key in (
                 "questionId", "inquiryNo", "inquiryId", "productId", "answered",
+                "sellerProductId", "sellerItemId", "vendorItemId",
                 "status", "createDate", "updateDate", "lastModifiedDate",
                 "inquiryRegistrationDateTime", "inquiryModificationDateTime",
             )
             if raw.get(key) not in (None, "")
         }
         return {
-            "source": "NAVER_HISTORY",
+            "source": source,
             "store_code": store,
             "inquiry_id": item.get("local_inquiry_id") or item.get("id"),
             "external_inquiry_id": external_id,
@@ -301,9 +312,11 @@ class HistoricalCaseService:
             "policy_risk": risk,
             "quality_score": score,
             "confidence": score,
-            # Learning participation is opt-out.  Safety eligibility remains a
-            # separate retrieval-time decision, even for BLOCK/HIGH cases.
-            "active": True,
+            # Coupang backfill rows are review candidates.  Unlike legacy
+            # Naver historical rows, they must not become runtime references
+            # or common Learning until an administrator explicitly approves
+            # them.
+            "active": not candidate_only,
             "metadata_json": flags,
             "case_key": case_key,
             "fingerprint": fingerprint,

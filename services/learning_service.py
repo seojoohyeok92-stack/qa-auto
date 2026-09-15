@@ -823,6 +823,17 @@ class LearningService:
                 if isinstance(case.get("metadata_json"), dict) else {}
             ),
         )
+        historical_metadata = (
+            case.get("metadata_json")
+            if isinstance(case.get("metadata_json"), dict) else {}
+        )
+        canonical_model = str(
+            historical_metadata.get("canonical_model") or ""
+        ).strip() or None
+        shared_cross_market = bool(
+            historical_metadata.get("shared_cross_market_learning")
+        )
+        origin_market = str(historical_metadata.get("market") or "").strip().upper() or None
         example = {
             "source_key": source_key,
             "inquiry_id": case.get("inquiry_id"),
@@ -833,11 +844,14 @@ class LearningService:
             "learning_source": "APPROVED_EDITED",
             "question_original_masked": self.privacy.mask(question),
             "question_normalized": normalize_learning_question(question),
-            "store_code": case.get("store_code"),
+            # A reviewed Coupang product-model answer is shared common
+            # Learning, not an account-local silo.  Legacy/Naver historical
+            # promotions retain their original store scope.
+            "store_code": None if shared_cross_market else case.get("store_code"),
             "inquiry_type": case.get("inquiry_type"),
             "intent": case.get("classification"),
             "product_name": self.privacy.mask(case.get("product_name")) or None,
-            "model_code": None,
+            "model_code": canonical_model,
             "generation_mode": "HISTORICAL_ADMIN_PROMOTION",
             "template_id": None,
             "processing_route": None,
@@ -865,6 +879,9 @@ class LearningService:
                 "product_scope": historical_profile.scope,
                 "learning_topics": list(historical_profile.topics),
                 "product_identity": historical_identity.to_dict(),
+                "canonical_model": canonical_model,
+                "shared_cross_market_learning": shared_cross_market,
+                "origin_market": origin_market,
             },
             "active": True,
         }

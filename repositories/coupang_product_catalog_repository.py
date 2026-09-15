@@ -68,6 +68,37 @@ class CoupangProductCatalogRepository:
         with self.database.transaction() as c:
             c.execute("UPDATE coupang_catalog_options SET on_sale=?, sale_status_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_code=? AND vendor_item_id=?", (int(bool(on_sale)), self._text(account_code), self._text(vendor_item_id)))
 
+    def is_canonical_model_currently_active(self, canonical_model: object) -> bool:
+        """Whether a confirmed option for this model is currently selling.
+
+        This is intentionally account-agnostic: a historical answer from one
+        Coupang account may remain useful when the same canonical model is
+        actively operated by the other account.
+        """
+
+        model = self._text(canonical_model)
+        if not model:
+            return False
+        with self.database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM coupang_catalog_products p
+                JOIN coupang_catalog_options o
+                  ON o.account_code=p.account_code
+                 AND o.seller_product_id=p.seller_product_id
+                JOIN coupang_product_mappings m
+                  ON m.account_code=o.account_code
+                 AND m.vendor_item_id=o.vendor_item_id
+                WHERE p.is_active=1
+                  AND m.mapping_status='CONFIRMED'
+                  AND m.canonical_model=?
+                LIMIT 1
+                """,
+                (model,),
+            ).fetchone()
+        return row is not None
+
     def grouped_products(self, *, account_code: str | None = None, status: str | None = None,
                          seller_product_ids: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
         clauses=[]; values=[]
