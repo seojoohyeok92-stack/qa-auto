@@ -121,6 +121,25 @@ class CoupangReadSettings:
 COUPANG_OJE_NS = "OJE_NS"
 COUPANG_OJE_PLUS = "OJE_PLUS"
 
+# Wing 판매량 순으로 운영 담당자가 확정한 OJE_PLUS 등록상품 범위다.
+# 이 범위는 catalog/history 삭제 정책이 아니라, 수동 catalog sync와
+# 관리자 상품 매칭 화면의 운영 대상만 제한한다.
+OJE_PLUS_TOP_SELLER_PRODUCT_IDS = (
+    "16253809108", "15977248291", "16322276855", "16315263618",
+    "14169560432", "16322299295", "16067069860", "16140598440",
+    "13288508554", "15469044405", "14911395814", "16325256204",
+    "16322233036", "16322313966", "16322303301", "16315294906",
+    "16304918969", "16284352713", "16284336165", "16284322915",
+)
+
+
+def get_coupang_catalog_sync_scope(account_code: str) -> tuple[str, ...] | None:
+    """Return an explicit direct-sync scope only where operations require it."""
+
+    if str(account_code or "").strip().upper() == COUPANG_OJE_PLUS:
+        return OJE_PLUS_TOP_SELLER_PRODUCT_IDS
+    return None
+
 
 @dataclass(frozen=True)
 class CoupangAccountSettings:

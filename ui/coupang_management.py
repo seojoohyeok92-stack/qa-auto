@@ -1,6 +1,8 @@
 from __future__ import annotations
 import streamlit as st
-from config import COUPANG_OJE_NS, COUPANG_OJE_PLUS, get_coupang_accounts, get_coupang_account
+from config import (COUPANG_OJE_NS, COUPANG_OJE_PLUS,
+                    get_coupang_accounts, get_coupang_account,
+                    get_coupang_catalog_sync_scope)
 from api.coupang_read_client import CoupangReadClient
 from repositories.coupang_product_catalog_repository import CoupangProductCatalogRepository
 from repositories.coupang_product_mapping_repository import CoupangProductMappingRepository
@@ -60,10 +62,22 @@ def render_coupang_management(database) -> None:
     for code in (COUPANG_OJE_NS,COUPANG_OJE_PLUS):
         if st.button(f"{NAMES[code]} 동기화",key=f"coupang_sync_{code}",disabled=code not in configured):
             a=get_coupang_account(code); client=CoupangReadClient(access_key=a.access_key,secret_key=a.secret_key,vendor_id=a.vendor_id)
+            progress_message=st.empty(); progress_bar=st.progress(0)
+            scope=get_coupang_catalog_sync_scope(code)
+            initial_suffix=f"0 / {len(scope)}" if scope else "시작 중..."
+            progress_message.info(f"{NAMES[code]} 상품 동기화 중... {initial_suffix}")
+            def show_progress(completed: int, total: int | None) -> None:
+                suffix=f"{completed} / {total}" if total else str(completed)
+                progress_message.info(f"{NAMES[code]} 상품 동기화 중... {suffix}")
+                if total:
+                    progress_bar.progress(min(completed / total, 1.0))
             mapping=CoupangProductMappingService(account_code=code,read_client=client,repository=mappings)
-            result=CoupangProductCatalogSyncService(account_code=code,read_client=client,catalog_repository=catalog,mapping_service=mapping).sync_account()
+            result=CoupangProductCatalogSyncService(account_code=code,read_client=client,catalog_repository=catalog,mapping_service=mapping,seller_product_ids=scope).sync_account(progress_callback=show_progress)
+            progress_bar.empty(); progress_message.empty()
+            if result.errors:
+                st.warning("동기화 오류: " + " | ".join(result.errors[:5]))
             st.success(f"등록상품 {result.products_seen} · 판매옵션 {result.options_seen} · 자동 {result.auto_exact} · 재사용 {result.confirmed_reused} · 검토 {result.needs_review} · 오류 {len(result.errors)}")
-    products=catalog.grouped_products(account_code=account,status=status)
+    products=catalog.grouped_products(account_code=account,status=status,seller_product_ids=get_coupang_catalog_sync_scope(account))
     st.subheader("상품 매칭")
     if not products:
         st.info("아직 동기화된 쿠팡 상품이 없습니다. 상품 동기화를 실행하면 판매상품과 판매옵션을 불러옵니다."); return

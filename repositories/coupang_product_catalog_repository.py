@@ -68,10 +68,18 @@ class CoupangProductCatalogRepository:
         with self.database.transaction() as c:
             c.execute("UPDATE coupang_catalog_options SET on_sale=?, sale_status_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_code=? AND vendor_item_id=?", (int(bool(on_sale)), self._text(account_code), self._text(vendor_item_id)))
 
-    def grouped_products(self, *, account_code: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+    def grouped_products(self, *, account_code: str | None = None, status: str | None = None,
+                         seller_product_ids: list[str] | tuple[str, ...] | None = None) -> list[dict[str, Any]]:
         clauses=[]; values=[]
         clauses=["p.is_active=1"]; values=[]
         if account_code and account_code != "ALL": clauses.append("p.account_code=?"); values.append(account_code)
+        if seller_product_ids is not None:
+            scope = [self._text(value) for value in seller_product_ids]
+            scope = [value for value in scope if value]
+            if not scope:
+                return []
+            clauses.append("p.seller_product_id IN (" + ",".join("?" for _ in scope) + ")")
+            values.extend(scope)
         where=(" WHERE " + " AND ".join(clauses)) if clauses else ""
         query="""SELECT p.*, o.vendor_item_id, o.item_name, m.canonical_model, m.mapping_source, m.mapping_status
         FROM coupang_catalog_products p LEFT JOIN coupang_catalog_options o ON o.account_code=p.account_code AND o.seller_product_id=p.seller_product_id

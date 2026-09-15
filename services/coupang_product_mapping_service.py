@@ -47,7 +47,11 @@ class CoupangProductMappingService:
         self.catalog_repository = catalog_repository or ProductCatalogRepository()
 
     def resolve(
-        self, *, seller_product_id: object, vendor_item_id: object
+        self,
+        *,
+        seller_product_id: object,
+        vendor_item_id: object,
+        product_data: dict[str, Any] | None = None,
     ) -> CoupangProductMappingResult:
         vendor_item = str(vendor_item_id or "").strip()
         existing = self.repository.get_confirmed(
@@ -56,8 +60,11 @@ class CoupangProductMappingService:
         if existing is not None:
             return CoupangProductMappingResult(existing, reused=True)
 
-        product = self.read_client.get_seller_product(seller_product_id)
-        data = product.get("data") if isinstance(product.get("data"), dict) else {}
+        if product_data is None:
+            product = self.read_client.get_seller_product(seller_product_id)
+            data = product.get("data") if isinstance(product.get("data"), dict) else {}
+        else:
+            data = product_data
         items = data.get("items") if isinstance(data.get("items"), list) else []
         matches = [
             item for item in items
