@@ -43,3 +43,101 @@ def test_catalog_repository_isolates_same_vendor_item_by_account(tmp_path: Path)
     repo.upsert_option(account_code="OJE_PLUS",seller_product_id="two",item=item)
     with db.connection() as c:
         assert c.execute("SELECT COUNT(*) FROM coupang_catalog_options").fetchone()[0] == 2
+
+
+class ApprovedClient:
+    def __init__(self, product_ids: list[str]) -> None:
+        self.product_ids = product_ids
+        self.statuses: list[str | None] = []
+
+    def list_seller_products(self, *, status=None, **kwargs):
+        self.statuses.append(status)
+        return {
+            "data": [
+                {
+                    "sellerProductId": product_id,
+                    "sellerProductName": f"product {product_id}",
+                    "statusName": "승인완료",
+                }
+                for product_id in self.product_ids
+            ],
+            "nextToken": "",
+        }
+
+    def get_seller_product(self, seller_product_id):
+        product_id = str(seller_product_id)
+        return {
+            "data": {
+                "sellerProductId": product_id,
+                "statusName": "승인완료",
+                "items": [{
+                    "vendorItemId": f"v-{product_id}",
+                    "sellerProductItemId": f"i-{product_id}",
+                    "itemName": "M50F 27",
+                }],
+            }
+        }
+
+
+def _approved_sync_service(db: Database, client: ApprovedClient):
+    catalog = CoupangProductCatalogRepository(db)
+    mappings = CoupangProductMappingRepository(db)
+    mapping = CoupangProductMappingService(
+        account_code="OJE_NS", read_client=client, repository=mappings,
+    )
+    return CoupangProductCatalogSyncService(
+        account_code="OJE_NS", read_client=client,
+        catalog_repository=catalog, mapping_service=mapping,
+    )
+
+
+def test_approved_sync_hides_products_absent_from_next_successful_sync(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "catalog.db")
+    db.initialize()
+    catalog = CoupangProductCatalogRepository(db)
+    catalog.upsert_product(
+        account_code="OJE_NS",
+        data={"sellerProductId": "old", "sellerProductName": "old"},
+    )
+    CoupangProductMappingRepository(db).upsert(
+        account_code="OJE_NS", vendor_item_id="old-option",
+        canonical_model="32DM501", mapping_source="MANUAL",
+        mapping_status="CONFIRMED",
+    )
+
+    client = ApprovedClient(["current-a", "current-b"])
+    result = _approved_sync_service(db, client).sync_account()
+
+    assert result.errors == []
+    assert client.statuses == ["APPROVED"]
+    active = catalog.grouped_products(account_code="OJE_NS")
+    assert {row["seller_product_id"] for row in active} == {"current-a", "current-b"}
+    with db.connection() as connection:
+        old = connection.execute(
+            "SELECT is_active FROM coupang_catalog_products "
+            "WHERE account_code='OJE_NS' AND seller_product_id='old'"
+        ).fetchone()
+    assert old["is_active"] == 0
+    assert CoupangProductMappingRepository(db).get(
+        account_code="OJE_NS", vendor_item_id="old-option"
+    )["canonical_model"] == "32DM501"
+
+
+def test_grouped_products_never_mix_accounts(tmp_path: Path) -> None:
+    db = Database(tmp_path / "catalog.db")
+    db.initialize()
+    catalog = CoupangProductCatalogRepository(db)
+    for account, seller, vendor in (
+        ("OJE_NS", "same-seller", "same-vendor"),
+        ("OJE_PLUS", "same-seller", "same-vendor"),
+    ):
+        catalog.upsert_product(account_code=account, data={"sellerProductId": seller})
+        catalog.upsert_option(
+            account_code=account, seller_product_id=seller,
+            item={"vendorItemId": vendor, "itemName": account},
+        )
+
+    assert [row["account_code"] for row in catalog.grouped_products(account_code="OJE_NS")] == ["OJE_NS"]
+    assert [row["account_code"] for row in catalog.grouped_products(account_code="OJE_PLUS")] == ["OJE_PLUS"]

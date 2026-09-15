@@ -24,7 +24,7 @@ from services.learning_signal_service import LearningSignalService
 
 def make_context(tmp_path):
     database = Database(tmp_path / "feedback.db")
-    assert database.initialize() == list(range(1, 32))
+    assert database.initialize() == list(range(1, 33))
     inquiry_id = InquiryRepository(database).upsert_work_item(
         {
             "store_code": "OJE_PLUS",
@@ -569,5 +569,5 @@ def test_feedback_migration_is_idempotent_and_legacy_rows_remain_positive(
             """
         )
     assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 32))
+    assert database.migration_versions() == list(range(1, 33))
     assert len(LearningRepository(database).candidates(store_code="OJE_PLUS")) == 1

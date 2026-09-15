@@ -2142,6 +2142,24 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        32,
+        (
+            """
+            ALTER TABLE coupang_catalog_products
+            ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1
+            CHECK (is_active IN (0, 1))
+            """,
+            """
+            ALTER TABLE coupang_catalog_products
+            ADD COLUMN last_seen_sync TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_coupang_catalog_products_active
+            ON coupang_catalog_products(account_code, is_active, seller_product_id)
+            """,
+        ),
+    ),
 )
 
 

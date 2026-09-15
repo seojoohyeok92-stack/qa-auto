@@ -10,15 +10,46 @@ class CoupangProductCatalogRepository:
     def _text(value: object | None) -> str | None:
         value = str(value or "").strip()
         return value or None
-    def upsert_product(self, *, account_code: object, data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    def upsert_product(
+        self,
+        *,
+        account_code: object,
+        data: dict[str, Any],
+        sync_token: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
         account=self._text(account_code); seller=self._text(data.get("sellerProductId"))
         if not account or not seller: raise ValueError("account_code and sellerProductId are required")
-        values=(account,seller,self._text(data.get("productId")),self._text(data.get("sellerProductName")),self._text(data.get("displayProductName")),self._text(data.get("generalProductName")),self._text(data.get("statusName")),self._text(data.get("status")))
+        values=(account,seller,self._text(data.get("productId")),self._text(data.get("sellerProductName")),self._text(data.get("displayProductName")),self._text(data.get("generalProductName")),self._text(data.get("statusName")),self._text(data.get("status")),self._text(sync_token))
         with self.database.transaction() as c:
             existed=c.execute("SELECT 1 FROM coupang_catalog_products WHERE account_code=? AND seller_product_id=?",(account,seller)).fetchone() is not None
-            c.execute("""INSERT INTO coupang_catalog_products(account_code,seller_product_id,product_id,seller_product_name,display_product_name,general_product_name,status_name,raw_status) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_code,seller_product_id) DO UPDATE SET product_id=excluded.product_id,seller_product_name=excluded.seller_product_name,display_product_name=excluded.display_product_name,general_product_name=excluded.general_product_name,status_name=excluded.status_name,raw_status=excluded.raw_status,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",values)
+            c.execute("""INSERT INTO coupang_catalog_products(account_code,seller_product_id,product_id,seller_product_name,display_product_name,general_product_name,status_name,raw_status,is_active,last_seen_sync) VALUES(?,?,?,?,?,?,?,?,1,?) ON CONFLICT(account_code,seller_product_id) DO UPDATE SET product_id=excluded.product_id,seller_product_name=excluded.seller_product_name,display_product_name=excluded.display_product_name,general_product_name=excluded.general_product_name,status_name=excluded.status_name,raw_status=excluded.raw_status,is_active=1,last_seen_sync=excluded.last_seen_sync,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')""",values)
             row=dict(c.execute("SELECT * FROM coupang_catalog_products WHERE account_code=? AND seller_product_id=?",(account,seller)).fetchone())
         return row, not existed
+
+    def deactivate_products_not_seen(
+        self, *, account_code: object, sync_token: object
+    ) -> int:
+        """Hide products absent from one successful account-scoped sync.
+
+        Rows and their option/mapping provenance remain intact.  A later
+        successful approved-product sync can reactivate the same row.
+        """
+
+        account = self._text(account_code)
+        token = self._text(sync_token)
+        if not account or not token:
+            raise ValueError("account_code and sync_token are required")
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE coupang_catalog_products
+                SET is_active=0, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE account_code=? AND is_active=1
+                  AND (last_seen_sync IS NULL OR last_seen_sync<>?)
+                """,
+                (account, token),
+            )
+        return int(cursor.rowcount)
     def upsert_option(self, *, account_code: object, seller_product_id: object, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         account=self._text(account_code); seller=self._text(seller_product_id); vendor=self._text(item.get("vendorItemId"))
         if not account or not seller or not vendor: raise ValueError("account_code, sellerProductId and vendorItemId are required")
@@ -31,6 +62,7 @@ class CoupangProductCatalogRepository:
 
     def grouped_products(self, *, account_code: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
         clauses=[]; values=[]
+        clauses=["p.is_active=1"]; values=[]
         if account_code and account_code != "ALL": clauses.append("p.account_code=?"); values.append(account_code)
         where=(" WHERE " + " AND ".join(clauses)) if clauses else ""
         query="""SELECT p.*, o.vendor_item_id, o.item_name, m.canonical_model, m.mapping_source, m.mapping_status
