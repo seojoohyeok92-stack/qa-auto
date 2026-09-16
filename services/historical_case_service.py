@@ -32,6 +32,19 @@ if TYPE_CHECKING:
 SUPPORTED_INQUIRY_TYPES = ("PRODUCT_INQUIRY", "CUSTOMER_INQUIRY")
 COUPANG_ONLINE_INQUIRY = "COUPANG_ONLINE_INQUIRY"
 
+# The promotion gate, named once.  ``promote`` and the bulk entry point both
+# read these: a bulk run has to know whether a case would be refused *before*
+# it makes the case active, and two copies of the threshold would drift.
+# Values are unchanged from the single-case gate.
+PROMOTION_MINIMUM_QUALITY = 0.55
+BLOCKING_POLICY_RISKS = frozenset({"HIGH", "BLOCK", "BLOCKED"})
+# A stored answer written by the storefront bot, not by a person.  It describes
+# no product fact of its own and greets the asker, so promoting it would teach
+# later answers to introduce themselves as the bot.
+CHATBOT_ANSWER_MARKER = "챗봇"
+CHATBOT_EXCLUSION_REASON = "CHATBOT_ANSWER"
+PROMOTION_FAILED_REASON = "PROMOTION_FAILED"
+
 
 TIME_DEPENDENT = re.compile(
     r"(?:배송|도착|출고|설치)\s*(?:예정|가능|일|됩니다)|"
@@ -768,9 +781,12 @@ class HistoricalCaseService:
         case = self.repository.get(int(case_id))
         if not case:
             raise LookupError("Historical Case를 찾을 수 없습니다.")
-        if not case.get("active") or float(case.get("quality_score") or 0) < 0.55:
+        if (
+            not case.get("active")
+            or float(case.get("quality_score") or 0) < PROMOTION_MINIMUM_QUALITY
+        ):
             raise ValueError("활성 상태이고 품질 기준 0.55 이상인 사례만 승격할 수 있습니다.")
-        if str(case.get("policy_risk") or "").upper() in {"HIGH", "BLOCK", "BLOCKED"}:
+        if str(case.get("policy_risk") or "").upper() in BLOCKING_POLICY_RISKS:
             raise ValueError("현재 정책과 충돌할 위험이 있는 사례는 승격할 수 없습니다.")
         if case.get("promoted_learning_id"):
             existing = LearningRepository(self.database).get_by_source_key(
@@ -786,3 +802,119 @@ class HistoricalCaseService:
         )
         self.repository.mark_promoted(int(case_id), int(saved["id"]))
         return saved
+
+    @staticmethod
+    def promotion_block_reason(case: dict[str, Any]) -> str | None:
+        """Why ``promote`` would refuse this case, before anything is written.
+
+        A bulk run cannot learn this by trying: ``promote`` requires the case
+        to be active already, so finding out by calling it would mean making
+        1300 refused cases active first and then undoing that.  Asking here
+        instead means a refused case is never touched at all.
+        """
+
+        if float(case.get("quality_score") or 0) < PROMOTION_MINIMUM_QUALITY:
+            return "QUALITY_SCORE"
+        if str(case.get("policy_risk") or "").upper() in BLOCKING_POLICY_RISKS:
+            return "POLICY_RISK"
+        return None
+
+    def bulk_promote_candidates(
+        self,
+        *,
+        actor: str,
+        source: str | None = None,
+        limit: int | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Promote the stored backlog through the ordinary single-case path.
+
+        Every Learning row still comes from ``promote`` ->
+        ``capture_historical_promotion``; this only decides which cases to send
+        there and guarantees that a case it touches never ends up active
+        without a promotion behind it.
+
+        ``apply`` defaults to False so the counts can be read first.
+        """
+
+        summary: dict[str, Any] = {
+            "total_candidates": 0,
+            "already_promoted": 0,
+            "chatbot_excluded": 0,
+            "promotion_attempted": 0,
+            "promoted": 0,
+            "quality_or_policy_blocked": 0,
+            "failed": 0,
+            "blocked_reasons": {"QUALITY_SCORE": 0, "POLICY_RISK": 0, "OTHER_GATE": 0},
+            "applied": bool(apply),
+        }
+        for case in self.repository.promotion_backlog(source=source, limit=limit):
+            summary["total_candidates"] += 1
+            case_id = int(case["id"])
+            if case.get("promoted_learning_id"):
+                summary["already_promoted"] += 1
+                continue
+            if CHATBOT_ANSWER_MARKER in str(case.get("seller_answer") or ""):
+                summary["chatbot_excluded"] += 1
+                if apply:
+                    self._exclude_from_learning(
+                        case, reason=CHATBOT_EXCLUSION_REASON, actor=actor
+                    )
+                continue
+            blocked = self.promotion_block_reason(case)
+            if blocked is not None:
+                # Left exactly as found: not made active, not marked excluded.
+                # A quality-blocked case is still awaiting review, and writing
+                # an exclusion reason here would read as a human decision.
+                summary["quality_or_policy_blocked"] += 1
+                summary["blocked_reasons"][blocked] += 1
+                continue
+            summary["promotion_attempted"] += 1
+            if not apply:
+                continue
+            was_active = bool(case.get("active"))
+            try:
+                if not was_active:
+                    self.repository.set_learning_enabled(case_id, True, actor=actor)
+                self.promote(case_id, actor=actor)
+                summary["promoted"] += 1
+            except Exception:
+                summary["failed"] += 1
+                summary["blocked_reasons"]["OTHER_GATE"] += 1
+                if not was_active:
+                    self._restore_inactive(case_id, actor=actor)
+        return summary
+
+    def _exclude_from_learning(
+        self, case: dict[str, Any], *, reason: str, actor: str
+    ) -> None:
+        """Record the exclusion once, without rewriting it on every re-run."""
+
+        metadata = case.get("metadata_json")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if (
+            not case.get("active")
+            and str(metadata.get("learning_exclusion_reason") or "") == reason
+        ):
+            return
+        self.repository.set_learning_enabled(
+            int(case["id"]), False, reason=reason, actor=actor
+        )
+
+    def _restore_inactive(self, case_id: int, *, actor: str) -> None:
+        """Undo the activation a failed promotion left behind.
+
+        An active case with no promotion behind it is the one state this must
+        never leave: it would enter Historical retrieval as a reviewed answer
+        that nobody reviewed.  So the restore is verified, and a restore that
+        did not take stops the run rather than continuing past it.
+        """
+
+        self.repository.set_learning_enabled(
+            int(case_id), False, reason=PROMOTION_FAILED_REASON, actor=actor
+        )
+        restored = self.repository.get(int(case_id)) or {}
+        if restored.get("active") and not restored.get("promoted_learning_id"):
+            raise RuntimeError(
+                f"Historical Case #{case_id}가 승격 없이 활성 상태로 남았습니다."
+            )

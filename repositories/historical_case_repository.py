@@ -242,6 +242,32 @@ class HistoricalCaseRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
+    def promotion_backlog(
+        self, *, source: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Every stored case in a stable order, for a resumable bulk run.
+
+        Deliberately not ``list_cases``: that one is the manager screen's view
+        and drops anything under its quality floor, while a bulk promotion has
+        to see the refused rows too in order to count why they were refused.
+        Oldest first so a re-run after an interruption covers the same rows in
+        the same order.
+        """
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source:
+            clauses.append("source=?")
+            params.append(str(source))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM historical_cases {where} ORDER BY id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self.database.connection() as connection:
+            rows = connection.execute(sql, tuple(params)).fetchall()
+        return [self._row(row) for row in rows if row is not None]
+
     def list_cases(
         self, *, store_code: str | None = None, inquiry_type: str | None = None,
         search: str = "", active: bool | None = None, has_answer: bool | None = None,
