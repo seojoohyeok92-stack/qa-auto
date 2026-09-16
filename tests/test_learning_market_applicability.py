@@ -104,6 +104,7 @@ def test_market_applicability_filters_runtime_candidates_and_preserves_legacy_na
 
     assert {"coupang-only", "coupang-common"} <= coupang
     assert "naver-only" not in coupang
+    assert "legacy-naver" not in coupang
     assert {"naver-only", "coupang-common", "legacy-naver"} <= naver
     assert "coupang-only" not in naver
 

@@ -54,10 +54,19 @@ def is_market_applicable(metadata: dict[str, Any], market: str | None) -> bool:
     applicability = normalize_market_applicability(
         metadata.get("market_applicability")
     )
-    # Metadata-free legacy Learning retains its established behavior.
-    if applicability is None or applicability == MARKET_APPLICABILITY_COMMON:
-        return True
     normalized_market = str(market or "").strip().upper()
+    # Read-only manager/audit callers without a market keep their established
+    # all-row view. Runtime callers always provide (or derive) one.
+    if not normalized_market:
+        return True
+    if applicability is None:
+        # The corpus that predates marketplace metadata is Naver-originated.
+        # Treat it as NAVER_ONLY at runtime: this preserves Naver behavior and
+        # prevents a metadata-free legacy row from leaking into Coupang GPT
+        # context. Explicit COMMON remains the only cross-market policy.
+        applicability = "NAVER_ONLY"
+    if applicability == MARKET_APPLICABILITY_COMMON:
+        return True
     return bool(normalized_market) and applicability == f"{normalized_market}_ONLY"
 
 
