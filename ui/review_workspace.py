@@ -56,6 +56,7 @@ from services.approval_service import (
     ApprovalLockedError,
     ApprovalService,
 )
+from services.market_policy import is_store_answer_enabled, store_display_name
 from services.learning_feedback_service import LearningFeedbackService
 from services.learning_privacy_service import LearningPrivacyService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
@@ -1442,9 +1443,22 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         width="stretch",
         key=f"review_save_{inquiry_id}",
     )
+    # The marketplace this inquiry actually came from, not the one the
+    # dashboard is filtered to.  A market production only collects can show
+    # the button's name but must not be able to press it: there is no post
+    # client for it and the answer path is closed.
+    post_market_name = store_display_name(inquiry.get("store_code"))
+    post_market_read_only = not is_store_answer_enabled(inquiry.get("store_code"))
     registration_start = top_actions[3].button(
-        "네이버 답변 등록",
-        disabled=posted or not draft or not can(Permission.APPROVE),
+        f"{post_market_name} 답변 등록",
+        disabled=(
+            posted or not draft or not can(Permission.APPROVE)
+            or post_market_read_only
+        ),
+        help=(
+            f"현재 {post_market_name} 답변 등록은 비활성화되어 있습니다."
+            if post_market_read_only else None
+        ),
         width="stretch",
         key=f"review_naver_post_start_{inquiry_id}",
     )
@@ -1453,7 +1467,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         st.rerun()
     top_actions[4].markdown(
         '<div class="workspace-lock-note">승인은 Final Answer만 생성합니다.'
-        " <b>승인과 네이버 등록은 별도 작업입니다.</b></div>",
+        f" <b>승인과 {post_market_name} 등록은 별도 작업입니다.</b></div>",
         unsafe_allow_html=True,
     )
 

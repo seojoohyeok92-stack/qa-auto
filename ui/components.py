@@ -46,6 +46,11 @@ from services.order_service import (
 from services.work_queue_service import WorkItem
 from ui.answer_presenter import build_answer_display
 from ui.dps_presenter import build_dps_display
+from services.market_policy import (
+    is_store_answer_enabled,
+    market_of as store_market,
+    store_display_name,
+)
 from ui.market_labels import store_market_label
 
 
@@ -611,6 +616,15 @@ def _render_ai_answer_draft(work_item: WorkItem) -> None:
         work_item,
         "answer_generate",
     )
+    # Read-only markets are read-only here too.  These buttons call
+    # AnswerService and DPS directly, so a market that production only
+    # collects must not be able to start either from a click.  The decision
+    # is the inquiry's own store, never the dashboard's market picker: the
+    # picker chooses what is displayed, not what may run.
+    answer_market = store_market(work_item.get("store_code"))
+    answer_market_name = store_display_name(work_item.get("store_code"))
+    market_is_read_only = not is_store_answer_enabled(work_item.get("store_code"))
+
     database = Database()
     inquiry = None
     latest_draft = None
@@ -729,7 +743,10 @@ def _render_ai_answer_draft(work_item: WorkItem) -> None:
 
         if dps_decision.lookup_required:
             lookup_col, refresh_col = st.columns(2)
-            dps_disabled = posted or running or not dps_decision.order_id
+            dps_disabled = (
+                posted or running or not dps_decision.order_id
+                or market_is_read_only
+            )
             lookup_requested = lookup_col.button(
                 "DPS 조회",
                 key=get_work_item_state_key(
@@ -774,11 +791,23 @@ def _render_ai_answer_draft(work_item: WorkItem) -> None:
     generation_requested = st.button(
         button_label,
         key=generate_key,
-        disabled=posted or running,
+        disabled=posted or running or market_is_read_only,
+        help=(
+            f"{answer_market_name} 문의는 현재 조회 전용입니다."
+            if market_is_read_only else None
+        ),
     )
 
-    if posted:
-        st.info("이미 네이버에 등록된 문의이므로 초안을 다시 생성할 수 없습니다.")
+    if market_is_read_only:
+        st.info(
+            f"{answer_market_name} 문의는 현재 조회 전용입니다. "
+            "답변 생성과 등록은 아직 사용할 수 없습니다."
+        )
+    elif posted:
+        st.info(
+            f"이미 {answer_market_name}에 등록된 문의이므로 "
+            "초안을 다시 생성할 수 없습니다."
+        )
 
     if generation_requested:
         st.session_state[running_key] = True

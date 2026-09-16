@@ -28,6 +28,7 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from services.coupang_inquiry_normalizer import CoupangInquiryNormalizer
 from services.historical_case_service import HistoricalCaseService
+from services.inquiry_sync_service import normalize_work_item
 from services.historical_learning_quality_service import classify_historical_candidate
 
 
@@ -172,7 +173,18 @@ class CoupangHistoricalInquiryBackfillService:
         try:
             normalized = self.normalizer.online(payload, account_code=account_code)
             work_item = normalized.to_work_item()
-            upsert = self.inquiries.upsert_work_item(work_item)
+            # Through ``normalize_work_item``, exactly like the live sync.
+            #
+            # A work item says ``answered`` and ``raw_payload``; the inquiries
+            # table stores ``source_answered`` and ``raw_json``.  The rename
+            # between the two lives in that function alone, so writing straight
+            # to the repository silently dropped both: 7,278 rows landed with
+            # source_answered NULL and an empty raw_json, which is why answered
+            # Coupang inquiries read as unanswered and why nothing could be
+            # joined back to the product catalogue.
+            upsert = self.inquiries.upsert_work_item(
+                normalize_work_item(work_item)
+            )
             setattr(
                 result,
                 f"inquiries_{upsert.outcome}",

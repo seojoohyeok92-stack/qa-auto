@@ -288,6 +288,10 @@ def _dashboard_work_items_from_rows(
                 "title": inquiry.get("title"),
                 "content": inquiry.get("content"),
                 "product_name": inquiry.get("product_name"),
+                # The marketplace's own reply, read-only.  Not a draft and not
+                # something this app wrote: it is shown so staff can see the
+                # question is already handled.
+                "source_seller_answer": inquiry.get("seller_answer"),
                 "customer_name": inquiry.get("customer_display"),
                 "order_id": inquiry.get("order_id"),
                 "product_order_id": inquiry.get("product_order_id"),

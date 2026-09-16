@@ -201,6 +201,16 @@ def normalize_work_item(work_item: dict[str, Any]) -> dict[str, Any]:
         ),
         "is_private": is_private,
         "source_metadata_json": {
+            # Provenance the collector supplied -- which seller account a
+            # Coupang inquiry came from, for instance -- kept underneath the
+            # keys this function owns.  Overwriting the whole dict dropped the
+            # account, and without it a seller product id cannot be scoped to
+            # the right catalogue: the same id is a different product in the
+            # other account.  The three keys below still win.
+            **(
+                work_item.get("source_metadata_json")
+                if isinstance(work_item.get("source_metadata_json"), dict) else {}
+            ),
             "is_private": is_private,
             "privacy_source_present": is_private is not None,
             "source": str(source_type),

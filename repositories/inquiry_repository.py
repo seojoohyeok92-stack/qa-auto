@@ -725,7 +725,71 @@ class InquiryRepository:
         states = self.learning_states([int(row["id"]) for row in values])
         for row in values:
             row.update(states.get(int(row["id"]), self._empty_learning_state()))
+        self._attach_marketplace_details(values)
         return values, total, total_pages
+
+    def _attach_marketplace_details(self, rows: list[dict[str, Any]]) -> None:
+        """Fill in what a Coupang inquiry does not carry on its own.
+
+        Its payload has no product name -- only a sellerProductId -- and the
+        seller's reply lives inside the stored comment list rather than in a
+        column.  Both are read from what is already stored: no request is made
+        to Coupang to render a page.
+
+        One query for the page, not one per row.  Product ids are scoped by
+        account, because the same seller product id belongs to a different
+        product in the other seller account.
+        """
+
+        wanted: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            raw = row.get("raw_json") if isinstance(row.get("raw_json"), dict) else {}
+            metadata = (
+                row.get("source_metadata_json")
+                if isinstance(row.get("source_metadata_json"), dict) else {}
+            )
+            row.setdefault("seller_answer", None)
+            comments = raw.get("commentDtoList")
+            if isinstance(comments, list) and comments:
+                bodies = [
+                    text
+                    for comment in comments
+                    if isinstance(comment, dict)
+                    and (text := str(comment.get("content") or "").strip())
+                ]
+                if bodies:
+                    row["seller_answer"] = "\n\n".join(bodies)
+            if str(row.get("product_name") or "").strip():
+                continue
+            seller_product_id = str(raw.get("sellerProductId") or "").strip()
+            account_code = str(metadata.get("account_code") or "").strip()
+            if seller_product_id and account_code:
+                wanted.setdefault((account_code, seller_product_id), []).append(row)
+        if not wanted:
+            return
+        clauses = " OR ".join(
+            "(account_code=? AND seller_product_id=?)" for _ in wanted
+        )
+        parameters = [value for key in wanted for value in key]
+        with self.database.connection() as connection:
+            found = connection.execute(
+                "SELECT account_code, seller_product_id, seller_product_name, "
+                f"display_product_name FROM coupang_catalog_products WHERE {clauses}",
+                tuple(parameters),
+            ).fetchall()
+        for catalog in found:
+            key = (
+                str(catalog["account_code"]),
+                str(catalog["seller_product_id"]),
+            )
+            name = (
+                str(catalog["seller_product_name"] or "").strip()
+                or str(catalog["display_product_name"] or "").strip()
+            )
+            if not name:
+                continue
+            for row in wanted.get(key, ()):
+                row["product_name"] = name
 
     def dashboard_kpi_counts(
         self,
