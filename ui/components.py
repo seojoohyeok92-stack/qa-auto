@@ -46,11 +46,17 @@ from services.order_service import (
 from services.work_queue_service import WorkItem
 from ui.answer_presenter import build_answer_display
 from ui.dps_presenter import build_dps_display
+from ui.market_labels import store_market_label
 
 
 SOURCE_LABELS = {
     "PRODUCT_INQUIRY": "상품문의",
     "CUSTOMER_INQUIRY": "고객문의",
+    # Coupang's online inquiry is the same thing a shopper asks on a product
+    # page, so it reads as 상품문의 here.  The market badge beside it already
+    # says which marketplace it came from; repeating "쿠팡" in the type would
+    # say it twice.  The stored enum is untouched.
+    "COUPANG_ONLINE_INQUIRY": "상품문의",
 }
 
 PRIORITY_LABELS = {
@@ -1740,7 +1746,7 @@ def render_work_item(work_item: WorkItem) -> None:
         )
         _render_detail_fields(
             [
-                ("스토어명", work_item.get("store_name")),
+                ("마켓", store_market_label(work_item.get("store_code"))),
                 ("문의 번호", work_item.get("inquiry_id")),
                 (
                     "문의 출처",
@@ -1897,7 +1903,7 @@ def create_expander_title(work_item: WorkItem) -> str:
     return " | ".join(
         [
             PRIORITY_LABELS.get(priority_code, priority_code or "-"),
-            display_value(work_item.get("store_name")),
+            store_market_label(work_item.get("store_code")),
             SOURCE_LABELS.get(source_code, source_code or "-"),
             QUEUE_LABELS.get(queue_code, queue_code or "-"),
             subject_text,

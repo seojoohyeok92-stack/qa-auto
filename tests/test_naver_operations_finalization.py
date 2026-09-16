@@ -60,13 +60,20 @@ def test_operational_cards_use_kst_flow_and_current_stock(tmp_path: Path) -> Non
     approved_draft = _draft(database, approved)
 
     with database.transaction() as connection:
+        # NEW counts when the customer asked, so registered_at is what decides
+        # the card.  created_at is kept beside it deliberately: a row written
+        # today about a question asked earlier must not land in today's count.
         connection.execute(
-            "UPDATE inquiries SET created_at=? WHERE id=?",
-            ("2026-08-30T14:59:59+00:00", before),
+            "UPDATE inquiries SET created_at=?, registered_at=? WHERE id=?",
+            ("2026-08-30T14:59:59+00:00", "2026-08-30T23:59:59+09:00", before),
         )
         connection.execute(
-            "UPDATE inquiries SET created_at=? WHERE id IN (?,?,?,?)",
-            ("2026-08-30T15:00:00+00:00", review, approved, attention, post_failed),
+            "UPDATE inquiries SET created_at=?, registered_at=? "
+            "WHERE id IN (?,?,?,?)",
+            (
+                "2026-08-30T15:00:00+00:00", "2026-08-31T00:00:00+09:00",
+                review, approved, attention, post_failed,
+            ),
         )
         connection.execute(
             "UPDATE answer_drafts SET created_at=? WHERE id IN (?,?)",
@@ -101,18 +108,14 @@ def test_operational_cards_use_kst_flow_and_current_stock(tmp_path: Path) -> Non
     cards = InquiryRepository(database).dashboard_operational_card_counts(
         today_kst=date(2026, 8, 31)
     )
-    assert cards["NEW"] == {
-        "value": 5, "today": 4, "total": 5, "kind": "FLOW"
-    }
-    assert cards["DRAFTED"] == {
-        "value": 2, "today": 2, "total": 2, "kind": "FLOW"
-    }
+    # No date range asked for, so a FLOW card reports everything it knows.
+    # "total" is gone: it repeated "value" exactly.
+    assert cards["NEW"] == {"value": 5, "today": 4, "kind": "FLOW"}
+    assert cards["DRAFTED"] == {"value": 2, "today": 2, "kind": "FLOW"}
     assert cards["REVIEW"] == {
         "value": 3, "current": 3, "kind": "STOCK"
     }
-    assert cards["APPROVED"] == {
-        "value": 1, "today": 1, "total": 1, "kind": "FLOW"
-    }
+    assert cards["APPROVED"] == {"value": 1, "today": 1, "kind": "FLOW"}
     assert cards["ATTENTION"] == {
         "value": 2, "current": 2, "kind": "STOCK"
     }

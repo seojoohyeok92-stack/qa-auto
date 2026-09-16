@@ -13,6 +13,13 @@ from core.time_utils import KST, format_datetime_kst
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
 from services.work_queue_service import WorkItem, parse_registered_at
+from ui.market_labels import (
+    ALL_MARKETS,
+    ALL_MARKETS_LABEL,
+    market_label,
+    markets_for_stores,
+    stores_in_market,
+)
 from ui.components import (
     PRIORITY_LABELS,
     QUEUE_LABELS,
@@ -458,7 +465,7 @@ def render_filter_bar(
         "status": "dashboard_answer_status",
         "source": "dashboard_source",
         "sort": "dashboard_sort",
-        "stores": "dashboard_stores",
+        "market": "dashboard_market",
         "queues": "dashboard_queues",
         "priorities": "dashboard_priorities",
         "delivery": "dashboard_delivery_only",
@@ -485,13 +492,19 @@ def render_filter_bar(
             "문의 검색", placeholder="주문번호, 상품명, 문의 검색", key=keys["search"]
         )
     with store_col:
-        stores = st.multiselect(
-            "Store",
-            list(available_stores),
-            default=list(available_stores),
-            format_func=lambda code: available_stores.get(code, code),
-            key=keys["stores"],
+        # One market at a time.  Several markets at once is what 전체 is for,
+        # and a multiselect here stacked a row of removable chips that pushed
+        # the rest of the filter bar off the line.
+        market_options = [ALL_MARKETS, *markets_for_stores(available_stores)]
+        selected_market = st.selectbox(
+            "마켓",
+            market_options,
+            format_func=lambda code: (
+                ALL_MARKETS_LABEL if code == ALL_MARKETS else market_label(code)
+            ),
+            key=keys["market"],
         )
+        stores = stores_in_market(available_stores, selected_market)
     with status_col:
         answer_status = st.selectbox(
             "문의 상태", ["전체 상태", "미답변", "답변 완료"], key=keys["status"]
@@ -568,6 +581,7 @@ def render_filter_bar(
     return {
         "search_query": search_query,
         "answer_status": answer_code,
+        "market": selected_market,
         "source": source_code,
         "sort_mode": sort_mode,
         "stores": stores,

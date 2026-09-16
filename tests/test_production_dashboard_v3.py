@@ -54,8 +54,10 @@ st.write("ROUTE_VALUE", filters["route"])
     assert not app.exception
     assert any("ROUTE_VALUE ALL" in item.value for item in app.markdown)
     assert {item.label for item in app.text_input} >= {"문의 검색"}
-    assert {item.label for item in app.multiselect} >= {"Store"}
-    assert {item.label for item in app.selectbox} >= {"문의 상태", "Route"}
+    # The store picker is a single 마켓 dropdown now: one market at a time,
+    # and no row of removable chips across the filter bar.
+    assert "Store" not in {item.label for item in app.multiselect}
+    assert {item.label for item in app.selectbox} >= {"마켓", "문의 상태", "Route"}
     route = next(item for item in app.selectbox if item.label == "Route")
     assert route.options == ["ALL", "ORDER_ID_REQUEST", "TEMPLATE"]
     assert any(button.label == "새로고침" for button in app.button)

@@ -42,6 +42,7 @@ from ui.dashboard import (
     render_inquiry_table,
     render_kpi_cards,
 )
+from ui.market_labels import ALL_MARKETS as MARKET_ALL
 from ui.inquiries import render_inquiries_page
 from ui.activity_log_panel import render_activity_log_panel
 from ui.build_info import render_build_footer
@@ -908,11 +909,20 @@ def render_dashboard_page(
 
     kpi_slot = st.container()
 
+    # The market picker offers the markets whose inquiries this screen can
+    # actually show, so the candidates come from the inquiries table rather
+    # than from the Naver stores the work queue happened to poll.  Reading
+    # them from work_items is why Coupang never appeared: its store codes were
+    # never in the list, so they were never in the store_codes the query
+    # filters on.
     available_stores = {
         str(item.get("store_code")): str(item.get("store_name"))
         for item in work_items
         if item.get("store_code")
     }
+    if database is not None:
+        for code in InquiryRepository(database).dashboard_store_codes():
+            available_stores.setdefault(code, code)
     if not available_stores:
         available_stores = {store.code: store.name for store in configured_stores}
 
@@ -948,6 +958,13 @@ def render_dashboard_page(
     # reloading this file.  During that transition an older filter result has
     # no route key, so treat it as the unfiltered route until the next rerun.
     route_filter = str(filters.get("route") or "ALL")
+    # Route runs off the Naver work-queue path, and Coupang inquiries are not
+    # on it yet.  Any market that can include them is served whole rather than
+    # silently dropping them, so Route is read as ALL there.  The Naver-only
+    # view keeps the Route filter exactly as it was.
+    selected_market = str(filters.get("market") or MARKET_ALL)
+    if selected_market != "NAVER":
+        route_filter = "ALL"
     with profile_stage("filter_work_items"):
         scoped_items = filter_work_items(
             work_items,
@@ -965,7 +982,11 @@ def render_dashboard_page(
         )
     with profile_stage("dashboard_kpi_counts"):
         kpi_counts = (
-            InquiryRepository(database).dashboard_operational_card_counts()
+            InquiryRepository(database).dashboard_operational_card_counts(
+                store_codes=filters["stores"],
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+            )
             if database is not None
             else {}
         )

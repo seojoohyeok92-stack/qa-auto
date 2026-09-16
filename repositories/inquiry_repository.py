@@ -771,108 +771,184 @@ class InquiryRepository:
                 )
         return result
 
+    def dashboard_store_codes(self) -> list[str]:
+        """Store codes that actually have inquiries on the dashboard.
+
+        Deliberately read from ``inquiries`` and not from the configured Naver
+        stores or from Historical: the market picker must offer exactly the
+        markets whose questions this screen can show.  A store that only
+        appears in Historical would otherwise become a choice that returns
+        nothing.
+        """
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT store_code FROM inquiries "
+                "WHERE store_code IS NOT NULL AND trim(store_code)<>'' "
+                "ORDER BY store_code"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    @staticmethod
+    def _market_scope(
+        store_codes: list[str] | None, *, column: str = "store_code"
+    ) -> tuple[str, list[Any]]:
+        """A store-code restriction for the operator cards.
+
+        ``None`` means every market, which is what the unfiltered dashboard
+        asks for.  An empty list means a market was chosen that has no stores,
+        and that has to count nothing rather than everything.
+        """
+
+        if store_codes is None:
+            return "", []
+        scope = [str(code) for code in store_codes if str(code or "").strip()]
+        if not scope:
+            return " AND 1=0", []
+        return f" AND {column} IN ({','.join('?' * len(scope))})", scope
+
     def dashboard_operational_card_counts(
-        self, *, today_kst: date | None = None
+        self,
+        *,
+        today_kst: date | None = None,
+        store_codes: list[str] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> dict[str, dict[str, int | str]]:
         """Return the five operator cards from their authoritative state.
 
-        FLOW timestamps are stored as UTC ISO strings, so the KST calendar
-        boundary is passed explicitly instead of depending on the process or
-        SQLite host timezone. STOCK cards intentionally have no date filter.
-        Every count is inquiry-distinct and is calculated in SQL.
+        FLOW and STOCK are read differently on purpose.
+
+        FLOW cards -- new, drafted, approved -- answer "how much happened in
+        the chosen window", so they are counted on the timestamp of the event
+        each card names, inside the selected date range and market.  Counting
+        them on the inquiry's arrival time instead would report a draft
+        written today under the day the question was asked.
+
+        STOCK cards -- review, attention -- answer "how much is waiting right
+        now".  A backlog has no date range: narrowing the window cannot make
+        work disappear from someone's queue, so these take the market scope
+        and ignore the dates.  Two cards staying still while the others move
+        is the design, not a stale number.
+
+        Timezones differ by column and are not interchangeable.
+        ``registered_at`` is stored as KST-offset ISO, so its calendar day is
+        read straight off the string; ``approved_at`` and the draft timestamps
+        are UTC, so they are shifted to the KST boundary first.  Applying the
+        shift to ``registered_at`` too would move every inquiry nine hours.
         """
 
         day = today_kst or datetime.now(ZoneInfo("Asia/Seoul")).date()
         day_text = day.isoformat()
+        market_where, market_params = self._market_scope(store_codes)
+        draft_market_where, draft_market_params = self._market_scope(
+            store_codes, column="i.store_code"
+        )
+        # Inclusive on both ends, matching the list query's date handling.
+        ranged = bool(start_date and end_date)
+        registered_range = (
+            " AND substr(registered_at, 1, 10) BETWEEN ? AND ?" if ranged else ""
+        )
+        registered_params = [start_date, end_date] if ranged else []
         usable_answer = (
             "trim(coalesce(d.final_answer,d.edited_answer,"
             "d.original_answer,''))<>''"
         )
         with self.database.connection() as connection:
-            total_inquiries = int(
-                connection.execute(
-                    "SELECT COUNT(DISTINCT id) FROM inquiries"
-                ).fetchone()[0]
+
+            def scalar(sql: str, params: list[Any]) -> int:
+                return int(connection.execute(sql, tuple(params)).fetchone()[0])
+
+            # NEW -- when the customer asked, not when the row was written.
+            # A historical backfill inserts thousands of old inquiries today;
+            # counting on created_at would report every one of them as a new
+            # question received today.
+            new_ranged = scalar(
+                "SELECT COUNT(DISTINCT id) FROM inquiries WHERE 1=1"
+                + market_where + registered_range,
+                market_params + registered_params,
             )
-            new_today = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT id) FROM inquiries
-                    WHERE date(created_at, '+9 hours')=?
-                    """,
-                    (day_text,),
-                ).fetchone()[0]
+            new_today = scalar(
+                "SELECT COUNT(DISTINCT id) FROM inquiries "
+                "WHERE substr(registered_at, 1, 10)=?" + market_where,
+                [day_text] + market_params,
             )
-            drafted_total = int(
-                connection.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT inquiry_id) FROM answer_drafts d
-                    WHERE {usable_answer}
-                    """
-                ).fetchone()[0]
+            # DRAFTED -- when the draft was written.  The inquiry it answers
+            # may have arrived months earlier, and that is the point.
+            drafted_ranged = scalar(
+                f"""
+                SELECT COUNT(DISTINCT d.inquiry_id) FROM answer_drafts d
+                JOIN inquiries i ON i.id=d.inquiry_id
+                WHERE {usable_answer}
+                """
+                + draft_market_where
+                + (
+                    " AND date(d.created_at, '+9 hours') BETWEEN ? AND ?"
+                    if ranged else ""
+                ),
+                draft_market_params + ([start_date, end_date] if ranged else []),
             )
-            drafted_today = int(
-                connection.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT inquiry_id) FROM answer_drafts d
-                    WHERE {usable_answer}
-                      AND date(d.created_at, '+9 hours')=?
-                    """,
-                    (day_text,),
-                ).fetchone()[0]
+            drafted_today = scalar(
+                f"""
+                SELECT COUNT(DISTINCT d.inquiry_id) FROM answer_drafts d
+                JOIN inquiries i ON i.id=d.inquiry_id
+                WHERE {usable_answer}
+                  AND date(d.created_at, '+9 hours')=?
+                """
+                + draft_market_where,
+                [day_text] + draft_market_params,
             )
-            review_current = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT id) FROM inquiries
-                    WHERE approval_status='PENDING'
-                      AND post_status NOT IN ('POSTED','POSTING','POST_UNKNOWN')
-                      AND workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')
-                    """
-                ).fetchone()[0]
+            # APPROVED -- approved_at beside approval_status, the pair
+            # production already treats as the approval record.
+            approved_ranged = scalar(
+                "SELECT COUNT(DISTINCT id) FROM inquiries "
+                "WHERE approval_status='APPROVED'"
+                + market_where
+                + (
+                    " AND date(approved_at, '+9 hours') BETWEEN ? AND ?"
+                    if ranged else ""
+                ),
+                market_params + ([start_date, end_date] if ranged else []),
             )
-            approved_total = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT id) FROM inquiries
-                    WHERE approval_status='APPROVED'
-                    """
-                ).fetchone()[0]
+            approved_today = scalar(
+                "SELECT COUNT(DISTINCT id) FROM inquiries "
+                "WHERE approval_status='APPROVED' "
+                "AND date(approved_at, '+9 hours')=?" + market_where,
+                [day_text] + market_params,
             )
-            approved_today = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT id) FROM inquiries
-                    WHERE approval_status='APPROVED'
-                      AND date(approved_at, '+9 hours')=?
-                    """,
-                    (day_text,),
-                ).fetchone()[0]
+            # STOCK -- what is queued right now.  Market scope, no dates.
+            review_current = scalar(
+                """
+                SELECT COUNT(DISTINCT id) FROM inquiries
+                WHERE approval_status='PENDING'
+                  AND post_status NOT IN ('POSTED','POSTING','POST_UNKNOWN')
+                  AND workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')
+                """
+                + market_where,
+                list(market_params),
             )
-            attention_current = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT id) FROM inquiries
-                    WHERE approval_status='PENDING'
-                      AND post_status<>'POSTED'
-                      AND (
-                        workflow_status IN ('NEEDS_ATTENTION','FAILED')
-                        OR post_status IN ('POST_FAILED','POST_UNKNOWN')
-                      )
-                    """
-                ).fetchone()[0]
+            attention_current = scalar(
+                """
+                SELECT COUNT(DISTINCT id) FROM inquiries
+                WHERE approval_status='PENDING'
+                  AND post_status<>'POSTED'
+                  AND (
+                    workflow_status IN ('NEEDS_ATTENTION','FAILED')
+                    OR post_status IN ('POST_FAILED','POST_UNKNOWN')
+                  )
+                """
+                + market_where,
+                list(market_params),
             )
         return {
             "NEW": {
-                "value": total_inquiries,
+                "value": new_ranged,
                 "today": new_today,
-                "total": total_inquiries,
                 "kind": "FLOW",
             },
             "DRAFTED": {
-                "value": drafted_total,
+                "value": drafted_ranged,
                 "today": drafted_today,
-                "total": drafted_total,
                 "kind": "FLOW",
             },
             "REVIEW": {
@@ -881,9 +957,8 @@ class InquiryRepository:
                 "kind": "STOCK",
             },
             "APPROVED": {
-                "value": approved_total,
+                "value": approved_ranged,
                 "today": approved_today,
-                "total": approved_total,
                 "kind": "FLOW",
             },
             "ATTENTION": {
