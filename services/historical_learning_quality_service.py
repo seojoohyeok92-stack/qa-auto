@@ -138,6 +138,34 @@ DAMAGE_OR_DEFECT = re.compile(
     r"파손|불량|하자|고장|손상|깨[짐졌]|흠집|누락|오배송|책임|보상",
     re.IGNORECASE,
 )
+# A failure that has already happened to the asker's own unit, told as an
+# event.  This is the line between "조립 방법 알려주세요" -- a standing FAQ any
+# later customer can reuse -- and "나사가 전부 빠졌습니다, 다시 해주세요",
+# which is one customer's damaged product and a CS decision about it.  Both
+# say 조립, so the noun cannot decide it; the failure verb can.
+PRODUCT_TROUBLE_EVENT = re.compile(
+    r"(?:나사|볼트|스탠드|브라켓|거치대|본체|화면|전원)[^\n]{0,12}"
+    r"(?:빠졌|빠져|풀렸|풀려|헐거|느슨|망가|부러|기울어|흔들려)"
+    r"|고정(?:이|도)?[^\n]{0,4}(?:안\s*되|안\s*돼|되지\s*않)"
+    r"|(?:다시|재)[^\n]{0,4}조립(?:할\s*수\s*없|이\s*안|하기\s*어려|되지\s*않)"
+    r"|분해(?:했|하였|해서)"
+    r"|(?:조립|설치)(?:하다가|하던\s*중)[^\n]{0,20}"
+    r"(?:빠졌|풀렸|망가|문제|안\s*되|실패)",
+    re.IGNORECASE,
+)
+# A symptom the asker's product is showing now, or a service call they have
+# already placed.  "AS 접수 전화번호가 어디인가요" stays a policy question --
+# it reports no symptom and books no visit -- so the request half requires a
+# past-tense 신청/접수, not the word A/S on its own.
+PRODUCT_MALFUNCTION = re.compile(
+    r"(?:전원|화면|소리|리모컨|버튼)[^\n]{0,10}"
+    r"(?:안\s*켜|켜지지\s*않|안\s*나[오와]|나오지\s*않|안\s*들|"
+    r"작동(?:하지|되지)\s*않|먹통)"
+    r"|갑자기[^\n]{0,16}(?:않|안\s*되|안\s*돼|멈춤|멈춰)"
+    r"|(?:출장\s*서비스|출장서비스|기사\s*방문|A/?S|수리)[^\n]{0,10}"
+    r"(?:신청|접수)(?:했|하였|을\s*했)",
+    re.IGNORECASE,
+)
 TEMPORARY_TRANSACTION = re.compile(
     r"할인|쿠폰|가격|사은품|상품권|온누리|프로모션|이벤트|행사|신청\s*기간|"
     r"재고|명절|추석|설날|기간\s*(?:내|중|한정)|까지\s*신청",
@@ -167,6 +195,25 @@ UNKNOWN_OR_UNVERIFIED = re.compile(
     r"확인\s*후.{0,16}(?:안내|답변)|알\s*수\s*없|확인\s*어렵",
     re.IGNORECASE,
 )
+# An answer that settles the cause by putting it on the customer's own side.
+# "모니터 문제가 아니라 고객님 PC 문제입니다" states no evidence for either
+# half, and generalising it would answer a later customer's unrelated symptom
+# with a verdict nobody checked.
+UNSUPPORTED_CAUSE_ASSERTION = re.compile(
+    r"(?:제품|모니터|tv|티비|티브이)\s*(?:의\s*)?문제가?\s*아니(?:라|고|며|)"
+    r"|고객님[^\n]{0,12}(?:문제|탓|잘못)(?:입니다|이라|일\s*수)",
+    re.IGNORECASE,
+)
+# ``발송`` alone is ordinary listing copy -- "각각 박스로 발송됩니다" describes
+# a package, not a delivery enquiry -- while "빠르게 발송하겠습니다" is exactly
+# the delivery promise this gate exists to keep out.  A timing or urgency word
+# beside it is what separates the two, and neither shape touches 송출.
+SHIPPING_DISPATCH = re.compile(
+    r"(?:빨리|빠르게|빠른|언제|급하|급히|서둘|바로|오늘|내일|지연|먼저)"
+    r"[^\n]{0,8}발송"
+    r"|발송[^\n]{0,8}(?:언제|지연|예정|부탁|요청|해\s*주|해주)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -174,6 +221,32 @@ class HistoricalCandidateGate:
     decision: str
     primary_reason: str
     tags: tuple[str, ...]
+
+
+def _terse_question_left_unanswered(
+    question: str, answer: str, quality: "HistoricalLearningQualityService"
+) -> bool:
+    """A one- or two-word feature question the answer never takes up.
+
+    ``assess`` can only see a mismatch when *both* sides carry a known
+    concept, and the concept vocabulary is ten patterns wide.  "터치되나요?"
+    matches none of them, so the mismatch test was switched off entirely and
+    the exchange reached KEEP while its answer talked about VESA holes and
+    weight -- a stored example that answers a touchscreen question with
+    mounting specifications.
+
+    Kept to a terse question on purpose.  A full sentence that merely shares
+    no vocabulary with its answer is usually a paraphrase, not a mismatch, and
+    sweeping those in would delete ordinary product FAQ.
+    """
+
+    tokens = [token for token in WORD.findall(question.lower()) if len(token) > 1]
+    if not tokens or len(tokens) > 2:
+        return False
+    if quality.concepts(question) or not quality.concepts(answer):
+        return False
+    lowered = answer.lower()
+    return not any(token in lowered for token in tokens)
 
 
 def classify_historical_candidate(question: str, answer: str) -> HistoricalCandidateGate:
@@ -190,11 +263,20 @@ def classify_historical_candidate(question: str, answer: str) -> HistoricalCandi
 
     if DAMAGE_OR_DEFECT.search(combined):
         return HistoricalCandidateGate("EXCLUDE", "DAMAGE_DEFECT", ("DAMAGE_DEFECT",))
+    if PRODUCT_TROUBLE_EVENT.search(combined):
+        return HistoricalCandidateGate(
+            "EXCLUDE", "DAMAGE_DEFECT",
+            ("DAMAGE_DEFECT", "INDIVIDUAL_PRODUCT_TROUBLE"),
+        )
+    if PRODUCT_MALFUNCTION.search(combined):
+        return HistoricalCandidateGate(
+            "EXCLUDE", "DAMAGE_DEFECT", ("DAMAGE_DEFECT", "PRODUCT_MALFUNCTION"),
+        )
     if RETURN_TRANSACTION.search(combined):
         return HistoricalCandidateGate("EXCLUDE", "CS_TRANSACTION", ("CS_TRANSACTION",))
     if ORDER_SPECIFIC.search(combined) or ORDER_SPECIFIC_SIGNAL.search(combined):
         return HistoricalCandidateGate("EXCLUDE", "ORDER_SPECIFIC", ("ORDER_SPECIFIC",))
-    if DELIVERY_OR_SCHEDULE.search(combined):
+    if DELIVERY_OR_SCHEDULE.search(combined) or SHIPPING_DISPATCH.search(combined):
         return HistoricalCandidateGate("EXCLUDE", "DELIVERY", ("DELIVERY", "ORDER_SPECIFIC"))
     if TEMPORARY_TRANSACTION.search(combined) or is_time_bound(answer):
         return HistoricalCandidateGate("EXCLUDE", "TEMPORARY", ("TEMPORARY",))
@@ -212,8 +294,20 @@ def classify_historical_candidate(question: str, answer: str) -> HistoricalCandi
         return HistoricalCandidateGate(
             "MANUAL_REVIEW", "UNKNOWN_INFORMATION", ("UNKNOWN_INFORMATION",)
         )
+    if UNSUPPORTED_CAUSE_ASSERTION.search(answer):
+        return HistoricalCandidateGate(
+            "MANUAL_REVIEW", "UNKNOWN_INFORMATION",
+            ("UNKNOWN_INFORMATION", "UNSUPPORTED_CAUSE_ASSERTION"),
+        )
 
-    assessment = HistoricalLearningQualityService().assess(
+    quality = HistoricalLearningQualityService()
+    if _terse_question_left_unanswered(question, answer, quality):
+        return HistoricalCandidateGate(
+            "MANUAL_REVIEW", "UNKNOWN_INFORMATION",
+            ("UNKNOWN_INFORMATION", "QUESTION_ANSWER_MISMATCH"),
+        )
+
+    assessment = quality.assess(
         question=question,
         answer=answer,
         # Candidate intake must not treat the default stored score as evidence.
