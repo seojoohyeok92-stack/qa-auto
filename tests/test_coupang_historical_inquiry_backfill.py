@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from config import COUPANG_OJE_NS, COUPANG_OJE_PLUS
+from config import (
+    COUPANG_OJE_NS,
+    COUPANG_OJE_PLUS,
+    OJE_PLUS_TOP_SELLER_PRODUCT_IDS,
+)
 from repositories.coupang_product_catalog_repository import CoupangProductCatalogRepository
 from repositories.coupang_product_mapping_repository import (
     CONFIRMED,
     MANUAL,
+    NEEDS_REVIEW,
     CoupangProductMappingRepository,
 )
 from repositories.database import Database
@@ -100,7 +105,11 @@ def test_backfill_is_answered_only_paginated_account_scoped_and_idempotent(tmp_p
     _configure_accounts(monkeypatch)
     database = _database(tmp_path)
     _seed_mapping(database, COUPANG_OJE_NS, "v-shared", "32DM501")
-    _seed_mapping(database, COUPANG_OJE_PLUS, "v-shared", "25HG400")
+    # OJE_PLUS counts as current stock only inside its operated Top 20 scope.
+    _seed_mapping(
+        database, COUPANG_OJE_PLUS, "v-shared", "25HG400",
+        seller=OJE_PLUS_TOP_SELLER_PRODUCT_IDS[0],
+    )
     clients = {
         COUPANG_OJE_NS: FakeReadClient({
             1: [_inquiry("same-id", "v-shared", [_comment("same-id")])],
@@ -156,7 +165,10 @@ def test_current_model_policy_uses_only_active_coupang_canonical_models(tmp_path
     database = _database(tmp_path)
     # Historical listing is inactive, but another current Coupang listing has the same model.
     _seed_mapping(database, COUPANG_OJE_NS, "v-historical", "32DM501", active=False)
-    _seed_mapping(database, COUPANG_OJE_PLUS, "v-current", "32DM501", active=True)
+    _seed_mapping(
+        database, COUPANG_OJE_PLUS, "v-current", "32DM501", active=True,
+        seller=OJE_PLUS_TOP_SELLER_PRODUCT_IDS[0],
+    )
     _seed_mapping(database, COUPANG_OJE_NS, "v-retired", "27DG700", active=False)
     client = FakeReadClient({1: [
         _inquiry("historical", "v-historical", [_comment("historical")]),
@@ -321,3 +333,144 @@ def test_backfill_preserves_general_installation_and_flags_unknown_information(t
     assert by_id["unknown"]["metadata_json"]["historical_candidate_reason"] == "UNKNOWN_INFORMATION"
     assert by_id["mismatch"]["metadata_json"]["historical_candidate_decision"] == "MANUAL_REVIEW"
     assert by_id["mismatch"]["metadata_json"]["historical_candidate_reason"] == "UNKNOWN_INFORMATION"
+
+
+# --- current operated model set: OJE_NS active UNION OJE_PLUS Top 20 active ---
+#
+# A scoped sync returns before the deactivation sweep a full sync runs, so
+# OJE_PLUS rows an earlier unscoped sync left active are still active -- 613 of
+# them on the server, outside the operated Top 20.  Reading is_active alone
+# would take those for current stock.
+
+TOP20_SELLER_ID = OJE_PLUS_TOP_SELLER_PRODUCT_IDS[0]
+OUTSIDE_TOP20_SELLER_ID = "99999999999"
+
+
+def _backfill(database, account, inquiries):
+    client = FakeReadClient({1: inquiries})
+    return CoupangHistoricalInquiryBackfillService(
+        database, client_factory=lambda _account: client
+    ).backfill_account(account, start_date=date(2025, 1, 2), end_date=date(2025, 1, 2))
+
+
+def test_stale_oje_plus_listing_outside_top20_is_not_current_stock(tmp_path, monkeypatch) -> None:
+    """Scenario A/D: the only active row for the model is a stale non-Top20 one."""
+
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    _seed_mapping(database, COUPANG_OJE_PLUS, "v-past", "32BM501", active=False)
+    _seed_mapping(
+        database, COUPANG_OJE_PLUS, "v-stale", "32BM501",
+        active=True, seller=OUTSIDE_TOP20_SELLER_ID,
+    )
+    result = _backfill(
+        database, COUPANG_OJE_PLUS, [_inquiry("stale", "v-past", [_comment("stale")])]
+    )
+    assert result.candidates_inserted == 0
+    assert result.skipped_not_currently_operated == 1
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM historical_cases").fetchone()[0] == 0
+        # The common Inquiry is still kept; only the Learning candidate is refused.
+        assert connection.execute("SELECT COUNT(*) FROM inquiries").fetchone()[0] == 1
+
+
+def test_inactive_listing_passes_when_same_model_is_active_elsewhere(tmp_path, monkeypatch) -> None:
+    """Scenario B: the past listing need not be the one still selling."""
+
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    _seed_mapping(database, COUPANG_OJE_NS, "v-past", "32DM501", active=False)
+    _seed_mapping(database, COUPANG_OJE_NS, "v-now", "32DM501", active=True)
+    result = _backfill(
+        database, COUPANG_OJE_NS, [_inquiry("reuse", "v-past", [_comment("reuse")])]
+    )
+    assert result.candidates_inserted == 1
+
+
+def test_oje_plus_history_outside_top20_passes_on_top20_active_model(tmp_path, monkeypatch) -> None:
+    """Scenario C: model identity decides, not the past sellerProduct."""
+
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    _seed_mapping(
+        database, COUPANG_OJE_PLUS, "v-past", "32DM501",
+        active=False, seller=OUTSIDE_TOP20_SELLER_ID,
+    )
+    _seed_mapping(
+        database, COUPANG_OJE_PLUS, "v-top", "32DM501",
+        active=True, seller=TOP20_SELLER_ID,
+    )
+    result = _backfill(
+        database, COUPANG_OJE_PLUS, [_inquiry("top20", "v-past", [_comment("top20")])]
+    )
+    assert result.candidates_inserted == 1
+
+
+def test_current_model_set_is_the_union_of_both_accounts(tmp_path, monkeypatch) -> None:
+    """Scenarios E and F: cross-account reuse stays allowed in both directions."""
+
+    _configure_accounts(monkeypatch)
+    plus_db = _database(tmp_path / "plus")
+    _seed_mapping(plus_db, COUPANG_OJE_PLUS, "v-plus-past", "32DM501", active=False)
+    _seed_mapping(plus_db, COUPANG_OJE_NS, "v-ns-now", "32DM501", active=True)
+    assert _backfill(
+        plus_db, COUPANG_OJE_PLUS, [_inquiry("e", "v-plus-past", [_comment("e")])]
+    ).candidates_inserted == 1
+
+    ns_db = _database(tmp_path / "ns")
+    _seed_mapping(ns_db, COUPANG_OJE_NS, "v-ns-past", "32DM501", active=False)
+    _seed_mapping(
+        ns_db, COUPANG_OJE_PLUS, "v-plus-now", "32DM501",
+        active=True, seller=TOP20_SELLER_ID,
+    )
+    assert _backfill(
+        ns_db, COUPANG_OJE_NS, [_inquiry("f", "v-ns-past", [_comment("f")])]
+    ).candidates_inserted == 1
+
+
+def test_inactive_top20_listing_is_not_current_stock(tmp_path, monkeypatch) -> None:
+    """Scenario G: being inside the operated scope is not being on sale."""
+
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    _seed_mapping(database, COUPANG_OJE_PLUS, "v-past", "32DM501", active=False)
+    _seed_mapping(
+        database, COUPANG_OJE_PLUS, "v-top", "32DM501",
+        active=False, seller=TOP20_SELLER_ID,
+    )
+    result = _backfill(
+        database, COUPANG_OJE_PLUS, [_inquiry("idle", "v-past", [_comment("idle")])]
+    )
+    assert result.candidates_inserted == 0
+    assert result.skipped_not_currently_operated == 1
+
+
+def test_unconfirmed_mapping_does_not_make_a_model_current(tmp_path, monkeypatch) -> None:
+    """Scenario H: only a CONFIRMED mapping may name an active listing's model."""
+
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    _seed_mapping(database, COUPANG_OJE_NS, "v-past", "32DM501", active=False)
+    catalog = CoupangProductCatalogRepository(database)
+    catalog.upsert_product(
+        account_code=COUPANG_OJE_NS,
+        data={"sellerProductId": "unreviewed", "status": "APPROVED", "sellerProductName": "미확정"},
+        sync_token="test",
+    )
+    catalog.upsert_option(
+        account_code=COUPANG_OJE_NS, seller_product_id="unreviewed",
+        item={"vendorItemId": "v-unreviewed", "itemName": "미확정 옵션"},
+    )
+    catalog.set_product_active(
+        account_code=COUPANG_OJE_NS, seller_product_id="unreviewed", is_active=True
+    )
+    CoupangProductMappingRepository(database).upsert(
+        account_code=COUPANG_OJE_NS, vendor_item_id="v-unreviewed",
+        seller_product_id="unreviewed", canonical_model="32DM501",
+        mapping_source=MANUAL, mapping_status=NEEDS_REVIEW,
+    )
+    result = _backfill(
+        database, COUPANG_OJE_NS, [_inquiry("unconfirmed", "v-past", [_comment("unconfirmed")])]
+    )
+    assert result.candidates_inserted == 0
+    assert result.skipped_not_currently_operated == 1

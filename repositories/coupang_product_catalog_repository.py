@@ -1,6 +1,7 @@
 """Persistence for Coupang registered products and their option hierarchy."""
 from __future__ import annotations
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 from repositories.database import Database
 
@@ -68,20 +69,68 @@ class CoupangProductCatalogRepository:
         with self.database.transaction() as c:
             c.execute("UPDATE coupang_catalog_options SET on_sale=?, sale_status_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_code=? AND vendor_item_id=?", (int(bool(on_sale)), self._text(account_code), self._text(vendor_item_id)))
 
-    def is_canonical_model_currently_active(self, canonical_model: object) -> bool:
+    def is_canonical_model_currently_active(
+        self,
+        canonical_model: object,
+        *,
+        operating_scopes: "Mapping[str, Sequence[object] | None] | None" = None,
+    ) -> bool:
         """Whether a confirmed option for this model is currently selling.
 
-        This is intentionally account-agnostic: a historical answer from one
-        Coupang account may remain useful when the same canonical model is
-        actively operated by the other account.
+        This stays account-agnostic on purpose: a historical answer from one
+        Coupang account remains useful when the same canonical model is
+        actively operated by the other account.  What it is *not* agnostic
+        about is which listings count as currently operated.
+
+        ``operating_scopes`` maps an account code to the seller products that
+        account currently operates, or to ``None`` when its whole active
+        catalogue counts.  Only the listed accounts are considered.
+
+        The scope matters because ``is_active`` is not a complete answer on its
+        own.  A scoped sync (OJE_PLUS) returns before the deactivation sweep
+        that a full sync runs, so rows an earlier unscoped sync left active
+        stay active -- 613 of them on the server outside the operated Top 20.
+        Without a scope those stale rows read as current stock and would admit
+        historical answers for models nobody sells today.  Passing no scopes
+        keeps the older unrestricted meaning.
         """
 
         model = self._text(canonical_model)
         if not model:
             return False
+        clauses = [
+            "p.is_active=1",
+            "m.mapping_status='CONFIRMED'",
+            "m.canonical_model=?",
+        ]
+        values: list[Any] = [model]
+        if operating_scopes is not None:
+            accounts: list[str] = []
+            for account_code, scope in operating_scopes.items():
+                account = self._text(account_code)
+                if not account:
+                    continue
+                if scope is None:
+                    accounts.append("p.account_code=?")
+                    values.append(account)
+                    continue
+                seller_ids = [
+                    text for value in scope if (text := self._text(value))
+                ]
+                if not seller_ids:
+                    continue
+                placeholders = ",".join("?" * len(seller_ids))
+                accounts.append(
+                    f"(p.account_code=? AND p.seller_product_id IN ({placeholders}))"
+                )
+                values.append(account)
+                values.extend(seller_ids)
+            if not accounts:
+                return False
+            clauses.append("(" + " OR ".join(accounts) + ")")
         with self.database.connection() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT 1
                 FROM coupang_catalog_products p
                 JOIN coupang_catalog_options o
@@ -90,12 +139,10 @@ class CoupangProductCatalogRepository:
                 JOIN coupang_product_mappings m
                   ON m.account_code=o.account_code
                  AND m.vendor_item_id=o.vendor_item_id
-                WHERE p.is_active=1
-                  AND m.mapping_status='CONFIRMED'
-                  AND m.canonical_model=?
+                WHERE {' AND '.join(clauses)}
                 LIMIT 1
                 """,
-                (model,),
+                values,
             ).fetchone()
         return row is not None
 

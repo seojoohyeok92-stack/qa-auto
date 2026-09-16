@@ -14,7 +14,14 @@ from datetime import date, timedelta
 from typing import Any, Callable
 
 from api.coupang_read_client import CoupangReadClient
-from config import CoupangAccountSettings, get_coupang_account, get_coupang_accounts
+from config import (
+    COUPANG_OJE_NS,
+    COUPANG_OJE_PLUS,
+    CoupangAccountSettings,
+    get_coupang_account,
+    get_coupang_accounts,
+    get_coupang_catalog_sync_scope,
+)
 from repositories.coupang_product_catalog_repository import CoupangProductCatalogRepository
 from repositories.coupang_product_mapping_repository import CoupangProductMappingRepository
 from repositories.database import Database
@@ -26,6 +33,11 @@ from services.historical_learning_quality_service import classify_historical_can
 
 HISTORICAL_START_DATE = date(2024, 9, 1)
 ONLINE_INQUIRY_TYPE = "COUPANG_ONLINE_INQUIRY"
+# The accounts whose current stock decides whether a historical model is still
+# worth learning from.  Listed rather than read from configured credentials:
+# whether an account's API keys happen to be present says nothing about what is
+# on sale, and a missing key must not silently shrink the operated model set.
+CURRENT_MODEL_ACCOUNTS: tuple[str, ...] = (COUPANG_OJE_NS, COUPANG_OJE_PLUS)
 
 ReadClientFactory = Callable[[CoupangAccountSettings], CoupangReadClient]
 
@@ -247,7 +259,23 @@ class CoupangHistoricalInquiryBackfillService:
         except Exception:
             result.failed += 1
 
+    @staticmethod
+    def _current_operating_scopes() -> dict[str, tuple[str, ...] | None]:
+        """What each Coupang account is operating right now.
+
+        ``get_coupang_catalog_sync_scope`` is the single place that says so --
+        the same list the manual catalog sync and the matching screen use --
+        so the Top 20 is read from it rather than restated here.
+        """
+
+        return {
+            account_code: get_coupang_catalog_sync_scope(account_code)
+            for account_code in CURRENT_MODEL_ACCOUNTS
+        }
+
     def _operation_source(self, canonical_model: str) -> str | None:
-        if self.catalog.is_canonical_model_currently_active(canonical_model):
+        if self.catalog.is_canonical_model_currently_active(
+            canonical_model, operating_scopes=self._current_operating_scopes()
+        ):
             return "COUPANG_ACTIVE_CATALOG"
         return None
