@@ -138,34 +138,6 @@ DAMAGE_OR_DEFECT = re.compile(
     r"파손|불량|하자|고장|손상|깨[짐졌]|흠집|누락|오배송|책임|보상",
     re.IGNORECASE,
 )
-# A failure that has already happened to the asker's own unit, told as an
-# event.  This is the line between "조립 방법 알려주세요" -- a standing FAQ any
-# later customer can reuse -- and "나사가 전부 빠졌습니다, 다시 해주세요",
-# which is one customer's damaged product and a CS decision about it.  Both
-# say 조립, so the noun cannot decide it; the failure verb can.
-PRODUCT_TROUBLE_EVENT = re.compile(
-    r"(?:나사|볼트|스탠드|브라켓|거치대|본체|화면|전원)[^\n]{0,12}"
-    r"(?:빠졌|빠져|풀렸|풀려|헐거|느슨|망가|부러|기울어|흔들려)"
-    r"|고정(?:이|도)?[^\n]{0,4}(?:안\s*되|안\s*돼|되지\s*않)"
-    r"|(?:다시|재)[^\n]{0,4}조립(?:할\s*수\s*없|이\s*안|하기\s*어려|되지\s*않)"
-    r"|분해(?:했|하였|해서)"
-    r"|(?:조립|설치)(?:하다가|하던\s*중)[^\n]{0,20}"
-    r"(?:빠졌|풀렸|망가|문제|안\s*되|실패)",
-    re.IGNORECASE,
-)
-# A symptom the asker's product is showing now, or a service call they have
-# already placed.  "AS 접수 전화번호가 어디인가요" stays a policy question --
-# it reports no symptom and books no visit -- so the request half requires a
-# past-tense 신청/접수, not the word A/S on its own.
-PRODUCT_MALFUNCTION = re.compile(
-    r"(?:전원|화면|소리|리모컨|버튼)[^\n]{0,10}"
-    r"(?:안\s*켜|켜지지\s*않|안\s*나[오와]|나오지\s*않|안\s*들|"
-    r"작동(?:하지|되지)\s*않|먹통)"
-    r"|갑자기[^\n]{0,16}(?:않|안\s*되|안\s*돼|멈춤|멈춰)"
-    r"|(?:출장\s*서비스|출장서비스|기사\s*방문|A/?S|수리)[^\n]{0,10}"
-    r"(?:신청|접수)(?:했|하였|을\s*했)",
-    re.IGNORECASE,
-)
 TEMPORARY_TRANSACTION = re.compile(
     r"할인|쿠폰|가격|사은품|상품권|온누리|프로모션|이벤트|행사|신청\s*기간|"
     r"재고|명절|추석|설날|기간\s*(?:내|중|한정)|까지\s*신청",
@@ -195,13 +167,21 @@ UNKNOWN_OR_UNVERIFIED = re.compile(
     r"확인\s*후.{0,16}(?:안내|답변)|알\s*수\s*없|확인\s*어렵",
     re.IGNORECASE,
 )
-# An answer that settles the cause by putting it on the customer's own side.
-# "모니터 문제가 아니라 고객님 PC 문제입니다" states no evidence for either
-# half, and generalising it would answer a later customer's unrelated symptom
-# with a verdict nobody checked.
+# An answer whose reasoning is about this one asker: a verdict on what they
+# personally did, or a reading of evidence only they submitted.
+#
+# The topic is not what makes these unusable.  A 나사/전원/고장 question whose
+# answer gives the official check or the standard AS route is reusable
+# knowledge and stays KEEP.  What cannot be reused is the *finding*:
+# "사진 확인 시 강제로 푸신 것으로 확인됩니다" is true of one photograph, and
+# "모니터 문제가 아니라 고객님 PC 문제입니다" names a cause nobody verified.
+# Repeating either to the next customer answers a question they did not ask.
 UNSUPPORTED_CAUSE_ASSERTION = re.compile(
     r"(?:제품|모니터|tv|티비|티브이)\s*(?:의\s*)?문제가?\s*아니(?:라|고|며|)"
-    r"|고객님[^\n]{0,12}(?:문제|탓|잘못)(?:입니다|이라|일\s*수)",
+    r"|고객님[^\n]{0,12}(?:문제|탓|잘못)(?:입니다|이라|일\s*수)"
+    r"|사진[^\n]{0,12}(?:확인|보면|보니|첨부)"
+    r"|(?:푸신|푸셨|하신|하셨|누르신|분해하신|조작하신|해제하신)"
+    r"[^\n]{0,8}(?:것으로|것\s*같|걸로)\s*(?:확인|보입|판단|추정)",
     re.IGNORECASE,
 )
 # ``발송`` alone is ordinary listing copy -- "각각 박스로 발송됩니다" describes
@@ -213,6 +193,19 @@ SHIPPING_DISPATCH = re.compile(
     r"[^\n]{0,8}발송"
     r"|발송[^\n]{0,8}(?:언제|지연|예정|부탁|요청|해\s*주|해주)",
     re.IGNORECASE,
+)
+# Read by the intake gate alone.  ``CONCEPT_PATTERNS`` is shared with runtime
+# relevance and search ranking and is deliberately left untouched, so this
+# lives beside it rather than in it.
+#
+# 서비스센터 is how an after-service answer names itself, and the shared
+# concept set has no term for it: "AS 접수는 어디서 하나요" carries
+# AFTER_SERVICE while its correct answer "삼성전자 서비스센터를 통해 접수할
+# 수 있습니다" carries only POLICY, so the pair scores as a mismatch.  When
+# both sides name the same route, that verdict is an artefact of the missing
+# word, not a real disagreement.
+INTAKE_AFTER_SERVICE_ROUTE = re.compile(
+    r"A/?S|에이에스|서비스\s*센터", re.IGNORECASE
 )
 
 
@@ -238,6 +231,11 @@ def _terse_question_left_unanswered(
     Kept to a terse question on purpose.  A full sentence that merely shares
     no vocabulary with its answer is usually a paraphrase, not a mismatch, and
     sweeping those in would delete ordinary product FAQ.
+
+    The question word is matched by its stem, not whole.  Korean inflects the
+    subject away -- "터치되나요?" asks about 터치 and its correct answer says
+    "터치 기능을 지원하지 않습니다" -- so comparing whole tokens called that a
+    mismatch and sent a model-accurate FAQ answer to review.
     """
 
     tokens = [token for token in WORD.findall(question.lower()) if len(token) > 1]
@@ -246,7 +244,11 @@ def _terse_question_left_unanswered(
     if quality.concepts(question) or not quality.concepts(answer):
         return False
     lowered = answer.lower()
-    return not any(token in lowered for token in tokens)
+    return not any(
+        token[:length] in lowered
+        for token in tokens
+        for length in range(len(token), 1, -1)
+    )
 
 
 def classify_historical_candidate(question: str, answer: str) -> HistoricalCandidateGate:
@@ -263,15 +265,6 @@ def classify_historical_candidate(question: str, answer: str) -> HistoricalCandi
 
     if DAMAGE_OR_DEFECT.search(combined):
         return HistoricalCandidateGate("EXCLUDE", "DAMAGE_DEFECT", ("DAMAGE_DEFECT",))
-    if PRODUCT_TROUBLE_EVENT.search(combined):
-        return HistoricalCandidateGate(
-            "EXCLUDE", "DAMAGE_DEFECT",
-            ("DAMAGE_DEFECT", "INDIVIDUAL_PRODUCT_TROUBLE"),
-        )
-    if PRODUCT_MALFUNCTION.search(combined):
-        return HistoricalCandidateGate(
-            "EXCLUDE", "DAMAGE_DEFECT", ("DAMAGE_DEFECT", "PRODUCT_MALFUNCTION"),
-        )
     if RETURN_TRANSACTION.search(combined):
         return HistoricalCandidateGate("EXCLUDE", "CS_TRANSACTION", ("CS_TRANSACTION",))
     if ORDER_SPECIFIC.search(combined) or ORDER_SPECIFIC_SIGNAL.search(combined):
@@ -314,7 +307,15 @@ def classify_historical_candidate(question: str, answer: str) -> HistoricalCandi
         stored_quality=0.0,
         active=True,
     )
-    if assessment.status in {
+    # Both sides naming the same after-service route means the alignment score
+    # is short a word, not short an answer.  Intake only -- ``assess`` returns
+    # the same verdict it always did to every other caller.
+    shares_after_service_route = bool(
+        assessment.status in {"QUESTION_ANSWER_MISMATCH", "LOW_RELEVANCE"}
+        and INTAKE_AFTER_SERVICE_ROUTE.search(question)
+        and INTAKE_AFTER_SERVICE_ROUTE.search(answer)
+    )
+    if not shares_after_service_route and assessment.status in {
         "QUESTION_ANSWER_MISMATCH", "LOW_RELEVANCE", "REVIEW_REQUIRED", "POLICY_RISK",
     }:
         tags.append(assessment.status)

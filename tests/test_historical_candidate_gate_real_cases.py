@@ -2,8 +2,16 @@
 
 Every exchange below is a reconstruction of a row that a READ-ONLY replay of
 the 45 stored ``COUPANG_ONLINE_HISTORY`` cases actually produced, so each test
-records a decision that was observed to be wrong rather than one imagined from
-the policy text.
+records a decision that was observed rather than one imagined from policy text.
+
+The gate answers one question only: *can this stored pair be reused as
+knowledge for a later customer?*  It is not the production auto-answer gate,
+and a KEEP here is a candidate for review, never an activation -- Coupang
+historical rows are written with ``candidate_only`` and stay inactive.  So the
+subject of a question never decides the outcome on its own: a 파손/고장/나사
+question whose answer gives the official check or the standard AS route is
+reusable knowledge, while an answer that reads one customer's photograph is
+not, whatever it is about.
 """
 
 from __future__ import annotations
@@ -13,52 +21,110 @@ import pytest
 from services.historical_learning_quality_service import classify_historical_candidate
 
 
-# --- individual product trouble: one customer's unit, not a standing FAQ ----
+# --- always excluded: one order, one transaction, one window ---------------
 
-def test_loosened_screws_that_fell_out_is_a_cs_case_not_assembly_faq() -> None:
-    """Case 269 reached KEEP: no concept pattern covers 나사 or 조립."""
+@pytest.mark.parametrize(
+    "question,answer,reason",
+    [
+        pytest.param(
+            "제 주문 언제 배송되나요?", "고객님 건은 9/12 배송 예정입니다.",
+            "ORDER_SPECIFIC", id="one-order-delivery-date",
+        ),
+        pytest.param(
+            "지금 어디까지 왔나요?", "현재 출고되어 배송 중입니다.",
+            "DELIVERY", id="one-order-delivery-status",
+        ),
+        pytest.param(
+            "주문 취소했는데 처리됐나요?", "이미 주문 취소하신 것으로 확인됩니다.",
+            "CS_TRANSACTION", id="one-order-cancellation-state",
+        ),
+        pytest.param(
+            "반품 접수했는데 어떻게 되나요?", "반품 회수 후 환불 처리될 예정입니다.",
+            "CS_TRANSACTION", id="one-order-return-state",
+        ),
+        pytest.param(
+            "상품권 언제까지 신청하나요?", "09/30일까지 신청기간입니다.",
+            "TEMPORARY", id="voucher-application-window",
+        ),
+        pytest.param(
+            "할인 적용되나요?", "현재 진행 중인 쿠폰 할인으로 구매 가능합니다.",
+            "TEMPORARY", id="current-discount",
+        ),
+        pytest.param(
+            "확인 부탁드립니다", "네",
+            "LOW_VALUE", id="no-standalone-knowledge",
+        ),
+    ],
+)
+def test_order_transaction_and_temporary_rows_are_excluded(
+    question: str, answer: str, reason: str
+) -> None:
+    gate = classify_historical_candidate(question, answer)
+    assert gate.decision == "EXCLUDE"
+    assert gate.primary_reason == reason
+
+
+def test_dispatch_promise_is_delivery_even_without_the_word_배송() -> None:
+    gate = classify_historical_candidate("빨리 보내주세요", "최대한 빠르게 발송하겠습니다.")
+    assert gate.decision == "EXCLUDE"
+    assert gate.primary_reason == "DELIVERY"
+
+
+# --- reusable troubleshooting and AS knowledge must survive ----------------
+#
+# These are the cases an earlier revision excluded on topic alone: it read
+# 나사/전원/고장 in the question and stopped there. The answers below are
+# official, general and repeatable, which is what actually decides it.
+
+@pytest.mark.parametrize(
+    "question,answer",
+    [
+        pytest.param(
+            "전원이 안 켜지는데 어떻게 해야 하나요?",
+            "전원 케이블 연결 상태를 먼저 확인해 주세요. 동일 증상이 지속되면 "
+            "삼성전자 서비스센터를 통해 점검을 신청해 주세요.",
+            id="power-fault-with-official-check-and-as-route",
+        ),
+        pytest.param(
+            "나사가 빠졌는데 다시 조립하려면 어떻게 해야 하나요?",
+            "해당 부위는 사용자가 분해하는 부분이 아닙니다. 추가 조립을 시도하지 "
+            "마시고 삼성전자 서비스센터 점검을 받아 주세요.",
+            id="loose-screw-with-general-safe-instruction",
+        ),
+        pytest.param(
+            "AS 접수는 어디서 하나요?",
+            "삼성전자 서비스센터를 통해 접수할 수 있습니다.",
+            id="as-intake-route",
+        ),
+    ],
+)
+def test_troubleshooting_answers_that_generalise_stay_keep(
+    question: str, answer: str
+) -> None:
+    gate = classify_historical_candidate(question, answer)
+    assert gate.decision == "KEEP"
+    assert gate.primary_reason == "STABLE_PRODUCT_FAQ"
+
+
+# --- the question is fine; only some answers are not ----------------------
+
+def test_touch_question_answered_about_touch_is_a_good_candidate() -> None:
+    """"터치되나요?" is a model FAQ.  Nothing about the question is a problem."""
 
     gate = classify_historical_candidate(
-        "모니터가 고정이 안 되고 기존 나사가 느슨해서 다시 조이다가 "
-        "나사가 전부 빠졌습니다. 다시 해주세요.",
-        "풀면 안 되는 곳을 강제로 푸신 것으로 보입니다.",
+        "터치되나요?", "해당 모델은 터치 기능을 지원하지 않습니다."
     )
-    assert gate.decision == "EXCLUDE"
-    assert gate.primary_reason == "DAMAGE_DEFECT"
-    assert "INDIVIDUAL_PRODUCT_TROUBLE" in gate.tags
+    assert gate.decision == "KEEP"
+    assert gate.primary_reason == "STABLE_PRODUCT_FAQ"
 
-
-def test_failed_reassembly_request_is_excluded_despite_policy_shaped_answer() -> None:
-    """Case 282: the answer reads like a standing 조립서비스 policy, but the
-    question is one customer's stuck product."""
-
-    gate = classify_historical_candidate(
-        "모니터를 고정하다가 기존에 조립된 나사가 풀렸고 무거워서 "
-        "다시 조립할 수 없습니다. 조립해주세요.",
-        "별도 조립서비스는 제공하지 않으며 조립 영상을 참고해주시기 바랍니다.",
-    )
-    assert gate.decision == "EXCLUDE"
-    assert gate.primary_reason == "DAMAGE_DEFECT"
-
-
-def test_dead_power_with_engineer_visit_already_booked_is_excluded() -> None:
-    """Case 284: a live fault plus a service call the customer already made."""
-
-    gate = classify_historical_candidate(
-        "갑자기 전원이 켜지지 않아서 삼성 서비스센터에 출장서비스를 "
-        "신청했는데 그렇게 하는 게 맞나요?",
-        "네 맞습니다. 서비스센터로 접수하시면 됩니다.",
-    )
-    assert gate.decision == "EXCLUDE"
-    assert gate.primary_reason == "DAMAGE_DEFECT"
-    assert "PRODUCT_MALFUNCTION" in gate.tags
-
-
-# --- question/answer mismatch the concept vocabulary could not see ----------
 
 def test_touch_question_answered_with_mounting_specs_goes_to_review() -> None:
-    """Case 285 reached KEEP because 터치 is in no concept pattern, which
-    switched the mismatch test off entirely."""
+    """Case 285: the same question, answered about VESA holes and weight.
+
+    ``assess`` sees a mismatch only when both sides carry a known concept, and
+    터치 is in none of the ten concept patterns, so the check was switched off
+    entirely and this pair reached KEEP.
+    """
 
     gate = classify_historical_candidate(
         "터치되나요?",
@@ -69,10 +135,52 @@ def test_touch_question_answered_with_mounting_specs_goes_to_review() -> None:
     assert "QUESTION_ANSWER_MISMATCH" in gate.tags
 
 
-def test_unclear_symptom_answered_by_blaming_the_customer_pc_goes_to_review() -> None:
-    """Case 301: the question's meaning is unclear and the answer settles the
-    cause on the customer's side with nothing behind it."""
+# --- answers whose reasoning belongs to one asker -------------------------
 
+def test_case_269_verdict_read_off_the_customers_photo_goes_to_review() -> None:
+    """Not because it is a 나사/분해 case -- because the answer's finding is
+    about one photograph and offers no reassembly method anyone can reuse."""
+
+    gate = classify_historical_candidate(
+        "모니터가 고정이 안 되고 기존 나사가 느슨해서 다시 조이다가 "
+        "나사가 전부 빠졌습니다. 다시 해주세요.",
+        "사진 확인 시 풀면 안 되는 곳을 강제로 푸신 것으로 확인됩니다. "
+        "사용설명서에도 해당 부분을 분해하라는 곳이 없었습니다.",
+    )
+    assert gate.decision == "MANUAL_REVIEW"
+    assert gate.primary_reason == "UNKNOWN_INFORMATION"
+    assert "UNSUPPORTED_CAUSE_ASSERTION" in gate.tags
+
+
+def test_case_282_reusable_assembly_service_policy_stays_a_candidate() -> None:
+    """The question is one customer's stuck product, but the answer states a
+    standing policy -- no assembly service, use the guide video -- which is
+    exactly the kind of thing later customers ask."""
+
+    gate = classify_historical_candidate(
+        "모니터를 고정하다가 기존에 조립된 나사가 풀렸고 무거워서 "
+        "다시 조립할 수 없습니다. 조립해주세요.",
+        "별도의 조립서비스는 없습니다. 조립영상 참고 바랍니다.",
+    )
+    assert gate.decision == "KEEP"
+    assert gate.primary_reason == "STABLE_PRODUCT_FAQ"
+
+
+def test_case_284_is_judged_on_how_little_the_answer_says() -> None:
+    """A real fault, but "네 맞습니다." carries no knowledge on its own.  The
+    fault is not the reason for review; the empty answer is."""
+
+    gate = classify_historical_candidate(
+        "갑자기 전원이 켜지지 않아서 삼성 서비스센터에 출장서비스를 "
+        "신청했는데 그렇게 하는 게 맞나요?",
+        "네 맞습니다.",
+    )
+    assert gate.decision == "MANUAL_REVIEW"
+    assert gate.primary_reason == "UNKNOWN_INFORMATION"
+    assert "REVIEW_REQUIRED" in gate.tags
+
+
+def test_case_301_unclear_symptom_answered_by_blaming_the_customer_pc() -> None:
     gate = classify_historical_candidate(
         "설치 후 로그인하면 모니터에 나타납니다. 왜 그런가요?",
         "모니터는 PC 신호를 표시하는 장치이며 화면에서 넘어가지 않는다면 "
@@ -83,15 +191,7 @@ def test_unclear_symptom_answered_by_blaming_the_customer_pc_goes_to_review() ->
     assert "UNSUPPORTED_CAUSE_ASSERTION" in gate.tags
 
 
-# --- delivery wording that used only 발송 -----------------------------------
-
-def test_dispatch_promise_is_delivery_even_without_the_word_배송() -> None:
-    gate = classify_historical_candidate("빨리 보내주세요", "최대한 빠르게 발송하겠습니다.")
-    assert gate.decision == "EXCLUDE"
-    assert gate.primary_reason == "DELIVERY"
-
-
-# --- protected: stable product FAQ must stay reusable ----------------------
+# --- protected: stable product FAQ ----------------------------------------
 
 @pytest.mark.parametrize(
     "question,answer",
@@ -101,6 +201,12 @@ def test_dispatch_promise_is_delivery_even_without_the_word_배송() -> None:
             "별도 이동식 스탠드라면 스탠드형으로 주문하셔도 브라켓 체결이 "
             "가능한 VESA 홀이 있어 사용에 문제없습니다.",
             id="case-262-vesa-compatibility",
+        ),
+        pytest.param(
+            "화면을 세로로 돌리면 화면도 자동으로 세로로 전환되나요?",
+            "해당 모델은 오토피벗 기능을 지원하여 화면을 세로로 돌리시면 "
+            "자동으로 전환됩니다.",
+            id="case-268-auto-pivot",
         ),
         pytest.param(
             "와이파이 연결방법 알려주세요.",
