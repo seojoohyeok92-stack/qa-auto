@@ -179,7 +179,7 @@ def test_backfill_preserves_privacy_and_does_not_post_or_call_contact_center(tmp
     database = _database(tmp_path)
     _seed_mapping(database, COUPANG_OJE_NS, "v-private", "32DM501")
     item = _inquiry("private", "v-private", [_comment("private")])
-    item["content"] = "홍길동 010-1234-5678 주문번호 1234567890123456"
+    item["content"] = "홍길동 010-1234-5678 주문번호 1234567890123456 주소는 테스트로 123"
     item["commentDtoList"][0]["content"] = "주소 서울시 테스트로 1, 주문번호 1234567890123456"
     client = FakeReadClient({1: [item]})
     result = CoupangHistoricalInquiryBackfillService(
@@ -191,6 +191,7 @@ def test_backfill_preserves_privacy_and_does_not_post_or_call_contact_center(tmp
         posts = connection.execute("SELECT COUNT(*) FROM naver_post_attempts").fetchone()[0]
     assert "010-1234-5678" not in row[0]
     assert "1234567890123456" not in row[1]
+    assert "테스트로 123" not in row[0]
     assert row[2] == 0 and posts == 0
     assert not hasattr(client, "list_contact_center_inquiries")
 
@@ -222,3 +223,101 @@ def test_approved_coupang_candidate_defaults_to_coupang_only_learning(tmp_path, 
     assert promoted["metadata_json"]["shared_cross_market_learning"] is False
     assert promoted["metadata_json"]["origin_market"] == "COUPANG"
     assert promoted["metadata_json"]["market_applicability"] == "COUPANG_ONLY"
+
+
+def test_backfill_excludes_delivery_cs_damage_and_temporary_cases(tmp_path, monkeypatch) -> None:
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    cases = [
+        ("delivery-date", "9월22일 배송예정이라는데 좀 더 빨리 배송 가능할까요?", "고객님건의 경우 09/12 예정으로 확인됩니다."),
+        ("delivery-fast", "빨리 보내주세요", "고객님건의 경우 09/12 예정으로 확인됩니다."),
+        ("delivery-when", "삼성TV 언제 배송되나요", "고객님 건 확인 시 14일 예정으로 확인됩니다."),
+        ("cancel", "주문 취소하겠습니다", "처리 도와드리겠습니다."),
+        ("discount", "추가 구매하려는데 할인 적용 가능한가요?", "현재 기본 판매자 자체 할인 적용 중입니다."),
+        ("benefit", "온누리상품권을 아직 못받았습니다", "삼성닷컴으로 신청해주세요. 09/30일까지 신청기간입니다."),
+        ("damage", "파손된 상품은 이미 회수했는데 새 상품은 언제 배송되나요?", "새 상품 배송을 확인하겠습니다."),
+    ]
+    payloads = []
+    for case_id, question, answer in cases:
+        vendor = f"v-{case_id}"
+        _seed_mapping(database, COUPANG_OJE_NS, vendor, "32DM501")
+        item = _inquiry(case_id, vendor, [_comment(case_id)])
+        item["content"] = question
+        item["commentDtoList"][0]["content"] = answer
+        payloads.append(item)
+
+    result = CoupangHistoricalInquiryBackfillService(
+        database, client_factory=lambda _account: FakeReadClient({1: payloads})
+    ).backfill_account(COUPANG_OJE_NS, start_date=date(2025, 1, 2), end_date=date(2025, 1, 2))
+
+    assert result.fetched == 7
+    assert result.skipped_learning_excluded == 7
+    assert result.candidates_inserted == 0
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM historical_cases").fetchone()[0] == 0
+
+
+def test_backfill_keeps_product_faq_and_marks_bundle_for_manual_review(tmp_path, monkeypatch) -> None:
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    payloads = []
+    for case_id, question, answer in (
+        ("wifi", "Wi-Fi 연결 방법이 궁금합니다", "설정 메뉴에서 Wi-Fi를 선택한 후 네트워크에 연결해 주세요."),
+        ("vesa", "VESA 이동식 거치대를 사용할 수 있나요?", "규격을 확인한 뒤 호환되는 거치대를 사용할 수 있습니다."),
+        ("bundle", "스탠드와 같이 오나요?", "해당제품은 모니터와 스탠드 패키지상품이며 박스는 각각 갑니다."),
+    ):
+        vendor = f"v-{case_id}"
+        _seed_mapping(database, COUPANG_OJE_NS, vendor, "32DM501")
+        item = _inquiry(case_id, vendor, [_comment(case_id)])
+        item["content"] = question
+        item["commentDtoList"][0]["content"] = answer
+        payloads.append(item)
+
+    client = FakeReadClient({1: payloads})
+    result = CoupangHistoricalInquiryBackfillService(
+        database, client_factory=lambda _account: client
+    ).backfill_account(COUPANG_OJE_NS, start_date=date(2025, 1, 2), end_date=date(2025, 1, 2))
+
+    assert result.candidates_inserted == 3
+    assert result.manual_review_candidates == 1
+    rows = HistoricalCaseService(database).repository.list_cases(limit=10)
+    by_id = {row["external_inquiry_id"]: row for row in rows}
+    assert by_id["wifi"]["metadata_json"]["historical_candidate_decision"] == "KEEP"
+    assert by_id["vesa"]["metadata_json"]["historical_candidate_decision"] == "KEEP"
+    assert by_id["bundle"]["metadata_json"]["historical_candidate_decision"] == "MANUAL_REVIEW"
+    assert by_id["bundle"]["metadata_json"]["historical_candidate_reason"] == "LISTING_OR_BUNDLE_SPECIFIC"
+    assert all(row["metadata_json"]["origin_market"] == "COUPANG" for row in rows)
+    assert all(row["metadata_json"]["market_applicability"] == "COUPANG_ONLY" for row in rows)
+
+
+def test_backfill_preserves_general_installation_and_flags_unknown_information(tmp_path, monkeypatch) -> None:
+    _configure_accounts(monkeypatch)
+    database = _database(tmp_path)
+    payloads = []
+    for case_id, question, answer in (
+        ("iptv", "IPTV와 Netflix, YouTube를 사용할 수 있나요?", "셋톱박스를 연결하고 앱을 이용할 수 있습니다."),
+        ("move-install", "기존 제품 이동설치도 가능한가요?", "일반 설치 가능 여부는 설치 환경을 확인해 안내드립니다."),
+        ("unknown", "이 모델의 특별 기능은 무엇인가요?", "정확한 내용은 확인 후 안내드리겠습니다."),
+        ("mismatch", "VESA 거치대와 호환되나요?", "넷플릭스는 앱 메뉴에서 사용할 수 있습니다."),
+    ):
+        vendor = f"v-{case_id}"
+        _seed_mapping(database, COUPANG_OJE_NS, vendor, "32DM501")
+        item = _inquiry(case_id, vendor, [_comment(case_id)])
+        item["content"] = question
+        item["commentDtoList"][0]["content"] = answer
+        payloads.append(item)
+
+    result = CoupangHistoricalInquiryBackfillService(
+        database, client_factory=lambda _account: FakeReadClient({1: payloads})
+    ).backfill_account(COUPANG_OJE_NS, start_date=date(2025, 1, 2), end_date=date(2025, 1, 2))
+
+    assert result.candidates_inserted == 4
+    assert result.manual_review_candidates == 2
+    rows = HistoricalCaseService(database).repository.list_cases(limit=10)
+    by_id = {row["external_inquiry_id"]: row for row in rows}
+    assert by_id["iptv"]["metadata_json"]["historical_candidate_decision"] == "KEEP"
+    assert by_id["move-install"]["metadata_json"]["historical_candidate_decision"] == "KEEP"
+    assert by_id["unknown"]["metadata_json"]["historical_candidate_decision"] == "MANUAL_REVIEW"
+    assert by_id["unknown"]["metadata_json"]["historical_candidate_reason"] == "UNKNOWN_INFORMATION"
+    assert by_id["mismatch"]["metadata_json"]["historical_candidate_decision"] == "MANUAL_REVIEW"
+    assert by_id["mismatch"]["metadata_json"]["historical_candidate_reason"] == "UNKNOWN_INFORMATION"

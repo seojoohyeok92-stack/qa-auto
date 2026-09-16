@@ -21,6 +21,7 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from services.coupang_inquiry_normalizer import CoupangInquiryNormalizer
 from services.historical_case_service import HistoricalCaseService
+from services.historical_learning_quality_service import classify_historical_candidate
 
 
 HISTORICAL_START_DATE = date(2024, 9, 1)
@@ -44,6 +45,8 @@ class CoupangHistoricalBackfillResult:
     skipped_multi_comment_review: int = 0
     skipped_unmapped: int = 0
     skipped_not_currently_operated: int = 0
+    skipped_learning_excluded: int = 0
+    manual_review_candidates: int = 0
     failed: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -171,6 +174,13 @@ class CoupangHistoricalInquiryBackfillService:
                 result.skipped_no_answer += 1
                 return
 
+            candidate_gate = classify_historical_candidate(
+                normalized.content, normalized.seller_answer
+            )
+            if candidate_gate.decision == "EXCLUDE":
+                result.skipped_learning_excluded += 1
+                return
+
             vendor_item_id = str(payload.get("vendorItemId") or "").strip()
             mapping = (
                 self.mappings.get_confirmed(
@@ -203,6 +213,7 @@ class CoupangHistoricalInquiryBackfillService:
                         # marketplace procedure that differs elsewhere.  Only
                         # an explicit review decision may make it COMMON.
                         "market_applicability": "COUPANG_ONLY",
+                        "origin_market": "COUPANG",
                         "shared_cross_market_learning": False,
                         "account_code": account_code,
                         "canonical_model": canonical_model,
@@ -213,6 +224,9 @@ class CoupangHistoricalInquiryBackfillService:
                         "seller_item_id": payload.get("sellerItemId"),
                         "inquiry_comment_id": normalized.inquiry_comment_id,
                         "seller_answer_selection": normalized.answer_selection_status,
+                        "historical_candidate_decision": candidate_gate.decision,
+                        "historical_candidate_reason": candidate_gate.primary_reason,
+                        "historical_candidate_tags": list(candidate_gate.tags),
                     },
                 }
             )
@@ -228,6 +242,8 @@ class CoupangHistoricalInquiryBackfillService:
                 f"candidates_{outcome}",
                 getattr(result, f"candidates_{outcome}") + 1,
             )
+            if candidate_gate.decision == "MANUAL_REVIEW":
+                result.manual_review_candidates += 1
         except Exception:
             result.failed += 1
 

@@ -24,6 +24,14 @@ ADDRESS = re.compile(
     r"(?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|"
     r"전북|전남|경북|경남|제주)[^\n,]{0,50}(?:로|길|동|읍|면)\s*\d+(?:-\d+)?"
 )
+# The regional-address expression above intentionally avoids ordinary product
+# wording, but source Q&A also contains labelled delivery addresses without a
+# province/city prefix.  Require an address label plus a road/building signal
+# so "배송주소 변경" alone is not over-redacted.
+LABELLED_ADDRESS = re.compile(
+    r"(?:배송\s*주소|배송지|수령지|주소)\s*(?:[:：]|은|는|가|이)\s*"
+    r"[^\n]{0,50}?(?:\d{1,4}(?:-\d{1,4})?|[가-힣]{2,}(?:로|길|동|읍|면))"
+)
 
 
 class LearningPrivacyService:
@@ -51,4 +59,5 @@ class LearningPrivacyService:
         text = ORDER_ID.sub("<masked-order-id>", text)
         text = PRODUCT_ORDER_ID.sub("<masked-product-order-id>", text)
         text = ADDRESS.sub("<masked-address>", text)
+        text = LABELLED_ADDRESS.sub("<masked-address>", text)
         return SECRET.sub("<masked-secret>", text).strip()

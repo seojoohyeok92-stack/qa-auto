@@ -118,6 +118,115 @@ LOW_INFORMATION = re.compile(
     re.IGNORECASE,
 )
 
+
+# Historical candidate intake is deliberately narrower than runtime relevance.
+# These are operationally unsafe customer-transaction topics, not a second
+# semantic answer classifier.  They are checked against both sides of a past
+# exchange so a seller's customer-specific reply cannot become reusable
+# Learning merely because the question was short or vague.
+DELIVERY_OR_SCHEDULE = re.compile(
+    r"배송|출고|도착|운송장|택배|배송기사|기사님|배송지|주소\s*변경|"
+    r"재배송|재발송|설치.{0,12}(?:언제|예정|일정|날짜|방문|변경)|"
+    r"(?:언제|예정|일정|날짜|방문|변경).{0,12}설치",
+    re.IGNORECASE,
+)
+RETURN_TRANSACTION = re.compile(
+    r"반품|교환|환불|주문\s*취소|취소\s*(?:처리|요청|완료)|회수|수거|주문\s*변경",
+    re.IGNORECASE,
+)
+DAMAGE_OR_DEFECT = re.compile(
+    r"파손|불량|하자|고장|손상|깨[짐졌]|흠집|누락|오배송|책임|보상",
+    re.IGNORECASE,
+)
+TEMPORARY_TRANSACTION = re.compile(
+    r"할인|쿠폰|가격|사은품|상품권|온누리|프로모션|이벤트|행사|신청\s*기간|"
+    r"재고|명절|추석|설날|기간\s*(?:내|중|한정)|까지\s*신청",
+    re.IGNORECASE,
+)
+LISTING_OR_BUNDLE = re.compile(
+    r"패키지|세트|모니터\s*[+＋]|스탠드.{0,18}(?:같이|포함|패키지|박스)|"
+    r"거치대.{0,18}(?:같이|포함|패키지)|배터리.{0,18}(?:같이|포함)|"
+    r"구성품.{0,18}(?:별도|포함|박스)|(?:별도|각각)\s*박스|옵션\s*구성",
+    re.IGNORECASE,
+)
+MARKET_SPECIFIC = re.compile(
+    r"마이쿠팡|쿠팡\s*(?:앱|주문|고객센터|현금영수증|쿠폰|캐시|포인트|화면|메뉴)",
+    re.IGNORECASE,
+)
+ACKNOWLEDGEMENT_ONLY = re.compile(
+    r"^(?:네|감사합니다|확인했습니다|처리해주세요|연락주세요|알겠습니다)[.!\s]*$",
+    re.IGNORECASE,
+)
+ORDER_SPECIFIC_SIGNAL = re.compile(
+    r"고객님\s*건|고객님건|해당\s*건|주문\s*건|"
+    r"이미\s*주문\s*취소|취소\s*요청\s*확인|회수\s*상태",
+    re.IGNORECASE,
+)
+UNKNOWN_OR_UNVERIFIED = re.compile(
+    r"(?:정확한|상세한)\s*(?:내용|정보|사항).{0,16}확인\s*후|"
+    r"확인\s*후.{0,16}(?:안내|답변)|알\s*수\s*없|확인\s*어렵",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class HistoricalCandidateGate:
+    decision: str
+    primary_reason: str
+    tags: tuple[str, ...]
+
+
+def classify_historical_candidate(question: str, answer: str) -> HistoricalCandidateGate:
+    """Classify only the intake safety of one historical Q&A exchange.
+
+    EXCLUDE is reserved for clear customer-transaction or time-bound content.
+    Listing/package and uncertain content stay available for a human review;
+    neither path activates Learning automatically.
+    """
+    question = str(question or "").strip()
+    answer = str(answer or "").strip()
+    combined = f"{question}\n{answer}"
+    tags: list[str] = []
+
+    if DAMAGE_OR_DEFECT.search(combined):
+        return HistoricalCandidateGate("EXCLUDE", "DAMAGE_DEFECT", ("DAMAGE_DEFECT",))
+    if RETURN_TRANSACTION.search(combined):
+        return HistoricalCandidateGate("EXCLUDE", "CS_TRANSACTION", ("CS_TRANSACTION",))
+    if ORDER_SPECIFIC.search(combined) or ORDER_SPECIFIC_SIGNAL.search(combined):
+        return HistoricalCandidateGate("EXCLUDE", "ORDER_SPECIFIC", ("ORDER_SPECIFIC",))
+    if DELIVERY_OR_SCHEDULE.search(combined):
+        return HistoricalCandidateGate("EXCLUDE", "DELIVERY", ("DELIVERY", "ORDER_SPECIFIC"))
+    if TEMPORARY_TRANSACTION.search(combined) or is_time_bound(answer):
+        return HistoricalCandidateGate("EXCLUDE", "TEMPORARY", ("TEMPORARY",))
+    if ACKNOWLEDGEMENT_ONLY.fullmatch(answer) or not answer:
+        return HistoricalCandidateGate("EXCLUDE", "LOW_VALUE", ("LOW_VALUE",))
+    if LISTING_OR_BUNDLE.search(combined):
+        return HistoricalCandidateGate(
+            "MANUAL_REVIEW", "LISTING_OR_BUNDLE_SPECIFIC", ("LISTING_OR_BUNDLE_SPECIFIC",)
+        )
+    if MARKET_SPECIFIC.search(combined):
+        return HistoricalCandidateGate(
+            "MANUAL_REVIEW", "MARKET_SPECIFIC", ("MARKET_SPECIFIC",)
+        )
+    if UNKNOWN_OR_UNVERIFIED.search(combined):
+        return HistoricalCandidateGate(
+            "MANUAL_REVIEW", "UNKNOWN_INFORMATION", ("UNKNOWN_INFORMATION",)
+        )
+
+    assessment = HistoricalLearningQualityService().assess(
+        question=question,
+        answer=answer,
+        # Candidate intake must not treat the default stored score as evidence.
+        stored_quality=0.0,
+        active=True,
+    )
+    if assessment.status in {
+        "QUESTION_ANSWER_MISMATCH", "LOW_RELEVANCE", "REVIEW_REQUIRED", "POLICY_RISK",
+    }:
+        tags.append(assessment.status)
+        return HistoricalCandidateGate("MANUAL_REVIEW", "UNKNOWN_INFORMATION", tuple(tags))
+    return HistoricalCandidateGate("KEEP", "STABLE_PRODUCT_FAQ", ("STABLE_PRODUCT_FAQ",))
+
 CONCEPT_PATTERNS: dict[str, re.Pattern[str]] = {
     "RETURN": re.compile(r"반품|교환|환불|회수"),
     "PICKUP": re.compile(r"수거|택배|보내|기사.{0,8}회수|회수.{0,8}기사"),
@@ -127,7 +236,7 @@ CONCEPT_PATTERNS: dict[str, re.Pattern[str]] = {
     "INSTALLATION": re.compile(r"설치|자가\s*설치|벽걸이|스탠드"),
     "AFTER_SERVICE": re.compile(r"A/?S|에이에스|수리|고장|제품\s*문제", re.IGNORECASE),
     "PRODUCT_FUNCTION": re.compile(r"기능|OTT|넷플릭스|셋탑|패널|LED|QLED|화질", re.IGNORECASE),
-    "PRODUCT_OPTION": re.compile(r"옵션|인치|모델|무빙|상품\s*종류"),
+    "PRODUCT_OPTION": re.compile(r"옵션|인치|모델|무빙|상품\s*종류|VESA|거치대|호환"),
     "PROMOTION": re.compile(r"포인트|쿠폰|프로모션|행사|이벤트|할인|감사제"),
     "POLICY": re.compile(r"정책|규정|기준|비용|포함|접수|절차|방법"),
 }
