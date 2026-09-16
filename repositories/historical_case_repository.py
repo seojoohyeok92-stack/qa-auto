@@ -1,9 +1,30 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from repositories.database import Database
+
+# One inquiry, one place in the list.
+#
+# Rows that know when their inquiry arrived come first, newest first, ties
+# broken by id so the order does not move between queries.  Rows that do not
+# fall to the bottom as a group and are ordered among themselves by when they
+# were imported.
+#
+# The two tiers are the point.  Collapsing them into a single COALESCE down to
+# ``imported_at`` looks tidier and is wrong: a legacy row with no inquiry date
+# borrows the moment it was imported, which is *today*, and sorts above every
+# genuinely recent inquiry.  A row whose date is unknown must not read as the
+# newest thing in the list.
+_INQUIRY_TIME = "julianday(COALESCE(inquiry_created_at, answer_updated_at))"
+CASE_ORDER_BY = (
+    f"CASE WHEN {_INQUIRY_TIME} IS NULL THEN 1 ELSE 0 END, "
+    f"{_INQUIRY_TIME} DESC, "
+    "julianday(COALESCE(imported_at, created_at)) DESC, "
+    "id DESC"
+)
 
 
 def _json(value: Any) -> str:
@@ -268,16 +289,64 @@ class HistoricalCaseRepository:
             rows = connection.execute(sql, tuple(params)).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
-    def list_cases(
-        self, *, store_code: str | None = None, inquiry_type: str | None = None,
-        search: str = "", active: bool | None = None, has_answer: bool | None = None,
+    def distinct_store_codes(self) -> list[str]:
+        """Which stores actually have stored cases.
+
+        The manager screen groups these into markets, so it needs the codes
+        that exist rather than the ones currently configured -- a store can
+        stop being operated while its history stays.
+        """
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT store_code FROM historical_cases "
+                "WHERE store_code IS NOT NULL AND trim(store_code)<>'' "
+                "ORDER BY store_code"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def distinct_inquiry_types(self) -> list[str]:
+        """Which inquiry types actually occur in the stored cases."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT inquiry_type FROM historical_cases "
+                "WHERE inquiry_type IS NOT NULL AND trim(inquiry_type)<>'' "
+                "ORDER BY inquiry_type"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def count_cases(self, **filters: Any) -> int:
+        """How many rows ``list_cases`` would return, ignoring limit/offset."""
+
+        clauses, params = self._case_filters(**filters)
+        with self.database.connection() as connection:
+            return int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM historical_cases WHERE {' AND '.join(clauses)}",
+                    tuple(params),
+                ).fetchone()[0]
+            )
+
+    @staticmethod
+    def _case_filters(
+        *, store_code: str | None = None, store_codes: Sequence[str] | None = None,
+        inquiry_type: str | None = None, search: str = "",
+        active: bool | None = None, has_answer: bool | None = None,
         min_quality: float = 0.0, policy_risk: str | None = None,
         date_from: str | None = None, date_to: str | None = None,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[str], list[Any]]:
         clauses, params = ["quality_score>=?"], [max(0.0, min(float(min_quality), 1.0))]
         if store_code:
             clauses.append("store_code=?"); params.append(store_code)
+        if store_codes is not None:
+            # An empty selection means nothing was chosen, not everything.
+            scope = [str(code) for code in store_codes if str(code or "").strip()]
+            if not scope:
+                clauses.append("1=0")
+            else:
+                clauses.append(f"store_code IN ({','.join('?' * len(scope))})")
+                params.extend(scope)
         if inquiry_type:
             clauses.append("inquiry_type=?"); params.append(inquiry_type)
         if active is not None:
@@ -293,11 +362,28 @@ class HistoricalCaseRepository:
         if search.strip():
             clauses.append("(question LIKE ? OR seller_answer LIKE ? OR product_name LIKE ? OR external_inquiry_id LIKE ?)")
             token = f"%{search.strip()}%"; params.extend([token] * 4)
+        return clauses, params
+
+    def list_cases(
+        self, *, limit: int = 200, offset: int = 0, **filters: Any
+    ) -> list[dict[str, Any]]:
+        """Filtered cases, newest inquiry first.
+
+        The order is applied in SQL before ``LIMIT``/``OFFSET``, not to a page
+        after it: paging a set that was only ordered per page makes rows swap
+        sides of a boundary and go missing.  ``id DESC`` breaks ties so two
+        inquiries recorded in the same second keep a fixed order between runs,
+        and a row whose dates are all unreadable sorts last rather than
+        surfacing above real recent inquiries.
+        """
+
+        clauses, params = self._case_filters(**filters)
         params.append(max(1, min(int(limit), 1000)))
+        params.append(max(0, int(offset)))
         with self.database.connection() as connection:
             rows = connection.execute(
                 f"SELECT * FROM historical_cases WHERE {' AND '.join(clauses)} "
-                "ORDER BY julianday(COALESCE(inquiry_created_at, answer_updated_at, imported_at, created_at)) DESC, id DESC LIMIT ?",
+                f"ORDER BY {CASE_ORDER_BY} LIMIT ? OFFSET ?",
                 tuple(params),
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]

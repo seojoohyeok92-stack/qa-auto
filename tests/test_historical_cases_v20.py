@@ -341,10 +341,11 @@ else:
     assert not app.exception
     search = next(item for item in app.text_input if item.label == "검색")
     search.set_value("연결 방법")
+    # The picker names markets now; OJE_PLUS is the store code behind 네이버.
     next(
         item for item in app.selectbox
-        if item.key == "historical_manage_store"
-    ).set_value("OJE_PLUS")
+        if item.key == "historical_manage_market"
+    ).set_value("NAVER")
     next(
         item for item in app.selectbox
         if item.key == "historical_manage_type"
@@ -377,7 +378,7 @@ else:
     assert app.session_state["historical_selected_case_id"] == first_id
     assert app.session_state["historical_active_section"] == "case_manager"
     assert app.session_state["historical_filter_state"]["historical_search"] == "연결 방법"
-    assert app.session_state["historical_filter_state"]["historical_manage_store"] == "OJE_PLUS"
+    assert app.session_state["historical_filter_state"]["historical_manage_market"] == "NAVER"
     assert app.session_state["historical_filter_state"]["historical_manage_type"] == "PRODUCT_INQUIRY"
     assert app.session_state["historical_filter_state"]["historical_risk_filter"] == "NONE"
     assert app.session_state["historical_filter_state"]["historical_min_quality"] == 0.50

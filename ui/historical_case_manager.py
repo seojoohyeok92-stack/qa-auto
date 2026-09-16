@@ -17,12 +17,37 @@ from repositories.learning_feedback_repository import LearningFeedbackRepository
 from answer.learning_signal import SignalKind
 from services.historical_case_service import HistoricalCaseService
 from services.learning_feedback_service import LearningFeedbackService
+from ui.market_labels import (
+    ALL_MARKETS,
+    ALL_MARKETS_LABEL,
+    market_label,
+    markets_for_stores,
+    store_market_label,
+    stores_in_market,
+)
 from ui.review_workspace import _structured_signal_input
 from ui.session_identity import current_identity
 
 
+# Stored inquiry types, said the way the rest of the product says them.  The
+# stored values are untouched; only the label changes.
+INQUIRY_TYPE_LABELS = {
+    "PRODUCT_INQUIRY": "상품문의",
+    "CUSTOMER_INQUIRY": "고객문의",
+    "COUPANG_ONLINE_INQUIRY": "쿠팡 상품문의",
+}
+
+# One line instead of a row of removable chips.  The stored values behind each
+# choice are the same ones the multiselect passed through.
+IMPORT_TYPE_CHOICES: dict[str, tuple[str, ...]] = {
+    "전체 유형": ("PRODUCT_INQUIRY", "CUSTOMER_INQUIRY"),
+    "상품문의": ("PRODUCT_INQUIRY",),
+    "고객문의": ("CUSTOMER_INQUIRY",),
+}
+
 HISTORICAL_FILTER_KEYS = (
-    "historical_manage_store",
+    "historical_manage_market",
+    "historical_manage_page",
     "historical_manage_type",
     "historical_min_quality",
     "historical_active_filter",
@@ -101,7 +126,7 @@ def render_historical_case_manager(database: Database) -> None:
     service = HistoricalCaseService(database)
     repository = HistoricalCaseRepository(database)
     stores = get_configured_stores()
-    st.title("과거 네이버 상담 사례")
+    st.title("과거 상담 사례")
     st.caption(
         "과거 사례는 기본적으로 학습 참고에 사용되며, 안전기준을 통과한 사례만 Context에 포함됩니다. "
         "학습 제외는 원본을 삭제하지 않습니다. 이 화면은 Event Queue와 Auto Post를 호출하지 않습니다."
@@ -126,7 +151,7 @@ def render_historical_case_manager(database: Database) -> None:
         )
     )
 
-    with st.expander("과거 문의 가져오기", expanded=True):
+    with st.expander("네이버 과거 문의 가져오기", expanded=True):
         st.info(
             f"현재 Historical {summary['total']:,}건은 로컬 DB 백필 결과입니다. "
             "네이버 전체 과거 문의 Import 결과가 아닙니다. 상품문의·고객문의, "
@@ -141,17 +166,20 @@ def render_historical_case_manager(database: Database) -> None:
         end = filter_cols[1].date_input(
             "종료일", value=date.today(), key="historical_import_end",
         )
+        # Naver only, deliberately.  Coupang history is backfilled by its own
+        # service and this panel must not look like it can do that.
         store_options = ["ALL", *[store.code for store in stores]]
         selected_store = filter_cols[2].selectbox(
-            "Store", store_options, key="historical_import_store",
+            "네이버 스토어", store_options,
+            format_func=lambda code: "전체" if code == "ALL" else code,
+            key="historical_import_store",
         )
         option_cols = st.columns(3, gap="small")
-        inquiry_types = option_cols[0].multiselect(
-            "문의 유형",
-            ["PRODUCT_INQUIRY", "CUSTOMER_INQUIRY"],
-            default=["PRODUCT_INQUIRY", "CUSTOMER_INQUIRY"],
-            key="historical_import_types",
+        import_type_choice = option_cols[0].selectbox(
+            "문의 유형", list(IMPORT_TYPE_CHOICES),
+            key="historical_import_type_choice",
         )
+        inquiry_types = list(IMPORT_TYPE_CHOICES[import_type_choice])
         answered_only = option_cols[1].checkbox(
             "답변 완료 문의만", value=True, key="historical_answered_only",
         )
@@ -227,13 +255,26 @@ def render_historical_case_manager(database: Database) -> None:
             _run_metrics(last_result)
 
     st.subheader("Historical Case 관리")
+    # Markets, not stores.  A reviewer thinks in 네이버/쿠팡; which Coupang
+    # account a row came from is provenance and stays in the detail panel.
+    stored_store_codes = repository.distinct_store_codes()
+    market_options = [ALL_MARKETS, *markets_for_stores(stored_store_codes)]
     filters = st.columns([1.1, 1.2, 1.2, 1.1, 1.2, 2.2], gap="small")
-    manage_store = filters[0].selectbox(
-        "Store", ["ALL", *sorted({row.get("store_code") for row in repository.list_cases(limit=1000) if row.get("store_code")})],
-        key="historical_manage_store",
+    manage_market = filters[0].selectbox(
+        "마켓", market_options,
+        format_func=lambda code: (
+            ALL_MARKETS_LABEL if code == ALL_MARKETS else market_label(code)
+        ),
+        key="historical_manage_market",
     )
+    type_options = ["ALL", *sorted({
+        str(row) for row in repository.distinct_inquiry_types()
+    })]
     manage_type = filters[1].selectbox(
-        "유형", ["ALL", "PRODUCT_INQUIRY", "CUSTOMER_INQUIRY"],
+        "유형", type_options,
+        format_func=lambda code: (
+            "전체 유형" if code == "ALL" else INQUIRY_TYPE_LABELS.get(code, code)
+        ),
         key="historical_manage_type",
     )
     quality = filters[2].slider(
@@ -258,23 +299,52 @@ def render_historical_case_manager(database: Database) -> None:
         "사례 종료일", value=date.today(), key="historical_manage_end",
     )
     active = None if active_label == "전체" else active_label == "사용 중"
+    case_filters = {
+        # The market is resolved to the store codes that belong to it, so the
+        # query still filters on stored provenance and nothing is rewritten.
+        "store_codes": (
+            None
+            if manage_market == ALL_MARKETS
+            else stores_in_market(stored_store_codes, manage_market)
+        ),
+        "inquiry_type": None if manage_type == "ALL" else manage_type,
+        "search": search,
+        "active": active,
+        "min_quality": quality,
+        "policy_risk": None if risk_label == "ALL" else risk_label,
+        "date_from": datetime.combine(manage_start, time.min, UTC).isoformat(),
+        "date_to": datetime.combine(manage_end, time.max, UTC).isoformat(),
+    }
+    total_cases = repository.count_cases(**case_filters)
+    page_size = 100
+    page_count = max(1, -(-total_cases // page_size))
+    page_key = "historical_manage_page"
+    if int(st.session_state.get(page_key) or 1) > page_count:
+        st.session_state[page_key] = 1
+    page = 1
+    if page_count > 1:
+        page = st.number_input(
+            "페이지", min_value=1, max_value=page_count, step=1, key=page_key,
+        )
     cases = repository.list_cases(
-        store_code=None if manage_store == "ALL" else manage_store,
-        inquiry_type=None if manage_type == "ALL" else manage_type,
-        search=search, active=active, min_quality=quality, limit=300,
-        policy_risk=None if risk_label == "ALL" else risk_label,
-        date_from=datetime.combine(manage_start, time.min, UTC).isoformat(),
-        date_to=datetime.combine(manage_end, time.max, UTC).isoformat(),
+        limit=page_size, offset=(int(page) - 1) * page_size, **case_filters
     )
-    st.caption("정렬: 실제 문의 접수시간 최신순 · 동률 ID 내림차순")
+    st.caption(
+        "정렬: 실제 문의 접수시간 최신순 · 동률 ID 내림차순 · "
+        f"{total_cases:,}건 중 {len(cases):,}건 표시"
+        + (f" ({int(page)}/{page_count} 페이지)" if page_count > 1 else "")
+    )
     if not cases:
         st.info("조건에 맞는 과거 사례가 없습니다.")
         return
     st.dataframe(
         [
             {
-                "ID": row["id"], "Store": row["store_code"],
-                "유형": row["inquiry_type"], "문의": str(row["question"])[:100],
+                "ID": row["id"],
+                "마켓": store_market_label(row["store_code"]),
+                "유형": INQUIRY_TYPE_LABELS.get(
+                    row["inquiry_type"], row["inquiry_type"]
+                ), "문의": str(row["question"])[:100],
                 "답변 있음": bool(row.get("seller_answer")),
                 "품질": row["quality_score"], "정책 위험": row["policy_risk"],
                 "Context 사용 가능": service.quality_policy.assess(
