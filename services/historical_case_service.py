@@ -758,7 +758,13 @@ class HistoricalCaseService:
             self.repository.list_cases(store_code=store_code, limit=1000)
         )
 
-    def promote(self, case_id: int, *, actor: str) -> dict[str, Any]:
+    def promote(
+        self,
+        case_id: int,
+        *,
+        actor: str,
+        market_applicability: str | None = None,
+    ) -> dict[str, Any]:
         case = self.repository.get(int(case_id))
         if not case:
             raise LookupError("Historical Case를 찾을 수 없습니다.")
@@ -774,7 +780,9 @@ class HistoricalCaseService:
                 return existing
         from services.learning_service import LearningService
         saved = LearningService(self.database).capture_historical_promotion(
-            case=case, actor=actor
+            case=case,
+            actor=actor,
+            market_applicability=market_applicability,
         )
         self.repository.mark_promoted(int(case_id), int(saved["id"]))
         return saved

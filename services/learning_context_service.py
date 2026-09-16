@@ -586,7 +586,14 @@ class LearningContextService:
         elif not questions:
             questions = [original_question]
         candidate_pool = self.search.repository.candidates(
-            store_code=store_code, limit=2000
+            store_code=store_code,
+            market=(
+                "COUPANG"
+                if str(inquiry.get("source_type") or "").upper().startswith("COUPANG_")
+                or str(store_code or "").upper().startswith("COUPANG_")
+                else "NAVER"
+            ),
+            limit=2000,
         )
         repository_candidate_count = len(candidate_pool)
         candidate_diagnostics = self.search.repository.candidate_diagnostics(

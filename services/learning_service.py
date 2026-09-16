@@ -790,7 +790,11 @@ class LearningService:
         return saved
 
     def capture_historical_promotion(
-        self, *, case: dict[str, Any], actor: str,
+        self,
+        *,
+        case: dict[str, Any],
+        actor: str,
+        market_applicability: str | None = None,
     ) -> dict[str, Any]:
         """Promote one admin-reviewed case through the existing Learning store."""
 
@@ -830,10 +834,22 @@ class LearningService:
         canonical_model = str(
             historical_metadata.get("canonical_model") or ""
         ).strip() or None
-        shared_cross_market = bool(
-            historical_metadata.get("shared_cross_market_learning")
-        )
         origin_market = str(historical_metadata.get("market") or "").strip().upper() or None
+        from repositories.learning_repository import (
+            MARKET_APPLICABILITY_COMMON,
+            normalize_market_applicability,
+        )
+
+        applicability = normalize_market_applicability(market_applicability)
+        if market_applicability is not None and applicability is None:
+            raise ValueError("Learning market applicability is invalid.")
+        if applicability is None:
+            applicability = normalize_market_applicability(
+                historical_metadata.get("market_applicability")
+            )
+        if origin_market == "COUPANG" and applicability is None:
+            applicability = "COUPANG_ONLY"
+        shared_cross_market = applicability == MARKET_APPLICABILITY_COMMON
         example = {
             "source_key": source_key,
             "inquiry_id": case.get("inquiry_id"),
@@ -844,10 +860,10 @@ class LearningService:
             "learning_source": "APPROVED_EDITED",
             "question_original_masked": self.privacy.mask(question),
             "question_normalized": normalize_learning_question(question),
-            # A reviewed Coupang product-model answer is shared common
-            # Learning, not an account-local silo.  Legacy/Naver historical
-            # promotions retain their original store scope.
-            "store_code": None if shared_cross_market else case.get("store_code"),
+            # Coupang-only scope is account-independent but guarded by the
+            # retrieval metadata filter.  Legacy/Naver historical rows retain
+            # their established store scope unless explicitly changed later.
+            "store_code": None if origin_market == "COUPANG" else case.get("store_code"),
             "inquiry_type": case.get("inquiry_type"),
             "intent": case.get("classification"),
             "product_name": self.privacy.mask(case.get("product_name")) or None,
@@ -882,6 +898,7 @@ class LearningService:
                 "canonical_model": canonical_model,
                 "shared_cross_market_learning": shared_cross_market,
                 "origin_market": origin_market,
+                "market_applicability": applicability,
             },
             "active": True,
         }

@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from answer.evidence_support import SUPPORTED_THRESHOLD, apply_answer_support
-from repositories.learning_repository import LearningRepository
+from repositories.learning_repository import LearningRepository, market_from_store_code
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
     extract_product_identity,
@@ -751,6 +751,11 @@ class SimilarAnswerService:
                 "historical_case_id": (
                     (item.get("metadata_json") or {}).get("historical_case_id")
                     if isinstance(item.get("metadata_json"), dict) else None
+                ),
+                "origin_market": (
+                    ((item.get("metadata_json") or {}).get("origin_market")
+                    if isinstance(item.get("metadata_json"), dict) else None)
+                    or market_from_store_code(item.get("store_code"))
                 ),
                 "source_product_id": item.get("source_product_id"),
                 "authority": (

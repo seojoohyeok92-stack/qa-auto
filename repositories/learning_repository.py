@@ -24,6 +24,43 @@ from services.learning_validity_service import (
 from services.learning_privacy_service import LearningPrivacyService
 
 
+MARKET_APPLICABILITY_COMMON = "COMMON"
+
+
+def normalize_market_applicability(value: Any) -> str | None:
+    """Return the persisted applicability value, without inventing a scope."""
+    normalized = str(value or "").strip().upper()
+    if normalized == MARKET_APPLICABILITY_COMMON:
+        return normalized
+    if normalized.endswith("_ONLY") and normalized[:-5].replace("_", "").isalnum():
+        return normalized
+    return None
+
+
+def market_from_store_code(store_code: str | None) -> str | None:
+    """Current common Inquiry stores identify Coupang with this stable prefix."""
+    normalized = str(store_code or "").strip().upper()
+    if not normalized:
+        return None
+    if normalized.startswith("COUPANG_"):
+        return "COUPANG"
+    # All pre-Coupang common Learning stores are Naver stores.  This preserves
+    # their existing retrieval behavior while metadata-free legacy rows remain
+    # COMMON below.
+    return "NAVER"
+
+
+def is_market_applicable(metadata: dict[str, Any], market: str | None) -> bool:
+    applicability = normalize_market_applicability(
+        metadata.get("market_applicability")
+    )
+    # Metadata-free legacy Learning retains its established behavior.
+    if applicability is None or applicability == MARKET_APPLICABILITY_COMMON:
+        return True
+    normalized_market = str(market or "").strip().upper()
+    return bool(normalized_market) and applicability == f"{normalized_market}_ONLY"
+
+
 class LearningRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -423,11 +460,24 @@ class LearningRepository:
             ).fetchall()
         return [self._row(row) for row in rows if row is not None]
 
-    def candidates(self, *, store_code: str | None, limit: int = 200) -> list[dict[str, Any]]:
+    def candidates(
+        self,
+        *,
+        store_code: str | None,
+        limit: int = 200,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
         # The live store has more than 500 ACTIVE rows.  Callers that perform
         # relevance ranking must be able to inspect the complete usable pool;
         # the default remains bounded for legacy/style aggregation callers.
         safe_limit = max(1, min(int(limit), 2000))
+        effective_market = str(market or "").strip().upper() or market_from_store_code(
+            store_code
+        )
+        # Filtering after deserializing metadata keeps the schema unchanged.
+        # Fetch the bounded usable corpus before applying a market-only filter
+        # so excluded rows cannot consume all requested candidate slots.
+        query_limit = 2000 if effective_market else safe_limit
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         with self.database.connection() as connection:
             rows = connection.execute(
@@ -463,7 +513,7 @@ class LearningRepository:
                          learning_examples.created_at DESC
                 LIMIT ?
                 """,
-                (now, now, store_code, store_code, safe_limit),
+                (now, now, store_code, store_code, query_limit),
             ).fetchall()
         # Keep the shared Python policy as a second guard if a legacy timestamp
         # cannot be interpreted consistently by SQLite.  Active feedback is
@@ -474,6 +524,11 @@ class LearningRepository:
             for row in rows
             if (item := self._row(row)) is not None
             and is_learning_usable(item)
+            and is_market_applicable(
+                item.get("metadata_json")
+                if isinstance(item.get("metadata_json"), dict) else {},
+                effective_market,
+            )
         ]
         inquiry_ids = sorted({
             int(item["inquiry_id"])

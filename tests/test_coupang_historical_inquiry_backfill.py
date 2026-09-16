@@ -195,7 +195,7 @@ def test_backfill_preserves_privacy_and_does_not_post_or_call_contact_center(tmp
     assert not hasattr(client, "list_contact_center_inquiries")
 
 
-def test_approved_coupang_candidate_promotes_as_shared_model_learning(tmp_path, monkeypatch) -> None:
+def test_approved_coupang_candidate_defaults_to_coupang_only_learning(tmp_path, monkeypatch) -> None:
     _configure_accounts(monkeypatch)
     database = _database(tmp_path)
     _seed_mapping(database, COUPANG_OJE_NS, "v-promote", "32DM501")
@@ -219,5 +219,6 @@ def test_approved_coupang_candidate_promotes_as_shared_model_learning(tmp_path, 
     promoted = historical.promote(int(case["id"]), actor="tester")
     assert promoted["store_code"] is None
     assert promoted["model_code"] == "32DM501"
-    assert promoted["metadata_json"]["shared_cross_market_learning"] is True
+    assert promoted["metadata_json"]["shared_cross_market_learning"] is False
     assert promoted["metadata_json"]["origin_market"] == "COUPANG"
+    assert promoted["metadata_json"]["market_applicability"] == "COUPANG_ONLY"

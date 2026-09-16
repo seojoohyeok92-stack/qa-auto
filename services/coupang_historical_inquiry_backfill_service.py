@@ -198,8 +198,12 @@ class CoupangHistoricalInquiryBackfillService:
                     "raw_payload": normalized.raw_payload,
                     "historical_metadata": {
                         "candidate_only": True,
-                        "shared_cross_market_learning": True,
                         "market": "COUPANG",
+                        # A Coupang answer can describe a bundle, option, or
+                        # marketplace procedure that differs elsewhere.  Only
+                        # an explicit review decision may make it COMMON.
+                        "market_applicability": "COUPANG_ONLY",
+                        "shared_cross_market_learning": False,
                         "account_code": account_code,
                         "canonical_model": canonical_model,
                         "model_code": canonical_model,
