@@ -1112,6 +1112,7 @@ class AnswerService:
                     if needs_review
                     else "[네이버 Q&A 답변 생성 완료]"
                 ),
+                store_code=str(inquiry.get("store_code") or ""),
                 product=str(inquiry.get("product_name") or ""),
                 option_name=str(inquiry.get("option_name") or ""),
                 question=str(

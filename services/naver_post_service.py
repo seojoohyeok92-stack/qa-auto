@@ -530,6 +530,7 @@ class NaverPostService:
                     if automatic
                     else "[네이버 Q&A 답변 등록 완료]"
                 ),
+                store_code=str(inquiry.get("store_code") or ""),
                 product=str(
                     inquiry.get("product_name") or inquiry.get("product") or ""
                 ),

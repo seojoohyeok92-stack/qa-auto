@@ -245,14 +245,50 @@ class AutoPostRepository:
                  str(error_message or "")[:500] or None, now, owner_id),
             )
 
+    def distinct_store_codes(self) -> list[str]:
+        """Every store code that has inquiries, for market scoping."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT store_code FROM inquiries "
+                "WHERE store_code IS NOT NULL AND trim(store_code)<>''"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def candidates(
         self,
         *,
         max_retries: int,
         limit: int = 100,
         inquiry_ids: Iterable[int] | None = None,
+        store_codes: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]:
+        """Inquiries the auto-post pipeline may pick up.
+
+        ``store_codes`` restricts the queue to the markets production is
+        allowed to answer for.  It has to happen in SQL: the queue is ordered
+        by arrival and cut with LIMIT, so a market that is collected but not
+        answered would otherwise fill the page and the answered market would
+        never be reached.  ``None`` keeps every store, which is what the
+        existing callers and tests that pass their own ids expect.
+        """
+
         terminal_errors = tuple(sorted(NON_RETRYABLE_TARGET_ERRORS))
+        store_clause = ""
+        store_parameters: tuple[str, ...] = ()
+        if store_codes is not None:
+            scope = tuple(
+                dict.fromkeys(
+                    text for code in store_codes
+                    if (text := str(code or "").strip())
+                )
+            )
+            if not scope:
+                return []
+            store_clause = " AND i.store_code IN ({})".format(
+                ",".join("?" for _ in scope)
+            )
+            store_parameters = scope
         placeholders = ",".join("?" for _ in terminal_errors)
         selected_ids = tuple(dict.fromkeys(int(value) for value in (inquiry_ids or ())))
         id_clause = ""
@@ -277,6 +313,7 @@ class AutoPostRepository:
                   AND trim(COALESCE(i.source_type,''))<>''
                   AND trim(COALESCE(i.external_inquiry_id,i.source_question_id,''))<>''
                   AND upper(COALESCE(i.post_error_code,'')) NOT IN ({placeholders})
+                  {store_clause}
                   {id_clause}
                   AND (
                       i.post_status<>'POST_FAILED' OR
@@ -287,7 +324,7 @@ class AutoPostRepository:
                 LIMIT ?
                 """,
                 (
-                    *terminal_errors, *id_parameters,
+                    *terminal_errors, *store_parameters, *id_parameters,
                     max(0, int(max_retries)), max(1, min(int(limit), 500)),
                 ),
             ).fetchall()

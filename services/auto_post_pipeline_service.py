@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 from kakao_notify import notify_qna_safely
+from services.market_policy import answer_enabled_store_codes
 from repositories.answer_repository import AnswerRepository
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
@@ -132,6 +133,7 @@ class AutoPostPipelineService:
         try:
             sent = notify_qna_safely(
                 title="[Q&A 미등록 / 직원 확인 필요]",
+                store_code=str(inquiry.get("store_code") or ""),
                 product=str(inquiry.get("product_name") or ""),
                 option_name=str(inquiry.get("option_name") or ""),
                 question=str(inquiry.get("content") or inquiry.get("title") or ""),
@@ -346,8 +348,15 @@ class AutoPostPipelineService:
                 "앱 재시작 전 전송 중이던 건을 POST_UNKNOWN으로 복구했습니다.",
                 level="ERROR", details={"recovered_count": recovered},
             )
+        # The one place production decides which marketplaces it acts on.
+        # Everything past this point -- draft, GPT, DPS, validator, post,
+        # Kakao -- runs only for the markets listed in the policy, so a
+        # collected-but-not-answered market cannot reach any of it.
         for candidate in self.auto.candidates(
-            max_retries=max_retries, limit=limit, inquiry_ids=inquiry_ids
+            max_retries=max_retries, limit=limit, inquiry_ids=inquiry_ids,
+            store_codes=answer_enabled_store_codes(
+                self.auto.distinct_store_codes()
+            ),
         ):
             inquiry_id = int(candidate["id"])
             external_id = str(

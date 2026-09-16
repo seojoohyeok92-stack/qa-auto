@@ -26,6 +26,34 @@ PENDING_TIMEOUT_MINUTES = 10
 
 # 카카오톡 채팅방 기본 이름 #"테스트" #"오제 네이버 자동답변 확인방"
 KAKAO_QNA_RECIPIENT = "오제 네이버 자동답변 확인방"
+# One room per marketplace, never per seller account: both Coupang accounts
+# report into the same room.  The Naver variable keeps its name and its
+# meaning because Naver production is already reading it.
+#
+# A room being configured is not the same as a market being notified.  Nothing
+# here sends anything; what may be notified at all is decided once, in
+# ``services.market_policy``, and Coupang is not in it.
+KAKAO_RECIPIENT_ENV_BY_MARKET = {
+    "NAVER": "KAKAO_QNA_RECIPIENT",
+    "COUPANG": "KAKAO_COUPANG_QNA_RECIPIENT",
+}
+KAKAO_RECIPIENT_DEFAULT_BY_MARKET = {
+    "NAVER": KAKAO_QNA_RECIPIENT,
+    "COUPANG": "오제 쿠팡 자동답변 확인방",
+}
+
+
+def recipient_for_market(market: object) -> str:
+    """The chat room for one marketplace's Q&A notifications."""
+
+    code = str(market or "NAVER").strip().upper() or "NAVER"
+    env_name = KAKAO_RECIPIENT_ENV_BY_MARKET.get(code)
+    configured = os.getenv(env_name, "").strip() if env_name else ""
+    return (
+        configured
+        or KAKAO_RECIPIENT_DEFAULT_BY_MARKET.get(code)
+        or KAKAO_QNA_RECIPIENT
+    )
 
 
 def is_kakao_notify_enabled() -> bool:
@@ -321,13 +349,13 @@ def enqueue_kakao_message(
     title: str,
     message: str,
     recipient: str | None = None,
+    market: str | None = None,
 ) -> Path:
     _validate_kakao_service()
 
     target_recipient = (
         str(recipient or "").strip()
-        or os.getenv("KAKAO_QNA_RECIPIENT", "").strip()
-        or KAKAO_QNA_RECIPIENT
+        or recipient_for_market(market)
     )
 
     event = {
@@ -348,8 +376,21 @@ def enqueue_kakao_message(
     return OUTBOX
 
 
+def _market_display_name(market: object) -> str:
+    """The marketplace name for the message body, defaulting to Naver.
+
+    Imported lazily: ``kakao_notify`` is imported by the answer pipeline, and
+    a module-level import back into services would close a cycle.
+    """
+
+    from services.market_policy import market_display_name
+
+    return market_display_name(market) or "네이버"
+
+
 def format_qna_message(
     *,
+    market: str | None = None,
     product: str,
     option_name: str,
     question: str,
@@ -412,7 +453,10 @@ def format_qna_message(
                 "답변: -",
                 "",
                 f"답변 생성: {'생략됨' if generation_skipped else '완료'}",
-                "네이버 등록: 안 됨",
+                # Which marketplace the answer was not posted to.  A staff
+                # member reading this on their phone needs to know which shop
+                # to open; "등록: 안 됨" on its own does not say.
+                f"{_market_display_name(market)} 등록: 안 됨",
             ]
         )
     else:
@@ -439,6 +483,8 @@ def format_qna_message(
 def notify_qna_safely(
     *,
     title: str,
+    market: str | None = None,
+    store_code: str | None = None,
     product: str,
     option_name: str,
     question: str,
@@ -463,6 +509,33 @@ def notify_qna_safely(
     """
     if not is_kakao_notify_enabled():
         return False
+
+    # Which marketplace this inquiry belongs to, and whether production may
+    # notify about it at all.
+    #
+    # This gate is here rather than in each caller because a Coupang inquiry
+    # did reach a real chat room: it entered the auto-post queue, which was
+    # not scoped by market, generated a draft, was held for review, and the
+    # hold notification went out reading "네이버 등록: 안 됨" for a question
+    # nobody had asked on Naver.  The queue scoping is fixed at its source,
+    # but every path into this function has to be closed, not just the one
+    # that was found.  A market that is collected and displayed but not yet
+    # answered sends nothing.
+    resolved_market = market
+    if resolved_market is None and store_code is not None:
+        from services.market_policy import market_of
+
+        resolved_market = market_of(store_code)
+    if resolved_market is not None:
+        from services.market_policy import is_answer_market_enabled
+
+        if not is_answer_market_enabled(resolved_market):
+            print(
+                "[KAKAO] 발송 대상 마켓이 아니어서 생략: "
+                f"{resolved_market}"
+            )
+            return False
+    market = resolved_market
 
     resolved_notify_key = (
         str(notify_key or "").strip()
@@ -492,6 +565,7 @@ def notify_qna_safely(
             return False
 
         message = format_qna_message(
+            market=market,
             product=product,
             option_name=option_name,
             question=question,
@@ -506,6 +580,7 @@ def notify_qna_safely(
         outbox = enqueue_kakao_message(
             title=title,
             message=message,
+            market=market,
         )
 
         # outbox 등록이 정상적으로 끝난 후에만 전송 완료 처리
