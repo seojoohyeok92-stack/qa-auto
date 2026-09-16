@@ -176,9 +176,16 @@ UNKNOWN_OR_UNVERIFIED = re.compile(
 # "사진 확인 시 강제로 푸신 것으로 확인됩니다" is true of one photograph, and
 # "모니터 문제가 아니라 고객님 PC 문제입니다" names a cause nobody verified.
 # Repeating either to the next customer answers a question they did not ask.
+# 아니 is not a prefix of 아닌.  Korean composes the ending into the syllable
+# -- 아닌 is U+B2CC, not 니 with a trailing consonant -- so ``아니(?:라|고|며|)``
+# matched 아니라 and 아니고 and silently missed "모니터 문제가 아닌 고객님
+# PC문제십니다", which is the real case 301 and the exact sentence this was
+# written for.  The conjugations are listed as whole syllables for that reason.
 UNSUPPORTED_CAUSE_ASSERTION = re.compile(
-    r"(?:제품|모니터|tv|티비|티브이)\s*(?:의\s*)?문제가?\s*아니(?:라|고|며|)"
-    r"|고객님[^\n]{0,12}(?:문제|탓|잘못)(?:입니다|이라|일\s*수)"
+    r"(?:제품|모니터|tv|티비|티브이|본체)[^\n]{0,10}"
+    r"문제(?:가|는)?\s*(?:아니(?:라|고|며|지만)|아닌|아님|아닙니다)"
+    r"|고객님[^\n]{0,12}(?:문제|탓|잘못)(?:입니다|이라|일\s*수|십니다)"
+    r"|(?:pc|피씨|본체|고객님)[^\n]{0,10}문제(?:로|라고)\s*(?:보입|확인|판단)"
     r"|사진[^\n]{0,12}(?:확인|보면|보니|첨부)"
     r"|(?:푸신|푸셨|하신|하셨|누르신|분해하신|조작하신|해제하신)"
     r"[^\n]{0,8}(?:것으로|것\s*같|걸로)\s*(?:확인|보입|판단|추정)",
@@ -207,6 +214,34 @@ SHIPPING_DISPATCH = re.compile(
 INTAKE_AFTER_SERVICE_ROUTE = re.compile(
     r"A/?S|에이에스|서비스\s*센터", re.IGNORECASE
 )
+# Also intake-only.  A stored row is not just the exchange: the question keeps
+# the marketplace's own title line, and the answer keeps whatever greeting,
+# bot introduction and contact footer the seller template wraps around it.
+#
+# Measuring information or alignment across that measures the template.  It is
+# what let three real rows through: "안녕하세요 고객님" carried "네 맞습니다."
+# past the twelve-character low-information floor (284); "Coupang 상품문의"
+# added two tokens to "터치되나요?" and put it over the terse-question cap
+# (285); and the footer's "언제든지" even contributed a DELIVERY_DATE concept
+# the seller never wrote about.
+INTAKE_BOILERPLATE_LINE = re.compile(
+    r"^(?:(?:coupang|쿠팡|네이버|naver)\s*)?(?:상품|제품)?\s*문의$"
+    r"|^안녕하[세십]"
+    r"|^더\s*궁금하[신실]"
+    r"|^\(?\s*상담\s*가능\s*시간"
+    r"|^감사합니다[.!\s]*$",
+    re.IGNORECASE,
+)
+
+
+def intake_substance(text: object) -> str:
+    """The part of a stored message that is actually the exchange."""
+
+    return "\n".join(
+        stripped
+        for line in str(text or "").splitlines()
+        if (stripped := line.strip()) and not INTAKE_BOILERPLATE_LINE.search(stripped)
+    ).strip()
 
 
 @dataclass(frozen=True)
@@ -294,15 +329,31 @@ def classify_historical_candidate(question: str, answer: str) -> HistoricalCandi
         )
 
     quality = HistoricalLearningQualityService()
-    if _terse_question_left_unanswered(question, answer, quality):
+    # Judge information and alignment on what the seller actually wrote, not on
+    # the template around it.  ``assess`` below still receives the stored text
+    # unchanged, so nothing outside this gate sees a different row.
+    question_said = intake_substance(question)
+    answer_said = intake_substance(answer)
+    if len(answer_said) < 12 or LOW_INFORMATION.fullmatch(answer_said):
+        # "네 맞습니다." confirms one customer's own plan and states nothing a
+        # later customer could reuse.  The fault it is about is not the reason.
+        return HistoricalCandidateGate(
+            "MANUAL_REVIEW", "UNKNOWN_INFORMATION",
+            ("UNKNOWN_INFORMATION", "REVIEW_REQUIRED"),
+        )
+    if _terse_question_left_unanswered(question_said, answer_said, quality):
         return HistoricalCandidateGate(
             "MANUAL_REVIEW", "UNKNOWN_INFORMATION",
             ("UNKNOWN_INFORMATION", "QUESTION_ANSWER_MISMATCH"),
         )
 
     assessment = quality.assess(
-        question=question,
-        answer=answer,
+        # The substance, for the same reason the checks above use it: the
+        # footer's "언제든지" reads as a DELIVERY_DATE concept and turned a
+        # plain Wi-Fi setup answer into a mismatch.  ``assess`` is unchanged
+        # and still sees the stored text whenever anything else calls it.
+        question=question_said,
+        answer=answer_said,
         # Candidate intake must not treat the default stored score as evidence.
         stored_quality=0.0,
         active=True,
@@ -312,8 +363,8 @@ def classify_historical_candidate(question: str, answer: str) -> HistoricalCandi
     # the same verdict it always did to every other caller.
     shares_after_service_route = bool(
         assessment.status in {"QUESTION_ANSWER_MISMATCH", "LOW_RELEVANCE"}
-        and INTAKE_AFTER_SERVICE_ROUTE.search(question)
-        and INTAKE_AFTER_SERVICE_ROUTE.search(answer)
+        and INTAKE_AFTER_SERVICE_ROUTE.search(question_said)
+        and INTAKE_AFTER_SERVICE_ROUTE.search(answer_said)
     )
     if not shares_after_service_route and assessment.status in {
         "QUESTION_ANSWER_MISMATCH", "LOW_RELEVANCE", "REVIEW_REQUIRED", "POLICY_RISK",

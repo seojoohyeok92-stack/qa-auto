@@ -121,14 +121,20 @@ def test_touch_question_answered_about_touch_is_a_good_candidate() -> None:
 def test_touch_question_answered_with_mounting_specs_goes_to_review() -> None:
     """Case 285: the same question, answered about VESA holes and weight.
 
-    ``assess`` sees a mismatch only when both sides carry a known concept, and
-    터치 is in none of the ten concept patterns, so the check was switched off
-    entirely and this pair reached KEEP.
+    Two layers hid this.  ``assess`` sees a mismatch only when both sides carry
+    a known concept and 터치 is in none of the ten patterns; and the stored
+    question carries the marketplace's own "Coupang 상품문의" title, whose two
+    tokens pushed a one-word question over the terse-question cap.  The
+    footer's "언제든지" even lent the answer a DELIVERY_DATE concept.
     """
 
     gate = classify_historical_candidate(
-        "터치되나요?",
-        "VESA 100x100 규격이며 무게는 6.6kg으로 무빙 스탠드와 호환됩니다.",
+        "Coupang 상품문의\n터치되나요?",
+        "안녕하세요. ⚙ 오제 챗봇입니다.\n"
+        "삼성 S32DM501 모델은 VESA 100x100 / 6.6kg 제품으로 본 무빙 스탠드와 "
+        "호환 가능합니다.\n\n"
+        "더 궁금하신 점은 저희 고객센터(1588-0000)로 언제든지 문의 주세요\n"
+        "(상담가능시간 평일 09:00~18:00). 감사합니다.",
     )
     assert gate.decision == "MANUAL_REVIEW"
     assert gate.primary_reason == "UNKNOWN_INFORMATION"
@@ -168,12 +174,17 @@ def test_case_282_reusable_assembly_service_policy_stays_a_candidate() -> None:
 
 def test_case_284_is_judged_on_how_little_the_answer_says() -> None:
     """A real fault, but "네 맞습니다." carries no knowledge on its own.  The
-    fault is not the reason for review; the empty answer is."""
+    fault is not the reason for review; the empty answer is.
+
+    Stored text, greeting included: "안녕하세요 고객님" is nine characters and
+    on its own carried this past the twelve-character low-information floor.
+    """
 
     gate = classify_historical_candidate(
-        "갑자기 전원이 켜지지 않아서 삼성 서비스센터에 출장서비스를 "
-        "신청했는데 그렇게 하는 게 맞나요?",
-        "네 맞습니다.",
+        "Coupang 상품문의\n"
+        "갑자기 전원이켜지지않는데요 1588 3366 걸어서 출장서비스신청햇는데 "
+        "여기다가 하는게맞나요?",
+        "안녕하세요 고객님\n네 맞습니다.",
     )
     assert gate.decision == "MANUAL_REVIEW"
     assert gate.primary_reason == "UNKNOWN_INFORMATION"
@@ -181,10 +192,21 @@ def test_case_284_is_judged_on_how_little_the_answer_says() -> None:
 
 
 def test_case_301_unclear_symptom_answered_by_blaming_the_customer_pc() -> None:
+    """Stored wording is 아닌, not 아니라.
+
+    Korean composes the ending into the syllable -- 아닌 is U+B2CC, not 니 with
+    a trailing consonant -- so a pattern written as ``아니(?:라|고|며|)`` matched
+    the textbook forms and missed the sentence actually on file.
+    """
+
     gate = classify_historical_candidate(
-        "설치 후 로그인하면 모니터에 나타납니다. 왜 그런가요?",
-        "모니터는 PC 신호를 표시하는 장치이며 화면에서 넘어가지 않는다면 "
-        "모니터 문제가 아니라 고객님 PC 문제입니다.",
+        "Coupang 상품문의\n"
+        "에제 설치 허였습니다. 하지만 로그인하면 모니터에 나타납니다 왜그럴까요",
+        "안녕하세요 고객님\n"
+        "모니터는 송출기기이기때문에 고객님 PC신호를 받고 해당 화면을 "
+        "띄워주는 기기입니다.\n"
+        "해당 화면에서 안넘어가시는 경우라면 해당부분은 모니터 문제가 아닌 "
+        "고객님 PC문제십니다.",
     )
     assert gate.decision == "MANUAL_REVIEW"
     assert gate.primary_reason == "UNKNOWN_INFORMATION"
@@ -274,6 +296,71 @@ def test_stable_product_faq_stays_keep(question: str, answer: str) -> None:
     gate = classify_historical_candidate(question, answer)
     assert gate.decision == "KEEP"
     assert gate.primary_reason == "STABLE_PRODUCT_FAQ"
+
+
+# Every stored Coupang row arrives inside this template, so stripping it is not
+# a special case for three rows -- it changes how all 45 are read.  These pin
+# that a good answer keeps its verdict once the template is on it.
+TITLE = "Coupang 상품문의\n"
+GREETING = "안녕하세요 고객님\n"
+BOT = "안녕하세요. ⚙ 오제 챗봇입니다.\n"
+FOOTER = (
+    "\n\n더 궁금하신 점은 저희 고객센터(1588-0000)로 언제든지 문의 주세요\n"
+    "(상담가능시간 평일 09:00~18:00). 감사합니다."
+)
+
+
+@pytest.mark.parametrize(
+    "question,answer",
+    [
+        pytest.param(
+            "유선 잭을 꽂으면 TV 시청이 가능한가요?",
+            "해당 제품은 RF 안테나 단자가 없어 직접 연결은 불가하며 "
+            "셋톱박스를 HDMI로 연결하여 사용하셔야 합니다.",
+            id="case-296-rf-input-templated",
+        ),
+        pytest.param(
+            "와이파이 연결방법 알려주세요.",
+            "초기 설정 화면 또는 설정창에서 Wi-Fi 설정을 선택하여 연결하실 수 있습니다.",
+            # The footer's 언제든지 reads as DELIVERY_DATE; without stripping,
+            # this exact pair turns into a mismatch.
+            id="case-274-wifi-templated",
+        ),
+        pytest.param(
+            "터치되나요?",
+            "해당 모델은 터치 기능을 지원하지 않습니다.",
+            id="touch-answered-about-touch-templated",
+        ),
+        pytest.param(
+            "AS 접수는 어디서 하나요?",
+            "삼성전자 서비스센터를 통해 접수할 수 있습니다.",
+            id="as-intake-route-templated",
+        ),
+        pytest.param(
+            "기존 거실 TV를 방으로 옮기고 새 TV를 거실에 설치할 수 있나요?",
+            "새 제품 설치는 가능하지만 기존 제품 이동은 지원해드리기 어렵습니다.",
+            id="case-300-installation-scope-templated",
+        ),
+    ],
+)
+def test_template_around_a_good_answer_does_not_change_its_verdict(
+    question: str, answer: str
+) -> None:
+    for wrapper in (GREETING, BOT):
+        gate = classify_historical_candidate(
+            TITLE + question, wrapper + answer + FOOTER
+        )
+        assert gate.decision == "KEEP", (wrapper, gate)
+        assert gate.primary_reason == "STABLE_PRODUCT_FAQ"
+
+
+def test_template_does_not_rescue_a_bundle_row_from_review() -> None:
+    gate = classify_historical_candidate(
+        TITLE + "스탠드와 같이 오나요?",
+        GREETING + "모니터와 스탠드 패키지 제품이며 각각 박스로 발송됩니다." + FOOTER,
+    )
+    assert gate.decision == "MANUAL_REVIEW"
+    assert gate.primary_reason == "LISTING_OR_BUNDLE_SPECIFIC"
 
 
 # --- protected: listing/bundle rows stay a human decision ------------------
