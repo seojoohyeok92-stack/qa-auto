@@ -1226,6 +1226,21 @@ def _render_gpt_diagnostics(
             )
 
 
+def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
+    """What an approver can do next, which depends on the marketplace.
+
+    Approval only produces a Final Answer; registering it is a separate step.
+    On a market production does not post to, that step does not exist and the
+    registration button beside it is disabled, so telling the approver to go
+    and register would contradict the screen they are looking at.
+    """
+
+    market = store_display_name(inquiry.get("store_code"))
+    if is_store_answer_enabled(inquiry.get("store_code")):
+        return f"승인 완료했습니다. 아래에서 {market} 답변 등록을 별도로 진행할 수 있습니다."
+    return f"승인 완료했습니다. 현재 {market} 답변 등록은 비활성화되어 있습니다."
+
+
 def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     inquiry_id = int(inquiry["id"])
     view_key = f"answer_workspace_view_{inquiry_id}"
@@ -2034,7 +2049,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         with st.expander("이 답변이 잘못됨", expanded=False):
             st.caption(
                 "현재 선택한 답변을 삭제하지 않고 Negative Learning으로 기록합니다. "
-                "실제 네이버 답변은 수정하거나 재등록하지 않습니다."
+                f"실제 {store_display_name(inquiry.get('store_code'))} 답변은 "
+                "수정하거나 재등록하지 않습니다."
             )
             st.caption(
                 "평가 대상: "
@@ -2810,7 +2826,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             st.session_state["approval_ui_notice"] = (
                 "success",
                 "직원 수정본을 STAFF_EDITED Positive Learning으로 승인했습니다. "
-                "실제 네이버 답변은 변경하지 않았습니다.",
+                f"실제 {store_display_name(inquiry.get('store_code'))} 답변은 "
+                "변경하지 않았습니다.",
             )
             st.rerun()
         if approve and source_answered:
@@ -2851,7 +2868,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
                 "success",
-                "승인 완료했습니다. 아래에서 네이버 답변 등록을 별도로 진행할 수 있습니다.",
+                _approval_next_step_notice(inquiry),
             )
             st.rerun()
         if cancel:
