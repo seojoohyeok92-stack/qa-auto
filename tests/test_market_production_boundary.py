@@ -21,10 +21,11 @@ from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from services.market_policy import (
-    PRODUCTION_ANSWER_MARKETS,
-    answer_enabled_store_codes,
-    is_store_answer_enabled,
+    KAKAO_MARKETS,
+    POST_MARKETS,
+    is_store_post_enabled,
     market_of,
+    post_enabled_store_codes,
     store_display_name,
 )
 
@@ -71,15 +72,16 @@ def test_store_codes_map_to_markets(store_code, market) -> None:
     assert market_of(store_code) == market
 
 
-def test_only_naver_is_answered_in_production() -> None:
-    assert PRODUCTION_ANSWER_MARKETS == frozenset({"NAVER"})
-    assert is_store_answer_enabled(NAVER_STORE) is True
-    assert is_store_answer_enabled(COUPANG_NS) is False
-    assert is_store_answer_enabled(COUPANG_PLUS) is False
+def test_only_naver_is_posted_and_notified_in_production() -> None:
+    assert POST_MARKETS == frozenset({"NAVER"})
+    assert KAKAO_MARKETS == frozenset({"NAVER"})
+    assert is_store_post_enabled(NAVER_STORE) is True
+    assert is_store_post_enabled(COUPANG_NS) is False
+    assert is_store_post_enabled(COUPANG_PLUS) is False
 
 
 def test_enabled_store_filter_drops_every_coupang_account() -> None:
-    assert answer_enabled_store_codes(
+    assert post_enabled_store_codes(
         [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
     ) == [NAVER_STORE]
 
@@ -98,7 +100,7 @@ def test_auto_post_queue_no_longer_offers_coupang(tmp_path) -> None:
     unscoped = repository.candidates(max_retries=3)
     scoped = repository.candidates(
         max_retries=3,
-        store_codes=answer_enabled_store_codes(repository.distinct_store_codes()),
+        store_codes=post_enabled_store_codes(repository.distinct_store_codes()),
     )
 
     # Without a scope the Coupang rows qualify - which is exactly what happened.
@@ -119,7 +121,7 @@ def test_coupang_volume_cannot_starve_the_naver_queue(tmp_path) -> None:
 
     rows = repository.candidates(
         max_retries=3, limit=5,
-        store_codes=answer_enabled_store_codes(repository.distinct_store_codes()),
+        store_codes=post_enabled_store_codes(repository.distinct_store_codes()),
     )
     assert [row["source_question_id"] for row in rows] == ["n-last"]
 

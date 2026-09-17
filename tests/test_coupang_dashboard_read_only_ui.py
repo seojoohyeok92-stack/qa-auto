@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from services.market_policy import (
-    is_store_answer_enabled,
+    is_store_post_enabled,
     market_of,
     store_display_name,
 )
@@ -25,20 +25,21 @@ COUPANG_PLUS = "COUPANG_OJE_PLUS"
 # --- what the buttons ask before enabling themselves -----------------------
 
 @pytest.mark.parametrize("store_code", [COUPANG_NS, COUPANG_PLUS])
-def test_coupang_inquiries_may_not_start_generation_or_posting(store_code) -> None:
-    assert is_store_answer_enabled(store_code) is False
+def test_coupang_inquiries_may_not_start_posting(store_code) -> None:
+    # Phase 2-1 opens answer generation for review; posting stays closed.
+    assert is_store_post_enabled(store_code) is False
 
 
 def test_naver_inquiries_still_may() -> None:
-    assert is_store_answer_enabled(NAVER_STORE) is True
+    assert is_store_post_enabled(NAVER_STORE) is True
 
 
 def test_the_dashboard_filter_is_not_what_decides() -> None:
     """Whatever the picker is set to, the store answers the question."""
 
     for dashboard_market in ("ALL", "NAVER", "COUPANG"):
-        assert is_store_answer_enabled(COUPANG_NS) is False
-        assert is_store_answer_enabled(NAVER_STORE) is True
+        assert is_store_post_enabled(COUPANG_NS) is False
+        assert is_store_post_enabled(NAVER_STORE) is True
         assert dashboard_market in {"ALL", "NAVER", "COUPANG"}
 
 

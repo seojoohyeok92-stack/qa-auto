@@ -94,11 +94,26 @@ def build_answer_facts(
                 if isinstance(request.metadata.get("phase9_analysis"), dict)
                 else None
             ),
+            # Present only for a marketplace other than Naver, so a Naver
+            # prompt is byte-for-byte what it was.
+            **(
+                {"market": request.metadata.get("market")}
+                if request.metadata.get("market") else {}
+            ),
         },
         product={
             "product_id": request.metadata.get("product_id") or None,
             "name": request.product_name or None,
             "option_name": request.option_name or None,
+            # The operator-confirmed model for a Coupang option.  Only that
+            # provenance adds it; a model read from a title is not a fact.
+            **(
+                {"model_code": request.metadata.get("model_code")}
+                if request.metadata.get("model_identity_source")
+                == "COUPANG_CONFIRMED_MAPPING"
+                and request.metadata.get("model_code")
+                else {}
+            ),
         },
         order={
             "order_id": request.order_id or None,

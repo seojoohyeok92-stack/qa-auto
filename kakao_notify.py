@@ -32,7 +32,8 @@ KAKAO_QNA_RECIPIENT = "오제 네이버 자동답변 확인방"
 #
 # A room being configured is not the same as a market being notified.  Nothing
 # here sends anything; what may be notified at all is decided once, in
-# ``services.market_policy``, and Coupang is not in it.
+# ``services.market_policy`` (``KAKAO_MARKETS``), and Coupang is not in it --
+# not even now that Coupang answers may be generated for review.
 KAKAO_RECIPIENT_ENV_BY_MARKET = {
     "NAVER": "KAKAO_QNA_RECIPIENT",
     "COUPANG": "KAKAO_COUPANG_QNA_RECIPIENT",
@@ -527,9 +528,9 @@ def notify_qna_safely(
 
         resolved_market = market_of(store_code)
     if resolved_market is not None:
-        from services.market_policy import is_answer_market_enabled
+        from services.market_policy import is_kakao_market_enabled
 
-        if not is_answer_market_enabled(resolved_market):
+        if not is_kakao_market_enabled(resolved_market):
             print(
                 "[KAKAO] 발송 대상 마켓이 아니어서 생략: "
                 f"{resolved_market}"

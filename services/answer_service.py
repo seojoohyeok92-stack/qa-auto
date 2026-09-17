@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -72,6 +73,19 @@ from services.product_fact_guard import (
     classify_product_fact,
     extract_model_code,
 )
+from services.market_policy import (
+    COUPANG,
+    NAVER,
+    account_of_store,
+    foreign_market_wording,
+    is_store_answer_generation_enabled,
+    is_store_dps_enabled,
+    is_store_post_enabled,
+    market_of,
+)
+from repositories.coupang_product_mapping_repository import (
+    CoupangProductMappingRepository,
+)
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
 
@@ -135,6 +149,79 @@ EXACT_TEMPLATE_MATCH_KINDS = frozenset({
 })
 
 
+def _non_naver_market(store_code: object) -> str | None:
+    """The request's market when it is not Naver, else None.
+
+    Market-aware handling below only ever applies to a market other than
+    Naver, so every Naver request keeps exactly the path it had.
+    """
+
+    market = market_of(store_code)
+    return market if market and market != NAVER else None
+
+
+def _foreign_wording_for(request: Any, text: object) -> tuple[str, ...]:
+    market = _non_naver_market(getattr(request, "store_code", None))
+    return foreign_market_wording(text, market) if market else ()
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def coupang_confirmed_model(
+    database: Database,
+    inquiry: dict[str, Any],
+    catalog_repository: Any = None,
+) -> dict[str, Any] | None:
+    """The model a Coupang inquiry is about, when an operator confirmed it.
+
+    The option the customer asked from (account + vendorItemId) is mapped to
+    a canonical model by ``coupang_product_mappings``.  Only a CONFIRMED
+    mapping speaks: a mapping still waiting for review names a guess, and a
+    guessed model would put another product's specification in the answer.
+    The canonical code (``32DM501``) is resolved to the catalogue record it
+    names, so the Product Knowledge lookup takes it as an explicit model
+    rather than re-deriving one from the listing title.
+    """
+
+    store_code = inquiry.get("store_code")
+    if market_of(store_code) != COUPANG:
+        return None
+    raw = _dict_value(inquiry.get("raw_json"))
+    metadata = _dict_value(inquiry.get("source_metadata_json"))
+    account = str(metadata.get("account_code") or account_of_store(store_code) or "").strip()
+    vendor_item = str(raw.get("vendorItemId") or "").strip()
+    if not account or not vendor_item:
+        return None
+    mapping = CoupangProductMappingRepository(database).get_confirmed(
+        account_code=account, vendor_item_id=vendor_item
+    )
+    canonical = str((mapping or {}).get("canonical_model") or "").strip()
+    if not canonical:
+        return None
+    catalog_key = None
+    if catalog_repository is not None:
+        try:
+            catalog_key = catalog_repository.match(model_code=canonical).model_key
+        except Exception:  # noqa: BLE001 - identity lookup never blocks generation
+            catalog_key = None
+    return {
+        "canonical_model": canonical,
+        "model_code": str(catalog_key or canonical),
+        "account_code": account,
+        "vendor_item_id": vendor_item,
+    }
+
+
 def _template_may_answer(metadata: dict[str, Any]) -> bool:
     """True when a rule result is exact enough to be the final answer.
 
@@ -172,6 +259,8 @@ def _template_unavailable_reason(
     }
     if allowed_stores and str(request.store_code).upper() not in allowed_stores:
         return "STORE_MISMATCH"
+    if _foreign_wording_for(request, result.answer):
+        return "MARKET_WORDING_MISMATCH"
     allowed_types = {
         str(value).upper()
         for value in metadata.get("allowed_inquiry_types", ())
@@ -700,6 +789,10 @@ class AnswerService:
     def _append_template_candidate(
         request: AnswerRequest, payload: dict[str, Any],
     ) -> None:
+        if _foreign_wording_for(request, payload.get("answer")):
+            # A standing sentence that names another marketplace's procedure
+            # is not evidence for this one; GPT would repeat it.
+            return
         candidates = request.metadata.setdefault("template_candidates", [])
         if not isinstance(candidates, list):
             candidates = []
@@ -1176,6 +1269,56 @@ class AnswerService:
                     inquiry_id,
                 )
 
+    def _with_marketplace_identity(
+        self, inquiry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The inquiry as the answer path must see it.
+
+        A Coupang row stores no product or option name -- only ids -- and the
+        names the dashboard shows are attached when it is read for display.
+        ``get`` does not attach them, so without this the screen showed the
+        product while AnswerService was handed none.  Naver rows are returned
+        unchanged.
+        """
+
+        if market_of(inquiry.get("store_code")) != COUPANG:
+            return inquiry
+        enriched = self.inquiries.get_by_source(
+            str(inquiry.get("store_code") or ""),
+            str(inquiry.get("source_type") or ""),
+            str(inquiry.get("source_question_id") or ""),
+        )
+        return enriched if enriched is not None else inquiry
+
+    def _attach_market_identity(
+        self, request: AnswerRequest, inquiry: dict[str, Any]
+    ) -> None:
+        market = _non_naver_market(request.store_code)
+        if market is None:
+            return
+        request.metadata["market"] = market
+        mapped = coupang_confirmed_model(
+            self.database, inquiry,
+            getattr(self.product_knowledge, "catalog_repository", None),
+        )
+        if mapped is not None:
+            request.metadata["model_code"] = mapped["model_code"]
+            request.metadata["canonical_model"] = mapped["canonical_model"]
+            request.metadata["model_identity_source"] = "COUPANG_CONFIRMED_MAPPING"
+
+    @staticmethod
+    def _product_knowledge_listing_id(request: AnswerRequest) -> Any:
+        """The listing id Product Knowledge may key on.
+
+        Product Knowledge listings are Naver product ids.  A Coupang
+        sellerProductId is a different numbering, so it is never offered as
+        one: the product is identified by its confirmed model instead.
+        """
+
+        if _non_naver_market(request.store_code) is not None:
+            return None
+        return request.metadata.get("product_id")
+
     def enrich_dps_for_inquiry(
         self,
         inquiry_id: int,
@@ -1187,6 +1330,11 @@ class AnswerService:
         inquiry = self.inquiries.get(inquiry_id)
         if inquiry is None:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
+        if not is_store_dps_enabled(inquiry.get("store_code")):
+            raise AutoAnswerProhibitedError(
+                "이 마켓의 문의는 배송·설치 조회를 지원하지 않습니다.",
+                policy_reason="MARKET_ORDER_DPS_NOT_SUPPORTED",
+            )
         if (
             self.answers.is_inquiry_posted(inquiry_id)
             and not explicit_lookup
@@ -1498,6 +1646,20 @@ class AnswerService:
             raise AnswerAlreadyPostedError(
                 "이미 등록된 문의는 답변 초안을 다시 생성할 수 없습니다."
             )
+        store_code = inquiry.get("store_code")
+        if not is_store_answer_generation_enabled(store_code):
+            raise AutoAnswerProhibitedError(
+                "이 마켓의 문의는 답변을 생성하지 않습니다.",
+                policy_reason="MARKET_ANSWER_GENERATION_DISABLED",
+            )
+        if inquiry.get("source_answered") and not is_store_post_enabled(store_code):
+            # The marketplace already holds the seller's reply and nothing here
+            # can post another, so a draft would be a write with no use.
+            raise AutoAnswerProhibitedError(
+                "마켓에 이미 판매자 답변이 있는 문의는 새 답변을 생성하지 않습니다.",
+                policy_reason="MARKET_SOURCE_ALREADY_ANSWERED",
+            )
+        inquiry = self._with_marketplace_identity(inquiry)
         prior_active = self.answers.active_for_inquiry(inquiry_id)
 
         step_started = False
@@ -1548,7 +1710,23 @@ class AnswerService:
                     "문의와 처리계획의 식별자가 일치하지 않습니다."
                 )
             correlation_id = plan.correlation_id
+            if not is_store_dps_enabled(inquiry.get("store_code")) and (
+                plan.is_delivery
+                or plan.requires_order_lookup
+                or plan.requires_dps_lookup
+            ):
+                # Order lookup and DPS are Naver order semantics (general order
+                # number, product-order number, the Naver order API).  Until a
+                # market's own order path is verified, an inquiry that needs
+                # one gets no draft at all rather than a schedule or an
+                # order-number request written for the wrong marketplace.
+                raise AutoAnswerProhibitedError(
+                    "이 마켓의 주문·배송·설치 일정 조회는 아직 지원하지 않아 "
+                    "직원 확인이 필요합니다.",
+                    policy_reason="MARKET_ORDER_DPS_NOT_SUPPORTED",
+                )
             request = answer_request_from_inquiry(inquiry)
+            self._attach_market_identity(request, inquiry)
             self._attach_semantic_routing(
                 request, routing_semantic, semantic_routing,
             )
@@ -1573,10 +1751,13 @@ class AnswerService:
                 and understanding.get("offer_product_record")
             )
             product_knowledge = self.product_knowledge.facts_for_inquiry(
-                product_id=request.metadata.get("product_id"),
+                product_id=self._product_knowledge_listing_id(request),
                 questions=split_subquestions(request.question),
                 question=request.question,
-                model_code=extract_model_code(request.product_name),
+                model_code=(
+                    request.metadata.get("model_code")
+                    or extract_model_code(request.product_name)
+                ),
                 product_name=request.product_name,
                 option_name=request.metadata.get("option_name"),
                 include_all_catalog_fields=product_evidence_requested,
@@ -1908,6 +2089,7 @@ class AnswerService:
                     )
                     inquiry = refreshed
                     request = answer_request_from_inquiry(inquiry)
+                    self._attach_market_identity(request, inquiry)
                     self._attach_semantic_routing(
                         request, routing_semantic, semantic_routing,
                     )
@@ -3049,9 +3231,12 @@ class AnswerService:
             product_knowledge = request.metadata.get("product_knowledge")
             if not isinstance(product_knowledge, ProductKnowledgeResult):
                 product_knowledge = self.product_knowledge.facts_for_inquiry(
-                    product_id=request.metadata.get("product_id"),
+                    product_id=self._product_knowledge_listing_id(request),
                     question=request.question,
-                    model_code=product_fact_guard.model_code,
+                    model_code=(
+                        request.metadata.get("model_code")
+                        or product_fact_guard.model_code
+                    ),
                     product_name=request.product_name,
                     option_name=request.metadata.get("option_name"),
                 )

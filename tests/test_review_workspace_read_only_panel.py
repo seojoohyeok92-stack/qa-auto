@@ -39,13 +39,16 @@ def _draft(database: Database, inquiry_id: int) -> None:
     )
 
 
-def _coupang(database: Database, inquiry_id: str, *, answered: bool) -> tuple[str, str, str]:
+def _coupang(
+    database: Database, inquiry_id: str, *, answered: bool,
+    content: str = "벽걸이 설치 되나요?",
+) -> tuple[str, str, str]:
     """As it happened: a draft made while unanswered, the reply read back later."""
 
     def ready(with_reply: bool) -> dict:
         return normalize_work_item(
             CoupangInquiryNormalizer().online(
-                _payload(inquiry_id, with_reply), account_code="OJE_NS"
+                _payload(inquiry_id, with_reply, content), account_code="OJE_NS"
             ).to_work_item()
         )
 
@@ -57,10 +60,10 @@ def _coupang(database: Database, inquiry_id: str, *, answered: bool) -> tuple[st
     return first["store_code"], first["source_type"], first["source_question_id"]
 
 
-def _payload(inquiry_id: str, answered: bool) -> dict:
+def _payload(inquiry_id: str, answered: bool, content: str = "벽걸이 설치 되나요?") -> dict:
     return {
         "inquiryId": inquiry_id, "sellerProductId": "15654321531",
-        "vendorItemId": "93128932886", "content": "벽걸이 설치 되나요?",
+        "vendorItemId": "93128932886", "content": content,
         "inquiryAt": "2026-09-16T10:00:00+09:00", "orderIds": [],
         "commentDtoList": [{
             "inquiryCommentId": "c-1", "inquiryId": inquiry_id, "content": REPLY,
@@ -202,13 +205,36 @@ def test_copy_copies_the_reply_and_writes_nothing(coupang_app) -> None:
     assert _activity_rows(database) == before
 
 
-def test_an_unanswered_coupang_inquiry_says_there_is_no_reply_yet(database) -> None:
-    app = _render(database, _coupang(database, "160852999", answered=False))
-    assert "아직 마켓에 판매자 답변이 없는 문의입니다." in _texts(app)
-    assert list(app.segmented_control) == []
-    assert list(app.text_area) == []
-    copy = next(button for button in app.button if button.label == "복사")
-    assert copy.disabled
+# --- Phase 2-1: an unanswered Coupang inquiry is a review workspace ------------
+
+def test_an_unanswered_coupang_inquiry_opens_generation_and_review(database) -> None:
+    app = _render(database, _coupang(database, "160852999", answered=False, content="스피커 있나요?"))
+    text = _texts(app)
+    buttons = {button.label: button for button in app.button}
+
+    assert "조회전용" not in text and "답변 검토 및 승인" in text
+    for label in ("GPT 새 답변 생성", "초기화", "임시 저장", "승인 취소", "승인", "복사"):
+        assert label in buttons, label
+    assert not buttons["GPT 새 답변 생성"].disabled
+    assert not buttons["임시 저장"].disabled
+    # Registration stays closed: shown, never pressable.
+    assert buttons["쿠팡 답변 등록"].disabled
+    assert "네이버 답변 등록" not in buttons
+    assert "확정 운영 템플릿 사용" in _labels(app.checkbox)
+    assert list(app.segmented_control[0].options) == ["Program Answer", "직원 수정본", "Final Answer"]
+    assert "직원 수정본" in _labels(app.text_area)
+    assert "네이버 실제 등록 답변" not in text
+
+
+def test_a_coupang_order_or_schedule_inquiry_cannot_be_generated(database) -> None:
+    app = _render(database, _coupang(database, "160853000", answered=False, content="배송 언제 오나요?"))
+    text = _texts(app)
+    generate = next(
+        button for button in app.button
+        if "생성" in str(button.label) and "답변" in str(button.label)
+    )
+    assert generate.disabled
+    assert "일정 문의는 아직 답변 생성을 지원하지 않습니다" in text
 
 
 # --- Naver keeps everything ----------------------------------------------------

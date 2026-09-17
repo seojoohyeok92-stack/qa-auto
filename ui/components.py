@@ -47,7 +47,7 @@ from services.work_queue_service import WorkItem
 from ui.answer_presenter import build_answer_display
 from ui.dps_presenter import build_dps_display
 from services.market_policy import (
-    is_store_answer_enabled,
+    is_store_post_enabled,
     market_of as store_market,
     store_display_name,
 )
@@ -623,7 +623,10 @@ def _render_ai_answer_draft(work_item: WorkItem) -> None:
     # picker chooses what is displayed, not what may run.
     answer_market = store_market(work_item.get("store_code"))
     answer_market_name = store_display_name(work_item.get("store_code"))
-    market_is_read_only = not is_store_answer_enabled(work_item.get("store_code"))
+    # This older card renderer generates and posts from the same controls, so
+    # it stays closed wherever posting is: Phase 2-1 review happens in the
+    # review workspace, which separates the two.
+    market_is_read_only = not is_store_post_enabled(work_item.get("store_code"))
 
     database = Database()
     inquiry = None

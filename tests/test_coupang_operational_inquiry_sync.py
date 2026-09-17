@@ -420,7 +420,7 @@ def test_the_production_scheduler_is_wired_to_the_coupang_sync(database, monkeyp
 
 # --- 13 dashboard and the read-only gate -------------------------------------
 
-def test_the_dashboard_reads_a_new_row_and_keeps_it_read_only(database) -> None:
+def test_the_dashboard_reads_a_new_row_and_nothing_acts_on_it_unasked(database) -> None:
     service(database, {"OJE_PLUS": Transport(recent([inquiry("42")]))}).sync_account("OJE_PLUS")
     repository = InquiryRepository(database)
 
@@ -434,8 +434,14 @@ def test_the_dashboard_reads_a_new_row_and_keeps_it_read_only(database) -> None:
     assert total == 1
     assert str(listed[0].get("source_question_id") or listed[0].get("inquiry_id")) == "42"
 
-    from ui.review_workspace import _is_read_only_inquiry
-    assert _is_read_only_inquiry(by_source(database, "COUPANG_OJE_PLUS", "42")) is True
+    from services.market_policy import (
+        is_store_automatic_generation_enabled,
+        is_store_post_enabled,
+    )
+    # Phase 2-1: a person may generate an answer for it; nothing does so
+    # unasked and nothing posts it.
+    assert is_store_automatic_generation_enabled("COUPANG_OJE_PLUS") is False
+    assert is_store_post_enabled("COUPANG_OJE_PLUS") is False
 
 
 # --- 14, 15 nothing but inquiries ----------------------------------------------

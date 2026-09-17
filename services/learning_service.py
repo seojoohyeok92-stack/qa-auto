@@ -12,7 +12,7 @@ from answer.positive_learning import normalize_positive_reason
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository, utc_now
-from repositories.learning_repository import LearningRepository
+from repositories.learning_repository import LearningRepository, market_from_store_code
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_posted_answer_repository import (
@@ -200,6 +200,7 @@ class LearningService:
             f"{source}|{inquiry.get('id')}|{masked_question}|{masked_answer}".encode("utf-8")
         ).hexdigest()
         validator = str((draft or {}).get("validation_status") or "")
+        coupang_origin = market_from_store_code(inquiry.get("store_code")) == "COUPANG"
         return {
             "source_key": digest,
             "inquiry_id": inquiry.get("id"),
@@ -208,7 +209,12 @@ class LearningService:
             "learning_source": source,
             "question_original_masked": masked_question,
             "question_normalized": normalize_learning_question(masked_question),
-            "store_code": inquiry.get("store_code"),
+            # A Coupang answer is shared by both seller accounts, exactly like
+            # promoted Coupang history: the store column would otherwise pin it
+            # to the one account it was approved in.
+            "store_code": (
+                None if coupang_origin else inquiry.get("store_code")
+            ),
             "inquiry_type": inquiry.get("inquiry_type"),
             "intent": plan.get("detected_intent") or analysis.get("detected_intent") or analysis.get("primary_intent"),
             "product_name": self.privacy.mask(inquiry.get("product_name")),
@@ -244,6 +250,18 @@ class LearningService:
                 # verified it. Legacy rows without this remain retrievable by
                 # product/topic/text compatibility.
                 **({"semantic": canonical_semantic} if canonical_semantic else {}),
+                # A row with no applicability is read as NAVER_ONLY, so an
+                # answer approved for a Coupang inquiry has to say where it
+                # belongs or Coupang could never use it.  Naver rows are left
+                # without the keys, as they always were.
+                **(
+                    {
+                        "origin_market": "COUPANG",
+                        "market_applicability": "COUPANG_ONLY",
+                        "shared_cross_market_learning": False,
+                    }
+                    if coupang_origin else {}
+                ),
             },
             "active": True,
         }

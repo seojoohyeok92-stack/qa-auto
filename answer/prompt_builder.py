@@ -273,6 +273,7 @@ class PromptBuilder:
         selected_facts: SelectedFacts | None = None,
     ) -> str:
         normalized_task = str(task).upper()
+        market = str((facts.inquiry or {}).get("market") or "").strip().upper()
         fact_payload = (
             dict(selected_facts.values)
             if selected_facts is not None
@@ -337,7 +338,7 @@ class PromptBuilder:
             # The listing tier exists because withholding it produced worse
             # answers than showing it: an inquiry whose catalogue lookup failed
             # was left with no idea which product was being asked about at all.
-            "product_information_tiers": dict(self.PRODUCT_TIER_RULES),
+            "product_information_tiers": self._tier_rules(market),
             "inquiry_analysis": (
                 analysis.to_dict() if analysis is not None else {}
             ),
@@ -351,10 +352,11 @@ class PromptBuilder:
                 "allowed_facts 의 값을 바꾸거나 없는 값을 만들지 않습니다.",
                 "고객이 묻지 않은 구매요청 상태나 내부 처리 코드를 설명하지 않습니다.",
                 "DPS, 요구납기일, AnswerFacts, GPT, OpenAI, API, DB를 고객에게 노출하지 않습니다.",
+                *self._market_prohibitions(market),
             ],
             "required_content": (
                 [
-                    "네이버 주문내역에 표시된 주문번호 요청",
+                    f"{self._market_label(market)} 주문내역에 표시된 주문번호 요청",
                     "비밀글 또는 비공개로 남겨 달라는 안내",
                     "주문번호 확인 후 다시 안내한다는 설명",
                 ]
@@ -469,8 +471,36 @@ class PromptBuilder:
                 "allowed_fact_paths": allowed_fact_paths,
             },
         }
+        if market:
+            payload["system_policy"]["marketplace"] = market
         safe = _sanitize(payload)
         return json.dumps(safe, ensure_ascii=False, sort_keys=True)
+
+    # The prompt was written for Naver.  A market is named only for a request
+    # that carries one (non-Naver), so a Naver prompt does not change.
+    _MARKET_LABELS = {"COUPANG": "쿠팡"}
+
+    @classmethod
+    def _market_label(cls, market: str) -> str:
+        return cls._MARKET_LABELS.get(market, "네이버")
+
+    @classmethod
+    def _tier_rules(cls, market: str) -> dict[str, str]:
+        rules = dict(cls.PRODUCT_TIER_RULES)
+        if market in cls._MARKET_LABELS:
+            rules["listing_metadata"] = rules["listing_metadata"].replace(
+                "네이버 판매 페이지", f"{cls._MARKET_LABELS[market]} 판매 페이지"
+            )
+        return rules
+
+    @classmethod
+    def _market_prohibitions(cls, market: str) -> list[str]:
+        if market not in cls._MARKET_LABELS:
+            return []
+        return [
+            f"이 문의는 {cls._MARKET_LABELS[market]} 고객 문의입니다. 네이버·스마트스토어·"
+            "네이버페이 등 다른 마켓의 주문·결제·구매내역·등록 절차를 안내하지 않습니다.",
+        ]
 
     def safe_payload(self, payload: Any) -> Any:
         return _sanitize(payload)

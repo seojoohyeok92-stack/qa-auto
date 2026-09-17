@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 from kakao_notify import notify_qna_safely
-from services.market_policy import answer_enabled_store_codes
+from services.market_policy import post_enabled_store_codes
 from repositories.answer_repository import AnswerRepository
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
@@ -348,13 +348,14 @@ class AutoPostPipelineService:
                 "앱 재시작 전 전송 중이던 건을 POST_UNKNOWN으로 복구했습니다.",
                 level="ERROR", details={"recovered_count": recovered},
             )
-        # The one place production decides which marketplaces it acts on.
-        # Everything past this point -- draft, GPT, DPS, validator, post,
-        # Kakao -- runs only for the markets listed in the policy, so a
-        # collected-but-not-answered market cannot reach any of it.
+        # The one place the auto-post pipeline decides which marketplaces it
+        # acts on.  Everything past this point -- draft, GPT, DPS, validator,
+        # post, Kakao -- runs only for markets production may *post* to, so a
+        # market whose answers are only generated for a person to review
+        # cannot reach any of it.
         for candidate in self.auto.candidates(
             max_retries=max_retries, limit=limit, inquiry_ids=inquiry_ids,
-            store_codes=answer_enabled_store_codes(
+            store_codes=post_enabled_store_codes(
                 self.auto.distinct_store_codes()
             ),
         ):
@@ -398,11 +399,19 @@ class AutoPostPipelineService:
                 )
                 if draft_outcome.status in {
                     "FAILED", "SKIPPED_ALREADY_ANSWERED", "POLICY_BLOCKED",
+                    "SKIPPED_MANUAL_GENERATION_ONLY",
                 }:
                     message = "자동 답변을 준비하지 못해 해당 문의를 건너뛰었습니다."
                     if draft_outcome.status == "SKIPPED_ALREADY_ANSWERED":
                         counters["skipped_count"] += 1
                         event = "AUTO_POST_SKIPPED_ALREADY_ANSWERED"
+                    elif draft_outcome.status == "SKIPPED_MANUAL_GENERATION_ONLY":
+                        # Unreachable through the post-scoped candidate query;
+                        # kept so a market opened for review can never fall
+                        # through to posting from here.
+                        counters["skipped_count"] += 1
+                        event = "AUTO_POST_SKIPPED_MANUAL_GENERATION_ONLY"
+                        message = "수동 답변 생성만 허용된 마켓이라 자동등록을 건너뛰었습니다."
                     elif draft_outcome.status == "POLICY_BLOCKED":
                         # Blocked on purpose. It still skips auto-post exactly
                         # as before; only the counter and event stop calling a

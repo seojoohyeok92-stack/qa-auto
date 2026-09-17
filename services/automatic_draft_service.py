@@ -10,6 +10,7 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from services.answer_service import AnswerService, is_valid_draft
+from services.market_policy import is_store_automatic_generation_enabled
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,15 @@ class AutomaticDraftService:
         ):
             return AutomaticDraftOutcome(
                 status="SKIPPED_ALREADY_ANSWERED",
+                inquiry_id=int(inquiry_id),
+            )
+        if not is_store_automatic_generation_enabled(inquiry.get("store_code")):
+            # Every caller of this service is an unasked generation -- a
+            # selection, a sync, the auto-post pipeline.  A market whose
+            # answers are only generated when a person presses the button
+            # gets nothing here, whichever of those paths arrived.
+            return AutomaticDraftOutcome(
+                status="SKIPPED_MANUAL_GENERATION_ONLY",
                 inquiry_id=int(inquiry_id),
             )
         active = self.answers.active_for_inquiry(int(inquiry_id))

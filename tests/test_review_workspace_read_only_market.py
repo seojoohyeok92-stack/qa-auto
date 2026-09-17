@@ -1,15 +1,14 @@
-"""The review workspace is read-only for a market production only collects.
+"""When the review workspace is read-only, and what selecting an inquiry may do.
 
-Every control on this screen writes: drafts through AutomaticDraftService and
-AnswerService, DPS lookups, approval state, Learning rows, registration.  The
-data-layer boundaries added earlier stop the queue and the notifications, but
-a person clicking in the dashboard went straight past them -- merely selecting
-a Coupang inquiry created a draft for it.
+Phase 2-1 opens Coupang answer *generation* for a person to review.  Two
+things stay closed on this screen:
 
-So the gate is the inquiry's own store, and it is applied twice on purpose:
-the widget is disabled, and the intent it produces is cleared.  A disabled
-button is a UI state, and a rerun can replay a click that a fresh render would
-have refused.
+* Selecting an inquiry is a read.  On Naver it lazily creates the first draft;
+  on a market whose answers are only generated on request, it creates nothing.
+* An inquiry the marketplace already holds a seller reply for, on a market
+  nothing here can post to, has nothing left to write -- it is view-only.
+
+The gate is the inquiry's own store, never the dashboard's market picker.
 """
 
 from __future__ import annotations
@@ -25,86 +24,72 @@ COUPANG_PLUS = {"store_code": "COUPANG_OJE_PLUS"}
 
 # --- the gate --------------------------------------------------------------
 
-@pytest.mark.parametrize(
-    "inquiry", [COUPANG_NS, COUPANG_PLUS], ids=["ns", "plus"]
-)
-def test_coupang_inquiries_are_read_only(inquiry) -> None:
-    assert _is_read_only_inquiry(inquiry) is True
+@pytest.mark.parametrize("inquiry", [COUPANG_NS, COUPANG_PLUS], ids=["ns", "plus"])
+def test_an_unanswered_coupang_inquiry_is_reviewable(inquiry) -> None:
+    assert _is_read_only_inquiry(dict(inquiry, source_answered=0)) is False
 
 
-def test_naver_inquiries_are_not() -> None:
-    assert _is_read_only_inquiry(NAVER) is False
+@pytest.mark.parametrize("inquiry", [COUPANG_NS, COUPANG_PLUS], ids=["ns", "plus"])
+@pytest.mark.parametrize("flag", ["source_answered", "answered"])
+def test_an_answered_coupang_inquiry_is_view_only(inquiry, flag) -> None:
+    """Detail rows carry ``source_answered``; list items carry ``answered``."""
+
+    assert _is_read_only_inquiry(dict(inquiry, **{flag: True})) is True
+
+
+@pytest.mark.parametrize("answered", [False, True])
+def test_naver_inquiries_are_never_read_only(answered) -> None:
+    assert _is_read_only_inquiry(dict(NAVER, source_answered=answered)) is False
 
 
 def test_the_dashboard_filter_does_not_decide() -> None:
-    """Whatever the market picker is set to, the store answers the question."""
-
     for _ in ("ALL", "NAVER", "COUPANG"):
-        assert _is_read_only_inquiry(COUPANG_NS) is True
+        assert _is_read_only_inquiry(dict(COUPANG_NS, answered=True)) is True
+        assert _is_read_only_inquiry(dict(COUPANG_NS, answered=False)) is False
         assert _is_read_only_inquiry(NAVER) is False
 
 
-# --- selecting an inquiry must not write ------------------------------------
-
-def test_selecting_a_coupang_inquiry_creates_no_draft(monkeypatch) -> None:
-    """The call that made merely opening a question generate an answer."""
-
-    import ui.review_workspace as workspace
-
-    calls: list[int] = []
-    monkeypatch.setattr(
-        workspace, "_ensure_initial_program_answer",
-        lambda database, inquiry: calls.append(int(inquiry["id"])) or True,
-    )
-
-    for inquiry in (dict(COUPANG_NS, id=1), dict(COUPANG_PLUS, id=2)):
-        if not workspace._is_read_only_inquiry(inquiry):
-            workspace._ensure_initial_program_answer(None, inquiry)
-    assert calls == []
-
-    naver = dict(NAVER, id=3)
-    if not workspace._is_read_only_inquiry(naver):
-        workspace._ensure_initial_program_answer(None, naver)
-    assert calls == [3]
-
-
-# --- the source is the same one the rest of the boundary uses ---------------
-
-def test_the_gate_reads_the_shared_market_policy() -> None:
-    from services.market_policy import is_store_answer_enabled
-
-    for inquiry in (NAVER, COUPANG_NS, COUPANG_PLUS):
-        expected = not is_store_answer_enabled(inquiry["store_code"])
-        assert _is_read_only_inquiry(inquiry) is expected
-
-
 def test_a_row_with_no_store_is_read_only() -> None:
-    """No store means no market, and no market may be written to.
-
-    ``market_from_store_code`` returns None for an empty code rather than
-    guessing Naver, so the unknown case fails closed here.
-    """
+    """No store means no market, and no market may be written to."""
 
     assert _is_read_only_inquiry({}) is True
     assert _is_read_only_inquiry({"store_code": ""}) is True
 
 
 def test_an_unrecognised_non_empty_code_is_still_treated_as_naver() -> None:
-    """The other half of the same rule, recorded rather than endorsed.
-
-    Anything that is not the COUPANG_ prefix is Naver -- the corpus predating
-    marketplaces is Naver.  The Kakao gate and the auto-post queue read the
-    same rule, so this screen must not disagree with it; when a third
-    marketplace arrives, that rule is what has to learn about it.
-    """
+    """Recorded rather than endorsed: the shared rule reads non-COUPANG_ as Naver."""
 
     assert _is_read_only_inquiry({"store_code": "GMARKET_MAIN"}) is False
 
 
-# --- the list label --------------------------------------------------------
+# --- selecting an inquiry must not generate ----------------------------------
+
+def test_selection_generates_only_where_automatic_generation_is_open() -> None:
+    from services.market_policy import is_store_automatic_generation_enabled
+
+    assert is_store_automatic_generation_enabled("OJE_PLUS") is True
+    assert is_store_automatic_generation_enabled("COUPANG_OJE_NS") is False
+    assert is_store_automatic_generation_enabled("COUPANG_OJE_PLUS") is False
+
+
+def test_the_selection_call_is_gated_by_automatic_generation() -> None:
+    """The one call site that drafts on selection reads the automatic gate."""
+
+    import inspect
+
+    import ui.review_workspace as workspace
+
+    source = inspect.getsource(workspace.render_review_workspace)
+    gate = "if is_store_automatic_generation_enabled(inquiry.get(\"store_code\")):"
+    assert gate in source
+    after_gate = source[source.index(gate):]
+    assert after_gate.index("_ensure_initial_program_answer(database, inquiry)") < 120
+
+
+# --- the list label ----------------------------------------------------------
 
 def _status_label(item: dict) -> str:
-    """The same ladder ``_render_list`` walks, kept in one place to assert."""
+    """The same ladder ``_render_list`` walks."""
 
     if item.get("answered"):
         return "답변완료"
@@ -115,37 +100,19 @@ def _status_label(item: dict) -> str:
     return "검토대기"
 
 
-@pytest.mark.parametrize(
-    "answered,expected",
-    [
-        pytest.param(True, "답변완료", id="answered"),
-        pytest.param(False, "조회전용", id="unanswered"),
-        pytest.param(None, "조회전용", id="unknown"),
-    ],
-)
-def test_a_coupang_card_never_says_it_is_awaiting_review(answered, expected) -> None:
-    label = _status_label(dict(COUPANG_NS, answered=answered))
-    assert label == expected
-    assert label != "검토대기"
+def test_an_answered_coupang_card_says_answered() -> None:
+    assert _status_label(dict(COUPANG_NS, answered=True)) == "답변완료"
 
 
-def test_a_coupang_card_is_not_offered_as_generatable() -> None:
-    """Auto-processable is about a queue Coupang inquiries never enter."""
-
-    label = _status_label(
-        dict(COUPANG_NS, answered=False, queue="AUTO_PROCESSABLE")
-    )
-    assert label == "조회전용"
+def test_an_unanswered_coupang_card_is_waiting_for_review() -> None:
+    assert _status_label(dict(COUPANG_NS, answered=False)) == "검토대기"
 
 
 @pytest.mark.parametrize(
     "item,expected",
     [
         pytest.param({**NAVER, "answered": True}, "답변완료", id="answered"),
-        pytest.param(
-            {**NAVER, "answered": False, "queue": "AUTO_PROCESSABLE"},
-            "생성가능", id="auto",
-        ),
+        pytest.param({**NAVER, "answered": False, "queue": "AUTO_PROCESSABLE"}, "생성가능", id="auto"),
         pytest.param({**NAVER, "answered": False}, "검토대기", id="review"),
     ],
 )
@@ -154,14 +121,9 @@ def test_naver_card_labels_are_unchanged(item, expected) -> None:
 
 
 def test_the_learning_badge_is_untouched() -> None:
-    """Second badge is Learning lifecycle and keeps its own vocabulary."""
-
     from services.learning_lifecycle_service import LEARNING_STATUS_LABELS
 
     assert LEARNING_STATUS_LABELS == {
-        "APPROVED": "승인",
-        "AUTO": "자동",
-        "EXCLUDED": "제외",
-        "CORRECTED": "교정",
-        "NONE": "-",
+        "APPROVED": "승인", "AUTO": "자동", "EXCLUDED": "제외",
+        "CORRECTED": "교정", "NONE": "-",
     }

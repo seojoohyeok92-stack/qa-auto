@@ -627,6 +627,19 @@ class AnswerValidator:
             errors.append("답변에 개인정보 형태의 값이 포함되어 있습니다.")
         if SECRET_PATTERN.search(draft.answer):
             errors.append("답변에 인증정보 형태의 문구가 포함되어 있습니다.")
+        answer_market = str(facts.inquiry.get("market") or "").strip().upper()
+        if answer_market:
+            # Only set for a marketplace other than Naver.  Another market's
+            # procedure ("네이버페이 > 결제내역") is wrong for this customer
+            # whatever evidence the rest of the answer stands on.
+            from services.market_policy import foreign_market_wording
+
+            foreign = foreign_market_wording(draft.answer, answer_market)
+            if foreign:
+                errors.append(
+                    "답변에 다른 마켓 안내 문구가 포함되어 있습니다: "
+                    + ", ".join(foreign)
+                )
         # Wording rules that read the answer's *meaning* from a phrase list run
         # only where no reader judged the evidence. On the GPT path GPT ② (and
         # its self-review's has_speculation) already made these calls.

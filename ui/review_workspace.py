@@ -57,7 +57,12 @@ from services.approval_service import (
     ApprovalService,
 )
 from services.market_policy import (
-    is_store_answer_enabled,
+    NAVER,
+    is_store_answer_generation_enabled,
+    is_store_automatic_generation_enabled,
+    is_store_dps_enabled,
+    is_store_post_enabled,
+    market_of,
     store_display_name,
     store_label,
 )
@@ -1279,17 +1284,38 @@ def _render_gpt_diagnostics(
 def _is_read_only_inquiry(inquiry: dict[str, Any]) -> bool:
     """Whether this inquiry may only be looked at.
 
-    A market production does not answer for is collected and displayed and
-    nothing else.  The buttons on this screen write drafts, call GPT and DPS,
-    move approval state and register answers, so on such a market they must
-    not be pressable -- a disabled control is the honest version of a backend
-    that would refuse.
+    Two cases.  A market production does not generate answers for is
+    collected and displayed and nothing else.  And an inquiry the marketplace
+    already holds a seller reply for, on a market nothing here can post to,
+    has no answer left to write: generating one would be a write with no use.
 
     Decided by the inquiry's own store, never by the dashboard's market
     picker: the picker chooses what is displayed, not what may run.
     """
 
-    return not is_store_answer_enabled(inquiry.get("store_code"))
+    store_code = inquiry.get("store_code")
+    if not is_store_answer_generation_enabled(store_code):
+        return True
+    answered = inquiry.get("source_answered") or inquiry.get("answered")
+    return bool(answered) and not is_store_post_enabled(store_code)
+
+
+def _order_lookup_unsupported(
+    inquiry: dict[str, Any], plan: Any
+) -> bool:
+    """An order/DPS inquiry on a market whose order path is not verified.
+
+    The backend refuses these with no draft; the screen says so up front
+    instead of offering a button that can only fail.
+    """
+
+    if is_store_dps_enabled(inquiry.get("store_code")):
+        return False
+    return bool(
+        getattr(plan, "is_delivery", False)
+        or getattr(plan, "requires_order_lookup", False)
+        or getattr(plan, "requires_dps_lookup", False)
+    )
 
 
 NAVER_POSTED_VIEW = "네이버 실제 등록 답변"
@@ -1311,7 +1337,7 @@ def _source_answer_view(inquiry: dict[str, Any]) -> str | None:
 
     if not inquiry.get("source_answered"):
         return None
-    if is_store_answer_enabled(inquiry.get("store_code")):
+    if market_of(inquiry.get("store_code")) == NAVER:
         return NAVER_POSTED_VIEW
     return COUPANG_SELLER_VIEW if _source_seller_answer(inquiry) else None
 
@@ -1332,7 +1358,7 @@ def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
     """
 
     market = store_display_name(inquiry.get("store_code"))
-    if is_store_answer_enabled(inquiry.get("store_code")):
+    if is_store_post_enabled(inquiry.get("store_code")):
         return f"승인 완료했습니다. 아래에서 {market} 답변 등록을 별도로 진행할 수 있습니다."
     return f"승인 완료했습니다. 현재 {market} 답변 등록은 비활성화되어 있습니다."
 
@@ -1494,6 +1520,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         and isinstance(latest_delivery_dps.get("normalized_result_json"), dict)
         else {}
     )
+    lookup_unsupported = _order_lookup_unsupported(inquiry, inquiry_analysis)
     if read_only:
         generate = reset = save = False
         st.info(
@@ -1527,6 +1554,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "확정 운영 템플릿을 사용하지 않고\n"
                 "Learning 등의 근거를 참고하여 GPT가 답변 초안을 생성합니다."
             )
+        if lookup_unsupported:
+            st.warning(
+                f"{store_display_name(inquiry.get('store_code'))} 주문·배송·설치 "
+                "일정 문의는 아직 답변 생성을 지원하지 않습니다. 직원이 직접 "
+                "확인해 주세요."
+            )
         if draft and not posted:
             st.warning(
                 "현재 작성 중인 초안이 있습니다. 새 답변을 생성하면 기존 "
@@ -1553,7 +1586,10 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         generate = top_actions[0].button(
             generate_label,
             disabled=(
-                read_only or posted or bool(st.session_state.get(generating_key))
+                read_only
+                or lookup_unsupported
+                or posted
+                or bool(st.session_state.get(generating_key))
             ),
             type="primary",
             width="stretch",
@@ -1592,7 +1628,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         # the button's name but must not be able to press it: there is no post
         # client for it and the answer path is closed.
         post_market_name = store_display_name(inquiry.get("store_code"))
-        post_market_read_only = not is_store_answer_enabled(inquiry.get("store_code"))
+        post_market_read_only = not is_store_post_enabled(inquiry.get("store_code"))
         registration_start = top_actions[3].button(
             f"{post_market_name} 답변 등록",
             disabled=(
@@ -2853,6 +2889,11 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             st.warning(
                 f"{store_display_name(inquiry.get('store_code'))} 문의는 "
                 "현재 조회 전용이라 답변을 생성하지 않습니다."
+            )
+        elif generate and lookup_unsupported:
+            st.warning(
+                f"{store_display_name(inquiry.get('store_code'))} 주문·배송·설치 "
+                "일정 문의는 아직 답변 생성을 지원하지 않습니다."
             )
         elif generate:
             generation_correlation_id = str(uuid.uuid4())
@@ -4321,9 +4362,9 @@ def render_review_workspace(
             st.warning("선택한 문의가 아직 DB에 동기화되지 않았습니다.")
         return
     # Selecting an inquiry is a read.  This call creates a draft through
-    # AutomaticDraftService -> AnswerService, so on a read-only market merely
-    # opening a question would generate an answer for it.
-    if not _is_read_only_inquiry(inquiry):
+    # AutomaticDraftService -> AnswerService, so it runs only where answers
+    # may be generated unasked; elsewhere a person presses the button.
+    if is_store_automatic_generation_enabled(inquiry.get("store_code")):
         _ensure_initial_program_answer(database, inquiry)
     st.session_state["selected_inquiry_id"] = int(inquiry["id"])
     st.session_state["selected_order_id"] = inquiry.get("order_id")
@@ -4341,20 +4382,20 @@ def render_review_workspace(
             border=True, height=760, key="official_answer_panel"
         ):
             _render_answer_panel(database, inquiry)
-        # Registration and DPS are write paths for this marketplace.  A market
-        # production only collects has neither, so the panels are not drawn at
-        # all rather than drawn full of controls that refuse.
-        if not _is_read_only_inquiry(inquiry):
+        # Registration and DPS are write paths for this marketplace.  Where
+        # a market has neither, the panels are not drawn at all rather than
+        # drawn full of controls that refuse.
+        if is_store_post_enabled(inquiry.get("store_code")):
             _render_naver_post_prepare(database, inquiry)
     with dps_column:
         with st.container(
             border=True, height=760, key="official_dps_panel"
         ):
-            if _is_read_only_inquiry(inquiry):
+            if not is_store_dps_enabled(inquiry.get("store_code")):
                 st.markdown("### 배송·설치 조회")
                 st.info(
                     f"{store_display_name(inquiry.get('store_code'))} 문의는 "
-                    "현재 조회 전용이라 배송·설치 조회를 실행하지 않습니다."
+                    "현재 배송·설치 조회를 지원하지 않습니다."
                 )
             else:
                 _render_dps(database, inquiry)
