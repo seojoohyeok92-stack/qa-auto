@@ -390,7 +390,7 @@ def test_generation_context_is_attached_only_to_actual_draft(tmp_path: Path) -> 
 def test_dashboard_list_header_scroll_and_minute_format_are_separated() -> None:
     workspace = (Path(__file__).parents[1] / "ui" / "review_workspace.py").read_text(encoding="utf-8")
     css = (Path(__file__).parents[1] / "ui" / "dashboard.css").read_text(encoding="utf-8")
-    assert workspace.index("_render_list_header(total_count)") < workspace.index('key="official_inquiry_rows_scroll"')
+    assert workspace.index("total_count, show_market_badge=show_market_badge") < workspace.index('key="official_inquiry_rows_scroll"')
     assert workspace.index('key="official_inquiry_rows_scroll"') < workspace.index("_render_pagination(resolved_page")
     assert 'key="official_inquiry_list_panel"' in workspace
     assert "overflow-y: auto !important" in css[css.index("st-key-official_inquiry_rows_scroll"):]

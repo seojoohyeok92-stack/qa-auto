@@ -43,6 +43,7 @@ from ui.dashboard import (
     render_kpi_cards,
 )
 from ui.market_labels import ALL_MARKETS as MARKET_ALL
+from ui.market_labels import shows_market_badge
 from ui.inquiries import render_inquiries_page
 from ui.activity_log_panel import render_activity_log_panel
 from ui.build_info import render_build_footer
@@ -1084,6 +1085,7 @@ def render_dashboard_page(
             page_size=int(filters["display_limit"]),
             current_page=current_page,
             total_pages=total_pages,
+            show_market_badge=shows_market_badge(filters.get("market")),
         )
 
     with profile_stage("gpt_copilot"):

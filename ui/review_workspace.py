@@ -79,6 +79,7 @@ from services.runtime_diagnostics import (
 from services.uat_order_service import UatOrderService
 from services.work_queue_service import WorkItem, parse_registered_at
 from ui.components import display_value
+from ui.market_labels import market_label, store_market
 from ui.dps_presenter import (
     installation_date_display,
     installation_date_value,
@@ -595,18 +596,47 @@ def _render_pagination(current_page: int, total_pages: int) -> None:
 
 
 INQUIRY_LIST_WIDTHS = [1.08, 0.72, 1.42, 2.1, 1.12, 0.78, 0.72, 1.55]
+# With every market listed the type column also carries the market chip, so it
+# borrows width from the preview column -- which truncates anyway -- instead of
+# wrapping and making the fixed-height row taller.
+INQUIRY_LIST_WIDTHS_WITH_MARKET = [1.08, 1.12, 1.42, 1.7, 1.12, 0.78, 0.72, 1.55]
 
 
-def _render_list_header(total_count: int) -> None:
+def _list_widths(show_market_badge: bool) -> list[float]:
+    return INQUIRY_LIST_WIDTHS_WITH_MARKET if show_market_badge else INQUIRY_LIST_WIDTHS
+
+
+def _market_badge_html(item: WorkItem, show_market_badge: bool) -> str:
+    """A compact market chip for one row, or nothing.
+
+    Named from the store code through the shared market rule, so the internal
+    code (``COUPANG_OJE_NS``, ``OJE_PLUS`` ...) never reaches the screen, and a
+    market added to that rule shows up here without touching this list.
+    """
+
+    if not show_market_badge:
+        return ""
+    market = store_market(item.get("store_code"))
+    if market is None:
+        return ""
+    return (
+        f'<span class="official-market-badge {escape(market.lower())}">'
+        f"{escape(market_label(market))}</span>"
+    )
+
+
+def _render_list_header(
+    total_count: int, *, show_market_badge: bool = False
+) -> None:
     st.markdown(
         f'<div class="official-section-title"><div><h3>문의 리스트</h3>'
         f"<span>{total_count}건의 문의</span></div></div>",
         unsafe_allow_html=True,
     )
-    headers = st.columns(INQUIRY_LIST_WIDTHS, gap="small")
+    headers = st.columns(_list_widths(show_market_badge), gap="small")
     for column, label in zip(
         headers,
-        ("문의 ID", "문의유형", "상품 정보", "문의 내용 요약", "주문번호", "상태", "학습", "접수 시간"),
+        ("문의 ID", "마켓·유형" if show_market_badge else "문의유형", "상품 정보", "문의 내용 요약", "주문번호", "상태", "학습", "접수 시간"),
     ):
         column.markdown(
             f'<div class="official-table-head">{escape(label)}</div>',
@@ -614,7 +644,12 @@ def _render_list_header(total_count: int) -> None:
         )
 
 
-def _render_list(items: list[WorkItem], total_count: int) -> WorkItem | None:
+def _render_list(
+    items: list[WorkItem],
+    total_count: int,
+    *,
+    show_market_badge: bool = False,
+) -> WorkItem | None:
     if not items:
         st.info("현재 조건에 맞는 문의가 없습니다.")
         return None
@@ -663,7 +698,9 @@ def _render_list(items: list[WorkItem], total_count: int) -> WorkItem | None:
             )
         )
         with row:
-            columns = st.columns(INQUIRY_LIST_WIDTHS, gap="small", vertical_alignment="center")
+            columns = st.columns(
+                _list_widths(show_market_badge), gap="small", vertical_alignment="center"
+            )
             if columns[0].button(
                 inquiry_id,
                 key=f"official_select_{index}_{abs(hash(key))}",
@@ -673,7 +710,9 @@ def _render_list(items: list[WorkItem], total_count: int) -> WorkItem | None:
                 st.session_state["selected_inquiry_key"] = key
                 st.rerun()
             columns[1].markdown(
-                f'<div class="official-cell"><span class="official-badge">{source}</span></div>',
+                '<div class="official-cell">'
+                f"{_market_badge_html(item, show_market_badge)}"
+                f'<span class="official-badge">{source}</span></div>',
                 unsafe_allow_html=True,
             )
             columns[2].markdown(
@@ -4158,6 +4197,7 @@ def render_review_workspace(
     page_size: int = 15,
     current_page: int | None = None,
     total_pages: int | None = None,
+    show_market_badge: bool = False,
 ) -> None:
     if database is None:
         st.warning("DB 연결을 사용할 수 없어 검토·승인 화면을 표시할 수 없습니다.")
@@ -4189,11 +4229,15 @@ def render_review_workspace(
                     f"검색 결과 {total_count:,}건 · 현재 {first:,}–{last:,}건 표시 · "
                     f"{resolved_page} / {resolved_total_pages} 페이지"
                 )
-                _render_list_header(total_count)
+                _render_list_header(
+                    total_count, show_market_badge=show_market_badge
+                )
             with st.container(
                 height=500, key="official_inquiry_rows_scroll"
             ):
-                selected = _render_list(page_items, total_count)
+                selected = _render_list(
+                    page_items, total_count, show_market_badge=show_market_badge
+                )
             _render_pagination(resolved_page, resolved_total_pages)
     if selected is None:
         with detail_column:

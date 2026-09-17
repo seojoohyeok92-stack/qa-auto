@@ -3419,6 +3419,27 @@ input,
   overflow: visible !important;
 }
 
+/* Market chip on a list row, shown only when every market is listed.  The two
+   tones are the existing running (blue) and warning (amber) state palettes, so
+   neither reads as the teal type/status badge beside it; a market without its
+   own tone keeps the neutral pending palette. */
+.official-market-badge {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  margin-right: 4px;
+  padding: 2px 6px;
+  border: 1px solid rgba(148, 163, 184, .2);
+  border-radius: 999px;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, .06);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.official-market-badge.naver { color: #6fb6ff; border-color: rgba(89,168,255,.25); background: rgba(89,168,255,.08); }
+.official-market-badge.coupang { color: #f5bd5c; border-color: rgba(245,184,75,.25); background: rgba(245,184,75,.08); }
+
 .official-learning-badge {
   display: inline-flex;
   align-items: center;

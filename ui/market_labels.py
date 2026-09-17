@@ -45,6 +45,16 @@ def store_market(store_code: str | None) -> str | None:
     return market_from_store_code(store_code)
 
 
+def shows_market_badge(selected_market: str | None) -> bool:
+    """Whether a list row should name its market.
+
+    Only when every market is on screen: with one market picked the reader
+    already knows which one each row is, and the badge would only repeat it.
+    """
+
+    return str(selected_market or ALL_MARKETS).strip().upper() == ALL_MARKETS
+
+
 def store_market_label(store_code: str | None) -> str:
     """The on-screen market name for one store code."""
 
