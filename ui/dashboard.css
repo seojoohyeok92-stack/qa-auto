@@ -342,17 +342,28 @@ hr {
     color 150ms ease;
 }
 
-.stButton > button:hover {
+/* Hover and the primary fill apply to enabled buttons only.  Without the
+   :not(:disabled) guard a disabled primary kept its purple gradient and lifted
+   on hover, so a button that could not be pressed looked like it could. */
+.stButton > button:hover:not(:disabled) {
   border-color: #6559ef;
   background: #151f35;
   color: #ffffff;
   transform: translateY(-1px);
 }
 
-.stButton > button[kind="primary"] {
+.stButton > button[kind="primary"]:not(:disabled) {
   border-color: rgba(139, 129, 255, 0.58);
   background: linear-gradient(135deg, #5c50e7, #4336c4);
   color: #ffffff;
+}
+
+.stButton > button:disabled {
+  border-color: rgba(148, 163, 184, 0.18);
+  background: rgba(148, 163, 184, 0.06);
+  color: #64748b;
+  cursor: not-allowed;
+  transform: none;
 }
 
 [data-testid="stExpander"] {

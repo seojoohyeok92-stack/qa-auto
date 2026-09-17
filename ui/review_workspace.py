@@ -1419,7 +1419,13 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         and diagnostics["validation"].get("passed")
         and not diagnostics["hybrid"].get("fallback_used")
     )
-    if approval_complete:
+    # A market production only reads: nothing on this panel may look like work
+    # waiting to be done.  The write gates below stay as they are; this decides
+    # what is drawn.
+    read_only = _is_read_only_inquiry(inquiry)
+    if read_only:
+        workspace_status = "조회전용"
+    elif approval_complete:
         workspace_status = "승인 완료"
     elif diagnostics and not validator_passed:
         workspace_status = "Validator 확인 필요"
@@ -1430,10 +1436,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
 
     st.markdown(
         '<div class="official-section-title answer workspace-title">'
-        '<div><h3>답변 검토 및 승인</h3>'
-        '<span>분석 · 답변 · 검증 · 승인을 한 곳에서 처리합니다.</span></div>'
-        f'<span class="official-state {_status_tone(state["approval_status"])}">'
-        f"{escape(workspace_status)}</span></div>",
+        + (
+            '<div><h3>답변 조회</h3>'
+            '<span>마켓에서 조회한 문의와 판매자 답변을 표시합니다.</span></div>'
+            '<span class="official-state pending">'
+            if read_only
+            else '<div><h3>답변 검토 및 승인</h3>'
+            '<span>분석 · 답변 · 검증 · 승인을 한 곳에서 처리합니다.</span></div>'
+            f'<span class="official-state {_status_tone(state["approval_status"])}">'
+        )
+        + f"{escape(workspace_status)}</span></div>",
         unsafe_allow_html=True,
     )
     _show_notice()
@@ -1453,15 +1465,17 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             database, draft_id=int(draft["id"]), outcome=outcome
         )
 
-    read_only = _is_read_only_inquiry(inquiry)
     generating_key = f"gpt_generation_running_{inquiry_id}"
     use_template_key = template_preference_key(inquiry)
-    use_template = st.checkbox(
-        "확정 운영 템플릿 사용",
-        value=True,
-        key=use_template_key,
-        disabled=read_only,
-    )
+    if read_only:
+        use_template = True
+    else:
+        use_template = st.checkbox(
+            "확정 운영 템플릿 사용",
+            value=True,
+            key=use_template_key,
+            disabled=read_only,
+        )
     inquiry_analysis = _processing_plan_for_inquiry(
         database,
         inquiry,
@@ -1480,118 +1494,126 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         and isinstance(latest_delivery_dps.get("normalized_result_json"), dict)
         else {}
     )
-    if not inquiry_analysis.requires_order_lookup:
+    if read_only:
+        generate = reset = save = False
         st.info(
-            "주문번호는 보존되며, 이 문의 의도에는 주문 및 DPS 조회 없이 "
-            "답변을 생성합니다(조회 불필요)."
-        )
-    elif not inquiry_analysis.order_id_validated:
-        st.info(
-            "주문번호가 없어 배송 일정을 확인할 수 없습니다. "
-            "주문번호 요청 답변을 생성합니다."
-        )
-    elif (
-        latest_delivery_normalized.get("installation_date")
-        or latest_delivery_normalized.get("required_delivery_date")
-    ):
-        st.info("확인된 설치예정일을 사용해 배송 답변을 생성합니다.")
-    if use_template:
-        st.caption(
-            "정확히 일치하는 고정 운영 정책이 있을 때만 템플릿을 사용합니다.\n"
-            "그 외 문의는 Learning 등의 근거를 참고하여 GPT가 답변을 생성합니다."
+            f"{store_display_name(inquiry.get('store_code'))} 문의는 현재 "
+            "조회 전용입니다. 답변 생성·수정·승인·등록은 실행하지 않고, "
+            "마켓에서 조회한 문의와 판매자 답변만 표시합니다."
         )
     else:
-        st.caption(
-            "확정 운영 템플릿을 사용하지 않고\n"
-            "Learning 등의 근거를 참고하여 GPT가 답변 초안을 생성합니다."
+        if not inquiry_analysis.requires_order_lookup:
+            st.info(
+                "주문번호는 보존되며, 이 문의 의도에는 주문 및 DPS 조회 없이 "
+                "답변을 생성합니다(조회 불필요)."
+            )
+        elif not inquiry_analysis.order_id_validated:
+            st.info(
+                "주문번호가 없어 배송 일정을 확인할 수 없습니다. "
+                "주문번호 요청 답변을 생성합니다."
+            )
+        elif (
+            latest_delivery_normalized.get("installation_date")
+            or latest_delivery_normalized.get("required_delivery_date")
+        ):
+            st.info("확인된 설치예정일을 사용해 배송 답변을 생성합니다.")
+        if use_template:
+            st.caption(
+                "정확히 일치하는 고정 운영 정책이 있을 때만 템플릿을 사용합니다.\n"
+                "그 외 문의는 Learning 등의 근거를 참고하여 GPT가 답변을 생성합니다."
+            )
+        else:
+            st.caption(
+                "확정 운영 템플릿을 사용하지 않고\n"
+                "Learning 등의 근거를 참고하여 GPT가 답변 초안을 생성합니다."
+            )
+        if draft and not posted:
+            st.warning(
+                "현재 작성 중인 초안이 있습니다. 새 답변을 생성하면 기존 "
+                "초안은 이력으로 보존되고 새 초안이 활성화됩니다."
+            )
+        top_actions = st.columns([1.25, 0.8, 0.95, 1.15, 2.55], gap="small")
+        generate_label = (
+            "주문번호 요청 답변 생성"
+            if inquiry_analysis.delivery_question
+            and not inquiry_analysis.order_id_validated
+            else "확인된 설치예정일로 배송 답변 생성"
+            if inquiry_analysis.delivery_question
+            and latest_delivery_normalized.get("installation_date")
+            else "배송 안전 답변 생성"
+            if inquiry_analysis.delivery_question
+            # Template use is now the narrow exception, not the default, and
+            # whether an exact fixed policy matches is only known once the rule
+            # engine runs inside AnswerService. Rather than duplicating that
+            # judgement here (which could drift from the backend), the button
+            # names what it always does: generate an answer. The checkbox caption
+            # above explains when a fixed template takes over instead.
+            else "GPT 새 답변 생성"
         )
-    if draft and not posted:
-        st.warning(
-            "현재 작성 중인 초안이 있습니다. 새 답변을 생성하면 기존 "
-            "초안은 이력으로 보존되고 새 초안이 활성화됩니다."
+        generate = top_actions[0].button(
+            generate_label,
+            disabled=(
+                read_only or posted or bool(st.session_state.get(generating_key))
+            ),
+            type="primary",
+            width="stretch",
+            key=f"review_generate_{inquiry_id}",
         )
-    top_actions = st.columns([1.25, 0.8, 0.95, 1.15, 2.55], gap="small")
-    generate_label = (
-        "주문번호 요청 답변 생성"
-        if inquiry_analysis.delivery_question
-        and not inquiry_analysis.order_id_validated
-        else "확인된 설치예정일로 배송 답변 생성"
-        if inquiry_analysis.delivery_question
-        and latest_delivery_normalized.get("installation_date")
-        else "배송 안전 답변 생성"
-        if inquiry_analysis.delivery_question
-        # Template use is now the narrow exception, not the default, and
-        # whether an exact fixed policy matches is only known once the rule
-        # engine runs inside AnswerService. Rather than duplicating that
-        # judgement here (which could drift from the backend), the button
-        # names what it always does: generate an answer. The checkbox caption
-        # above explains when a fixed template takes over instead.
-        else "GPT 새 답변 생성"
-    )
-    generate = top_actions[0].button(
-        generate_label,
-        disabled=(
-            read_only or posted or bool(st.session_state.get(generating_key))
-        ),
-        type="primary",
-        width="stretch",
-        key=f"review_generate_{inquiry_id}",
-    )
-    reset = top_actions[1].button(
-        "초기화",
-        disabled=(
-            read_only
-            or not draft
-            or not can_edit
-            or (not source_answered and (posted or approved))
-        ),
-        width="stretch",
-        key=f"review_reset_{inquiry_id}",
-    )
-    save = top_actions[2].button(
-        "임시 저장",
-        disabled=(
-            read_only
-            or not draft
-            or not can_edit
-            or (not source_answered and (posted or approved))
-        ),
-        width="stretch",
-        key=f"review_save_{inquiry_id}",
-    )
-    if read_only:
-        # Belt and braces beside the disabled attributes above: whatever a
-        # rerun replays, none of these write intents survive on a market
-        # production only reads.
-        reset = False
-        save = False
-    # The marketplace this inquiry actually came from, not the one the
-    # dashboard is filtered to.  A market production only collects can show
-    # the button's name but must not be able to press it: there is no post
-    # client for it and the answer path is closed.
-    post_market_name = store_display_name(inquiry.get("store_code"))
-    post_market_read_only = not is_store_answer_enabled(inquiry.get("store_code"))
-    registration_start = top_actions[3].button(
-        f"{post_market_name} 답변 등록",
-        disabled=(
-            posted or not draft or not can(Permission.APPROVE)
-            or post_market_read_only
-        ),
-        help=(
-            f"현재 {post_market_name} 답변 등록은 비활성화되어 있습니다."
-            if post_market_read_only else None
-        ),
-        width="stretch",
-        key=f"review_naver_post_start_{inquiry_id}",
-    )
-    if registration_start:
-        st.session_state[f"naver_post_flow_start_{inquiry_id}"] = True
-        st.rerun()
-    top_actions[4].markdown(
-        '<div class="workspace-lock-note">승인은 Final Answer만 생성합니다.'
-        f" <b>승인과 {post_market_name} 등록은 별도 작업입니다.</b></div>",
-        unsafe_allow_html=True,
-    )
+        reset = top_actions[1].button(
+            "초기화",
+            disabled=(
+                read_only
+                or not draft
+                or not can_edit
+                or (not source_answered and (posted or approved))
+            ),
+            width="stretch",
+            key=f"review_reset_{inquiry_id}",
+        )
+        save = top_actions[2].button(
+            "임시 저장",
+            disabled=(
+                read_only
+                or not draft
+                or not can_edit
+                or (not source_answered and (posted or approved))
+            ),
+            width="stretch",
+            key=f"review_save_{inquiry_id}",
+        )
+        if read_only:
+            # Belt and braces beside the disabled attributes above: whatever a
+            # rerun replays, none of these write intents survive on a market
+            # production only reads.
+            reset = False
+            save = False
+        # The marketplace this inquiry actually came from, not the one the
+        # dashboard is filtered to.  A market production only collects can show
+        # the button's name but must not be able to press it: there is no post
+        # client for it and the answer path is closed.
+        post_market_name = store_display_name(inquiry.get("store_code"))
+        post_market_read_only = not is_store_answer_enabled(inquiry.get("store_code"))
+        registration_start = top_actions[3].button(
+            f"{post_market_name} 답변 등록",
+            disabled=(
+                posted or not draft or not can(Permission.APPROVE)
+                or post_market_read_only
+            ),
+            help=(
+                f"현재 {post_market_name} 답변 등록은 비활성화되어 있습니다."
+                if post_market_read_only else None
+            ),
+            width="stretch",
+            key=f"review_naver_post_start_{inquiry_id}",
+        )
+        if registration_start:
+            st.session_state[f"naver_post_flow_start_{inquiry_id}"] = True
+            st.rerun()
+        top_actions[4].markdown(
+            '<div class="workspace-lock-note">승인은 Final Answer만 생성합니다.'
+            f" <b>승인과 {post_market_name} 등록은 별도 작업입니다.</b></div>",
+            unsafe_allow_html=True,
+        )
 
     analysis_column, answer_column = st.columns(
         [0.7, 3.3], gap="medium"
@@ -1643,105 +1665,130 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             f"{store_display_name(inquiry.get('store_code'))} 답변",
             answer_status.naver_answer_label,
         )
-        st.markdown(
-            '<div class="compact-analysis-card"><h4>분석 결과</h4>'
-            f'{_field("문의 유형", intent.get("category") or inquiry.get("inquiry_type"))}'
-            f'{_field("답변 출처", source)}'
-            f'{_field("답변 검증", answer_status.validation_label)}'
-            f'{_field("직원 검토", answer_status.staff_review_label)}'
-            f'{_field("자동등록", answer_status.registration_label)}'
-            f'{_field("승인 상태", answer_status.approval_label)}'
-            f"{market_answer_field}"
-            f'{_field("프로그램 등록", answer_status.program_post_label)}'
-            f'{_field("Provider", governance.get("provider") or (provider_run or {}).get("provider"))}'
-            f'{_field("사용 Rule", (diagnostics or {}).get("hybrid", {}).get("rule_id"))}'
-            f'{_field("경고", _warning_summary(answer_status))}'
-            f"{generation_failure_field}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        _render_registration_reasons(answer_status)
-        if generation_failure:
-            last_attempt = generation_failure.get("last_attempt")
-            details = generation_failure.get("error_code") or "-"
-            suffix = (
-                f" (마지막 시도: {format_datetime_kst(last_attempt)})"
-                if last_attempt
-                else ""
-            )
-            st.warning(
-                f"{generation_failure['message']}{suffix} · Error: {details}"
-            )
-        with st.expander("처리 진단", expanded=True):
+        if read_only:
             st.markdown(
-                '<div class="compact-analysis-card">'
-                + _field("문제 발생 단계", decision_trace.root_stage or "없음")
-                + _field("Root Cause", decision_trace.root_cause)
-                + _field("설명", decision_trace.root_message)
-                + _field(
-                    "GPT①", trace_stage_label("gpt1", decision_trace.gpt1)
-                )
-                + _field(
-                    "Source", trace_stage_label("source", decision_trace.source)
-                )
-                + _field(
-                    "Retrieval",
-                    trace_stage_label("retrieval", decision_trace.retrieval),
-                )
-                + _field(
-                    "GPT②", trace_stage_label("gpt2", decision_trace.gpt2)
-                )
-                + _field("Hard Safety", decision_trace.hard_safety)
-                + _field("Auto Post", decision_trace.auto_post)
-                + "</div>",
+                '<div class="compact-analysis-card"><h4>문의 정보</h4>'
+                f'{_field("마켓", store_display_name(inquiry.get("store_code")))}'
+                f'{_field("스토어", store_label(inquiry.get("store_code")))}'
+                f"{market_answer_field}"
+                '</div>',
                 unsafe_allow_html=True,
             )
-        if phase9_analysis:
-            displayed_order_id = str(inquiry.get("order_id") or "").strip()
-            st.caption(
-                " · ".join(
-                    (
-                        f"유형: {phase9_analysis.get('inquiry_type') or '-'}",
-                        f"전략: {phase9_analysis.get('answer_strategy') or '-'}",
-                        f"주문번호: {displayed_order_id or phase9_analysis.get('order_id_status') or '-'}",
-                        "DPS 조회: 필요"
-                        if phase9_analysis.get("requires_dps_lookup")
-                        else "DPS 조회: 불필요",
-                        "직원 검토 필요"
-                        if phase9_analysis.get("manual_review_required")
-                        or phase9_validator.get("status") == "REVIEW_REQUIRED"
-                        else "자동 답변 가능",
+        else:
+            st.markdown(
+                '<div class="compact-analysis-card"><h4>분석 결과</h4>'
+                f'{_field("문의 유형", intent.get("category") or inquiry.get("inquiry_type"))}'
+                f'{_field("답변 출처", source)}'
+                f'{_field("답변 검증", answer_status.validation_label)}'
+                f'{_field("직원 검토", answer_status.staff_review_label)}'
+                f'{_field("자동등록", answer_status.registration_label)}'
+                f'{_field("승인 상태", answer_status.approval_label)}'
+                f"{market_answer_field}"
+                f'{_field("프로그램 등록", answer_status.program_post_label)}'
+                f'{_field("Provider", governance.get("provider") or (provider_run or {}).get("provider"))}'
+                f'{_field("사용 Rule", (diagnostics or {}).get("hybrid", {}).get("rule_id"))}'
+                f'{_field("경고", _warning_summary(answer_status))}'
+                f"{generation_failure_field}"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            _render_registration_reasons(answer_status)
+            if generation_failure:
+                last_attempt = generation_failure.get("last_attempt")
+                details = generation_failure.get("error_code") or "-"
+                suffix = (
+                    f" (마지막 시도: {format_datetime_kst(last_attempt)})"
+                    if last_attempt
+                    else ""
+                )
+                st.warning(
+                    f"{generation_failure['message']}{suffix} · Error: {details}"
+                )
+            with st.expander("처리 진단", expanded=True):
+                st.markdown(
+                    '<div class="compact-analysis-card">'
+                    + _field("문제 발생 단계", decision_trace.root_stage or "없음")
+                    + _field("Root Cause", decision_trace.root_cause)
+                    + _field("설명", decision_trace.root_message)
+                    + _field(
+                        "GPT①", trace_stage_label("gpt1", decision_trace.gpt1)
+                    )
+                    + _field(
+                        "Source", trace_stage_label("source", decision_trace.source)
+                    )
+                    + _field(
+                        "Retrieval",
+                        trace_stage_label("retrieval", decision_trace.retrieval),
+                    )
+                    + _field(
+                        "GPT②", trace_stage_label("gpt2", decision_trace.gpt2)
+                    )
+                    + _field("Hard Safety", decision_trace.hard_safety)
+                    + _field("Auto Post", decision_trace.auto_post)
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+            if phase9_analysis:
+                displayed_order_id = str(inquiry.get("order_id") or "").strip()
+                st.caption(
+                    " · ".join(
+                        (
+                            f"유형: {phase9_analysis.get('inquiry_type') or '-'}",
+                            f"전략: {phase9_analysis.get('answer_strategy') or '-'}",
+                            f"주문번호: {displayed_order_id or phase9_analysis.get('order_id_status') or '-'}",
+                            "DPS 조회: 필요"
+                            if phase9_analysis.get("requires_dps_lookup")
+                            else "DPS 조회: 불필요",
+                            "직원 검토 필요"
+                            if phase9_analysis.get("manual_review_required")
+                            or phase9_validator.get("status") == "REVIEW_REQUIRED"
+                            else "자동 답변 가능",
+                        )
                     )
                 )
-            )
     with answer_column:
         rendered_program_text: str | None = None
-        answer_views = ["Program Answer", "직원 수정본"]
         source_answer_view = _source_answer_view(inquiry)
-        if source_answer_view is not None:
-            answer_views.append(source_answer_view)
-        answer_views.append("Final Answer")
-        with st.container(key=f"answer_source_tabs_{inquiry_id}"):
-            selected_view = st.segmented_control(
-                "답변 보기",
-                answer_views,
-                default=(
-                    None
-                    if view_key in st.session_state
-                    else "Final Answer"
-                    if approval_complete
-                    else source_answer_view
-                    if source_answer_view is not None
-                    else "직원 수정본"
-                    if draft and not approved
-                    else "Final Answer"
-                    if approved
-                    else "Program Answer"
-                ),
-                key=view_key,
-                label_visibility="collapsed",
-                width="stretch",
+        if read_only:
+            # Only what was read from the marketplace.  A draft stored for such
+            # an inquiry is kept as a record and never offered as an answer.
+            answer_views = (
+                [source_answer_view] if source_answer_view is not None else []
             )
+            if st.session_state.get(view_key) not in answer_views:
+                st.session_state.pop(view_key, None)
+        else:
+            answer_views = ["Program Answer", "직원 수정본"]
+            if source_answer_view is not None:
+                answer_views.append(source_answer_view)
+            answer_views.append("Final Answer")
+        with st.container(key=f"answer_source_tabs_{inquiry_id}"):
+            if read_only and not answer_views:
+                selected_view = None
+                st.info("아직 마켓에 판매자 답변이 없는 문의입니다.")
+            else:
+                selected_view = st.segmented_control(
+                    "답변 보기",
+                    answer_views,
+                    default=(
+                        None
+                        if view_key in st.session_state
+                        else source_answer_view
+                        if read_only
+                        else "Final Answer"
+                        if approval_complete
+                        else source_answer_view
+                        if source_answer_view is not None
+                        else "직원 수정본"
+                        if draft and not approved
+                        else "Final Answer"
+                        if approved
+                        else "Program Answer"
+                    ),
+                    key=view_key,
+                    label_visibility="collapsed",
+                    width="stretch",
+                )
             staff_seed, staff_seed_provenance, staff_edit_exists = staff_edit_body(
                 draft, posted_answer_body=posted_answer_body
             )
@@ -1749,13 +1796,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 selected_view,
                 staff_edit_provenance=staff_seed_provenance,
             )
-            st.markdown(
-                f'<div class="answer-source-marker source-{view_tone}">'
-                f'<span>현재 표시: <b>{escape(view_label)}</b></span>'
-                f'<small>Source: {escape(view_provenance)}</small>'
-                "</div>",
-                unsafe_allow_html=True,
-            )
+            if selected_view is not None or not read_only:
+                st.markdown(
+                    f'<div class="answer-source-marker source-{view_tone}">'
+                    f'<span>현재 표시: <b>{escape(view_label)}</b></span>'
+                    f'<small>Source: {escape(view_provenance)}</small>'
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
         edit_key = (
             f"staff_edit_{inquiry_id}_{draft['id']}"
             if draft
@@ -1868,7 +1916,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     if approval_trace.get("reference"):
                         final_metadata.append(str(approval_trace["reference"]))
                     st.caption(" · ".join(final_metadata))
-            else:
+            elif not read_only:
                 rendered_program_text = st.text_area(
                     "Program Answer",
                     height=360,
@@ -1920,7 +1968,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
 
         positive_reason = ""
         positive_note = ""
-        if not approval_complete:
+        if not approval_complete and not read_only:
             with st.expander("Positive Learning 설정", expanded=False):
                 st.caption(
                     "선택 사항입니다. 입력하지 않고 승인해도 기존 Human Verified "
@@ -1976,7 +2024,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             else ""
         )
         answer_was_corrected = bool(
-            draft
+            not read_only
+            and draft
             and format_final_answer(edited_value)
             and format_final_answer(edited_value)
             != format_final_answer(original_value)
@@ -2164,91 +2213,92 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         _render_negative_learning_saved(
             display_negative, inquiry_id=inquiry_id
         )
-        with st.expander("이 답변이 잘못됨", expanded=False):
-            st.caption(
-                "현재 선택한 답변을 삭제하지 않고 Negative Learning으로 기록합니다. "
-                f"실제 {store_display_name(inquiry.get('store_code'))} 답변은 "
-                "수정하거나 재등록하지 않습니다."
-            )
-            st.caption(
-                "평가 대상: "
-                + (
-                    f"{evaluation_source} · Reference {evaluation_reference_id}"
-                    if evaluation_source and evaluation_reference_id is not None
-                    else "현재 탭에 평가 가능한 답변 없음"
+        if not read_only:
+            with st.expander("이 답변이 잘못됨", expanded=False):
+                st.caption(
+                    "현재 선택한 답변을 삭제하지 않고 Negative Learning으로 기록합니다. "
+                    f"실제 {store_display_name(inquiry.get('store_code'))} 답변은 "
+                    "수정하거나 재등록하지 않습니다."
                 )
-            )
-            if active_negative:
-                negative_revoke_reason = st.text_input(
-                    "Negative 평가 취소 사유",
-                    key=f"negative_revoke_reason_{inquiry_id}_{selected_view}",
-                    max_chars=1_000,
-                )
-                negative_revoke_confirmed = st.checkbox(
-                    "이 Negative 평가를 취소합니다.",
-                    key=f"negative_revoke_confirm_{inquiry_id}_{selected_view}",
-                )
-                negative_revoke = st.button(
-                    "Negative 평가 취소",
-                    disabled=(
-                        read_only
-                        or not str(negative_revoke_reason or "").strip()
-                        or not negative_revoke_confirmed
-                    ),
-                    key=f"negative_revoke_{inquiry_id}_{selected_view}",
-                    width="stretch",
-                )
-            else:
-                negative_reason_label = st.selectbox(
-                    "잘못된 이유",
-                    ["선택하지 않음", *[
-                        CORRECTION_REASON_LABELS[reason]
-                        for reason in CorrectionReason
-                    ]],
-                    key=f"negative_reason_{inquiry_id}_{selected_view}",
-                )
-                selected_negative_reason = CORRECTION_REASON_BY_LABEL.get(
-                    negative_reason_label
-                )
-                negative_reason = (
-                    selected_negative_reason.value
-                    if selected_negative_reason is not None
-                    else ""
-                )
-                if selected_negative_reason is CorrectionReason.ROUTING_ERROR:
-                    negative_intent_label = st.selectbox(
-                        "올바른 문의 유형",
-                        list(INTENT_OPTIONS.values()),
-                        key=f"negative_intent_{inquiry_id}_{selected_view}",
+                st.caption(
+                    "평가 대상: "
+                    + (
+                        f"{evaluation_source} · Reference {evaluation_reference_id}"
+                        if evaluation_source and evaluation_reference_id is not None
+                        else "현재 탭에 평가 가능한 답변 없음"
                     )
-                    negative_intent = next(
-                        code
-                        for code, label in INTENT_OPTIONS.items()
-                        if label == negative_intent_label
+                )
+                if active_negative:
+                    negative_revoke_reason = st.text_input(
+                        "Negative 평가 취소 사유",
+                        key=f"negative_revoke_reason_{inquiry_id}_{selected_view}",
+                        max_chars=1_000,
                     )
-                negative_note = st.text_input(
-                    "Negative 상세 메모 (선택)",
-                    key=f"negative_note_{inquiry_id}_{selected_view}",
-                )
-                (
-                    negative_signal_kind, negative_signal_content,
-                    negative_fact_scope,
-                ) = _structured_signal_input(
-                    key_prefix=f"negative_{inquiry_id}_{selected_view}",
-                    allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
-                )
-                negative_save = st.button(
-                    "Negative Learning 저장",
-                    disabled=(
-                        read_only
-                        or evaluation_source is None
-                        or evaluation_reference_id is None
-                        or not negative_reason
-                        or evaluation_conflict_active
-                    ),
-                    key=f"negative_save_{inquiry_id}_{selected_view}",
-                    width="stretch",
-                )
+                    negative_revoke_confirmed = st.checkbox(
+                        "이 Negative 평가를 취소합니다.",
+                        key=f"negative_revoke_confirm_{inquiry_id}_{selected_view}",
+                    )
+                    negative_revoke = st.button(
+                        "Negative 평가 취소",
+                        disabled=(
+                            read_only
+                            or not str(negative_revoke_reason or "").strip()
+                            or not negative_revoke_confirmed
+                        ),
+                        key=f"negative_revoke_{inquiry_id}_{selected_view}",
+                        width="stretch",
+                    )
+                else:
+                    negative_reason_label = st.selectbox(
+                        "잘못된 이유",
+                        ["선택하지 않음", *[
+                            CORRECTION_REASON_LABELS[reason]
+                            for reason in CorrectionReason
+                        ]],
+                        key=f"negative_reason_{inquiry_id}_{selected_view}",
+                    )
+                    selected_negative_reason = CORRECTION_REASON_BY_LABEL.get(
+                        negative_reason_label
+                    )
+                    negative_reason = (
+                        selected_negative_reason.value
+                        if selected_negative_reason is not None
+                        else ""
+                    )
+                    if selected_negative_reason is CorrectionReason.ROUTING_ERROR:
+                        negative_intent_label = st.selectbox(
+                            "올바른 문의 유형",
+                            list(INTENT_OPTIONS.values()),
+                            key=f"negative_intent_{inquiry_id}_{selected_view}",
+                        )
+                        negative_intent = next(
+                            code
+                            for code, label in INTENT_OPTIONS.items()
+                            if label == negative_intent_label
+                        )
+                    negative_note = st.text_input(
+                        "Negative 상세 메모 (선택)",
+                        key=f"negative_note_{inquiry_id}_{selected_view}",
+                    )
+                    (
+                        negative_signal_kind, negative_signal_content,
+                        negative_fact_scope,
+                    ) = _structured_signal_input(
+                        key_prefix=f"negative_{inquiry_id}_{selected_view}",
+                        allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
+                    )
+                    negative_save = st.button(
+                        "Negative Learning 저장",
+                        disabled=(
+                            read_only
+                            or evaluation_source is None
+                            or evaluation_reference_id is None
+                            or not negative_reason
+                            or evaluation_conflict_active
+                        ),
+                        key=f"negative_save_{inquiry_id}_{selected_view}",
+                        width="stretch",
+                    )
 
         excluded_save = False
         excluded_revoke = False
@@ -2297,183 +2347,185 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         _render_excluded_learning_saved(
             display_excluded, inquiry_id=inquiry_id
         )
-        with st.expander("학습 제외", expanded=False):
-            st.caption(
-                "좋고 나쁨을 평가하지 않고, 선택한 답변을 향후 Learning 반영 대상에서 제외합니다. 원본 답변은 삭제하지 않습니다."
-            )
-            st.caption(
-                "평가 대상 · "
-                + (
-                    f"{evaluation_source} · Reference {evaluation_reference_id}"
-                    if evaluation_source and evaluation_reference_id is not None
-                    else "현재 탭에 평가 가능한 답변 없음"
+        if not read_only:
+            with st.expander("학습 제외", expanded=False):
+                st.caption(
+                    "좋고 나쁨을 평가하지 않고, 선택한 답변을 향후 Learning 반영 대상에서 제외합니다. 원본 답변은 삭제하지 않습니다."
                 )
-            )
-            if persisted_excluded:
-                excluded_revoke_reason = st.text_input(
-                    "학습 제외 취소 사유",
-                    key=f"excluded_revoke_reason_{inquiry_id}_{selected_view}",
-                    max_chars=1_000,
+                st.caption(
+                    "평가 대상 · "
+                    + (
+                        f"{evaluation_source} · Reference {evaluation_reference_id}"
+                        if evaluation_source and evaluation_reference_id is not None
+                        else "현재 탭에 평가 가능한 답변 없음"
+                    )
                 )
-                excluded_revoke = st.button(
-                    "학습 제외 취소",
-                    disabled=(
-                        read_only
-                        or not str(excluded_revoke_reason or "").strip()
-                    ),
-                    key=f"excluded_revoke_{inquiry_id}_{selected_view}",
-                    width="stretch",
-                )
-            else:
-                excluded_reason_label = st.selectbox(
-                    "제외 사유",
-                    ["선택 안 함", *[
-                        EXCLUSION_REASON_LABELS[reason]
-                        for reason in ExclusionReason
-                    ]],
-                    key=f"excluded_reason_{inquiry_id}_{selected_view}",
-                )
-                selected_excluded_reason = EXCLUSION_REASON_BY_LABEL.get(
-                    excluded_reason_label
-                )
-                excluded_reason = (
-                    selected_excluded_reason.value
-                    if selected_excluded_reason is not None
-                    else ""
-                )
-                excluded_note = st.text_input(
-                    "학습 제외 상세 메모 (선택)",
-                    key=f"excluded_note_{inquiry_id}_{selected_view}",
-                    max_chars=1_000,
-                )
-                (
-                    excluded_signal_kind, excluded_signal_content,
-                    excluded_fact_scope,
-                ) = _structured_signal_input(
-                    key_prefix=f"excluded_{inquiry_id}_{selected_view}",
-                    allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
-                )
-                excluded_save = st.button(
-                    "학습 제외 저장",
-                    disabled=(
-                        read_only
-                        or evaluation_source is None
-                        or evaluation_reference_id is None
-                        or not excluded_reason
-                        or evaluation_conflict_active
-                    ),
-                    key=f"excluded_save_{inquiry_id}_{selected_view}",
-                    width="stretch",
-                )
+                if persisted_excluded:
+                    excluded_revoke_reason = st.text_input(
+                        "학습 제외 취소 사유",
+                        key=f"excluded_revoke_reason_{inquiry_id}_{selected_view}",
+                        max_chars=1_000,
+                    )
+                    excluded_revoke = st.button(
+                        "학습 제외 취소",
+                        disabled=(
+                            read_only
+                            or not str(excluded_revoke_reason or "").strip()
+                        ),
+                        key=f"excluded_revoke_{inquiry_id}_{selected_view}",
+                        width="stretch",
+                    )
+                else:
+                    excluded_reason_label = st.selectbox(
+                        "제외 사유",
+                        ["선택 안 함", *[
+                            EXCLUSION_REASON_LABELS[reason]
+                            for reason in ExclusionReason
+                        ]],
+                        key=f"excluded_reason_{inquiry_id}_{selected_view}",
+                    )
+                    selected_excluded_reason = EXCLUSION_REASON_BY_LABEL.get(
+                        excluded_reason_label
+                    )
+                    excluded_reason = (
+                        selected_excluded_reason.value
+                        if selected_excluded_reason is not None
+                        else ""
+                    )
+                    excluded_note = st.text_input(
+                        "학습 제외 상세 메모 (선택)",
+                        key=f"excluded_note_{inquiry_id}_{selected_view}",
+                        max_chars=1_000,
+                    )
+                    (
+                        excluded_signal_kind, excluded_signal_content,
+                        excluded_fact_scope,
+                    ) = _structured_signal_input(
+                        key_prefix=f"excluded_{inquiry_id}_{selected_view}",
+                        allowed_kinds=(SignalKind.BAD_PATTERN, SignalKind.CORRECTION),
+                    )
+                    excluded_save = st.button(
+                        "학습 제외 저장",
+                        disabled=(
+                            read_only
+                            or evaluation_source is None
+                            or evaluation_reference_id is None
+                            or not excluded_reason
+                            or evaluation_conflict_active
+                        ),
+                        key=f"excluded_save_{inquiry_id}_{selected_view}",
+                        width="stretch",
+                    )
 
-        run = (diagnostics or {}).get("provider_run") or {}
-        confirmed_facts = (
-            (diagnostics or {}).get("hybrid", {}).get(
-                "confirmed_facts"
-            )
-            or {}
-        )
-        st.markdown(
-            '<div class="answer-meta-strip">'
-            f'<span>출처 <b>{escape(source)}</b></span>'
-            f'<span>모델 <b>{escape(str(governance.get("model") or run.get("model") or "-"))}</b></span>'
-            f'<span>응답 <b>{int(run.get("duration_ms") or 0):,} ms</b></span>'
-            f'<span>토큰 <b>{int(run.get("total_tokens") or 0):,}</b></span>'
-            f'<span>비용 <b>{escape(str(run.get("estimated_cost_krw") or "-"))}</b></span>'
-            f'<span>Draft <b>{escape(str(draft.get("id") if draft else "-"))}</b></span>'
-            f'<span>설치예정일 <b>{escape(str(confirmed_facts.get("installation_date") or "-"))}</b></span>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        if _developer_mode():
-            with st.expander("개발자용 Draft 추적", expanded=False):
-                st.write(
-                    {
-                        "draft_id": view_model.get("draft_id"),
-                        "provider_run_id": view_model.get(
-                            "provider_run_id"
-                        ),
-                        "answer_version": view_model.get(
-                            "answer_version"
-                        ),
-                        "inquiry_id": inquiry_id,
-                        "masked_order_id": _masked_order_id(
-                            inquiry.get("order_id")
-                        ),
-                        "created_at": format_datetime_kst(
-                            draft.get("created_at") if draft else None
-                        ),
-                        "widget_key": program_answer_widget_key(
-                            inquiry_id,
-                            draft["id"] if draft else None,
-                        ),
-                        "phase9_analysis": phase9_analysis,
-                        "selected_fact_keys": phase9_selected.get(
-                            "keys", []
-                        ),
-                        "validator_rules": phase9_validator.get(
-                            "rules", []
-                        ),
-                    }
+        if not read_only:
+            run = (diagnostics or {}).get("provider_run") or {}
+            confirmed_facts = (
+                (diagnostics or {}).get("hybrid", {}).get(
+                    "confirmed_facts"
                 )
-        if draft and draft.get("stale"):
-            st.warning(
-                "DPS 설치예정일이 변경되어 GPT 답변을 다시 생성해야 합니다."
+                or {}
             )
-        if draft:
-            render_log_key = (
-                f"gpt_program_answer_rendered_{inquiry_id}_{draft['id']}"
+            st.markdown(
+                '<div class="answer-meta-strip">'
+                f'<span>출처 <b>{escape(source)}</b></span>'
+                f'<span>모델 <b>{escape(str(governance.get("model") or run.get("model") or "-"))}</b></span>'
+                f'<span>응답 <b>{int(run.get("duration_ms") or 0):,} ms</b></span>'
+                f'<span>토큰 <b>{int(run.get("total_tokens") or 0):,}</b></span>'
+                f'<span>비용 <b>{escape(str(run.get("estimated_cost_krw") or "-"))}</b></span>'
+                f'<span>Draft <b>{escape(str(draft.get("id") if draft else "-"))}</b></span>'
+                f'<span>설치예정일 <b>{escape(str(confirmed_facts.get("installation_date") or "-"))}</b></span>'
+                "</div>",
+                unsafe_allow_html=True,
             )
-            if not st.session_state.get(render_log_key):
-                render_details = {
-                    "draft_id": draft["id"],
-                    "provider_run_id": (
-                        provider_run or {}
-                    ).get("id"),
-                    "dps_lookup_id": draft.get("dps_lookup_id"),
-                    "status": "RENDERED",
-                    "model": (provider_run or {}).get("model"),
-                    "widget_key": program_answer_widget_key(
-                        inquiry_id, draft["id"]
-                    ),
-                }
-                rerun_started = st.session_state.pop(
-                    "gpt_rerun_started_at", None
+            if _developer_mode():
+                with st.expander("개발자용 Draft 추적", expanded=False):
+                    st.write(
+                        {
+                            "draft_id": view_model.get("draft_id"),
+                            "provider_run_id": view_model.get(
+                                "provider_run_id"
+                            ),
+                            "answer_version": view_model.get(
+                                "answer_version"
+                            ),
+                            "inquiry_id": inquiry_id,
+                            "masked_order_id": _masked_order_id(
+                                inquiry.get("order_id")
+                            ),
+                            "created_at": format_datetime_kst(
+                                draft.get("created_at") if draft else None
+                            ),
+                            "widget_key": program_answer_widget_key(
+                                inquiry_id,
+                                draft["id"] if draft else None,
+                            ),
+                            "phase9_analysis": phase9_analysis,
+                            "selected_fact_keys": phase9_selected.get(
+                                "keys", []
+                            ),
+                            "validator_rules": phase9_validator.get(
+                                "rules", []
+                            ),
+                        }
+                    )
+            if draft and draft.get("stale"):
+                st.warning(
+                    "DPS 설치예정일이 변경되어 GPT 답변을 다시 생성해야 합니다."
                 )
-                if rerun_started is not None:
+            if draft:
+                render_log_key = (
+                    f"gpt_program_answer_rendered_{inquiry_id}_{draft['id']}"
+                )
+                if not st.session_state.get(render_log_key):
                     render_details = {
-                        **render_details,
-                        "rerun_elapsed_seconds": round(
-                            time.perf_counter() - rerun_started, 3
+                        "draft_id": draft["id"],
+                        "provider_run_id": (
+                            provider_run or {}
+                        ).get("id"),
+                        "dps_lookup_id": draft.get("dps_lookup_id"),
+                        "status": "RENDERED",
+                        "model": (provider_run or {}).get("model"),
+                        "widget_key": program_answer_widget_key(
+                            inquiry_id, draft["id"]
                         ),
                     }
-                    # When stage timing is switched on, attach the split so
-                    # the recorded span can be read as a breakdown rather
-                    # than a single unexplained number.
-                    profile = rerun_profile_snapshot()
-                    if profile:
+                    rerun_started = st.session_state.pop(
+                        "gpt_rerun_started_at", None
+                    )
+                    if rerun_started is not None:
                         render_details = {
                             **render_details,
-                            "rerun_profile": profile,
+                            "rerun_elapsed_seconds": round(
+                                time.perf_counter() - rerun_started, 3
+                            ),
                         }
-                _record_ui_event(
-                    database,
-                    inquiry_id,
-                    "GPT_PROGRAM_ANSWER_RENDERED",
-                    "활성 Program Answer를 화면에 표시했습니다.",
-                    details=render_details,
-                )
-                _record_ui_event(
-                    database,
-                    inquiry_id,
-                    "PROGRAM_ANSWER_REFRESHED",
-                    "활성 draft와 동일한 Program Answer를 갱신했습니다.",
-                    details={
-                        **render_details,
-                        "status": "MATCHED",
-                    },
-                )
-                st.session_state[render_log_key] = True
+                        # When stage timing is switched on, attach the split so
+                        # the recorded span can be read as a breakdown rather
+                        # than a single unexplained number.
+                        profile = rerun_profile_snapshot()
+                        if profile:
+                            render_details = {
+                                **render_details,
+                                "rerun_profile": profile,
+                            }
+                    _record_ui_event(
+                        database,
+                        inquiry_id,
+                        "GPT_PROGRAM_ANSWER_RENDERED",
+                        "활성 Program Answer를 화면에 표시했습니다.",
+                        details=render_details,
+                    )
+                    _record_ui_event(
+                        database,
+                        inquiry_id,
+                        "PROGRAM_ANSWER_REFRESHED",
+                        "활성 draft와 동일한 Program Answer를 갱신했습니다.",
+                        details={
+                            **render_details,
+                            "status": "MATCHED",
+                        },
+                    )
+                    st.session_state[render_log_key] = True
         pending_success = st.session_state.get(pending_success_key)
         if isinstance(pending_success, dict):
             expected_draft_id = pending_success.get("draft_id")
@@ -2623,98 +2675,114 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     # ``passed`` is True for REVIEW_REQUIRED as well as PASS, so reporting it
     # as "Validator 통과" told staff an answer had cleared review when the
     # validator had actually asked for them. The bar follows the status.
-    validator_status = answer_status.validation_status
-    validator_clear = validator_status == "PASS"
-    validator_message = (
-        "사실 일치 · PII 없음 · 금지 표현 없음"
-        if validator_clear
-        else "검증 결과를 확인하고 직원 검토를 진행하세요."
-    )
-    validator_headline = (
-        "✓ Validator 통과"
-        if validator_clear
-        else "✕ Validator 차단"
-        if validator_status == "BLOCK"
-        else "! Validator 확인 필요"
-    )
-    st.markdown(
-        f'<div class="validator-status-bar {"passed" if validator_clear else "warning"}">'
-        f"<strong>{escape(validator_headline)}</strong>"
-        f"<span>{escape(validator_message)}</span></div>",
-        unsafe_allow_html=True,
-    )
-    if diagnostics:
-        with st.expander("Validator 및 GPT 상세", expanded=False):
-            _render_gpt_diagnostics(draft, provider_run)
+    if not read_only:
+        validator_status = answer_status.validation_status
+        validator_clear = validator_status == "PASS"
+        validator_message = (
+            "사실 일치 · PII 없음 · 금지 표현 없음"
+            if validator_clear
+            else "검증 결과를 확인하고 직원 검토를 진행하세요."
+        )
+        validator_headline = (
+            "✓ Validator 통과"
+            if validator_clear
+            else "✕ Validator 차단"
+            if validator_status == "BLOCK"
+            else "! Validator 확인 필요"
+        )
+        st.markdown(
+            f'<div class="validator-status-bar {"passed" if validator_clear else "warning"}">'
+            f"<strong>{escape(validator_headline)}</strong>"
+            f"<span>{escape(validator_message)}</span></div>",
+            unsafe_allow_html=True,
+        )
+        if diagnostics:
+            with st.expander("Validator 및 GPT 상세", expanded=False):
+                _render_gpt_diagnostics(draft, provider_run)
 
-    bottom_left, bottom_actions = st.columns([3.1, 2.0], gap="medium")
-    cancel_available = bool(approval_complete and can_approve)
-    with bottom_left:
-        cancel_reason = st.text_input(
-            "승인 취소 사유",
-            placeholder="승인 취소 시 사유를 입력해 주세요.",
-            disabled=not cancel_available,
-            max_chars=1_000,
-            key=f"cancel_reason_{inquiry_id}",
-            label_visibility="collapsed",
+    if read_only:
+        # Copying writes nothing; it copies the reply the marketplace
+        # returned, not a stored draft.
+        cancel_reason = ""
+        cancel_confirmed = False
+        cancel = approve = False
+        copy = st.columns([3.1, 2.0], gap="medium")[1].columns(
+            3, gap="small"
+        )[0].button(
+            "복사",
+            disabled=not _source_seller_answer(inquiry),
+            width="stretch",
+            key=f"review_copy_{inquiry_id}",
         )
-        cancel_confirmed = st.checkbox(
-            "승인을 취소하면 Human Verified Positive Learning이 비활성화됩니다.",
-            disabled=not cancel_available,
-            key=f"cancel_confirm_{inquiry_id}",
+    else:
+        bottom_left, bottom_actions = st.columns([3.1, 2.0], gap="medium")
+        cancel_available = bool(approval_complete and can_approve)
+        with bottom_left:
+            cancel_reason = st.text_input(
+                "승인 취소 사유",
+                placeholder="승인 취소 시 사유를 입력해 주세요.",
+                disabled=not cancel_available,
+                max_chars=1_000,
+                key=f"cancel_reason_{inquiry_id}",
+                label_visibility="collapsed",
+            )
+            cancel_confirmed = st.checkbox(
+                "승인을 취소하면 Human Verified Positive Learning이 비활성화됩니다.",
+                disabled=not cancel_available,
+                key=f"cancel_confirm_{inquiry_id}",
+            )
+        action_columns = bottom_actions.columns(3, gap="small")
+        copy = action_columns[0].button(
+            "복사",
+            disabled=not bool(
+                final_answer
+                or (draft and draft.get("edited_answer"))
+                or program_answer
+            ),
+            width="stretch",
+            key=f"review_copy_{inquiry_id}",
         )
-    action_columns = bottom_actions.columns(3, gap="small")
-    copy = action_columns[0].button(
-        "복사",
-        disabled=not bool(
-            final_answer
-            or (draft and draft.get("edited_answer"))
-            or program_answer
-        ),
-        width="stretch",
-        key=f"review_copy_{inquiry_id}",
-    )
-    cancel = action_columns[1].button(
-        "승인 취소",
-        disabled=(
-            read_only
-            or not cancel_available
-            or not str(cancel_reason or "").strip()
-            or not cancel_confirmed
-        ),
-        width="stretch",
-        key=f"review_cancel_{inquiry_id}",
-    )
-    approve = action_columns[2].button(
-        "승인",
-        disabled=(
-            read_only
-            or not can_approve
-            or approval_conflict_active
-            or (
-                (
-                    not posted_answer_available
-                    or (
-                        approval_complete
-                        and (
-                            not answer_was_corrected
-                            or (
-                                approval_trace.get("provenance")
-                                == AnswerProvenance.STAFF_EDITED.value
-                                and format_final_answer(final_answer)
-                                == format_final_answer(edited_value)
+        cancel = action_columns[1].button(
+            "승인 취소",
+            disabled=(
+                read_only
+                or not cancel_available
+                or not str(cancel_reason or "").strip()
+                or not cancel_confirmed
+            ),
+            width="stretch",
+            key=f"review_cancel_{inquiry_id}",
+        )
+        approve = action_columns[2].button(
+            "승인",
+            disabled=(
+                read_only
+                or not can_approve
+                or approval_conflict_active
+                or (
+                    (
+                        not posted_answer_available
+                        or (
+                            approval_complete
+                            and (
+                                not answer_was_corrected
+                                or (
+                                    approval_trace.get("provenance")
+                                    == AnswerProvenance.STAFF_EDITED.value
+                                    and format_final_answer(final_answer)
+                                    == format_final_answer(edited_value)
+                                )
                             )
                         )
                     )
+                    if source_answered
+                    else not draft or posted or approved
                 )
-                if source_answered
-                else not draft or posted or approved
-            )
-        ),
-        type="primary",
-        width="stretch",
-        key=f"review_approve_{inquiry_id}",
-    )
+            ),
+            type="primary",
+            width="stretch",
+            key=f"review_approve_{inquiry_id}",
+        )
 
     if read_only:
         # Same reason as above: the widgets are disabled, and the intents they
@@ -3043,7 +3111,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             st.rerun()
         if copy:
             copy_text = (
-                final_answer
+                _source_seller_answer(inquiry)
+                if read_only
+                else final_answer
                 or str(draft.get("edited_answer") or "")
                 or program_answer
             )
