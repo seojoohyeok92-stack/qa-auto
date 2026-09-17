@@ -411,7 +411,14 @@ class InquiryRepository:
                 """,
                 (store_code, source_type, source_question_id),
             ).fetchone()
-        return self._row_to_dict(row)
+        result = self._row_to_dict(row)
+        if result is not None:
+            # The same marketplace enrichment the list query applies.  The
+            # detail screen reads the row again through here rather than
+            # reusing the page it was listed from, so without this the card
+            # shows a product name and the panel beside it shows a dash.
+            self._attach_marketplace_details([result])
+        return result
 
     def list(
         self,

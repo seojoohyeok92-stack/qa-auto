@@ -104,6 +104,10 @@ ANSWER_VIEW_PRESENTATION: dict[str, tuple[str, str]] = {
     "Program Answer": ("PROGRAM_GENERATED", "program"),
     "직원 수정본": ("STAFF_EDITED", "staff"),
     "네이버 실제 등록 답변": ("NAVER_POSTED", "naver"),
+    # Read back from the marketplace, not posted by this system.  The badge
+    # says so rather than borrowing NAVER_POSTED or inventing a posted-looking
+    # token; nothing downstream treats this as an evaluation source.
+    "쿠팡 실제 판매자 답변": ("MARKETPLACE_SELLER_ANSWER", "naver"),
     "Final Answer": ("FINAL_ANSWER", "final"),
 }
 
@@ -1226,6 +1230,36 @@ def _render_gpt_diagnostics(
             )
 
 
+NAVER_POSTED_VIEW = "네이버 실제 등록 답변"
+COUPANG_SELLER_VIEW = "쿠팡 실제 판매자 답변"
+
+
+def _source_answer_view(inquiry: dict[str, Any]) -> str | None:
+    """Which already-answered view this inquiry gets, if any.
+
+    Naver keeps its posted-answer tab: that answer is one this system
+    registered, tracked in its own repository with NAVER_POSTED provenance.
+
+    Coupang has no such thing.  Nothing was ever posted there -- the reply was
+    written by a person in Wing and merely read back with the inquiry.  So it
+    is shown as what it is, and never given a posted-answer provenance, a
+    posted-answer repository row, or the Naver NOT_FETCHED wording that
+    describes a fetch this marketplace does not do.
+    """
+
+    if not inquiry.get("source_answered"):
+        return None
+    if is_store_answer_enabled(inquiry.get("store_code")):
+        return NAVER_POSTED_VIEW
+    return COUPANG_SELLER_VIEW if _source_seller_answer(inquiry) else None
+
+
+def _source_seller_answer(inquiry: dict[str, Any]) -> str:
+    """The marketplace's own reply, as the repository read it back."""
+
+    return str(inquiry.get("seller_answer") or "").strip()
+
+
 def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
     """What an approver can do next, which depends on the marketplace.
 
@@ -1272,12 +1306,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     pending_answer_view = st.session_state.pop(
         pending_answer_view_key, None
     )
-    if pending_answer_view in {
-        "Program Answer",
-        "직원 수정본",
-        "네이버 실제 등록 답변",
-        "Final Answer",
-    }:
+    if pending_answer_view in set(ANSWER_VIEW_PRESENTATION):
         st.session_state[view_key] = pending_answer_view
     current_draft_id = int(draft["id"]) if draft else None
     if is_valid_draft(pending_draft_text):
@@ -1614,8 +1643,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     with answer_column:
         rendered_program_text: str | None = None
         answer_views = ["Program Answer", "직원 수정본"]
-        if source_answered:
-            answer_views.append("네이버 실제 등록 답변")
+        source_answer_view = _source_answer_view(inquiry)
+        if source_answer_view is not None:
+            answer_views.append(source_answer_view)
         answer_views.append("Final Answer")
         with st.container(key=f"answer_source_tabs_{inquiry_id}"):
             selected_view = st.segmented_control(
@@ -1626,8 +1656,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     if view_key in st.session_state
                     else "Final Answer"
                     if approval_complete
-                    else "네이버 실제 등록 답변"
-                    if source_answered
+                    else source_answer_view
+                    if source_answer_view is not None
                     else "직원 수정본"
                     if draft and not approved
                     else "Final Answer"
@@ -1693,10 +1723,23 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     if source_answered
                     else "변경 내용은 자동 저장되며 임시 저장으로 즉시 확정할 수 있습니다."
                 )
-            elif selected_view == "네이버 실제 등록 답변":
+            elif selected_view == COUPANG_SELLER_VIEW:
+                st.text_area(
+                    COUPANG_SELLER_VIEW,
+                    value=_source_seller_answer(inquiry),
+                    height=360,
+                    disabled=True,
+                    label_visibility="collapsed",
+                    key=f"coupang_seller_answer_{inquiry_id}",
+                )
+                st.caption(
+                    "마켓에서 조회한 기존 판매자 답변입니다. "
+                    "이 시스템이 등록한 답변이 아니며 읽기 전용입니다."
+                )
+            elif selected_view == NAVER_POSTED_VIEW:
                 if posted_answer_available:
                     st.text_area(
-                        "네이버 실제 등록 답변",
+                        NAVER_POSTED_VIEW,
                         value=posted_answer_body,
                         height=360,
                         disabled=True,
@@ -1936,7 +1979,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             evaluation_source = AnswerProvenance.STAFF_EDITED.value
             evaluation_reference_id = int(draft["id"])
         elif (
-            selected_view == "네이버 실제 등록 답변"
+            selected_view == NAVER_POSTED_VIEW
             and posted_answer_available
             and posted_answer_record is not None
         ):
@@ -3125,6 +3168,17 @@ def _render_inquiry_detail(
                 unsafe_allow_html=True,
             )
             st.caption("고객에게 실제 노출된 답변 · NAVER_POSTED")
+    elif _source_seller_answer(inquiry):
+        with st.expander(
+            f"{store_display_name(inquiry.get('store_code'))} 실제 판매자 답변",
+            expanded=False,
+        ):
+            st.markdown(
+                '<div class="existing-answer-scroll">'
+                f"{escape(_source_seller_answer(inquiry))}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("마켓에서 조회한 기존 판매자 답변 · 읽기 전용")
     elif inquiry.get("source_answered"):
         st.caption(
             f"{store_display_name(inquiry.get('store_code'))} 답변완료 · "
