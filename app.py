@@ -292,6 +292,7 @@ def _dashboard_work_items_from_rows(
                 # something this app wrote: it is shown so staff can see the
                 # question is already handled.
                 "source_seller_answer": inquiry.get("seller_answer"),
+                "product_option": inquiry.get("option_name"),
                 "customer_name": inquiry.get("customer_display"),
                 "order_id": inquiry.get("order_id"),
                 "product_order_id": inquiry.get("product_order_id"),

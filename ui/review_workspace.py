@@ -56,7 +56,11 @@ from services.approval_service import (
     ApprovalLockedError,
     ApprovalService,
 )
-from services.market_policy import is_store_answer_enabled, store_display_name
+from services.market_policy import (
+    is_store_answer_enabled,
+    store_display_name,
+    store_label,
+)
 from services.learning_feedback_service import LearningFeedbackService
 from services.learning_privacy_service import LearningPrivacyService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
@@ -1515,6 +1519,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             if generation_failure
             else ""
         )
+        # The marketplace this inquiry came from, so the row does not say
+        # 네이버 above a Coupang answer.
+        market_answer_field = _field(
+            f"{store_display_name(inquiry.get('store_code'))} 답변",
+            answer_status.naver_answer_label,
+        )
         st.markdown(
             '<div class="compact-analysis-card"><h4>분석 결과</h4>'
             f'{_field("문의 유형", intent.get("category") or inquiry.get("inquiry_type"))}'
@@ -1523,7 +1533,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             f'{_field("직원 검토", answer_status.staff_review_label)}'
             f'{_field("자동등록", answer_status.registration_label)}'
             f'{_field("승인 상태", answer_status.approval_label)}'
-            f'{_field("네이버 답변", answer_status.naver_answer_label)}'
+            f"{market_answer_field}"
             f'{_field("프로그램 등록", answer_status.program_post_label)}'
             f'{_field("Provider", governance.get("provider") or (provider_run or {}).get("provider"))}'
             f'{_field("사용 Rule", (diagnostics or {}).get("hybrid", {}).get("rule_id"))}'
@@ -3058,7 +3068,7 @@ def _render_inquiry_detail(
         + _field("상품명", inquiry.get("product_name"))
         + _field("상품 옵션", inquiry.get("option_name"))
         + _field("고객정보", _masked_customer(inquiry.get("customer_display")))
-        + _field("스토어", inquiry.get("store_code"))
+        + _field("스토어", store_label(inquiry.get("store_code")))
         + _field(
             "주문일",
             inquiry.get("order_date") or order_snapshot.get("order_date"),
@@ -3100,11 +3110,14 @@ def _render_inquiry_detail(
             st.caption("고객에게 실제 노출된 답변 · NAVER_POSTED")
     elif inquiry.get("source_answered"):
         st.caption(
-            "네이버 답변완료 · 실제 답변 본문 NOT_FETCHED "
-            "(Program Answer로 대체하지 않음)"
+            f"{store_display_name(inquiry.get('store_code'))} 답변완료 · "
+            "실제 답변 본문 NOT_FETCHED (Program Answer로 대체하지 않음)"
         )
     elif legacy_posted_answer:
-        with st.expander("기존 네이버 답변", expanded=False):
+        with st.expander(
+            f"기존 {store_display_name(inquiry.get('store_code'))} 답변",
+            expanded=False,
+        ):
             st.markdown(
                 '<div class="existing-answer-scroll">'
                 f"{escape(str(legacy_posted_answer))}</div>",
@@ -3886,7 +3899,7 @@ def _render_naver_post_prepare(
     values = (
         ("문의번호", inquiry.get("external_inquiry_id") or inquiry.get("source_question_id")),
         ("문의 유형", inquiry.get("source_type")),
-        ("스토어", inquiry.get("store_code")),
+        ("스토어", store_label(inquiry.get("store_code"))),
         ("Final Answer 길이", len(str(draft.get("final_answer") or ""))),
         ("승인 여부", approval.get("approval_status")),
         ("등록 상태", post_status),

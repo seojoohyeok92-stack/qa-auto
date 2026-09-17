@@ -60,6 +60,39 @@ def store_display_name(store_code: object) -> str:
     return market_display_name(market_of(store_code))
 
 
+def account_of_store(store_code: object) -> str | None:
+    """The seller account a Coupang store code belongs to."""
+
+    code = str(store_code or "").strip().upper()
+    prefix = "COUPANG_"
+    return code[len(prefix):] or None if code.startswith(prefix) else None
+
+
+def store_label(store_code: object) -> str:
+    """What to call this store on screen.
+
+    A Coupang store code carries its seller account, and that is the useful
+    half: an operator knows 오제앤에스, not COUPANG_OJE_NS.  Naver stores keep
+    the name they are configured with.  Either way the raw code stays out of
+    the screen.
+    """
+
+    code = str(store_code or "").strip()
+    if not code:
+        return "-"
+    account = account_of_store(code)
+    if account is not None:
+        from config import COUPANG_ACCOUNT_DISPLAY_NAMES
+
+        return COUPANG_ACCOUNT_DISPLAY_NAMES.get(account, account)
+    try:
+        from config import get_store_config
+
+        return get_store_config(code).name or code
+    except Exception:
+        return code
+
+
 def is_answer_market_enabled(market: object) -> bool:
     """Whether production may generate, post and notify for this market."""
 

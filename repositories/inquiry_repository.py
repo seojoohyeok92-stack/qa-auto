@@ -742,6 +742,7 @@ class InquiryRepository:
         """
 
         wanted: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        options: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for row in rows:
             raw = row.get("raw_json") if isinstance(row.get("raw_json"), dict) else {}
             metadata = (
@@ -763,8 +764,14 @@ class InquiryRepository:
                 continue
             seller_product_id = str(raw.get("sellerProductId") or "").strip()
             account_code = str(metadata.get("account_code") or "").strip()
-            if seller_product_id and account_code:
+            if not account_code:
+                continue
+            if seller_product_id:
                 wanted.setdefault((account_code, seller_product_id), []).append(row)
+            vendor_item_id = str(raw.get("vendorItemId") or "").strip()
+            if vendor_item_id and not str(row.get("option_name") or "").strip():
+                options.setdefault((account_code, vendor_item_id), []).append(row)
+        self._fill_option_names(options)
         if not wanted:
             return
         clauses = " OR ".join(
@@ -790,6 +797,38 @@ class InquiryRepository:
                 continue
             for row in wanted.get(key, ()):
                 row["product_name"] = name
+
+    def _fill_option_names(
+        self, options: dict[tuple[str, str], list[dict[str, Any]]]
+    ) -> None:
+        """The option a Coupang inquiry is about, from the stored catalogue.
+
+        Keyed by vendor item id inside its own account: the same id belongs to
+        a different option in the other seller account, so the account is part
+        of the key rather than an afterthought.  No filter on whether the
+        listing is still selling -- this names what a past customer asked
+        about, and a product that stopped selling still had a name.
+        """
+
+        if not options:
+            return
+        clauses = " OR ".join(
+            "(account_code=? AND vendor_item_id=?)" for _ in options
+        )
+        parameters = [value for key in options for value in key]
+        with self.database.connection() as connection:
+            found = connection.execute(
+                "SELECT account_code, vendor_item_id, item_name "
+                f"FROM coupang_catalog_options WHERE {clauses}",
+                tuple(parameters),
+            ).fetchall()
+        for option in found:
+            name = str(option["item_name"] or "").strip()
+            if not name:
+                continue
+            key = (str(option["account_code"]), str(option["vendor_item_id"]))
+            for row in options.get(key, ()):
+                row["option_name"] = name
 
     def dashboard_kpi_counts(
         self,

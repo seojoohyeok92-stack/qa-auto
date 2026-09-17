@@ -166,20 +166,29 @@ class CoupangAccountSettings:
         return tuple(name for name, value in zip(names, values) if not value)
 
 
+# What each Coupang seller account is called on screen.  Kept apart from the
+# credential builders so a screen can name an account without depending on
+# whether its API keys happen to be configured.
+COUPANG_ACCOUNT_DISPLAY_NAMES: dict[str, str] = {
+    COUPANG_OJE_NS: "오제앤에스",
+    COUPANG_OJE_PLUS: "오제플러스",
+}
+
+
 def get_coupang_accounts() -> tuple[CoupangAccountSettings, ...]:
     """Return configured accounts only; the optional second account is inert when absent."""
 
     accounts = (
         CoupangAccountSettings(
             account_code=COUPANG_OJE_NS,
-            display_name="오제앤에스",
+            display_name=COUPANG_ACCOUNT_DISPLAY_NAMES[COUPANG_OJE_NS],
             access_key=os.getenv("COUPANG_ACCESS_KEY", "").strip(),
             secret_key=os.getenv("COUPANG_SECRET_KEY", "").strip(),
             vendor_id=os.getenv("COUPANG_VENDOR_ID", "").strip(),
         ),
         CoupangAccountSettings(
             account_code=COUPANG_OJE_PLUS,
-            display_name="오제플러스",
+            display_name=COUPANG_ACCOUNT_DISPLAY_NAMES[COUPANG_OJE_PLUS],
             access_key=os.getenv("COUPANG_2_ACCESS_KEY", "").strip(),
             secret_key=os.getenv("COUPANG_2_SECRET_KEY", "").strip(),
             vendor_id=os.getenv("COUPANG_2_VENDOR_ID", "").strip(),
@@ -194,13 +203,14 @@ def get_coupang_account(account_code: str) -> CoupangAccountSettings:
     target = str(account_code or "").strip().upper()
     all_accounts = {
         COUPANG_OJE_NS: CoupangAccountSettings(
-            COUPANG_OJE_NS, "오제앤에스",
+            COUPANG_OJE_NS, COUPANG_ACCOUNT_DISPLAY_NAMES[COUPANG_OJE_NS],
             os.getenv("COUPANG_ACCESS_KEY", "").strip(),
             os.getenv("COUPANG_SECRET_KEY", "").strip(),
             os.getenv("COUPANG_VENDOR_ID", "").strip(),
         ),
         COUPANG_OJE_PLUS: CoupangAccountSettings(
-            COUPANG_OJE_PLUS, "오제플러스",
+            COUPANG_OJE_PLUS,
+            COUPANG_ACCOUNT_DISPLAY_NAMES[COUPANG_OJE_PLUS],
             os.getenv("COUPANG_2_ACCESS_KEY", "").strip(),
             os.getenv("COUPANG_2_SECRET_KEY", "").strip(),
             os.getenv("COUPANG_2_VENDOR_ID", "").strip(),

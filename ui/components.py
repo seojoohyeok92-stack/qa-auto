@@ -869,7 +869,7 @@ def _render_ai_answer_draft(work_item: WorkItem) -> None:
         st.warning(warning)
     st.caption(f"생성 시각: {display['created_at']}")
     st.caption(
-        "실제 네이버 답변 등록과 직원 수정·학습 기능은 아직 비활성입니다."
+        "실제 답변 등록과 직원 수정·학습 기능은 아직 비활성입니다."
     )
 
 
@@ -1822,6 +1822,15 @@ def render_work_item(work_item: WorkItem) -> None:
         )
         _render_message_card("문의 제목", work_item.get("title"))
         _render_message_card("문의 내용", work_item.get("content"))
+        # The reply already published on the marketplace.  Read-only, and not
+        # a draft: it is here so staff can see the question is handled.
+        source_answer = str(work_item.get("source_seller_answer") or "").strip()
+        if source_answer:
+            _render_message_card(
+                "%s에 등록된 판매자 답변"
+                % store_display_name(work_item.get("store_code")),
+                source_answer,
+            )
 
     with st.container(border=True):
         _render_panel_marker("panel-analysis")
