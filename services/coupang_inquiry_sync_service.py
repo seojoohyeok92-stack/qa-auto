@@ -1,114 +1,231 @@
-"""Read-only Coupang inquiry synchronization using existing persistence."""
+"""Operational, read-only Coupang Online Inquiry sync.
+
+Coupang is collected and displayed; nothing answers it.  So this is the whole
+path, and nothing else is reachable from here:
+
+    CoupangReadClient.list_online_inquiries(answered_type="ALL")
+      -> CoupangInquiryNormalizer.online(payload, account_code=...)
+      -> to_work_item() -> normalize_work_item()
+      -> InquiryRepository.upsert_work_item()
+
+``InquirySyncService.sync`` is deliberately not used.  Around the same upsert it
+records a Naver posted answer, initializes workflow steps, writes activity logs,
+can create an auto-post event and can run AutomaticDraftService -- every one of
+which is wrong for a market production only reads.
+
+Each seller account is its own identity (``COUPANG_OJE_NS`` /
+``COUPANG_OJE_PLUS``): inquiry ids are account-local, and a row carries its
+account in ``source_metadata_json`` so it joins that account's catalogue only.
+
+This runs inside the Naver auto sync cycle (see ``naver_auto_sync_scheduler``);
+the account loop keeps one account's failure from stopping the other.
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
-from typing import Any
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable, Iterator
 
-from api.coupang_read_client import CoupangReadClient
-from services.coupang_inquiry_normalizer import CoupangInquiryNormalizer
-from services.inquiry_sync_service import InquirySyncService
+from api.coupang_read_client import (
+    ONLINE_INQUIRIES_PATH,
+    CoupangReadClient,
+    CoupangReadError,
+)
+from config import COUPANG_OJE_NS, COUPANG_OJE_PLUS, get_coupang_account
+from repositories.database import Database
+from repositories.inquiry_repository import InquiryRepository
+from services.coupang_inquiry_normalizer import (
+    COUPANG_ONLINE_INQUIRY,
+    CoupangInquiryNormalizer,
+    coupang_store_code,
+)
+from services.inquiry_sync_service import normalize_work_item
+
+
+KST = timezone(timedelta(hours=9))
+
+ACCOUNTS: tuple[str, ...] = (COUPANG_OJE_NS, COUPANG_OJE_PLUS)
+# New, still-unanswered and answered inquiries alike -- the client accepts
+# ALL, ANSWERED and NOANSWER.
+ANSWERED_TYPE = "ALL"
+PAGE_SIZE = 50
+# Start and end at most six days apart: seven calendar days.  Seven apart passes
+# the client's own check and is refused by Coupang with HTTP 400.
+WINDOW_SPAN_DAYS = 6
+# Every cycle reads the last seven days: new inquiries and recent answers.
+RECENT_DAYS = 7
+# The API filters by when an inquiry was asked, so an answer given after its
+# seven days would never be read again.  A cycle therefore reaches back to the
+# oldest inquiry still stored as unanswered -- but no further than this.
+UNANSWERED_RECHECK_DAYS = 30
+
+
+def kst_today() -> date:
+    return datetime.now(KST).date()
+
+
+def date_windows(start: date, end: date) -> Iterator[tuple[date, date]]:
+    if end < start:
+        raise ValueError("end_date must not be earlier than start_date")
+    cursor = start
+    while cursor <= end:
+        window_end = min(cursor + timedelta(days=WINDOW_SPAN_DAYS), end)
+        yield cursor, window_end
+        cursor = window_end + timedelta(days=1)
 
 
 @dataclass
 class CoupangInquirySyncResult:
+    account_code: str
+    start_date: date | None = None
+    end_date: date | None = None
+    http_requests: int = 0
     fetched: int = 0
     new: int = 0
     updated: int = 0
     unchanged: int = 0
     failed: int = 0
-    online_pages: int = 0
-    contact_center_pages: int = 0
+    error: str | None = None
 
-    def to_dict(self) -> dict[str, int]:
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def log_line(self) -> str:
+        line = (
+            f"COUPANG_SYNC {self.account_code} "
+            f"range={self.start_date}~{self.end_date} "
+            f"requests={self.http_requests} fetched={self.fetched} "
+            f"new={self.new} updated={self.updated} "
+            f"unchanged={self.unchanged} failed={self.failed}"
+        )
+        return f"{line} error={self.error}" if self.error else line
+
+
+def _client_for_account(account_code: str) -> CoupangReadClient:
+    account = get_coupang_account(account_code)
+    return CoupangReadClient(
+        access_key=account.access_key,
+        secret_key=account.secret_key,
+        vendor_id=account.vendor_id,
+    )
+
+
+def _describe(error: Exception) -> str:
+    """Error text safe for a console: never credentials, never the vendor id."""
+
+    if isinstance(error, CoupangReadError):
+        return (
+            f"{error.code} status={error.status_code} "
+            f"endpoint={ONLINE_INQUIRIES_PATH}"
+        )
+    return error.__class__.__name__
 
 
 class CoupangInquirySyncService:
-    """Fetch both documented inquiry feeds and persist through InquirySyncService.
-
-    The caller supplies explicit dates; incremental scheduling/checkpointing is
-    intentionally outside Phase 1-A.
-    """
-
     def __init__(
         self,
-        read_client: CoupangReadClient,
-        inquiry_sync: InquirySyncService,
-        normalizer: CoupangInquiryNormalizer | None = None,
-    ) -> None:
-        self.read_client = read_client
-        self.inquiry_sync = inquiry_sync
-        self.normalizer = normalizer or CoupangInquiryNormalizer()
-
-    def sync_inquiries(
-        self,
+        database: Database,
         *,
-        start_date: date,
-        end_date: date,
-        include_contact_center: bool = True,
+        client_factory: Callable[[str], CoupangReadClient] = _client_for_account,
+        normalizer: CoupangInquiryNormalizer | None = None,
+        today: Callable[[], date] = kst_today,
+    ) -> None:
+        self.database = database
+        self.inquiries = InquiryRepository(database)
+        self.client_factory = client_factory
+        self.normalizer = normalizer or CoupangInquiryNormalizer()
+        self.today = today
+
+    def lookback_range(self, account_code: str) -> tuple[date, date]:
+        """The last seven days, stretched back to the oldest open inquiry.
+
+        Only as far as ``UNANSWERED_RECHECK_DAYS``: with nothing unanswered it
+        is one window, and an inquiry abandoned for months cannot make every
+        cycle re-read its whole history.
+        """
+
+        end = self.today()
+        start = end - timedelta(days=RECENT_DAYS - 1)
+        floor = end - timedelta(days=UNANSWERED_RECHECK_DAYS - 1)
+        with self.database.connection() as connection:
+            oldest = connection.execute(
+                "SELECT MIN(substr(source_created_at, 1, 10)) FROM inquiries "
+                "WHERE store_code = ? AND source_type = ? "
+                "AND source_answered = 0 "
+                "AND substr(source_created_at, 1, 10) >= ?",
+                (
+                    coupang_store_code(account_code),
+                    COUPANG_ONLINE_INQUIRY,
+                    floor.isoformat(),
+                ),
+            ).fetchone()[0]
+        if oldest:
+            try:
+                start = min(start, date.fromisoformat(str(oldest)))
+            except ValueError:
+                pass
+        return start, end
+
+    def sync_account(
+        self,
+        account_code: str,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> CoupangInquirySyncResult:
-        if end_date < start_date:
-            raise ValueError("end_date must not be earlier than start_date")
-        result = CoupangInquirySyncResult()
-        for window_start, window_end in self._date_chunks(start_date, end_date):
-            self._sync_online_window(window_start, window_end, result)
-            if include_contact_center:
-                self._sync_contact_window(window_start, window_end, result)
+        """Sync one account.  A failed request raises; a bad item is counted."""
+
+        if start_date is None or end_date is None:
+            default_start, default_end = self.lookback_range(account_code)
+            start_date = start_date or default_start
+            end_date = end_date or default_end
+        result = CoupangInquirySyncResult(
+            account_code=account_code, start_date=start_date, end_date=end_date
+        )
+        client = self.client_factory(account_code)
+        for window_start, window_end in date_windows(start_date, end_date):
+            page = 1
+            while True:
+                result.http_requests += 1
+                payload = client.list_online_inquiries(
+                    inquiry_start_at=window_start,
+                    inquiry_end_at=window_end,
+                    answered_type=ANSWERED_TYPE,
+                    page_num=page,
+                    page_size=PAGE_SIZE,
+                )
+                content, total_pages = self._page(payload)
+                for item in content:
+                    self._persist(account_code, item, result)
+                if page >= total_pages:
+                    break
+                page += 1
         return result
 
-    @staticmethod
-    def _date_chunks(start_date: date, end_date: date):
-        current = start_date
-        while current <= end_date:
-            window_end = min(current + timedelta(days=7), end_date)
-            yield current, window_end
-            current = window_end + timedelta(days=1)
+    def sync_accounts(
+        self, accounts: tuple[str, ...] = ACCOUNTS
+    ) -> list[CoupangInquirySyncResult]:
+        """One cycle.  Each account is tried; a failure is kept to its account."""
 
-    def _sync_online_window(
-        self,
-        start_date: date,
-        end_date: date,
-        result: CoupangInquirySyncResult,
-    ) -> None:
-        page = 1
-        while True:
-            payload = self.read_client.list_online_inquiries(
-                inquiry_start_at=start_date,
-                inquiry_end_at=end_date,
-                page_num=page,
-                page_size=50,
-                answered_type="ALL",
-            )
-            content, total_pages = self._page(payload)
-            self._persist(content, self.normalizer.online, result)
-            result.online_pages += 1
-            if page >= total_pages:
-                return
-            page += 1
-
-    def _sync_contact_window(
-        self,
-        start_date: date,
-        end_date: date,
-        result: CoupangInquirySyncResult,
-    ) -> None:
-        page = 1
-        while True:
-            payload = self.read_client.list_contact_center_inquiries(
-                inquiry_start_at=start_date,
-                inquiry_end_at=end_date,
-                page_num=page,
-                page_size=30,
-                partner_counseling_status="NONE",
-            )
-            content, total_pages = self._page(payload)
-            self._persist(content, self.normalizer.contact_center, result)
-            result.contact_center_pages += 1
-            if page >= total_pages:
-                return
-            page += 1
+        results: list[CoupangInquirySyncResult] = []
+        for account_code in accounts:
+            try:
+                result = self.sync_account(account_code)
+            except Exception as error:
+                result = CoupangInquirySyncResult(
+                    account_code=account_code, error=_describe(error)
+                )
+            # One line per account on the server console.  Printed rather than
+            # logged: nothing configures a console handler for service loggers,
+            # so an INFO record would never be seen.
+            print(result.log_line(), flush=True)
+            results.append(result)
+        return results
 
     @staticmethod
     def _page(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
@@ -126,14 +243,25 @@ class CoupangInquirySyncService:
 
     def _persist(
         self,
-        content: list[dict[str, Any]],
-        normalize: Any,
+        account_code: str,
+        payload: dict[str, Any],
         result: CoupangInquirySyncResult,
     ) -> None:
-        items = [normalize(payload).to_work_item() for payload in content]
-        persisted = self.inquiry_sync.sync(items)
-        result.fetched += len(content)
-        result.new += persisted["new"]
-        result.updated += persisted["updated"]
-        result.unchanged += persisted["unchanged"]
-        result.failed += persisted["failed"]
+        result.fetched += 1
+        try:
+            work_item = self.normalizer.online(
+                payload, account_code=account_code
+            ).to_work_item()
+            ready = normalize_work_item(work_item)
+            if ready["store_code"] != coupang_store_code(account_code):
+                raise ValueError("normalized store_code does not match the account")
+            outcome = self.inquiries.upsert_work_item(ready).outcome
+            setattr(result, outcome, getattr(result, outcome) + 1)
+        except Exception:
+            result.failed += 1
+
+
+def run_operational_sync(database: Database) -> list[CoupangInquirySyncResult]:
+    """The scheduler's entry: both accounts, default lookback, never raises."""
+
+    return CoupangInquirySyncService(database).sync_accounts()

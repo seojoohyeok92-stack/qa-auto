@@ -15,17 +15,11 @@ from api.coupang_read_client import (
     serialize_query,
 )
 from config import CoupangReadSettings
-from repositories.database import Database
-from repositories.inquiry_repository import InquiryRepository
-from repositories.log_repository import LogRepository
-from repositories.workflow_repository import WorkflowRepository
 from services.coupang_inquiry_normalizer import (
     COUPANG_CONTACT_CENTER_INQUIRY,
     COUPANG_ONLINE_INQUIRY,
     CoupangInquiryNormalizer,
 )
-from services.coupang_inquiry_sync_service import CoupangInquirySyncService
-from services.inquiry_sync_service import InquirySyncService
 
 
 FIXED_NOW = datetime(2026, 9, 14, 12, 34, 56, tzinfo=UTC)
@@ -283,75 +277,3 @@ def test_contact_normalizer_masks_pii_and_preserves_documented_metadata() -> Non
     answered = contact_payload(22)
     answered["csPartnerCounselingStatus"] = "answered"
     assert CoupangInquiryNormalizer().contact_center(answered).answered is True
-
-
-class RecordingReadClient:
-    def __init__(self) -> None:
-        self.online_calls: list[tuple[date, date, int]] = []
-        self.contact_calls: list[tuple[date, date, int, str]] = []
-
-    def list_online_inquiries(self, **kwargs: Any) -> dict[str, Any]:
-        self.online_calls.append((
-            kwargs["inquiry_start_at"], kwargs["inquiry_end_at"], kwargs["page_num"]
-        ))
-        if kwargs["page_num"] == 1 and kwargs["inquiry_start_at"] == date(2026, 9, 1):
-            return page([online_payload(101)], current=1, total=2)
-        if kwargs["page_num"] == 2:
-            return page([online_payload(102)], current=2, total=2)
-        return page([])
-
-    def list_contact_center_inquiries(self, **kwargs: Any) -> dict[str, Any]:
-        self.contact_calls.append((
-            kwargs["inquiry_start_at"], kwargs["inquiry_end_at"],
-            kwargs["page_num"], kwargs["partner_counseling_status"],
-        ))
-        inquiry_id = 201 if kwargs["inquiry_start_at"] == date(2026, 9, 1) else 202
-        return page([contact_payload(inquiry_id)]) if kwargs["page_num"] == 1 else page([])
-
-
-class CountingAutomaticDrafts:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def ensure_for_inquiry(self, *args: Any, **kwargs: Any) -> None:
-        self.calls += 1
-        raise AssertionError("Coupang collection must not draft answers")
-
-
-def test_sync_paginates_chunks_upserts_idempotently_and_never_drafts(tmp_path) -> None:
-    database = Database(tmp_path / "coupang-sync.db")
-    database.initialize()
-    drafts = CountingAutomaticDrafts()
-    persistence = InquirySyncService(
-        InquiryRepository(database),
-        WorkflowRepository(database),
-        LogRepository(database),
-        automatic_drafts=drafts,  # type: ignore[arg-type]
-        automatic_processing_enabled=lambda: False,
-    )
-    read_client = RecordingReadClient()
-    service = CoupangInquirySyncService(read_client, persistence)  # type: ignore[arg-type]
-
-    first = service.sync_inquiries(
-        start_date=date(2026, 9, 1), end_date=date(2026, 9, 10)
-    )
-    second = service.sync_inquiries(
-        start_date=date(2026, 9, 1), end_date=date(2026, 9, 10)
-    )
-
-    assert first.new == 4
-    assert second.new == 0
-    assert second.unchanged == 4
-    assert drafts.calls == 0
-    assert read_client.online_calls[:3] == [
-        (date(2026, 9, 1), date(2026, 9, 8), 1),
-        (date(2026, 9, 1), date(2026, 9, 8), 2),
-        (date(2026, 9, 9), date(2026, 9, 10), 1),
-    ]
-    assert all(call[3] == "NONE" for call in read_client.contact_calls)
-    repository = InquiryRepository(database)
-    assert repository.count() == 4
-    stored = repository.get_by_source("COUPANG", COUPANG_CONTACT_CENTER_INQUIRY, "201")
-    assert stored is not None
-    assert "buyer@example.com" not in str(stored["raw_json"])
-    assert "010-1234-5678" not in str(stored["raw_json"])

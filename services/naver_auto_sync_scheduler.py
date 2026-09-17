@@ -22,6 +22,15 @@ LOGGER = logging.getLogger(__name__)
 PROCESS_OWNER_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
 SchedulerFactory = Callable[[float, Callable[[], None]], Any]
 ServiceFactory = Callable[[Database], Any]
+CoupangSync = Callable[[Database], Any]
+
+
+def run_coupang_inquiry_sync(database: Database) -> Any:
+    """Read-only Coupang collection riding on this cycle (imported lazily)."""
+
+    from services.coupang_inquiry_sync_service import run_operational_sync
+
+    return run_operational_sync(database)
 
 
 def _utc_now() -> datetime:
@@ -67,8 +76,12 @@ class NaverAutoSyncScheduler:
         owner_id: str = PROCESS_OWNER_ID,
         lease_ttl_seconds: int = 180,
         tick_seconds: int = 30,
+        coupang_sync: CoupangSync | None = None,
     ) -> None:
         self.database = database
+        # None unless wired by ``ensure_auto_sync_scheduler``: a scheduler built
+        # directly (tests, tools) runs the Naver cycle and nothing more.
+        self.coupang_sync = coupang_sync
         self.runs = NaverSyncRepository(database)
         self.logs = LogRepository(database)
         self.service_factory = service_factory
@@ -332,7 +345,26 @@ class NaverAutoSyncScheduler:
             )
             return {"status": "FAILED", "error_code": error_code}
         finally:
+            self._run_coupang_sync()
             self._schedule(self.tick_seconds)
+
+    def _run_coupang_sync(self) -> None:
+        """Coupang collection after the Naver cycle, on the same cadence.
+
+        After Naver's sync and its auto-post trigger have finished, so it can
+        neither delay nor change them, and whatever the Naver outcome was.
+        Nothing may escape: the next tick is scheduled right after this.
+        """
+
+        if self.coupang_sync is None:
+            return
+        try:
+            self.coupang_sync(self.database)
+        except Exception as error:
+            LOGGER.warning(
+                "COUPANG_SYNC_CYCLE_FAILED error_type=%s",
+                error.__class__.__name__,
+            )
 
 
 _REGISTRY_LOCK = RLock()
@@ -344,6 +376,7 @@ def ensure_auto_sync_scheduler(
     *,
     service_factory: ServiceFactory = InquirySyncOrchestrator,
     timer_factory: SchedulerFactory = Timer,
+    coupang_sync: CoupangSync | None = run_coupang_inquiry_sync,
 ) -> NaverAutoSyncScheduler:
     key = str(Path(database.path).resolve())
     environment = NaverAutoSyncSettings.from_environment()
@@ -359,6 +392,7 @@ def ensure_auto_sync_scheduler(
                 database,
                 service_factory=service_factory,
                 timer_factory=timer_factory,
+                coupang_sync=coupang_sync,
             )
             _SCHEDULERS[key] = scheduler
     if settings.get("enabled") and NaverSyncSettings.from_environment().enabled:
