@@ -634,11 +634,18 @@ def _render_list(items: list[WorkItem], total_count: int) -> WorkItem | None:
             if item.get("source") == "PRODUCT_INQUIRY"
             else "고객문의"
         )
-        status = "답변완료" if item.get("answered") else (
-            "생성가능"
-            if item.get("queue") == "AUTO_PROCESSABLE"
-            else "검토대기"
-        )
+        # "검토대기" here is the fallback when an inquiry is neither answered
+        # nor auto-processable -- not a queue anyone put it in.  On a market
+        # production only reads, nothing is waiting for review, so the label
+        # says what is actually true of it.
+        if item.get("answered"):
+            status = "답변완료"
+        elif _is_read_only_inquiry(item):
+            status = "조회전용"
+        elif item.get("queue") == "AUTO_PROCESSABLE":
+            status = "생성가능"
+        else:
+            status = "검토대기"
         content = inquiry_list_summary(item)
         product_name = truncate_single_line(item.get("product_name"), 30)
         order_id = truncate_single_line(item.get("order_id"), 18)
@@ -1230,6 +1237,22 @@ def _render_gpt_diagnostics(
             )
 
 
+def _is_read_only_inquiry(inquiry: dict[str, Any]) -> bool:
+    """Whether this inquiry may only be looked at.
+
+    A market production does not answer for is collected and displayed and
+    nothing else.  The buttons on this screen write drafts, call GPT and DPS,
+    move approval state and register answers, so on such a market they must
+    not be pressable -- a disabled control is the honest version of a backend
+    that would refuse.
+
+    Decided by the inquiry's own store, never by the dashboard's market
+    picker: the picker chooses what is displayed, not what may run.
+    """
+
+    return not is_store_answer_enabled(inquiry.get("store_code"))
+
+
 NAVER_POSTED_VIEW = "네이버 실제 등록 답변"
 COUPANG_SELLER_VIEW = "쿠팡 실제 판매자 답변"
 
@@ -1391,12 +1414,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             database, draft_id=int(draft["id"]), outcome=outcome
         )
 
+    read_only = _is_read_only_inquiry(inquiry)
     generating_key = f"gpt_generation_running_{inquiry_id}"
     use_template_key = template_preference_key(inquiry)
     use_template = st.checkbox(
         "확정 운영 템플릿 사용",
         value=True,
         key=use_template_key,
+        disabled=read_only,
     )
     inquiry_analysis = _processing_plan_for_inquiry(
         database,
@@ -1466,7 +1491,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     )
     generate = top_actions[0].button(
         generate_label,
-        disabled=posted or bool(st.session_state.get(generating_key)),
+        disabled=(
+            read_only or posted or bool(st.session_state.get(generating_key))
+        ),
         type="primary",
         width="stretch",
         key=f"review_generate_{inquiry_id}",
@@ -1474,7 +1501,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     reset = top_actions[1].button(
         "초기화",
         disabled=(
-            not draft
+            read_only
+            or not draft
             or not can_edit
             or (not source_answered and (posted or approved))
         ),
@@ -1484,13 +1512,20 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     save = top_actions[2].button(
         "임시 저장",
         disabled=(
-            not draft
+            read_only
+            or not draft
             or not can_edit
             or (not source_answered and (posted or approved))
         ),
         width="stretch",
         key=f"review_save_{inquiry_id}",
     )
+    if read_only:
+        # Belt and braces beside the disabled attributes above: whatever a
+        # rerun replays, none of these write intents survive on a market
+        # production only reads.
+        reset = False
+        save = False
     # The marketplace this inquiry actually came from, not the one the
     # dashboard is filtered to.  A market production only collects can show
     # the button's name but must not be able to press it: there is no post
@@ -1704,7 +1739,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     height=360,
                     key=edit_key,
                     disabled=(
-                        not can_edit
+                        read_only
+                        or not can_edit
                         or (not source_answered and (posted or approved))
                     ),
                     label_visibility="collapsed",
@@ -2116,7 +2152,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 negative_revoke = st.button(
                     "Negative 평가 취소",
                     disabled=(
-                        not str(negative_revoke_reason or "").strip()
+                        read_only
+                        or not str(negative_revoke_reason or "").strip()
                         or not negative_revoke_confirmed
                     ),
                     key=f"negative_revoke_{inquiry_id}_{selected_view}",
@@ -2164,7 +2201,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 negative_save = st.button(
                     "Negative Learning 저장",
                     disabled=(
-                        evaluation_source is None
+                        read_only
+                        or evaluation_source is None
                         or evaluation_reference_id is None
                         or not negative_reason
                         or evaluation_conflict_active
@@ -2240,7 +2278,10 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 )
                 excluded_revoke = st.button(
                     "학습 제외 취소",
-                    disabled=not str(excluded_revoke_reason or "").strip(),
+                    disabled=(
+                        read_only
+                        or not str(excluded_revoke_reason or "").strip()
+                    ),
                     key=f"excluded_revoke_{inquiry_id}_{selected_view}",
                     width="stretch",
                 )
@@ -2276,7 +2317,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 excluded_save = st.button(
                     "학습 제외 저장",
                     disabled=(
-                        evaluation_source is None
+                        read_only
+                        or evaluation_source is None
                         or evaluation_reference_id is None
                         or not excluded_reason
                         or evaluation_conflict_active
@@ -2596,7 +2638,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     cancel = action_columns[1].button(
         "승인 취소",
         disabled=(
-            not cancel_available
+            read_only
+            or not cancel_available
             or not str(cancel_reason or "").strip()
             or not cancel_confirmed
         ),
@@ -2606,7 +2649,8 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     approve = action_columns[2].button(
         "승인",
         disabled=(
-            not can_approve
+            read_only
+            or not can_approve
             or approval_conflict_active
             or (
                 (
@@ -2632,6 +2676,17 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         width="stretch",
         key=f"review_approve_{inquiry_id}",
     )
+
+    if read_only:
+        # Same reason as above: the widgets are disabled, and the intents they
+        # produce are cleared so no replayed click can move approval state or
+        # write Learning on a market production only reads.
+        approve = False
+        cancel = False
+        negative_save = False
+        negative_revoke = False
+        excluded_save = False
+        excluded_revoke = False
 
     generation_stage = "button"
     generation_correlation_id: str | None = None
@@ -2685,7 +2740,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 actor=actor,
             )
             st.rerun()
-        if generate:
+        if generate and read_only:
+            # A disabled button is a UI state; a rerun carrying an old click
+            # is not stopped by it.  The handler refuses on its own.
+            st.warning(
+                f"{store_display_name(inquiry.get('store_code'))} 문의는 "
+                "현재 조회 전용이라 답변을 생성하지 않습니다."
+            )
+        elif generate:
             generation_correlation_id = str(uuid.uuid4())
             _record_ui_event(
                 database,
@@ -4144,7 +4206,11 @@ def render_review_workspace(
         with detail_column:
             st.warning("선택한 문의가 아직 DB에 동기화되지 않았습니다.")
         return
-    _ensure_initial_program_answer(database, inquiry)
+    # Selecting an inquiry is a read.  This call creates a draft through
+    # AutomaticDraftService -> AnswerService, so on a read-only market merely
+    # opening a question would generate an answer for it.
+    if not _is_read_only_inquiry(inquiry):
+        _ensure_initial_program_answer(database, inquiry)
     st.session_state["selected_inquiry_id"] = int(inquiry["id"])
     st.session_state["selected_order_id"] = inquiry.get("order_id")
     st.session_state["selected_order_date"] = inquiry.get("order_date")
@@ -4161,9 +4227,20 @@ def render_review_workspace(
             border=True, height=760, key="official_answer_panel"
         ):
             _render_answer_panel(database, inquiry)
-        _render_naver_post_prepare(database, inquiry)
+        # Registration and DPS are write paths for this marketplace.  A market
+        # production only collects has neither, so the panels are not drawn at
+        # all rather than drawn full of controls that refuse.
+        if not _is_read_only_inquiry(inquiry):
+            _render_naver_post_prepare(database, inquiry)
     with dps_column:
         with st.container(
             border=True, height=760, key="official_dps_panel"
         ):
-            _render_dps(database, inquiry)
+            if _is_read_only_inquiry(inquiry):
+                st.markdown("### 배송·설치 조회")
+                st.info(
+                    f"{store_display_name(inquiry.get('store_code'))} 문의는 "
+                    "현재 조회 전용이라 배송·설치 조회를 실행하지 않습니다."
+                )
+            else:
+                _render_dps(database, inquiry)
