@@ -111,3 +111,93 @@ def test_learning_model_scope_compares_canonical_samsung_identities():
         query_is_product_fact=True,
     )
     assert decision.product_match == "EXACT_MODEL"
+
+
+# --- the 43-inch BE equivalence -------------------------------------------------
+#
+# 43BED, 43BEH and 43BEDH differ by model year, not by specification, so for
+# answering they name one product.  This is operator-confirmed for 43 inches
+# only and is recorded where every other model-code equivalence in this
+# catalogue is recorded -- MODEL_ALIASES -- so no code knows about it.
+#
+# Before it was recorded the two halves of the product were unreachable from
+# each other: the catalogue record lived under LH43BEDH and its Product
+# Knowledge under LH43BEHHLGFXKR, which was not a catalogue key at all.
+
+BE43_FORMS = [
+    "LH43BEHHLGFXKR", "LH43BEHH", "LH43BE-H",
+    "LH43BEDH", "LH43BED-H", "43BEDH", "43BEH", "43BED",
+]
+
+
+@pytest.mark.parametrize("raw", BE43_FORMS)
+def test_every_43be_notation_resolves_to_one_catalog_record(raw):
+    match = ProductCatalogRepository(CATALOG).match(model_code=raw)
+    assert match.model_key == "LH43BEDH"
+    assert match.record is not None
+    assert match.status in {"EXACT", "UNIQUE_MATCH"}
+
+
+@pytest.mark.parametrize("raw", BE43_FORMS)
+def test_every_43be_notation_shares_one_identity(raw):
+    aliases = ProductCatalogRepository(CATALOG).catalog()["aliases"]
+    assert canonical_model_identity(raw, aliases=aliases) == "LH43BEDH"
+
+
+def test_the_confirmed_mapping_reaches_the_shared_product_knowledge():
+    """The raw CONFIRMED model and the representative read the same facts.
+
+    The operator's mapping still says LH43BEHHLGFXKR -- that provenance is not
+    rewritten.  What changed is that the representative the catalogue uses now
+    reaches the same evidence instead of none.
+    """
+
+    service = _service()
+    facts = {}
+    for raw in ("LH43BEHHLGFXKR", "LH43BEDH"):
+        result = service.facts_for_inquiry(
+            product_id="identity-probe-43be",
+            product_name=raw,
+            model_code=raw,
+            question="VESA HDMI USB speaker resolution",
+            include_all_catalog_fields=True,
+        )
+        assert result.matched is True
+        facts[raw] = {(f.field_key, str(f.value)) for f in result.safe_facts}
+    assert facts["LH43BEDH"]
+    assert facts["LH43BEDH"] == facts["LH43BEHHLGFXKR"]
+
+
+def test_the_equivalence_does_not_generalise_to_other_sizes_or_lines():
+    """Only 43 inches was confirmed; nothing else may have been pulled in."""
+
+    repository = ProductCatalogRepository(CATALOG)
+    aliases = repository.catalog()["aliases"]
+    # Other 43-inch BE lines keep their own records.
+    for other in ("LH43BEAH", "LH43BECH", "LH43BEFH"):
+        assert repository.match(model_code=other).model_key == other
+        assert canonical_model_identity(other, aliases=aliases) == other
+    # Other sizes keep theirs, including their own D/C/F distinctions.
+    for other in ("LH50BEDH", "LH50BECH", "LH50BEFH", "LH85BEFH"):
+        assert repository.match(model_code=other).model_key == other
+        assert canonical_model_identity(other, aliases=aliases) == other
+    assert canonical_model_identity("50BEH", aliases=aliases) != "LH50BEDH"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("LS32DM501EKXKR", "32DM501"),
+        ("S32DM501", "32DM501"),
+        ("32DM501", "32DM501"),
+        ("LS32DM500EKXKR", "32DM500"),
+        ("LS27FM501EKXKR", "27FM501"),
+        ("LS49CG954EKXKR", "49CG954"),
+        ("S43BM702UK", "43BM702"),
+    ],
+)
+def test_the_43be_aliases_leave_the_samsung_display_rule_alone(raw, expected):
+    """The catalogue-wide identity rule is unchanged by the new entries."""
+
+    aliases = ProductCatalogRepository(CATALOG).catalog()["aliases"]
+    assert canonical_model_identity(raw, aliases=aliases) == expected

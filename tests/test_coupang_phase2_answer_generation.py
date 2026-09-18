@@ -644,3 +644,48 @@ def test_rendering_a_coupang_answer_is_idempotent_and_strips_a_naver_footer() ->
     assert format_final_answer(naver, market="COUPANG") == coupang
     assert market_policy.foreign_market_wording(coupang, "COUPANG") == ()
     assert extract_answer_body(coupang) == body == extract_answer_body(naver)
+
+
+# --- I. the 43-inch BE equivalence, end to end ----------------------------------
+
+class RealCatalogKnowledge(RecordingKnowledge):
+    """Records the same calls, but resolves models through the real catalogue."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        from repositories.product_catalog_repository import ProductCatalogRepository
+
+        self.catalog_repository = ProductCatalogRepository()
+
+
+def test_a_confirmed_43be_mapping_keeps_its_raw_model_and_names_the_representative(
+    database,
+) -> None:
+    """The operator's CONFIRMED mapping is provenance and is not rewritten.
+
+    43BED/43BEH/43BEDH are one product by model year, so the catalogue's
+    representative is what Product Knowledge is asked for -- while
+    ``canonical_model`` still records exactly what the operator confirmed.
+    """
+
+    seed_catalog(database)
+    map_option(database, status=CONFIRMED, model="LH43BEHHLGFXKR")
+    inquiry_id = coupang_inquiry(database)
+    knowledge, hybrid = RealCatalogKnowledge(), RecordingHybrid()
+
+    service(
+        database, product_knowledge=knowledge, hybrid_service=hybrid
+    ).generate_for_inquiry(inquiry_id)
+
+    metadata = hybrid.requests[0].metadata
+    assert metadata["canonical_model"] == "LH43BEHHLGFXKR"
+    assert metadata["model_code"] == "LH43BEDH"
+    assert metadata["model_identity_source"] == "COUPANG_CONFIRMED_MAPPING"
+    assert knowledge.calls[0]["model_code"] == "LH43BEDH"
+
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT canonical_model, mapping_status FROM coupang_product_mappings"
+        ).fetchone()
+    assert row["canonical_model"] == "LH43BEHHLGFXKR"
+    assert row["mapping_status"] == CONFIRMED
