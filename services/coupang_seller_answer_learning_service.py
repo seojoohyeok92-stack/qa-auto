@@ -6,21 +6,27 @@ generates, edits, approves or registers an answer.  What was missing was a way
 to keep a good reply -- an operator could read one and had no way to tell the
 Learning corpus about it.
 
-That is the same action Naver already has.  There, an operator reads the
-answer the marketplace actually shows and keeps it through
-``LearningService.capture_verified_posted_answer``.  This is that path with a
-different source for the text, so it uses the Coupang twin,
-``capture_verified_marketplace_answer``, and adds no policy of its own: the
-shared builder, the negative-signal guard, the human-verified upsert and the
-positive signal all belong to the Naver path.
+That is the same action Naver already has, and it is an approval rather than a
+save.  On Naver an operator reads the answer the marketplace shows, optionally
+fills in Positive Learning 설정, presses 승인, and a Human Verified Positive
+Learning appears; pressing 승인 취소 deactivates it again.  Coupang goes
+through the same decision, entered at the same place --
+``ApprovalService.approve_posted_answer`` -- and cancelled by the same
+``cancel_approval_with_learning``.  Approval here never means registering an
+answer at Coupang: the reply is already there and nothing is posted.
+
+Only where the text comes from differs, so this module supplies the reply and
+its provenance and nothing else.  The capture, the negative-signal guard, the
+human-verified upsert and the positive signal are the Naver path's
+(``capture_verified_marketplace_answer``, the twin of
+``capture_verified_posted_answer``).
 
 In particular there is no quality threshold.  The 0.55 score belongs to
 unattended Historical promotion, which decides for itself which of thousands of
 backfilled rows may become Learning; here a person has read this one answer and
-pressed a button, and that is the decision.  Historical promotion keeps its
-gate untouched.
+approved it.  Historical promotion keeps its gate untouched.
 
-Two things stop a duplicate.  A repeat click rebuilds the same Learning row --
+Two things stop a duplicate.  Approving twice rebuilds the same Learning row --
 its ``source_key`` is derived from the question and the answer -- so the upsert
 updates in place.  And an inquiry the historical backfill already promoted is
 recognised by that path's own key, read without writing anything, so the 742
@@ -84,7 +90,7 @@ class CoupangSellerAnswerLearningService:
     # -- reading -----------------------------------------------------------
 
     def status(self, inquiry: dict[str, Any]) -> SellerAnswerLearningStatus:
-        """Whether this inquiry's seller answer may be, or already is, kept.
+        """Whether this seller answer may be approved, or already is.
 
         Read-only: the Learning row is built but not saved, only to read the
         key it would be stored under.
@@ -117,10 +123,25 @@ class CoupangSellerAnswerLearningService:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
         return self.status(inquiry)
 
-    # -- writing -----------------------------------------------------------
+    # -- approval ----------------------------------------------------------
 
-    def capture(self, inquiry_id: int, *, actor: str = "관리자") -> dict[str, Any]:
-        """Keep this seller answer as Learning; return the row either way."""
+    def approve_for_learning(
+        self,
+        *,
+        inquiry_id: int,
+        actor: str = "관리자",
+        positive_reason: str = "",
+        positive_note: str = "",
+        positive_signal_kind: str = "",
+        positive_signal_content: str = "",
+        positive_fact_scope: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Approve this seller answer as Human Verified Positive Learning.
+
+        Called by ``ApprovalService.approve_posted_answer``, which is where
+        the Naver decision is made too; cancelling goes through that service's
+        ``cancel_approval_with_learning`` and needs nothing from here.
+        """
 
         inquiry = self.inquiries.get(int(inquiry_id))
         if inquiry is None:
@@ -131,26 +152,23 @@ class CoupangSellerAnswerLearningService:
                 UNAVAILABLE_REASONS.get(prepared, "Learning에 반영할 수 없습니다.")
             )
         answer, provenance = prepared
-        example = self.learning_service.marketplace_answer_example(
-            inquiry=inquiry, answer=answer
-        )
-        if example is None:
-            raise ValueError(UNAVAILABLE_REASONS["ANSWER_NOT_REUSABLE"])
         promoted = self._historical_learning(inquiry)
         if promoted is not None:
             # Already in the corpus under Historical promotion's own key.
             # Writing the same answer again under this path's key would be a
             # second copy of one reply.
             return promoted
-        saved = self.learning_service.capture_verified_marketplace_answer(
+        return self.learning_service.capture_verified_marketplace_answer(
             inquiry_id=int(inquiry_id),
             answer=answer,
             actor=str(actor or "관리자"),
             provenance=provenance,
+            positive_reason=positive_reason,
+            positive_note=positive_note,
+            signal_kind=positive_signal_kind,
+            signal_content=positive_signal_content,
+            fact_scope=positive_fact_scope,
         )
-        if saved is None:
-            raise ValueError(UNAVAILABLE_REASONS["ANSWER_NOT_REUSABLE"])
-        return saved
 
     # -- internals ---------------------------------------------------------
 

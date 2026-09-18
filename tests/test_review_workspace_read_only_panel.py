@@ -148,19 +148,40 @@ def test_no_draft_warning_or_generation_notes(coupang_app) -> None:
     assert "조회 전용입니다" in text
 
 
-def test_no_generation_edit_approval_or_registration_controls(coupang_app) -> None:
+def test_no_generation_edit_or_registration_controls(coupang_app) -> None:
     app, _, _ = coupang_app
     buttons = _labels(app.button)
-    for label in ("GPT 새 답변 생성", "초기화", "임시 저장", "승인", "승인 취소",
+    for label in ("GPT 새 답변 생성", "초기화", "임시 저장",
                   "Negative Learning 저장", "학습 제외 저장"):
         assert label not in buttons, label
     assert not any("답변 등록" in label or "답변 생성" in label for label in buttons)
     assert "확정 운영 템플릿 사용" not in _labels(app.checkbox)
-    assert "승인 취소 사유" not in _labels(app.text_input)
     expanders = _labels(app.expander)
-    for label in ("Positive Learning 설정", "이 답변이 잘못됨", "학습 제외",
+    for label in ("이 답변이 잘못됨", "학습 제외",
                   "수정 피드백", "Validator 및 GPT 상세", "처리 진단"):
         assert label not in expanders, label
+
+
+def test_the_learning_approval_is_offered_exactly_as_on_naver(coupang_app) -> None:
+    """The reply is read-only; whether to learn from it is still a decision.
+
+    Approval here never registers anything at Coupang -- the reply is already
+    there.  It is the Naver decision, so it is the Naver controls: Positive
+    Learning 설정, 승인, and a 승인 취소 that only opens once something has
+    been approved.
+    """
+
+    app, _, _ = coupang_app
+    buttons = {button.label: button for button in app.button}
+    assert "Positive Learning 설정" in _labels(app.expander)
+    assert "승인" in buttons and not buttons["승인"].disabled
+    # Nothing is approved yet, so cancelling is not available.
+    assert "승인 취소" in buttons and buttons["승인 취소"].disabled
+    cancel_reason = next(
+        control for control in app.text_input
+        if control.label == "승인 취소 사유"
+    )
+    assert cancel_reason.disabled
 
 
 def test_no_staff_edit_program_or_final_answer_views(coupang_app) -> None:

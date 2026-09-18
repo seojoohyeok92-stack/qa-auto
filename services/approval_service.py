@@ -277,34 +277,68 @@ class ApprovalService:
         positive_signal_content: str = "",
         positive_fact_scope: str | None = None,
     ) -> dict[str, Any]:
-        """Human-verify the Naver answer for Learning without reposting it."""
+        """Human-verify the marketplace's own answer for Learning.
+
+        Approval here is not "register this answer at the marketplace" -- the
+        answer is already there and nothing is reposted.  It is the person
+        saying this reply may be used as Human Verified Positive Learning, and
+        cancelling it deactivates that Learning again.
+
+        Coupang goes through the same decision with the same words.  Its reply
+        lives in the inquiry payload rather than in a posted-answer row, so
+        only where the text and its provenance come from differs; the capture,
+        the approval record and the cancellation are the Naver ones.
+        """
 
         inquiry = self.inquiries.get(int(inquiry_id))
         if inquiry is None:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
         if not inquiry.get("source_answered"):
-            raise ApprovalError("네이버 답변완료 문의가 아닙니다.")
-        saved = LearningService(
-            self.database
-        ).capture_verified_posted_answer(
-            inquiry_id=int(inquiry_id),
-            actor=actor,
-            positive_reason=positive_reason,
-            positive_note=positive_note,
-            signal_kind=positive_signal_kind,
-            signal_content=positive_signal_content,
-            fact_scope=positive_fact_scope,
-        )
+            raise ApprovalError("답변완료 문의가 아닙니다.")
+        market = non_naver_market(inquiry.get("store_code"))
+        if market is None:
+            saved = LearningService(
+                self.database
+            ).capture_verified_posted_answer(
+                inquiry_id=int(inquiry_id),
+                actor=actor,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
+                signal_kind=positive_signal_kind,
+                signal_content=positive_signal_content,
+                fact_scope=positive_fact_scope,
+            )
+            provenance = "NAVER_POSTED"
+            missing = "검증할 네이버 실제 등록 답변이 없습니다."
+        else:
+            from services.coupang_seller_answer_learning_service import (
+                CoupangSellerAnswerLearningService,
+            )
+
+            saved = CoupangSellerAnswerLearningService(
+                self.database
+            ).approve_for_learning(
+                inquiry_id=int(inquiry_id),
+                actor=actor,
+                positive_reason=positive_reason,
+                positive_note=positive_note,
+                positive_signal_kind=positive_signal_kind,
+                positive_signal_content=positive_signal_content,
+                positive_fact_scope=positive_fact_scope,
+            )
+            provenance = "MARKETPLACE_SELLER_ANSWER"
+            missing = "검증할 마켓 판매자 답변이 없습니다."
         if saved is None:
-            raise ApprovalError("검증할 네이버 실제 등록 답변이 없습니다.")
+            raise ApprovalError(missing)
         self.logs.record_inquiry(
             int(inquiry_id),
             "NAVER_POSTED_ANSWER_APPROVED_FOR_LEARNING",
-            "네이버 실제 등록 답변을 직원 검증 Positive Learning으로 승인했습니다.",
+            "마켓 실제 판매자 답변을 직원 검증 Positive Learning으로 승인했습니다.",
             details={
                 "actor": actor,
                 "learning_example_id": int(saved["id"]),
-                "answer_provenance": "NAVER_POSTED",
+                "answer_provenance": provenance,
+                "market": market or "NAVER",
                 "network_call_count": 0,
             },
         )

@@ -70,9 +70,6 @@ from services.learning_feedback_service import LearningFeedbackService
 from services.learning_privacy_service import LearningPrivacyService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
 from services.dps_agent_client import get_dps_agent_status
-from services.coupang_seller_answer_learning_service import (
-    CoupangSellerAnswerLearningService,
-)
 from services.local_auth_service import Permission
 from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
@@ -908,6 +905,7 @@ def approval_learning_trace(
     draft: dict[str, Any] | None,
     approval_state: dict[str, Any],
     source_answered: bool,
+    seller_answer: str = "",
 ) -> dict[str, Any]:
     """Build the post-rerun approval view only from persisted repositories."""
 
@@ -935,6 +933,19 @@ def approval_learning_trace(
                     AnswerProvenance.NAVER_POSTED.value,
                     int(posted["id"]),
                     privacy.mask(format_final_answer(posted["answer_body"])),
+                )
+            )
+        # A marketplace this system does not post to has no posted-answer row.
+        # Its approved reply is keyed on the inquiry itself, so without this
+        # the screen could never find the Learning it had just approved and
+        # 승인 취소 would stay disabled forever.
+        marketplace_answer = str(seller_answer or "").strip()
+        if marketplace_answer:
+            identities.append(
+                (
+                    AnswerProvenance.HISTORICAL_VERIFIED.value,
+                    int(inquiry_id),
+                    privacy.mask(format_final_answer(marketplace_answer)),
                 )
             )
         if draft is not None and str(draft.get("edited_answer") or "").strip():
@@ -1351,67 +1362,22 @@ def _source_seller_answer(inquiry: dict[str, Any]) -> str:
     return str(inquiry.get("seller_answer") or "").strip()
 
 
-def _render_seller_answer_learning(
-    database: Database, inquiry: dict[str, Any]
-) -> None:
-    """The one action this read-only panel offers: keep this reply as Learning.
+def _seller_answer_learning_approval(inquiry: dict[str, Any]) -> bool:
+    """Whether this read-only inquiry may be approved for Learning.
 
-    The answer itself stays read-only.  Nothing here edits, approves,
-    registers or generates anything -- it only records that a person judged
-    this marketplace reply worth keeping, and only when they click.
-
-    An inquiry the historical backfill already promoted reads as captured on
-    the first render, so the button is never offered for work already done.
+    A marketplace this system never posts to still holds a reply a person
+    wrote, and Naver already lets an operator approve such a reply as Human
+    Verified Positive Learning without reposting it.  Read-only means no
+    answer may be written, generated or registered here -- it never meant the
+    Learning decision was unavailable, and this is the one control the panel
+    offers.
     """
 
-    service = CoupangSellerAnswerLearningService(database)
-    try:
-        status = service.status(inquiry)
-    except Exception:  # noqa: BLE001 - a read-only panel never fails to draw
-        LOGGER.exception("seller answer learning status failed")
-        return
-    inquiry_id = int(inquiry["id"])
-    if status.captured:
-        st.button(
-            "Learning 반영 완료",
-            key=f"seller_answer_learning_{inquiry_id}",
-            disabled=True,
-            use_container_width=True,
-        )
-        st.caption(
-            "이 판매자 답변은 이미 Learning에 반영되어 있습니다"
-            + (
-                f" (Learning #{status.learning_example_id})."
-                if status.learning_example_id
-                else "."
-            )
-        )
-        return
-    if not status.available:
-        if status.message:
-            st.caption(status.message)
-        return
-    if not can(Permission.STAFF_EDIT):
-        return
-    if st.button(
-        "Learning 반영",
-        key=f"seller_answer_learning_{inquiry_id}",
-        use_container_width=True,
-    ):
-        try:
-            saved = service.capture(inquiry_id, actor=current_actor())
-        except Exception as error:  # noqa: BLE001 - shown, never raised at staff
-            LOGGER.exception("seller answer learning capture failed")
-            st.error(f"Learning 반영에 실패했습니다: {error}")
-        else:
-            st.success(
-                f"판매자 답변을 Learning에 반영했습니다 (Learning #{saved['id']})."
-            )
-            st.rerun()
-    st.caption(
-        "쿠팡 실제 판매자 답변을 Learning에 반영합니다. "
-        "답변 수정·승인·등록은 열리지 않습니다."
-    )
+    if not inquiry.get("source_answered"):
+        return False
+    if market_of(inquiry.get("store_code")) == NAVER:
+        return False
+    return bool(_source_seller_answer(inquiry))
 
 
 def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
@@ -1498,6 +1464,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         draft=draft,
         approval_state=state,
         source_answered=source_answered,
+        seller_answer=_source_seller_answer(inquiry),
     )
     approval_complete = bool(approval_trace["approval_complete"])
     actor = current_actor()
@@ -1959,9 +1926,10 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 )
                 st.caption(
                     "마켓에서 조회한 기존 판매자 답변입니다. "
-                    "이 시스템이 등록한 답변이 아니며 읽기 전용입니다."
+                    "이 시스템이 등록한 답변이 아니며 읽기 전용입니다. "
+                    "아래 승인은 마켓 재등록이 아니라 이 답변을 "
+                    "Human Verified Positive Learning으로 사용할지에 대한 승인입니다."
                 )
-                _render_seller_answer_learning(database, inquiry)
             elif selected_view == NAVER_POSTED_VIEW:
                 if posted_answer_available:
                     st.text_area(
@@ -2071,7 +2039,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
 
         positive_reason = ""
         positive_note = ""
-        if not approval_complete and not read_only:
+        if not approval_complete and (
+            not read_only or _seller_answer_learning_approval(inquiry)
+        ):
             with st.expander("Positive Learning 설정", expanded=False):
                 st.caption(
                     "선택 사항입니다. 입력하지 않고 승인해도 기존 Human Verified "
@@ -2806,17 +2776,56 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     if read_only:
         # Copying writes nothing; it copies the reply the marketplace
         # returned, not a stored draft.
+        learning_approval = _seller_answer_learning_approval(inquiry)
         cancel_reason = ""
         cancel_confirmed = False
         cancel = approve = False
-        copy = st.columns([3.1, 2.0], gap="medium")[1].columns(
-            3, gap="small"
-        )[0].button(
+        read_only_left, read_only_actions = st.columns(
+            [3.1, 2.0], gap="medium"
+        )
+        cancel_available = bool(
+            learning_approval and approval_complete and can_approve
+        )
+        if learning_approval:
+            with read_only_left:
+                cancel_reason = st.text_input(
+                    "승인 취소 사유",
+                    placeholder="승인 취소 시 사유를 입력해 주세요.",
+                    disabled=not cancel_available,
+                    max_chars=1_000,
+                    key=f"cancel_reason_{inquiry_id}",
+                    label_visibility="collapsed",
+                )
+                cancel_confirmed = st.checkbox(
+                    "승인을 취소하면 Human Verified Positive Learning이 비활성화됩니다.",
+                    disabled=not cancel_available,
+                    key=f"cancel_confirm_{inquiry_id}",
+                )
+        read_only_columns = read_only_actions.columns(3, gap="small")
+        copy = read_only_columns[0].button(
             "복사",
             disabled=not _source_seller_answer(inquiry),
             width="stretch",
             key=f"review_copy_{inquiry_id}",
         )
+        if learning_approval:
+            cancel = read_only_columns[1].button(
+                "승인 취소",
+                disabled=(
+                    not cancel_available
+                    or not str(cancel_reason or "").strip()
+                    or not cancel_confirmed
+                ),
+                width="stretch",
+                key=f"review_cancel_{inquiry_id}",
+            )
+            approve = read_only_columns[2].button(
+                "승인",
+                disabled=not can_approve or approval_complete,
+                type="primary",
+                width="stretch",
+                key=f"review_approve_{inquiry_id}",
+            )
     else:
         bottom_left, bottom_actions = st.columns([3.1, 2.0], gap="medium")
         cancel_available = bool(approval_complete and can_approve)
@@ -2890,9 +2899,12 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     if read_only:
         # Same reason as above: the widgets are disabled, and the intents they
         # produce are cleared so no replayed click can move approval state or
-        # write Learning on a market production only reads.
-        approve = False
-        cancel = False
+        # write Learning on a market production only reads.  The Learning
+        # approval is the exception, because it is the one decision this panel
+        # renders -- and it still cannot post, edit or generate anything.
+        if not _seller_answer_learning_approval(inquiry):
+            approve = False
+            cancel = False
         negative_save = False
         negative_revoke = False
         excluded_save = False

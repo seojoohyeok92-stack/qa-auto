@@ -1,10 +1,11 @@
 """Keeping a Coupang seller's own reply as Learning, when a person asks.
 
-The inquiry stays read-only: nothing here generates, edits, approves or
-registers an answer.  The one added action is the Coupang twin of the Naver
-manual positive capture -- an operator reads the answer the marketplace shows
-and keeps it -- so it carries no quality threshold of its own, and an inquiry
-the historical backfill already promoted produces no second row.
+No answer is generated, edited or registered: the reply is already at the
+marketplace and nothing is posted back.  The one decision offered is the Naver
+one -- 승인 makes this reply Human Verified Positive Learning, 승인 취소
+deactivates it -- entered through the same ApprovalService, so it carries no
+quality threshold of its own and an inquiry the historical backfill already
+promoted produces no second row.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_repository import LearningRepository
 from repositories.workflow_repository import WorkflowRepository
+from services.approval_service import ApprovalService
 from services import market_policy
 from services.coupang_inquiry_normalizer import CoupangInquiryNormalizer
 from services.coupang_seller_answer_learning_service import (
@@ -115,6 +117,20 @@ def service(database: Database) -> CoupangSellerAnswerLearningService:
     return CoupangSellerAnswerLearningService(database)
 
 
+def approve(database: Database, inquiry_id: int, **kwargs) -> dict[str, Any]:
+    """Approve exactly where Naver approves its marketplace answer."""
+
+    return ApprovalService(database).approve_posted_answer(
+        inquiry_id=inquiry_id, actor="관리자", **kwargs
+    )
+
+
+def cancel(database: Database, inquiry_id: int, reason: str = "오안내"):
+    return ApprovalService(database).cancel_approval_with_learning(
+        inquiry_id=inquiry_id, draft_id=None, reason=reason, actor="관리자",
+    )
+
+
 def inquiry_of(database: Database, inquiry_id: int) -> dict[str, Any]:
     row = InquiryRepository(database).get(inquiry_id)
     assert row is not None
@@ -188,7 +204,7 @@ def test_capturing_writes_one_coupang_only_learning_row(database) -> None:
     inquiry_id = coupang_inquiry(database)
     before = learning_count(database)
 
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     assert learning_count(database) == before + 1
     metadata = saved["metadata_json"]
@@ -202,7 +218,7 @@ def test_capturing_writes_one_coupang_only_learning_row(database) -> None:
 
 def test_the_captured_row_keeps_the_marketplace_provenance(database) -> None:
     inquiry_id = coupang_inquiry(database)
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     metadata = saved["metadata_json"]
     provenance = metadata["market_provenance"]
@@ -234,10 +250,10 @@ def test_the_captured_row_keeps_the_marketplace_provenance(database) -> None:
 
 def test_pressing_the_button_twice_writes_one_row(database) -> None:
     inquiry_id = coupang_inquiry(database)
-    first = service(database).capture(inquiry_id, actor="관리자")
+    first = approve(database, inquiry_id)
     after_first = learning_count(database)
 
-    second = service(database).capture(inquiry_id, actor="관리자")
+    second = approve(database, inquiry_id)
 
     assert learning_count(database) == after_first
     assert int(second["id"]) == int(first["id"])
@@ -301,7 +317,7 @@ def test_an_answer_the_historical_backfill_already_promoted_is_not_duplicated(
     assert status.captured is True
     assert status.learning_example_id == int(promoted["id"])
 
-    again = service(database).capture(inquiry_id, actor="관리자")
+    again = approve(database, inquiry_id)
     assert int(again["id"]) == int(promoted["id"])
     assert learning_count(database) == baseline
 
@@ -319,7 +335,7 @@ def test_both_coupang_accounts_read_one_corpus(database) -> None:
     """E: captured under OJE_NS, retrievable for OJE_PLUS."""
 
     inquiry_id = coupang_inquiry(database, account="OJE_NS")
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     assert int(saved["id"]) in _candidate_ids(database, "COUPANG_OJE_NS")
     assert int(saved["id"]) in _candidate_ids(database, "COUPANG_OJE_PLUS")
@@ -329,7 +345,7 @@ def test_naver_never_retrieves_a_captured_coupang_answer(database) -> None:
     """F: a Coupang marketplace reply is not evidence for a Naver customer."""
 
     inquiry_id = coupang_inquiry(database)
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     assert int(saved["id"]) not in _candidate_ids(database, "OJE_PLUS")
     from repositories.learning_repository import is_market_applicable
@@ -353,7 +369,7 @@ def test_capturing_opens_no_answer_edit_approval_or_registration(database) -> No
     inquiry_id = coupang_inquiry(database)
     before = inquiry_of(database, inquiry_id)
 
-    service(database).capture(inquiry_id, actor="관리자")
+    approve(database, inquiry_id)
 
     row = inquiry_of(database, inquiry_id)
     # Nothing about the inquiry itself moves: the marketplace already answered
@@ -387,7 +403,7 @@ def test_a_confirmed_mapping_scopes_the_row_and_keeps_its_raw_value(
     map_option(database, model="LH43BEHHLGFXKR")
     inquiry_id = coupang_inquiry(database)
 
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     metadata = saved["metadata_json"]
     provenance = metadata["market_provenance"]
@@ -408,7 +424,7 @@ def test_a_confirmed_mapping_scopes_the_row_and_keeps_its_raw_value(
 
 def test_without_a_confirmed_mapping_no_model_is_invented(database) -> None:
     inquiry_id = coupang_inquiry(database)
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     # The shared builder masks an absent model to an empty string, exactly
     # as it does for a Naver row whose draft named none.
@@ -483,7 +499,7 @@ def test_a_low_quality_answer_is_still_capturable(database) -> None:
     status = service(database).status(inquiry_of(database, inquiry_id))
     assert status.available is True
 
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
     assert short in str(saved["final_answer"])
     assert saved["metadata_json"]["market_applicability"] == "COUPANG_ONLY"
 
@@ -514,8 +530,127 @@ def test_the_captured_row_uses_the_same_builder_as_the_naver_manual_capture(
     built = LearningService(database).marketplace_answer_example(
         inquiry=inquiry, answer=SELLER_ANSWER,
     )
-    saved = service(database).capture(inquiry_id, actor="관리자")
+    saved = approve(database, inquiry_id)
 
     assert built is not None
     assert saved["source_key"] == built["source_key"]
     assert saved["learning_source"] == built["learning_source"] == "SELLER_ANSWER"
+
+
+# --- the Naver approval / cancellation policy, reused ---------------------------
+
+def test_approval_is_entered_where_naver_enters_it(database) -> None:
+    """The same service method decides it, so it is one policy, not two."""
+
+    inquiry_id = coupang_inquiry(database)
+    saved = ApprovalService(database).approve_posted_answer(
+        inquiry_id=inquiry_id,
+        actor="관리자",
+        positive_reason="CONTENT_ACCURATE",
+        positive_note="설치 옵션 안내가 정확함",
+    )
+
+    assert saved["metadata_json"]["human_verified"] is True
+    assert saved["metadata_json"]["positive_reason"] == "CONTENT_ACCURATE"
+    assert saved["metadata_json"]["positive_note"] == "설치 옵션 안내가 정확함"
+    assert saved["active"] is True
+
+
+def test_cancelling_approval_deactivates_the_learning(database) -> None:
+    """승인 취소 deactivates it, exactly as it does for a Naver answer."""
+
+    inquiry_id = coupang_inquiry(database)
+    saved = approve(database, inquiry_id)
+    assert saved["active"] is True
+
+    outcome = cancel(database, inquiry_id, reason="안내 내용이 바뀌었습니다")
+
+    assert outcome.learning is not None
+    assert int(outcome.learning["id"]) == int(saved["id"])
+    after = LearningRepository(database).get(int(saved["id"]))
+    assert after["active"] is False
+    assert after["metadata_json"]["human_verified"] in (0, False)
+    assert after["metadata_json"]["learning_status"] == "REVOKED"
+    # A deactivated row is out of retrieval for both accounts.
+    assert int(saved["id"]) not in _candidate_ids(database, "COUPANG_OJE_NS")
+    assert int(saved["id"]) not in _candidate_ids(database, "COUPANG_OJE_PLUS")
+
+
+def test_cancelling_requires_a_reason(database) -> None:
+    inquiry_id = coupang_inquiry(database)
+    approve(database, inquiry_id)
+
+    with pytest.raises(ValueError):
+        cancel(database, inquiry_id, reason="   ")
+
+
+def test_approving_again_after_cancellation_reactivates_one_row(database) -> None:
+    """Re-approval is the same row again, never a second one."""
+
+    inquiry_id = coupang_inquiry(database)
+    first = approve(database, inquiry_id)
+    cancel(database, inquiry_id, reason="확인 필요")
+    before = learning_count(database)
+
+    second = approve(database, inquiry_id)
+
+    assert int(second["id"]) == int(first["id"])
+    assert learning_count(database) == before
+    assert second["active"] is True
+
+
+def test_an_unanswered_coupang_inquiry_cannot_be_approved(database) -> None:
+    inquiry_id = coupang_inquiry(database, answer=None)
+
+    with pytest.raises(Exception):
+        approve(database, inquiry_id)
+    assert learning_count(database) == 0
+
+
+def test_the_screen_finds_the_learning_it_just_approved(database) -> None:
+    """Without this the 승인 취소 button could never become available."""
+
+    from ui.review_workspace import approval_learning_trace
+    from repositories.approval_repository import ApprovalRepository
+
+    inquiry_id = coupang_inquiry(database)
+    saved = approve(database, inquiry_id)
+
+    trace = approval_learning_trace(
+        database,
+        inquiry_id=inquiry_id,
+        draft=None,
+        approval_state=ApprovalRepository(database).get_inquiry_approval(
+            inquiry_id
+        ),
+        source_answered=True,
+        seller_answer=SELLER_ANSWER,
+    )
+    assert trace["approval_complete"] is True
+    assert trace["positive_learning_id"] == int(saved["id"])
+    assert trace["positive_active"] is True
+    assert trace["human_verified"] is True
+
+
+def test_the_read_only_panel_offers_approval_and_nothing_else(database) -> None:
+    """G: the Learning decision is the only control this panel adds."""
+
+    from ui import review_workspace
+
+    inquiry_id = coupang_inquiry(database)
+    inquiry = inquiry_of(database, inquiry_id)
+    inquiry["seller_answer"] = SELLER_ANSWER
+
+    assert review_workspace._is_read_only_inquiry(inquiry) is True
+    assert review_workspace._seller_answer_learning_approval(inquiry) is True
+    # Naver keeps its own posted-answer path; this predicate is not for it.
+    naver = inquiry_of(database, naver_inquiry(database))
+    naver["seller_answer"] = "네이버 답변"
+    assert review_workspace._seller_answer_learning_approval(naver) is False
+    # Nothing was opened for writing an answer.
+    assert market_policy.is_store_post_enabled("COUPANG_OJE_NS") is False
+    assert market_policy.is_store_dps_enabled("COUPANG_OJE_NS") is False
+    assert market_policy.is_kakao_market_enabled("COUPANG") is False
+    assert market_policy.is_store_automatic_generation_enabled(
+        "COUPANG_OJE_NS"
+    ) is False
