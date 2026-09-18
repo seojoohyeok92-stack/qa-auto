@@ -385,10 +385,9 @@ def test_capturing_opens_no_answer_edit_approval_or_registration(database) -> No
         assert connection.execute(
             "SELECT COUNT(*) FROM naver_post_attempts"
         ).fetchone()[0] == 0
-    # The read-only market policy itself is untouched by this feature.
+    # Keeping an answer as Learning opens nothing that answers unattended.
     assert market_policy.is_store_post_enabled("COUPANG_OJE_NS") is False
     assert market_policy.is_store_dps_enabled("COUPANG_OJE_NS") is False
-    assert market_policy.is_kakao_market_enabled("COUPANG") is False
     assert market_policy.is_store_automatic_generation_enabled(
         "COUPANG_OJE_NS"
     ) is False
@@ -648,10 +647,10 @@ def test_the_read_only_panel_offers_approval_and_nothing_else(database) -> None:
     naver = inquiry_of(database, naver_inquiry(database))
     naver["seller_answer"] = "네이버 답변"
     assert review_workspace._seller_answer_learning_approval(naver) is False
-    # Nothing was opened for writing an answer.
+    # Nothing was opened for answering unattended.  Manual registration and
+    # its notification are separate decisions, each opened on its own.
     assert market_policy.is_store_post_enabled("COUPANG_OJE_NS") is False
     assert market_policy.is_store_dps_enabled("COUPANG_OJE_NS") is False
-    assert market_policy.is_kakao_market_enabled("COUPANG") is False
     assert market_policy.is_store_automatic_generation_enabled(
         "COUPANG_OJE_NS"
     ) is False
