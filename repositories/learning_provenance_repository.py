@@ -254,10 +254,15 @@ class LearningProvenanceRepository:
                        le.product_name AS learning_product_name,
                        li.external_inquiry_id AS learning_external_inquiry_id,
                        li.source_question_id AS learning_source_question_id,
+                       li.store_code AS learning_store_code,
+                       li.source_type AS learning_source_type,
                        hc.question AS historical_question,
                        hc.seller_answer AS historical_answer,
                        hc.product_name AS historical_product_name,
                        hc.external_inquiry_id AS historical_external_inquiry_id,
+                       hc.metadata_json AS historical_metadata,
+                       hc.store_code AS historical_store_code,
+                       hc.inquiry_type AS historical_source_type,
                        hi.source_question_id AS historical_source_question_id
                 FROM answer_learning_provenance p
                 LEFT JOIN learning_examples le ON le.id=p.learning_example_id

@@ -14,6 +14,7 @@ from repositories.feedback_signal_provenance_repository import (
 from repositories.learning_provenance_repository import LearningProvenanceRepository
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_performance_service import LearningPerformanceService
+from ui.product_name_presenter import ProductNameResolver
 
 
 SOURCE_LABELS = {
@@ -52,6 +53,18 @@ VERDICT_LABELS = {
     "NOT_SUPPORTED": "질문에 답하지 않음",
     "CONTEXT_INCOMPATIBLE": "상황이 다름",
 }
+
+
+def _loads(value: object) -> dict[str, Any]:
+    """A stored metadata blob as a mapping, or an empty one."""
+
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _verdict_by_reference(metadata: dict) -> dict[int, str]:
@@ -402,6 +415,9 @@ def render_answer_learning_provenance(
         display = []
         full_texts: list[dict[str, Any]] = []
         verdicts = _verdict_by_reference(metadata)
+        # One resolver for this render: several rows usually come from the
+        # same inquiry, and it reads each source at most once.
+        product_names = ProductNameResolver(database)
         for row in rows:
             is_historical = row["reference_kind"] == "HISTORICAL"
             reference_id = (
@@ -432,7 +448,18 @@ def render_answer_learning_provenance(
                 # What the prompt reads for a Historical case; see
                 # learning_context_service's ``answer_reference``.
                 stored_answer = str(row.get("historical_answer") or "")
-                product_name = row.get("historical_product_name") or "-"
+                # A row stored before the marketplace names were written keeps
+                # no product of its own; read one without changing the row.
+                product_name = product_names.for_display(
+                    stored=row.get("historical_product_name"),
+                    metadata=_loads(row.get("historical_metadata")),
+                    store_code=row.get("historical_store_code"),
+                    source_type=row.get("historical_source_type"),
+                    source_question_id=(
+                        row.get("historical_source_question_id")
+                        or row.get("historical_external_inquiry_id")
+                    ),
+                )
                 attached_signals = signals_repo.for_historical_case(reference_id)
             else:
                 metadata = {}
@@ -453,7 +480,16 @@ def render_answer_learning_provenance(
                 # What the prompt reads for a Learning row; see
                 # learning_context_service's candidate ``final_answer``.
                 stored_answer = str(row.get("learning_answer") or "")
-                product_name = row.get("learning_product_name") or "-"
+                product_name = product_names.for_display(
+                    stored=row.get("learning_product_name"),
+                    metadata=metadata,
+                    store_code=row.get("learning_store_code"),
+                    source_type=row.get("learning_source_type"),
+                    source_question_id=(
+                        row.get("learning_source_question_id")
+                        or row.get("learning_external_inquiry_id")
+                    ),
+                )
                 attached_signals = signals_repo.for_learning_example(reference_id)
             reference_label = (
                 f"네이버 문의 #{external_number}" if external_number else internal_label

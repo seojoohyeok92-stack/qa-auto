@@ -17,6 +17,7 @@ from repositories.learning_feedback_repository import LearningFeedbackRepository
 from answer.learning_signal import SignalKind
 from services.historical_case_service import HistoricalCaseService
 from services.learning_feedback_service import LearningFeedbackService
+from ui.product_name_presenter import ProductNameResolver
 from ui.market_labels import (
     ALL_MARKETS,
     ALL_MARKETS_LABEL,
@@ -388,8 +389,17 @@ def render_historical_case_manager(database: Database) -> None:
         st.write(case.get("question") or "-")
         st.markdown("#### 과거 직원 답변")
         st.write(case.get("seller_answer") or "답변 없음")
+        # A case stored before the marketplace names were written keeps no
+        # product of its own; read one for display without changing the row.
+        case_product_name = ProductNameResolver(database).for_display(
+            stored=case.get("product_name"),
+            metadata=case.get("metadata_json"),
+            store_code=case.get("store_code"),
+            source_type=case.get("inquiry_type"),
+            source_question_id=case.get("external_inquiry_id"),
+        )
         st.caption(
-            f"상품: {case.get('product_name') or '-'} · 작성일: {case.get('inquiry_created_at') or '-'} · "
+            f"상품: {case_product_name} · 작성일: {case.get('inquiry_created_at') or '-'} · "
             f"분류: {case.get('classification') or '-'} · 품질: {case.get('quality_score') or 0} · "
             f"현재 정책 위험: {case.get('policy_risk') or 'NONE'}"
         )
