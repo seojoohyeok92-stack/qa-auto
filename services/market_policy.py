@@ -55,7 +55,7 @@ POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # editing on inquiries the marketplace has already answered.  This opens the
 # button and nothing else.
 MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
-KAKAO_MARKETS: frozenset[str] = frozenset({NAVER})
+KAKAO_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 
 # Wording that names one marketplace's own procedure.  An answer for another
 # market must not carry it: "네이버페이 > 결제내역" is wrong advice to a Coupang

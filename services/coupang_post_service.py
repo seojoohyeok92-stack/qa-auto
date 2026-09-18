@@ -2,8 +2,14 @@
 
 Manual posting only.  Nothing schedules this, nothing retries it, and the
 auto-post pipeline cannot reach it: Coupang is absent from ``POST_MARKETS``,
-which is what scopes that queue.  Kakao is untouched -- ``KAKAO_MARKETS`` still
-excludes Coupang, so registering here notifies nobody.
+which is what scopes that queue.
+
+A confirmed registration notifies the Coupang operations room, through the one
+notification path Naver uses.  Only success does, because that is the only
+notification the Naver post service sends: a failed post is recorded and shown
+on the screen the operator is already looking at.  Holds and "직원 확인 필요"
+come from the answer pipeline, which already routes by store code, so they
+needed nothing here.
 
 The decision of *whether* this answer may go out is not re-invented here.  It
 is the Naver manual decision, made by the same code:
@@ -36,6 +42,7 @@ from api.coupang_post_client import (
     build_reply_path,
 )
 from config import get_coupang_account
+from kakao_notify import notify_qna_safely
 from repositories.answer_repository import AnswerRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
@@ -395,6 +402,33 @@ class CoupangPostService:
             actor=str(actor or "").strip() or "operator",
         )
         self._complete_workflow(inquiry_id, attempt_id=attempt_id, actor=actor)
+        # The same notification the Naver post service sends on the same
+        # event, keyed on the immutable attempt id so a repeated call cannot
+        # duplicate it.  ``notify_qna_safely`` resolves the room from the
+        # store code, so both Coupang accounts reach the one Coupang room and
+        # a market that may not be notified still sends nothing.
+        try:
+            notify_qna_safely(
+                title="[쿠팡 Q&A 답변 등록 완료]",
+                store_code=store_code,
+                product=str(inquiry.get("product_name") or ""),
+                option_name=str(inquiry.get("option_name") or ""),
+                question=str(inquiry.get("content") or inquiry.get("title") or ""),
+                # The text Coupang just acknowledged, not the draft it came from.
+                answer=post_answer,
+                action="posted",
+                inquiry_id=str(inquiry_id),
+                notify_key=f"coupang-posted:{inquiry_id}:{attempt_id}",
+            )
+        except Exception as error:  # noqa: BLE001 - the post is already confirmed
+            # Outbox trouble must never roll back a registered answer.
+            self.logs.record_inquiry(
+                inquiry_id,
+                "KAKAO_POSTED_NOTIFICATION_WARNING",
+                "쿠팡 등록 성공 알림을 대기열에 추가하지 못했습니다.",
+                level="WARNING",
+                details={"exception_type": error.__class__.__name__},
+            )
         self.logs.record_inquiry(
             inquiry_id,
             "COUPANG_POST_SUCCEEDED",

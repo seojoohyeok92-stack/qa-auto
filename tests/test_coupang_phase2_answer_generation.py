@@ -216,8 +216,11 @@ def test_coupang_generation_is_open_and_everything_else_closed(store) -> None:
     assert market_policy.is_store_answer_generation_enabled(store) is True
     assert market_policy.is_store_automatic_generation_enabled(store) is False
     assert market_policy.is_store_dps_enabled(store) is False
+    # Automatic posting stays closed; a person may register by hand, and a
+    # registration they make is notified.
     assert market_policy.is_store_post_enabled(store) is False
-    assert market_policy.is_kakao_market_enabled("COUPANG") is False
+    assert market_policy.is_store_manual_post_enabled(store) is True
+    assert market_policy.is_kakao_market_enabled("COUPANG") is True
 
 
 # --- B. only a person starts generation ---------------------------------------------
@@ -493,7 +496,16 @@ def test_order_and_dps_never_run_for_coupang(database, content) -> None:
         answer_service.enrich_dps_for_inquiry(inquiry_id)
 
 
-def test_generation_sends_no_kakao_for_coupang(database, monkeypatch) -> None:
+def test_generating_and_approving_sends_no_kakao_by_itself(
+    database, monkeypatch,
+) -> None:
+    """Notifications belong to registration and holds, not to drafting.
+
+    Coupang may be notified now, so this pins the thing that has not changed:
+    generating a draft and approving it is not an event anyone is told about,
+    exactly as on Naver.
+    """
+
     sent: list = []
     monkeypatch.setenv("KAKAO_NOTIFY_ENABLED", "1")
     monkeypatch.setattr(kakao_notify, "enqueue_kakao_message",
@@ -507,10 +519,13 @@ def test_generation_sends_no_kakao_for_coupang(database, monkeypatch) -> None:
     _approve(database, inquiry_id)
 
     assert sent == []
+    # A registration, however, does reach the Coupang room.
     assert kakao_notify.notify_qna_safely(
-        title="t", store_code="COUPANG_OJE_NS", product="p", option_name="",
-        question="q", answer="a", action="posted", inquiry_id="x",
-    ) is False
+        title="[쿠팡 Q&A 답변 등록 완료]", store_code="COUPANG_OJE_NS",
+        product="p", option_name="", question="q", answer="a",
+        action="posted", inquiry_id="x",
+    ) is True
+    assert sent and sent[0]["market"] == "COUPANG"
 
 
 def test_an_approved_coupang_answer_is_not_posted(database) -> None:

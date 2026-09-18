@@ -5,10 +5,14 @@ by market, so a Coupang question entered the answer pipeline, was held for
 review, and the hold notification went out reading "네이버 등록: 안 됨" for
 something nobody asked on Naver.
 
-Two things are pinned here.  The queue no longer offers Coupang rows at all,
+Two things are pinned here.  The queue still offers no Coupang rows at all,
 which is where the cost is — no draft, no GPT, no DPS.  And the notification
-boundary refuses any market production may not answer for, so the paths that
-were not the one found are closed too.
+boundary refuses any market production may not answer for.
+
+Coupang is notified now, because a person can register a Coupang answer by
+hand.  What that changed is the room it goes to, never the queue: the defect
+above was automatic posting reaching a market, and ``POST_MARKETS`` is still
+Naver alone.
 """
 
 from __future__ import annotations
@@ -72,12 +76,17 @@ def test_store_codes_map_to_markets(store_code, market) -> None:
     assert market_of(store_code) == market
 
 
-def test_only_naver_is_posted_and_notified_in_production() -> None:
+def test_only_naver_is_posted_automatically_in_production() -> None:
     assert POST_MARKETS == frozenset({"NAVER"})
-    assert KAKAO_MARKETS == frozenset({"NAVER"})
     assert is_store_post_enabled(NAVER_STORE) is True
     assert is_store_post_enabled(COUPANG_NS) is False
     assert is_store_post_enabled(COUPANG_PLUS) is False
+
+
+def test_both_answerable_markets_are_notified() -> None:
+    """A market a person can register to is a market worth telling them about."""
+
+    assert KAKAO_MARKETS == frozenset({"NAVER", "COUPANG"})
 
 
 def test_enabled_store_filter_drops_every_coupang_account() -> None:
@@ -157,7 +166,7 @@ def outbox(monkeypatch):
 
 
 @pytest.mark.parametrize("store_code", [COUPANG_NS, COUPANG_PLUS])
-def test_coupang_inquiry_never_reaches_the_sender(outbox, store_code) -> None:
+def test_a_coupang_inquiry_reaches_only_the_coupang_room(outbox, store_code) -> None:
     result = notify_qna_safely(
         title="[Q&A 미등록 / 직원 확인 필요]",
         store_code=store_code,
@@ -166,10 +175,14 @@ def test_coupang_inquiry_never_reaches_the_sender(outbox, store_code) -> None:
         question="와이파이가안됩니다",
         answer="-",
         action="needs_review",
-        inquiry_id="c1",
+        inquiry_id=f"c1-{store_code}",
     )
-    assert result is False
-    assert outbox == []
+    assert result is True
+    assert len(outbox) == 1
+    # Both accounts resolve to the one Coupang room, never Naver's.
+    assert outbox[0]["market"] == "COUPANG"
+    assert recipient_for_market(outbox[0]["market"]) == recipient_for_market("COUPANG")
+    assert recipient_for_market(outbox[0]["market"]) != recipient_for_market("NAVER")
 
 
 def test_naver_inquiry_still_notifies(outbox) -> None:

@@ -30,10 +30,12 @@ KAKAO_QNA_RECIPIENT = "오제 네이버 자동답변 확인방"
 # report into the same room.  The Naver variable keeps its name and its
 # meaning because Naver production is already reading it.
 #
-# A room being configured is not the same as a market being notified.  Nothing
-# here sends anything; what may be notified at all is decided once, in
-# ``services.market_policy`` (``KAKAO_MARKETS``), and Coupang is not in it --
-# not even now that Coupang answers may be generated for review.
+# A room being configured is still not the same as a market being notified.
+# Nothing here sends anything; what may be notified at all is decided once, in
+# ``services.market_policy`` (``KAKAO_MARKETS``).  Coupang is in that set now
+# that a person can register a Coupang answer, and both Coupang seller
+# accounts report into the one room above -- the room is chosen by market, not
+# by account, so OJE_NS and OJE_PLUS never split into two chat rooms.
 KAKAO_RECIPIENT_ENV_BY_MARKET = {
     "NAVER": "KAKAO_QNA_RECIPIENT",
     "COUPANG": "KAKAO_COUPANG_QNA_RECIPIENT",
@@ -529,13 +531,13 @@ def notify_qna_safely(
     # notify about it at all.
     #
     # This gate is here rather than in each caller because a Coupang inquiry
-    # did reach a real chat room: it entered the auto-post queue, which was
-    # not scoped by market, generated a draft, was held for review, and the
-    # hold notification went out reading "네이버 등록: 안 됨" for a question
-    # nobody had asked on Naver.  The queue scoping is fixed at its source,
-    # but every path into this function has to be closed, not just the one
-    # that was found.  A market that is collected and displayed but not yet
-    # answered sends nothing.
+    # once reached a real chat room by accident: it entered the auto-post
+    # queue, which was not scoped by market, generated a draft, was held for
+    # review, and the hold notification went out reading "네이버 등록: 안 됨"
+    # for a question nobody had asked on Naver.  The queue scoping was fixed
+    # at its source, and this stayed: a market is notified because it is in
+    # ``KAKAO_MARKETS``, never because some caller forgot to check.  A market
+    # that is only collected and displayed still sends nothing.
     resolved_market = market
     if resolved_market is None and store_code is not None:
         from services.market_policy import market_of

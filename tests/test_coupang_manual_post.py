@@ -476,14 +476,13 @@ def test_the_preflight_reports_the_same_refusal_the_post_would(database) -> None
 
 # --- N / O. nothing else was opened ---------------------------------------------
 
-def test_manual_post_is_open_but_automatic_posting_and_kakao_are_not() -> None:
+def test_manual_post_is_open_but_automatic_posting_is_not() -> None:
     for store in ("COUPANG_OJE_NS", "COUPANG_OJE_PLUS"):
         assert market_policy.is_store_manual_post_enabled(store) is True
         # The auto-post queue scopes on this one, so it stays closed.
         assert market_policy.is_store_post_enabled(store) is False
         assert market_policy.is_store_automatic_generation_enabled(store) is False
         assert market_policy.is_store_dps_enabled(store) is False
-    assert market_policy.is_kakao_market_enabled("COUPANG") is False
     assert market_policy.post_enabled_store_codes(
         ["COUPANG_OJE_NS", "COUPANG_OJE_PLUS", "OJE_PLUS"]
     ) == ["OJE_PLUS"]

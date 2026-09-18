@@ -165,9 +165,13 @@ def test_an_explicit_recipient_still_addresses_that_room(outbox) -> None:
     assert _events(outbox)[1]["recipient"] == NAVER_ROOM
 
 
-def test_coupang_still_sends_nothing(outbox) -> None:
-    """G: the market gate is untouched; a room existing is not a permission."""
+def test_coupang_notifies_its_own_room(outbox) -> None:
+    """Each market keeps its own room; neither borrows the other's."""
 
     assert kakao_notify.recipient_for_market("COUPANG") == COUPANG_ROOM
-    assert _notify(store_code="COUPANG_OJE_NS", notify_key="coupang:1") is False
-    assert _events(outbox) == []
+    assert _notify(store_code="COUPANG_OJE_NS", notify_key="coupang:1") is True
+
+    events = _events(outbox)
+    assert len(events) == 1
+    assert events[0]["recipient"] == COUPANG_ROOM
+    assert events[0]["recipient"] != NAVER_ROOM
