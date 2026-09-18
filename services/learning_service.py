@@ -53,27 +53,6 @@ def _first_text(value: Any) -> str:
     return ""
 
 
-# Marketplace identifiers a Historical case may carry into its Learning row.
-# Provenance only: nothing routes, scopes or retrieves on these.
-_CARRIED_MARKET_PROVENANCE = (
-    "account_code",
-    "origin_store_code",
-    "source_question_id",
-    "external_inquiry_id",
-    "seller_product_id",
-    "vendor_item_id",
-    "product_id",
-    "source_created_at",
-    "seller_answer_selection",
-    "inquiry_comment_id",
-    "seller_answer_provenance",
-    "source_origin_detail",
-    "captured_from_inquiry_id",
-    "confirmed_canonical_model",
-    "model_identity_source",
-)
-
-
 class LearningService:
     """승인/등록 트랜잭션의 결과만 복제하는 격리된 Learning Layer."""
 
@@ -166,7 +145,7 @@ class LearningService:
     def _build(
         self, *, inquiry: dict[str, Any], draft: dict[str, Any] | None,
         learning_source: str, answer: str, history_id: int | None = None,
-        seller_answer: str = "",
+        seller_answer: str = "", model_code: object = None,
     ) -> dict[str, Any] | None:
         clean_answer = str(answer or "").strip()
         question = "\n".join(
@@ -184,6 +163,10 @@ class LearningService:
         if not masked_question or not masked_answer:
             return None
         metadata = self._metadata(draft or {})
+        # A marketplace answer has no draft to carry the model, so a caller
+        # that knows it says so; every other caller passes nothing and reads
+        # the draft exactly as before.
+        scoped_model = model_code or metadata.get("model_code")
         plan = metadata.get("processing_plan") if isinstance(metadata.get("processing_plan"), dict) else {}
         semantic_routing = (
             plan.get("semantic_routing")
@@ -225,7 +208,7 @@ class LearningService:
         product_identity = extract_product_identity(
             product_id=inquiry.get("product_id"),
             product_name=inquiry.get("product_name"),
-            model_code=metadata.get("model_code"),
+            model_code=scoped_model,
             option=inquiry.get("option_name"),
         )
         knowledge_profile = profile_knowledge(
@@ -255,7 +238,7 @@ class LearningService:
             "inquiry_type": inquiry.get("inquiry_type"),
             "intent": plan.get("detected_intent") or analysis.get("detected_intent") or analysis.get("primary_intent"),
             "product_name": self.privacy.mask(inquiry.get("product_name")),
-            "model_code": self.privacy.mask(metadata.get("model_code")),
+            "model_code": self.privacy.mask(scoped_model),
             "generation_mode": metadata.get("generation_mode") or (draft or {}).get("source"),
             "template_id": metadata.get("template_id"),
             "processing_route": plan.get("selected_answer_route") or metadata.get("selected_answer_route"),
@@ -629,6 +612,129 @@ class LearningService:
         )
         return saved
 
+    def marketplace_answer_example(
+        self, *, inquiry: dict[str, Any], answer: str,
+        model_code: object = None,
+    ) -> dict[str, Any] | None:
+        """The Learning row this marketplace answer would become, unsaved.
+
+        The screen asks for this to find out whether the answer is already
+        kept -- the row's ``source_key`` is derived from the question and the
+        answer, so an unsaved build answers that without writing anything.
+        ``None`` means the shared builder refused the content.
+        """
+
+        return self._build(
+            inquiry=inquiry,
+            draft=None,
+            learning_source="SELLER_ANSWER",
+            answer=answer,
+            seller_answer=answer,
+            model_code=model_code,
+        )
+
+    def capture_verified_marketplace_answer(
+        self,
+        *,
+        inquiry_id: int,
+        answer: str,
+        actor: str,
+        provenance: dict[str, Any] | None = None,
+        positive_reason: str = "",
+        positive_note: str = "",
+        signal_kind: str = "",
+        signal_content: str = "",
+        fact_scope: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Keep a marketplace's own reply after a person reviewed it.
+
+        The twin of ``capture_verified_posted_answer`` for a market this
+        system does not post to: there is no posted-answer row and no draft,
+        only the reply the marketplace stored and an operator who read it.
+        Everything else -- the shared builder, the negative-signal guard, the
+        human-verified atomic upsert and the positive signal -- is that path's,
+        so a Coupang capture and a Naver one are one kind of Learning.
+
+        There is no quality threshold here, exactly as there is none there: a
+        person deciding is the gate.  The 0.55 score belongs to unattended
+        Historical promotion, which still applies it.
+        """
+
+        inquiry = self.inquiries.get(int(inquiry_id))
+        clean = str(answer or "").strip()
+        if inquiry is None or not clean:
+            return None
+        reference_id = int(inquiry_id)
+        self.assert_positive_allowed(
+            inquiry_id=inquiry_id,
+            answer_provenance=AnswerProvenance.HISTORICAL_VERIFIED,
+            answer_reference_id=reference_id,
+            answer=clean,
+        )
+        example = self.marketplace_answer_example(
+            inquiry=inquiry,
+            answer=clean,
+            model_code=(provenance or {}).get("canonical_model"),
+        )
+        if example is None:
+            return None
+        example.update(
+            {
+                "answer_draft_id": None,
+                "rating": 5,
+                "quality_score": 1.0,
+                # A person read this answer, so it is a reference, not a
+                # style sample -- the same promotion the Naver twin performs.
+                "style_only": False,
+                "validator_result": "HUMAN_VERIFIED_MARKETPLACE_ANSWER",
+                "metadata_json": {
+                    **(example.get("metadata_json") or {}),
+                    "facts_authority": "HUMAN_VERIFIED_MARKETPLACE_ANSWER",
+                    "answer_provenance": (
+                        AnswerProvenance.HISTORICAL_VERIFIED.value
+                    ),
+                    "human_verified": True,
+                    "verified_by": str(actor or "직원"),
+                    "verified_at": utc_now(),
+                    "customer_facing_truth": True,
+                    **(
+                        {"market_provenance": dict(provenance)}
+                        if provenance else {}
+                    ),
+                    **self._positive_review_metadata(
+                        answer_reference_id=reference_id,
+                        positive_reason=positive_reason,
+                        positive_note=positive_note,
+                    ),
+                },
+            }
+        )
+        saved = self.repository.upsert_human_verified_atomic(
+            example,
+            feedback_answer_sources=(
+                AnswerProvenance.HISTORICAL_VERIFIED.value,
+            ),
+        )
+        self.logs.record_inquiry(
+            int(inquiry_id),
+            "LEARNING_EXAMPLE_SAVED",
+            "운영자가 확인한 마켓 판매자 답변을 Learning Repository에 저장했습니다.",
+            details={
+                "learning_example_id": saved["id"],
+                "learning_source": "SELLER_ANSWER",
+                "actor": str(actor or "직원"),
+            },
+        )
+        self._capture_positive_signal(
+            inquiry=inquiry,
+            learning_example_id=saved.get("id"),
+            signal_kind=signal_kind,
+            signal_content=signal_content,
+            fact_scope=fact_scope,
+            actor=actor,
+        )
+        return saved
+
     def import_existing_seller_answers(self, *, limit: int | None = None) -> dict[str, int]:
         sql = "SELECT id FROM inquiries WHERE source_answered=1 ORDER BY id"
         params: tuple[Any, ...] = ()
@@ -954,21 +1060,6 @@ class LearningService:
                 "shared_cross_market_learning": shared_cross_market,
                 "origin_market": origin_market,
                 "market_applicability": applicability,
-                # The marketplace identifiers the case carries, copied so a
-                # Learning row names the account and listing it came from
-                # without a join back to Historical.  Nested under one key so
-                # it cannot collide with a field a reader already looks up --
-                # a bare ``product_id`` here would change product identity --
-                # and only keys the case actually has are copied.
-                **(
-                    {"market_provenance": carried}
-                    if (carried := {
-                        key: historical_metadata[key]
-                        for key in _CARRIED_MARKET_PROVENANCE
-                        if key in historical_metadata
-                    })
-                    else {}
-                ),
             },
             "active": True,
         }

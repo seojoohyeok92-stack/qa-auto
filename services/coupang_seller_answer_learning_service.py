@@ -6,25 +6,26 @@ generates, edits, approves or registers an answer.  What was missing was a way
 to keep a good reply -- an operator could read one and had no way to tell the
 Learning corpus about it.
 
-This adds that one action and nothing else.  It writes no new kind of row: the
-reply travels the same three stages the 742 backfilled Coupang answers already
-travelled --
+That is the same action Naver already has.  There, an operator reads the
+answer the marketplace actually shows and keeps it through
+``LearningService.capture_verified_posted_answer``.  This is that path with a
+different source for the text, so it uses the Coupang twin,
+``capture_verified_marketplace_answer``, and adds no policy of its own: the
+shared builder, the negative-signal guard, the human-verified upsert and the
+positive signal all belong to the Naver path.
 
-    CoupangInquiryNormalizer  ->  HistoricalCaseService.prepare_case
-                              ->  HistoricalCaseService.promote
-                              ->  LearningService.capture_historical_promotion
+In particular there is no quality threshold.  The 0.55 score belongs to
+unattended Historical promotion, which decides for itself which of thousands of
+backfilled rows may become Learning; here a person has read this one answer and
+pressed a button, and that is the decision.  Historical promotion keeps its
+gate untouched.
 
--- so it is deduplicated against them for free.  ``prepare_case`` derives a
-``case_key`` from the store, source type, external id and normalised question,
-and a ``fingerprint`` from that plus the answer; promotion's Learning
-``source_key`` is ``HISTORICAL_PROMOTED|<fingerprint>``.  An inquiry already
-promoted by the backfill therefore produces the identical key, and the existing
-Learning row is returned rather than a second one written.
+Two things stop a duplicate.  A repeat click rebuilds the same Learning row --
+its ``source_key`` is derived from the question and the answer -- so the upsert
+updates in place.  And an inquiry the historical backfill already promoted is
+recognised by that path's own key, read without writing anything, so the 742
+are never copied.
 
-The reply is re-derived from the stored payload through the normaliser rather
-than from the joined text the screen shows, for the same reason: the backfill
-selected a single unambiguous comment, and hashing a different string would
-mean a different fingerprint and a duplicate of a row that already exists.
 Nothing here calls Coupang.
 """
 
@@ -34,11 +35,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from repositories.database import Database
-from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_repository import LearningRepository
 from services.coupang_inquiry_normalizer import CoupangInquiryNormalizer
 from services.historical_case_service import HistoricalCaseService
+from services.learning_service import LearningService
 from services.market_policy import COUPANG, account_of_store, market_of
 
 
@@ -50,8 +51,9 @@ UNAVAILABLE_REASONS: dict[str, str] = {
     "MULTI_COMMENT_REVIEW": (
         "댓글이 여러 개라 어느 것이 판매자 답변인지 확정할 수 없습니다."
     ),
-    "QUALITY_SCORE": "품질 기준(0.55)에 미달하여 Learning에 반영할 수 없습니다.",
-    "POLICY_RISK": "정책 충돌 위험이 있어 Learning에 반영할 수 없습니다.",
+    "ANSWER_NOT_REUSABLE": (
+        "기간이 지난 정책·배송 표현이 있어 Learning에 반영할 수 없습니다."
+    ),
 }
 
 
@@ -75,9 +77,8 @@ class CoupangSellerAnswerLearningService:
     def __init__(self, database: Database) -> None:
         self.database = database
         self.inquiries = InquiryRepository(database)
-        self.cases = HistoricalCaseService(database)
-        self.case_repository = HistoricalCaseRepository(database)
         self.learning = LearningRepository(database)
+        self.learning_service = LearningService(database)
         self.normalizer = CoupangInquiryNormalizer()
 
     # -- reading -----------------------------------------------------------
@@ -85,8 +86,8 @@ class CoupangSellerAnswerLearningService:
     def status(self, inquiry: dict[str, Any]) -> SellerAnswerLearningStatus:
         """Whether this inquiry's seller answer may be, or already is, kept.
 
-        Read-only.  ``prepare_case`` is a pure derivation plus one count
-        query, so the screen can ask this on every render without writing.
+        Read-only: the Learning row is built but not saved, only to read the
+        key it would be stored under.
         """
 
         prepared = self._prepare(inquiry)
@@ -94,18 +95,19 @@ class CoupangSellerAnswerLearningService:
             return SellerAnswerLearningStatus(
                 available=False, captured=False, reason=prepared
             )
-        case, _ = prepared
-        existing = self._promoted_learning(case)
+        answer, _provenance = prepared
+        example = self.learning_service.marketplace_answer_example(
+            inquiry=inquiry, answer=answer
+        )
+        if example is None:
+            return SellerAnswerLearningStatus(
+                available=False, captured=False, reason="ANSWER_NOT_REUSABLE",
+            )
+        existing = self._existing(inquiry, example)
         if existing is not None:
             return SellerAnswerLearningStatus(
                 available=True, captured=True,
                 learning_example_id=int(existing["id"]),
-            )
-        stored = self.case_repository.get_by_case_key(case["case_key"])
-        blocked = HistoricalCaseService.promotion_block_reason(stored or case)
-        if blocked is not None:
-            return SellerAnswerLearningStatus(
-                available=False, captured=False, reason=blocked
             )
         return SellerAnswerLearningStatus(available=True, captured=False)
 
@@ -118,13 +120,7 @@ class CoupangSellerAnswerLearningService:
     # -- writing -----------------------------------------------------------
 
     def capture(self, inquiry_id: int, *, actor: str = "관리자") -> dict[str, Any]:
-        """Keep this seller answer as Learning; return the row either way.
-
-        Pressing the button twice writes one row.  So does pressing it on an
-        inquiry the historical backfill already promoted: the Learning
-        ``source_key`` is derived from the same fingerprint, so promotion
-        finds the existing row and returns it untouched.
-        """
+        """Keep this seller answer as Learning; return the row either way."""
 
         inquiry = self.inquiries.get(int(inquiry_id))
         if inquiry is None:
@@ -134,49 +130,113 @@ class CoupangSellerAnswerLearningService:
             raise ValueError(
                 UNAVAILABLE_REASONS.get(prepared, "Learning에 반영할 수 없습니다.")
             )
-        case, _ = prepared
-        existing = self._promoted_learning(case)
-        if existing is not None:
-            return existing
-        stored, _outcome = self.case_repository.upsert(case)
-        case_id = int(stored["id"])
-        blocked = HistoricalCaseService.promotion_block_reason(stored)
-        if blocked is not None:
-            raise ValueError(
-                UNAVAILABLE_REASONS.get(blocked, "Learning에 반영할 수 없습니다.")
-            )
-        # The operator reading the answer is the review decision, recorded the
-        # way the bulk promotion records it rather than as a second mechanism.
-        if not stored.get("active"):
-            self.case_repository.set_learning_enabled(
-                case_id, True, actor=str(actor or "관리자")
-            )
-        return self.cases.promote(case_id, actor=str(actor or "관리자"))
+        answer, provenance = prepared
+        example = self.learning_service.marketplace_answer_example(
+            inquiry=inquiry, answer=answer
+        )
+        if example is None:
+            raise ValueError(UNAVAILABLE_REASONS["ANSWER_NOT_REUSABLE"])
+        promoted = self._historical_learning(inquiry)
+        if promoted is not None:
+            # Already in the corpus under Historical promotion's own key.
+            # Writing the same answer again under this path's key would be a
+            # second copy of one reply.
+            return promoted
+        saved = self.learning_service.capture_verified_marketplace_answer(
+            inquiry_id=int(inquiry_id),
+            answer=answer,
+            actor=str(actor or "관리자"),
+            provenance=provenance,
+        )
+        if saved is None:
+            raise ValueError(UNAVAILABLE_REASONS["ANSWER_NOT_REUSABLE"])
+        return saved
 
     # -- internals ---------------------------------------------------------
 
-    def _promoted_learning(self, case: dict[str, Any]) -> dict[str, Any] | None:
-        """The Learning row this case already produced, if it produced one.
+    def _existing(
+        self, inquiry: dict[str, Any], example: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The Learning row this answer already has, by either path's key."""
 
-        Keyed on the fingerprint rather than on ``promoted_learning_id``: the
-        backfilled corpus is matched even when this inquiry has no historical
-        row of its own yet, which is what stops the 742 being duplicated.
+        return (
+            self.learning.get_by_source_key(str(example["source_key"]))
+            or self._historical_learning(inquiry)
+        )
+
+    def _historical_learning(
+        self, inquiry: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The row the historical backfill already promoted, if it did.
+
+        Read-only.  ``prepare_case`` is a pure derivation plus one count
+        query; nothing is written to Historical from here, and its promotion
+        gate is never consulted -- only the key it would have produced, so the
+        742 are recognised rather than copied.
         """
 
+        case = self._historical_case(inquiry)
+        if case is None:
+            return None
         return self.learning.get_by_source_key(
             HistoricalCaseService._digest(
                 "HISTORICAL_PROMOTED", case["fingerprint"]
             )
         )
 
+    def _historical_case(self, inquiry: dict[str, Any]) -> dict[str, Any] | None:
+        raw = inquiry.get("raw_json")
+        raw = raw if isinstance(raw, dict) else {}
+        account_code = self._account_code(inquiry)
+        normalized = self.normalizer.online(raw, account_code=account_code or None)
+        if not normalized.seller_answer:
+            return None
+        # The stored payload is privacy-masked, and a nine-digit Coupang
+        # inquiryId inside it comes back ``<masked-...>``.  ``prepare_case``
+        # puts the external id into its digest unmasked, so re-deriving it
+        # from the payload would hash a different string than the backfill
+        # hashed from the live response -- and none of the 742 would be
+        # recognised.  The inquiry's own columns kept the real value.
+        external_id = str(
+            inquiry.get("external_inquiry_id")
+            or inquiry.get("source_question_id")
+            or normalized.external_inquiry_id
+            or ""
+        )
+        candidate = dict(normalized.to_work_item())
+        candidate.update({
+            "external_inquiry_id": external_id,
+            "source_question_id": external_id,
+            "inquiry_id": external_id,
+            "local_inquiry_id": inquiry.get("id"),
+            "seller_answer": normalized.seller_answer,
+            "source_answered": True,
+            "raw_payload": normalized.raw_payload,
+            "historical_metadata": {"candidate_only": True, "market": COUPANG},
+        })
+        return HistoricalCaseService(self.database).prepare_case(
+            candidate,
+            source_reference=(
+                f"COUPANG_ONLINE_API:{account_code}:{external_id}"
+            ),
+        )
+
+    @staticmethod
+    def _account_code(inquiry: dict[str, Any]) -> str:
+        metadata = inquiry.get("source_metadata_json")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return str(
+            metadata.get("account_code")
+            or account_of_store(inquiry.get("store_code"))
+            or ""
+        ).strip()
+
     def _prepare(
         self, inquiry: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any]] | str:
-        """The historical case this inquiry's seller answer would become.
+    ) -> tuple[str, dict[str, Any]] | str:
+        """The seller answer to keep and the provenance to keep with it.
 
-        Returns a reason code instead when there is nothing to keep.  Builds
-        the candidate exactly as the backfill builds it, from the stored
-        payload, so the derived keys are the backfill's keys.
+        Returns a reason code instead when there is nothing to keep.
         """
 
         store_code = inquiry.get("store_code")
@@ -186,79 +246,34 @@ class CoupangSellerAnswerLearningService:
             return "NOT_ANSWERED"
         raw = inquiry.get("raw_json")
         raw = raw if isinstance(raw, dict) else {}
-        metadata = inquiry.get("source_metadata_json")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        account_code = str(
-            metadata.get("account_code") or account_of_store(store_code) or ""
-        ).strip()
+        account_code = self._account_code(inquiry)
         normalized = self.normalizer.online(raw, account_code=account_code or None)
+        # Which of several comments is the seller's is not decided here, for
+        # the same reason the historical import does not decide it.
         if normalized.answer_selection_status == "MULTI_COMMENT_REVIEW":
             return "MULTI_COMMENT_REVIEW"
         if not normalized.seller_answer:
             return "NO_SELLER_ANSWER"
-        candidate = dict(normalized.to_work_item())
-        # The stored payload is privacy-masked, and a nine-digit Coupang
-        # inquiryId inside it reads as a personal number and comes back
-        # ``<masked-...>``.  ``prepare_case`` puts the external id into the
-        # ``case_key`` digest unmasked, so re-deriving it from the payload
-        # would hash a different string than the historical backfill hashed
-        # from the live response -- and every one of the 742 would be
-        # duplicated.  The inquiry's own columns kept the real value; they are
-        # what the digest must see.
-        external_id = str(
-            inquiry.get("external_inquiry_id")
-            or inquiry.get("source_question_id")
-            or normalized.external_inquiry_id
-            or ""
+        return normalized.seller_answer, self._provenance(
+            inquiry, normalized, account_code, raw,
         )
-        candidate.update({
-            "external_inquiry_id": external_id,
-            "source_question_id": external_id,
-            "inquiry_id": external_id,
-            "local_inquiry_id": inquiry.get("id"),
-            "seller_answer": normalized.seller_answer,
-            "source_answered": True,
-            "source_updated_at": (
-                normalized.answer_created_at or normalized.source_created_at
-            ),
-            "raw_payload": normalized.raw_payload,
-            "historical_metadata": self._metadata(
-                inquiry, normalized, account_code, raw,
-            ),
-        })
-        case = self.cases.prepare_case(
-            candidate,
-            source_reference=(
-                f"COUPANG_ONLINE_API:{account_code}:"
-                f"{normalized.external_inquiry_id}"
-            ),
-        )
-        return case, candidate
 
-    def _metadata(
+    def _provenance(
         self,
         inquiry: dict[str, Any],
         normalized: Any,
         account_code: str,
         raw: dict[str, Any],
     ) -> dict[str, Any]:
-        """Provenance the Learning row carries, and the scope it is kept under.
+        """What the Learning row records about where this answer came from.
 
-        ``store_code`` is deliberately absent: promotion drops it for a Coupang
-        origin so both seller accounts read one corpus, and the market filter,
-        not a store column, is what keeps it away from Naver.  The account and
-        the listing ids stay here as provenance instead.
+        ``store_code`` is deliberately not among it: the shared builder drops
+        that column for a Coupang origin so both seller accounts read one
+        corpus, and the market filter, not a store column, is what keeps it
+        away from Naver.  The account and the listing ids stay here instead.
         """
 
-        model = self._confirmed_model(inquiry)
-        metadata: dict[str, Any] = {
-            # Same shape the historical backfill writes, so a row captured
-            # here and a row backfilled from the same reply are one kind.
-            "candidate_only": True,
-            "market": COUPANG,
-            "market_applicability": "COUPANG_ONLY",
-            "origin_market": COUPANG,
-            "shared_cross_market_learning": False,
+        provenance: dict[str, Any] = {
             "source_origin_detail": "COUPANG_SELLER_ANSWER_MANUAL_CAPTURE",
             "captured_from_inquiry_id": inquiry.get("id"),
             "account_code": account_code or None,
@@ -276,19 +291,19 @@ class CoupangSellerAnswerLearningService:
             "inquiry_comment_id": normalized.inquiry_comment_id,
             "seller_answer_provenance": "MARKETPLACE_SELLER_ANSWER",
         }
+        model = self._confirmed_model(inquiry)
         if model is not None:
             # The catalogue representative is the scope, because that is what
             # the answer path asks Product Knowledge for; the operator's
             # CONFIRMED value is kept beside it and its mapping row is not
             # touched.  Without a CONFIRMED mapping there is no scope at all --
             # guessing one would file this answer under another product.
-            metadata.update({
+            provenance.update({
                 "canonical_model": model["model_code"],
-                "model_code": model["model_code"],
                 "confirmed_canonical_model": model["canonical_model"],
                 "model_identity_source": "COUPANG_CONFIRMED_MAPPING",
             })
-        return metadata
+        return provenance
 
     def _confirmed_model(self, inquiry: dict[str, Any]) -> dict[str, Any] | None:
         """The operator-confirmed model for this option, or nothing.

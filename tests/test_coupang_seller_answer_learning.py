@@ -1,9 +1,10 @@
 """Keeping a Coupang seller's own reply as Learning, when a person asks.
 
 The inquiry stays read-only: nothing here generates, edits, approves or
-registers an answer.  The one added action writes a Learning row, and it
-writes it through the same three stages the 742 backfilled Coupang answers
-travelled, so pressing the button on one of those produces no second row.
+registers an answer.  The one added action is the Coupang twin of the Naver
+manual positive capture -- an operator reads the answer the marketplace shows
+and keeps it -- so it carries no quality threshold of its own, and an inquiry
+the historical backfill already promoted produces no second row.
 """
 
 from __future__ import annotations
@@ -219,10 +220,14 @@ def test_the_captured_row_keeps_the_marketplace_provenance(database) -> None:
         "COUPANG_SELLER_ANSWER_MANUAL_CAPTURE"
     )
     assert provenance["captured_from_inquiry_id"] == inquiry_id
-    # The Historical case it came from is still named, as for every promotion.
-    assert metadata["source_origin"] == "HISTORICAL_PROMOTED"
-    assert metadata["historical_case_id"]
-    assert metadata["historical_fingerprint"]
+    # Saved by the same manual-positive path Naver uses, and marked as one.
+    assert metadata["human_verified"] is True
+    assert metadata["verified_by"] == "관리자"
+    assert metadata["facts_authority"] == "HUMAN_VERIFIED_MARKETPLACE_ANSWER"
+    assert metadata["learning_signal_type"] == "POSITIVE"
+    assert saved["learning_source"] == "SELLER_ANSWER"
+    # A person read it, so it is a reference rather than a style sample.
+    assert saved["style_only"] is False
 
 
 # --- C/D. it never writes a second row ------------------------------------------
@@ -388,7 +393,10 @@ def test_a_confirmed_mapping_scopes_the_row_and_keeps_its_raw_value(
     provenance = metadata["market_provenance"]
     assert provenance["confirmed_canonical_model"] == "LH43BEHHLGFXKR"
     assert provenance["model_identity_source"] == "COUPANG_CONFIRMED_MAPPING"
-    assert metadata["canonical_model"] == "LH43BEDH"
+    assert provenance["canonical_model"] == "LH43BEDH"
+    # The scope the retrieval side compares on, not only a provenance note.
+    assert saved["model_code"] == "LH43BEDH"
+    assert metadata["product_identity"]["model_code"] == "LH43BEDH"
     assert saved["model_code"] == "LH43BEDH"
     with database.connection() as connection:
         row = connection.execute(
@@ -402,9 +410,11 @@ def test_without_a_confirmed_mapping_no_model_is_invented(database) -> None:
     inquiry_id = coupang_inquiry(database)
     saved = service(database).capture(inquiry_id, actor="관리자")
 
-    assert saved["model_code"] is None
-    assert saved["metadata_json"].get("canonical_model") is None
+    # The shared builder masks an absent model to an empty string, exactly
+    # as it does for a Naver row whose draft named none.
+    assert not saved["model_code"]
     provenance = saved["metadata_json"].get("market_provenance") or {}
+    assert "canonical_model" not in provenance
     assert "confirmed_canonical_model" not in provenance
     assert "model_identity_source" not in provenance
 
@@ -447,7 +457,65 @@ def test_the_key_matches_the_one_the_live_backfill_would_have_derived(
         live_candidate, source_reference="COUPANG_ONLINE_API:OJE_NS:170000001",
     )
 
-    stored_case, _ = service(database)._prepare(inquiry_of(database, inquiry_id))
+    stored_case = service(database)._historical_case(inquiry_of(database, inquiry_id))
+    assert stored_case is not None
 
     assert stored_case["case_key"] == live_case["case_key"]
     assert stored_case["fingerprint"] == live_case["fingerprint"]
+
+
+def test_a_low_quality_answer_is_still_capturable(database) -> None:
+    """A person deciding is the gate; the 0.55 score is not applied here.
+
+    That threshold belongs to unattended Historical promotion, which chooses
+    among thousands of backfilled rows on its own.  Here an operator has read
+    this one answer, which is the whole point of the button.
+    """
+
+    short = "네, 가능합니다."
+    inquiry_id = coupang_inquiry(database, answer=short)
+
+    # The same text would be refused by Historical promotion's gate.
+    case = service(database)._historical_case(inquiry_of(database, inquiry_id))
+    assert case is not None
+    assert HistoricalCaseService.promotion_block_reason(case) is not None
+
+    status = service(database).status(inquiry_of(database, inquiry_id))
+    assert status.available is True
+
+    saved = service(database).capture(inquiry_id, actor="관리자")
+    assert short in str(saved["final_answer"])
+    assert saved["metadata_json"]["market_applicability"] == "COUPANG_ONLY"
+
+
+def test_historical_bulk_promotion_keeps_its_own_quality_gate(database) -> None:
+    """The manual path must not have relaxed the unattended one."""
+
+    from services.historical_case_service import PROMOTION_MINIMUM_QUALITY
+
+    assert PROMOTION_MINIMUM_QUALITY == 0.55
+    assert HistoricalCaseService.promotion_block_reason(
+        {"quality_score": 0.54, "policy_risk": "NONE"}
+    ) == "QUALITY_SCORE"
+    assert HistoricalCaseService.promotion_block_reason(
+        {"quality_score": 0.9, "policy_risk": "HIGH"}
+    ) == "POLICY_RISK"
+
+
+def test_the_captured_row_uses_the_same_builder_as_the_naver_manual_capture(
+    database,
+) -> None:
+    """Same shared builder, same source_key rule -- only the text differs."""
+
+    inquiry_id = coupang_inquiry(database)
+    inquiry = inquiry_of(database, inquiry_id)
+    from services.learning_service import LearningService
+
+    built = LearningService(database).marketplace_answer_example(
+        inquiry=inquiry, answer=SELLER_ANSWER,
+    )
+    saved = service(database).capture(inquiry_id, actor="관리자")
+
+    assert built is not None
+    assert saved["source_key"] == built["source_key"]
+    assert saved["learning_source"] == built["learning_source"] == "SELLER_ANSWER"
