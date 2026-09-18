@@ -80,6 +80,48 @@ class AnswerRepository:
                 "이미 등록된 문의는 답변 초안을 다시 생성할 수 없습니다."
             )
 
+    @staticmethod
+    def _non_naver_market(row: Any) -> str | None:
+        """The row's market when it is not Naver, else ``None``.
+
+        ``None`` keeps the shared footer, so a Naver answer and a row that
+        cannot be read are byte-for-byte what they were.  Imported here rather
+        than at module scope: market policy is a service, and the repository
+        layer is imported by it.
+        """
+
+        from services.market_policy import non_naver_market
+
+        return non_naver_market(row["store_code"]) if row is not None else None
+
+    def _inquiry_market(self, inquiry_id: object) -> str | None:
+        """The market whose footer this inquiry's answers end with.
+
+        Persistence re-renders the answer, so the footer is chosen here as
+        well as at generation.  Choosing it in only one of the two places is
+        what put the Naver follow-up line on a Coupang draft.
+        """
+
+        with self.database.connection() as connection:
+            return self._non_naver_market(connection.execute(
+                "SELECT store_code FROM inquiries WHERE id = ?",
+                (inquiry_id,),
+            ).fetchone())
+
+    def _draft_market(self, draft_id: object) -> str | None:
+        """The same market, for a staff edit or a final answer being stored."""
+
+        with self.database.connection() as connection:
+            return self._non_naver_market(connection.execute(
+                """
+                SELECT i.store_code
+                FROM answer_drafts d
+                JOIN inquiries i ON i.id = d.inquiry_id
+                WHERE d.id = ?
+                """,
+                (draft_id,),
+            ).fetchone())
+
     def create_program_draft(
         self,
         inquiry_id: int,
@@ -90,7 +132,9 @@ class AnswerRepository:
         prompt_version: str | None = None,
         facts_version: str = "installation-date-v1",
     ) -> dict[str, Any]:
-        wrapped_answer = format_final_answer(result.answer)
+        wrapped_answer = format_final_answer(
+            result.answer, market=self._inquiry_market(inquiry_id)
+        )
         if not wrapped_answer:
             raise ValueError("Draft answer must not be empty.")
         review_status = (
@@ -410,7 +454,9 @@ class AnswerRepository:
             raise ValueError(f"Unsupported draft field: {field_name}")
         stored_value = value
         if field_name in {"edited_answer", "final_answer"} and value is not None:
-            stored_value = format_final_answer(value)
+            stored_value = format_final_answer(
+                value, market=self._draft_market(draft_id)
+            )
         with self.database.transaction() as connection:
             row = connection.execute(
                 "SELECT posted, updated_at FROM answer_drafts WHERE id = ?",

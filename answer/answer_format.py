@@ -37,21 +37,29 @@ def format_auto_answer(
     prefix: str = DEFAULT_PREFIX,
     fallback_notice: str = DEFAULT_FALLBACK_NOTICE,
     closing: str = DEFAULT_CLOSING,
+    market: object = None,
 ) -> str:
     """Compatibility entry point; the Final wrapper has one owner."""
 
     del prefix, fallback_notice, closing
-    return format_final_answer(body)
+    return format_final_answer(body, market=market)
 
 
-def format_final_answer(body: str) -> str:
-    """Apply the Template Repository wrapper once without rewriting it."""
+def format_final_answer(body: str, *, market: object = None) -> str:
+    """Apply the Template Repository wrapper once without rewriting it.
+
+    ``market`` selects the footer.  The shared one names 네이버 톡톡, so a
+    Coupang answer that carried it would send the customer to another
+    marketplace's channel -- and it is appended here, after the validator has
+    read the body, which is how it reached a Coupang draft the validator had
+    passed.  A caller that names no market keeps the shared footer.
+    """
 
     clean = extract_answer_body(body)
     if not clean:
         return ""
     wrapper = load_answer_wrapper()
-    return f"{wrapper.header}\n\n{clean}\n\n{wrapper.footer}"
+    return f"{wrapper.header}\n\n{clean}\n\n{wrapper.footer_for(market)}"
 
 
 def extract_answer_body(answer: str) -> str:
@@ -83,8 +91,15 @@ def extract_answer_body(answer: str) -> str:
             )
         )
     )
+    # Market footers are stripped as exact suffixes only, never used as a
+    # ``rfind`` marker below: the Coupang one is just the closing line, and
+    # searching for it would cut a body that legitimately ends in those words.
+    # They come last so a full shared footer is still matched whole.
+    exact_suffixes = tuple(
+        dict.fromkeys((*suffixes, *wrapper.market_footer_texts))
+    )
     matched_suffix = next(
-        (suffix for suffix in suffixes if text.endswith(suffix)), None
+        (suffix for suffix in exact_suffixes if text.endswith(suffix)), None
     )
     if matched_suffix:
         text = text[: -len(matched_suffix)].strip()

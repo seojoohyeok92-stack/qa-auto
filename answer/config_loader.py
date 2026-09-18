@@ -193,6 +193,26 @@ class AnswerWrapperTemplate:
     footer: str
     legacy_headers: tuple[str, ...] = ()
     legacy_footers: tuple[str, ...] = ()
+    # The footer for a marketplace whose customers must not be pointed at
+    # another market's channel.  The shared footer names 네이버 톡톡, which is
+    # a Naver-only follow-up route: appended to a Coupang answer it is wrong
+    # advice however correct the body is.  A market absent from here keeps the
+    # shared footer, so Naver is byte-for-byte what it was.
+    market_footers: tuple[tuple[str, str], ...] = ()
+
+    def footer_for(self, market: object = None) -> str:
+        """The footer this market's answers end with."""
+
+        code = str(market or "").strip().upper()
+        if not code:
+            return self.footer
+        return dict(self.market_footers).get(code, self.footer)
+
+    @property
+    def market_footer_texts(self) -> tuple[str, ...]:
+        """Every market-specific footer, for stripping a rendered answer."""
+
+        return tuple(dict.fromkeys(text for _, text in self.market_footers))
 
 
 def _read_json(path: Path, expected_type: type) -> Any:
@@ -257,11 +277,21 @@ def load_answer_wrapper(
         isinstance(item, str) for item in legacy_footers
     ):
         raise AnswerConfigError("공통 Wrapper legacy_footers가 올바르지 않습니다.")
+    market_footers = value.get("market_footers", {})
+    if not isinstance(market_footers, dict) or not all(
+        isinstance(key, str) and key.strip()
+        and isinstance(text, str) and text
+        for key, text in market_footers.items()
+    ):
+        raise AnswerConfigError("공통 Wrapper market_footers가 올바르지 않습니다.")
     return AnswerWrapperTemplate(
         header=header,
         footer=footer,
         legacy_headers=tuple(legacy_headers),
         legacy_footers=tuple(legacy_footers),
+        market_footers=tuple(
+            (key.strip().upper(), text) for key, text in market_footers.items()
+        ),
     )
 
 

@@ -65,6 +65,21 @@ def market_of(store_code: object) -> str | None:
     return market_from_store_code(store_code)
 
 
+def non_naver_market(store_code: object) -> str | None:
+    """The store's market when it is not Naver, else ``None``.
+
+    Market-aware handling only ever applies to a market other than Naver, and
+    every caller that renders or re-renders an answer needs the same answer to
+    "which footer does this store's customer read".  They ask here so that a
+    generated answer, the row it is persisted as, a staff edit and an approval
+    cannot disagree -- disagreeing is what put the Naver 톡톡 line back onto a
+    Coupang answer at one boundary while another had removed it.
+    """
+
+    market = market_of(store_code)
+    return market if market and market != NAVER else None
+
+
 def market_display_name(market: object) -> str:
     """The marketplace name as it should appear to a person."""
 

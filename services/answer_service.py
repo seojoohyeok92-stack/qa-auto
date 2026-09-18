@@ -75,13 +75,13 @@ from services.product_fact_guard import (
 )
 from services.market_policy import (
     COUPANG,
-    NAVER,
     account_of_store,
     foreign_market_wording,
     is_store_answer_generation_enabled,
     is_store_dps_enabled,
     is_store_post_enabled,
     market_of,
+    non_naver_market,
 )
 from repositories.coupang_product_mapping_repository import (
     CoupangProductMappingRepository,
@@ -153,11 +153,11 @@ def _non_naver_market(store_code: object) -> str | None:
     """The request's market when it is not Naver, else None.
 
     Market-aware handling below only ever applies to a market other than
-    Naver, so every Naver request keeps exactly the path it had.
+    Naver, so every Naver request keeps exactly the path it had.  The rule
+    lives in market policy so every rendering boundary shares one answer.
     """
 
-    market = market_of(store_code)
-    return market if market and market != NAVER else None
+    return non_naver_market(store_code)
 
 
 def _foreign_wording_for(request: Any, text: object) -> tuple[str, ...]:
@@ -1305,6 +1305,54 @@ class AnswerService:
             request.metadata["model_code"] = mapped["model_code"]
             request.metadata["canonical_model"] = mapped["canonical_model"]
             request.metadata["model_identity_source"] = "COUPANG_CONFIRMED_MAPPING"
+
+    def _block_foreign_market_wording(
+        self, inquiry_id: int, request: AnswerRequest, result: AnswerResult,
+    ) -> None:
+        """Fail the verdict when the *rendered* answer names another market.
+
+        The validator reads the body GPT wrote, and the wrapper is applied
+        after it, so nothing used to check the text the customer would
+        actually receive: a Coupang draft carrying the Naver footer was shown
+        as PASS and offered for automatic registration.  This is the last
+        line, placed after the final rendering boundary and run for every
+        route.  A Naver request has no foreign market and never reaches it.
+        """
+
+        foreign = _foreign_wording_for(request, result.answer)
+        if not foreign:
+            return
+        message = (
+            "최종 답변에 다른 마켓 안내 문구가 포함되어 있습니다: "
+            + ", ".join(foreign)
+        )
+        # Both the persisted column and the screen read the verdict from
+        # ``hybrid.validation``; the eligibility trace reads
+        # ``validator_result``.  Failing one and not the other would leave an
+        # answer that looks blocked on screen and cleared to the worker.
+        for verdict in (
+            (result.metadata.get("hybrid") or {}).get("validation"),
+            result.metadata.get("validator_result"),
+        ):
+            if not isinstance(verdict, dict):
+                continue
+            verdict["passed"] = False
+            verdict["status"] = "BLOCK"
+            verdict["errors"] = [
+                *(verdict.get("errors") or []), message,
+            ]
+        result.metadata["validation_status"] = "BLOCK"
+        result.metadata["foreign_market_wording"] = list(foreign)
+        self.logs.record_inquiry(
+            inquiry_id,
+            "FINAL_MARKET_WORDING_BLOCKED",
+            "최종 렌더링된 답변에 다른 마켓 문구가 있어 검증을 실패 처리했습니다.",
+            level="WARNING",
+            details={
+                "market": _non_naver_market(request.store_code),
+                "foreign_market_wording": list(foreign),
+            },
+        )
 
     @staticmethod
     def _product_knowledge_listing_id(request: AnswerRequest) -> Any:
@@ -3522,11 +3570,14 @@ class AnswerService:
             result.answer = self._complete_atomic_answer(
                 inquiry_id, request, result, phase9_analysis
             )
-            result.answer = format_final_answer(result.answer)
+            result.answer = format_final_answer(
+                result.answer, market=_non_naver_market(request.store_code)
+            )
             if not is_valid_draft(result.answer):
                 raise AnswerGenerationError(
                     "답변 생성 결과가 비어 있어 초안을 저장할 수 없습니다."
                 )
+            self._block_foreign_market_wording(inquiry_id, request, result)
             # Deterministic coverage gate: record whether the final answer
             # addresses what was asked.  It is placed after the final rendering
             # boundary so every route is measured the same way; clear missing

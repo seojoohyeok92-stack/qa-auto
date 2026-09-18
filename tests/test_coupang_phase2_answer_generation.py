@@ -523,3 +523,124 @@ def test_an_approved_coupang_answer_is_not_posted(database) -> None:
     assert not AnswerRepository(database).is_inquiry_posted(inquiry_id)
     with database.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM naver_post_attempts").fetchone()[0] == 0
+
+
+# --- H. the final rendering boundary ---------------------------------------------
+#
+# The validator reads the body GPT wrote; the wrapper footer is appended after
+# it.  Asserting only on HybridAnswerService therefore could not see the footer
+# at all, which is how a Coupang draft carrying "네이버 톡톡" was shown as PASS.
+# Everything here measures the text a customer would actually receive.
+
+class WrappedHybrid(RecordingHybrid):
+    """A GPT outcome shaped like production, including its validator verdict."""
+
+    def generate(self, request, rule_result):
+        outcome = super().generate(request, rule_result)
+        outcome.result.metadata["hybrid"] = {
+            "validation": {
+                "passed": True, "status": "PASS", "errors": [],
+                "warnings": [], "review_signals": [],
+            },
+        }
+        outcome.result.metadata["validator_result"] = (
+            outcome.result.metadata["hybrid"]["validation"]
+        )
+        return outcome
+
+
+def _rendered(database: Database, inquiry_id: int) -> str:
+    return str(
+        AnswerRepository(database).active_for_inquiry(inquiry_id)["original_answer"]
+    )
+
+
+def test_the_rendered_coupang_answer_carries_no_naver_footer(database) -> None:
+    from answer.config_loader import load_answer_wrapper
+
+    inquiry_id = coupang_inquiry(database)
+    service(database).generate_for_inquiry(inquiry_id)
+
+    rendered = _rendered(database, inquiry_id)
+    assert market_policy.foreign_market_wording(rendered, "COUPANG") == ()
+    assert "네이버" not in rendered and "톡톡" not in rendered
+    assert rendered.endswith(load_answer_wrapper().footer_for("COUPANG"))
+
+
+def test_the_rendered_naver_answer_keeps_the_shared_footer(database) -> None:
+    from answer.config_loader import load_answer_wrapper
+
+    inquiry_id = naver_inquiry(database)
+    service(database).generate_for_inquiry(inquiry_id)
+
+    wrapper = load_answer_wrapper()
+    rendered = _rendered(database, inquiry_id)
+    assert rendered.endswith(wrapper.footer)
+    assert "네이버 톡톡" in rendered
+
+
+def test_the_final_gate_fails_naver_wording_that_survives_rendering(database) -> None:
+    """A body the validator cleared is re-checked after the wrapper is applied.
+
+    Nothing before this point looks at the rendered text, so without the gate
+    an answer naming another marketplace reaches the operator as PASS and as a
+    candidate for automatic registration.
+    """
+
+    inquiry_id = coupang_inquiry(database)
+    hybrid = WrappedHybrid(answer=NAVER_ANSWER)
+    service(database, hybrid_service=hybrid).generate_for_inquiry(inquiry_id)
+
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    assert market_policy.foreign_market_wording(
+        str(draft["original_answer"]), "COUPANG"
+    ) == ("네이버",)
+    assert str(draft["validation_status"]).upper() not in {
+        "PASS", "PASSED", "PASS_WITH_WARNING",
+    }
+    verdict = draft["validator_result_json"] or {}
+    assert verdict.get("passed") is False
+    assert any("다른 마켓" in str(error) for error in verdict.get("errors") or [])
+
+
+def test_the_final_gate_leaves_a_naver_answer_alone(database) -> None:
+    inquiry_id = naver_inquiry(database)
+    hybrid = WrappedHybrid(answer=NAVER_ANSWER)
+    service(database, hybrid_service=hybrid).generate_for_inquiry(inquiry_id)
+
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    assert str(draft["validation_status"]).upper() in {"PASS", "PASSED"}
+    assert (draft["validator_result_json"] or {}).get("passed") is True
+
+
+def test_approving_a_coupang_answer_does_not_restore_the_naver_footer(database) -> None:
+    from answer.config_loader import load_answer_wrapper
+
+    inquiry_id = coupang_inquiry(database)
+    service(database).generate_for_inquiry(inquiry_id)
+    _approve(database, inquiry_id)
+
+    draft = AnswerRepository(database).active_for_inquiry(inquiry_id)
+    final = str(draft["final_answer"] or draft["original_answer"])
+    assert market_policy.foreign_market_wording(final, "COUPANG") == ()
+    assert final.endswith(load_answer_wrapper().footer_for("COUPANG"))
+
+
+def test_rendering_a_coupang_answer_is_idempotent_and_strips_a_naver_footer() -> None:
+    """Re-rendering must not stack footers, nor leave the Naver one behind.
+
+    A template/legacy answer arrives already wrapped with the shared footer;
+    the Coupang boundary has to remove it rather than append beside it.
+    """
+
+    from answer.answer_format import extract_answer_body, format_final_answer
+
+    body = "방문설치는 주문 시 설치 옵션을 선택해 주세요."
+    naver = format_final_answer(body)
+    coupang = format_final_answer(body, market="COUPANG")
+
+    assert format_final_answer(coupang, market="COUPANG") == coupang
+    assert format_final_answer(naver) == naver
+    assert format_final_answer(naver, market="COUPANG") == coupang
+    assert market_policy.foreign_market_wording(coupang, "COUPANG") == ()
+    assert extract_answer_body(coupang) == body == extract_answer_body(naver)

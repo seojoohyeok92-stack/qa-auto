@@ -25,6 +25,7 @@ from repositories.naver_posted_answer_repository import (
     NaverPostedAnswerRepository,
 )
 from services.learning_privacy_service import LearningPrivacyService
+from services.market_policy import non_naver_market
 from services.learning_signal_service import LearningSignalService
 
 
@@ -129,10 +130,25 @@ class LearningFeedbackService:
             original, draft_id = str(posted.get("answer_body") or ""), None
         else:
             raise ValueError("Dashboard에서 평가할 수 없는 답변 출처입니다.")
-        original = format_final_answer(original)
+        original = format_final_answer(
+            original, market=self._answer_market(inquiry_id)
+        )
         if not original:
             raise ValueError("평가할 답변 본문이 없습니다.")
         return inquiry, provenance, reference_id, draft_id, original
+
+    def _answer_market(self, inquiry_id: object) -> str | None:
+        """The market whose footer this inquiry's stored answers end with.
+
+        These re-render a text that was already persisted, and the comparisons
+        around them ("is the correction different from the original", "does
+        this mask equal a stored one") only hold while the re-render reproduces
+        what is stored.  Rendering for the wrong market would swap the footer
+        and silently make every such comparison false.
+        """
+
+        inquiry = self.inquiries.get(int(inquiry_id)) or {}
+        return non_naver_market(inquiry.get("store_code"))
 
     def _signals(
         self, reason: CorrectionReason, *, excluded: bool = False
@@ -179,7 +195,8 @@ class LearningFeedbackService:
                 if posted_available and posted_answer is not None
                 else draft.get("original_answer")
                 or ""
-            )
+            ),
+            market=self._answer_market(inquiry_id),
         )
         original_source = (
             AnswerProvenance.NAVER_POSTED
@@ -191,7 +208,10 @@ class LearningFeedbackService:
             if posted_available and posted_answer is not None
             else int(draft_id)
         )
-        corrected = format_final_answer(str(draft.get("edited_answer") or ""))
+        corrected = format_final_answer(
+            str(draft.get("edited_answer") or ""),
+            market=self._answer_market(inquiry_id),
+        )
         if not corrected or corrected == original:
             return []
         reason = normalize_reason(correction_reason)
@@ -306,7 +326,9 @@ class LearningFeedbackService:
             draft_id = None
         else:
             raise ValueError("Dashboard에서 평가할 수 없는 답변 출처입니다.")
-        original = format_final_answer(original)
+        original = format_final_answer(
+            original, market=self._answer_market(inquiry_id)
+        )
         if not original:
             raise ValueError("평가할 답변 본문이 없습니다.")
         masked_original = self.privacy.mask(original)

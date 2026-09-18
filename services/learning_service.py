@@ -26,6 +26,7 @@ from services.learning_compatibility_service import (
     profile_knowledge,
 )
 from services.learning_signal_service import LearningSignalService
+from services.market_policy import non_naver_market
 from answer.learning_signal import OriginKind
 
 
@@ -66,6 +67,19 @@ class LearningService:
         self.quality = LearningQualityService()
         self.signals = LearningSignalService(database)
 
+    def _answer_market(self, inquiry_id: object) -> str | None:
+        """The market whose footer this inquiry's stored answers end with.
+
+        These re-render a text that was already persisted, and the comparisons
+        around them ("is the correction different from the original", "does
+        this mask equal a stored one") only hold while the re-render reproduces
+        what is stored.  Rendering for the wrong market would swap the footer
+        and silently make every such comparison false.
+        """
+
+        inquiry = self.inquiries.get(int(inquiry_id)) or {}
+        return non_naver_market(inquiry.get("store_code"))
+
     def assert_positive_allowed(
         self,
         *,
@@ -81,7 +95,9 @@ class LearningService:
             if isinstance(answer_provenance, AnswerProvenance)
             else AnswerProvenance(str(answer_provenance))
         )
-        masked_answer = self.privacy.mask(format_final_answer(str(answer or "")))
+        masked_answer = self.privacy.mask(format_final_answer(
+            str(answer or ""), market=self._answer_market(inquiry_id),
+        ))
         rows = self.feedback_repository.active_dashboard_feedback(
             inquiry_id=int(inquiry_id),
             original_answer_source=provenance.value,

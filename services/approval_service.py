@@ -17,6 +17,7 @@ from services.quality_metrics_service import QualityMetricsService
 from services.learning_service import LearningService
 from services.learning_feedback_service import LearningFeedbackService
 from answer.answer_format import format_final_answer
+from services.market_policy import non_naver_market
 from answer.answer_provenance import AnswerProvenance
 from workflow.models import InquiryStatus, StepCode, StepStatus
 
@@ -105,6 +106,19 @@ class ApprovalService:
                 },
             )
 
+    def _answer_market(self, inquiry_id: int) -> str | None:
+        """The market whose footer this inquiry's answer ends with.
+
+        ``None`` for Naver and for an inquiry that cannot be read, so the
+        shared footer stays the default and nothing here can change a Naver
+        answer.  Re-rendering an edited or approved answer has to reach the
+        same footer as generation did, or an approval would put the Naver
+        follow-up line back onto a Coupang answer.
+        """
+
+        inquiry = self.inquiries.get(inquiry_id) or {}
+        return non_naver_market(inquiry.get("store_code"))
+
     def _assert_editable(
         self,
         inquiry_id: int,
@@ -171,7 +185,10 @@ class ApprovalService:
             raise StaleAnswerStateError()
         inquiry = self.inquiries.get(inquiry_id) or {}
         internal_posted_correction = bool(inquiry.get("source_answered"))
-        clean = format_final_answer(str(edited_answer or ""))
+        clean = format_final_answer(
+            str(edited_answer or ""),
+            market=self._answer_market(inquiry_id),
+        )
         current = str(draft.get("edited_answer") or "")
         if clean == current:
             if correction_reason and not autosave:
@@ -429,7 +446,8 @@ class ApprovalService:
     ) -> ApprovalOutcome:
         draft, _ = self._assert_editable(inquiry_id, draft_id)
         final_answer = format_final_answer(
-            str(draft.get("edited_answer") or draft.get("original_answer") or "")
+            str(draft.get("edited_answer") or draft.get("original_answer") or ""),
+            market=self._answer_market(inquiry_id),
         )
         learning = LearningService(self.database)
         learning.assert_positive_allowed(
