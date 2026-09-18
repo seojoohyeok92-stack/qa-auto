@@ -44,17 +44,23 @@ KAKAO_RECIPIENT_DEFAULT_BY_MARKET = {
 }
 
 
+class KakaoRecipientUnavailable(RuntimeError):
+    """No operations room is configured for this market, so nothing is sent."""
+
+
 def recipient_for_market(market: object) -> str:
-    """The chat room for one marketplace's Q&A notifications."""
+    """The chat room for one marketplace's Q&A notifications.
+
+    ``""`` when this market has no room of its own.  It deliberately does not
+    borrow another market's room, and there is no default: a notification with
+    nowhere to go is not sent, and the caller says so in the log.  Falling back
+    put operations messages somewhere nobody watches.
+    """
 
     code = str(market or "NAVER").strip().upper() or "NAVER"
     env_name = KAKAO_RECIPIENT_ENV_BY_MARKET.get(code)
     configured = os.getenv(env_name, "").strip() if env_name else ""
-    return (
-        configured
-        or KAKAO_RECIPIENT_DEFAULT_BY_MARKET.get(code)
-        or KAKAO_QNA_RECIPIENT
-    )
+    return configured or KAKAO_RECIPIENT_DEFAULT_BY_MARKET.get(code, "")
 
 
 def is_kakao_notify_enabled() -> bool:
@@ -358,6 +364,14 @@ def enqueue_kakao_message(
         str(recipient or "").strip()
         or recipient_for_market(market)
     )
+    if not target_recipient:
+        # Fail closed.  The dispatcher used to give an unaddressed event a
+        # default room, which is how an operations notification could arrive
+        # somewhere it was never meant to go.  Neither side guesses now.
+        raise KakaoRecipientUnavailable(
+            "카카오 운영 채팅방이 설정되지 않아 알림을 발송하지 않습니다: "
+            f"market={str(market or 'NAVER').strip().upper() or 'NAVER'}"
+        )
 
     event = {
         "title": title,

@@ -57,7 +57,9 @@ HEARTBEAT_FILE = SERVICE_ROOT / ".dispatcher.heartbeat"
 OUTBOX = SERVICE_ROOT / "outbox_events.jsonl"
 SETTINGS_XLSX = SERVICE_ROOT / "초기설정(경로설정).xlsx"
 
-DEFAULT_RECIPIENT = "테스트"
+# No default room.  An event that does not name its recipient is not sent:
+# a production notification landing in "테스트" is worse than one that is
+# missing, because nobody is watching that room for operations.
 
 # (선택) psutil
 try:
@@ -304,10 +306,13 @@ def drain_outbox_once() -> int:
                 or "[오제 챗봇 알림]"
             )
             msg = ev.get("message") or ""
-            recipient = (
-                ev.get("recipient")
-                or DEFAULT_RECIPIENT
-            )
+            recipient = str(ev.get("recipient") or "").strip()
+            if not recipient:
+                dlog(
+                    f"skip {i}/{len(lines)}: event has no recipient; "
+                    "not sent"
+                )
+                continue
             file_path = (
                 ev.get("file_path")
                 or ""
@@ -373,10 +378,14 @@ def drain_outbox_once() -> int:
                             or "[오제 챗봇 알림]"
                         )
                         msg = ev.get("message") or ""
-                        recipient = (
-                            ev.get("recipient")
-                            or DEFAULT_RECIPIENT
-                        )
+                        recipient = str(
+                            ev.get("recipient") or ""
+                        ).strip()
+                        if not recipient:
+                            dlog(
+                                "skip extra event: no recipient; not sent"
+                            )
+                            continue
                         file_path = (
                             ev.get("file_path")
                             or ""
