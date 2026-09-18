@@ -46,7 +46,13 @@ def normalize_model(value: object) -> str:
 
 _MODEL_CODE_TEXT = re.compile(r"^[A-Za-z0-9-]+$")
 _SAMSUNG_DISPLAY_CORE = re.compile(r"^\d{2}[A-Z]+\d[A-Z0-9]*$")
-_KOREAN_REGION_SUFFIX = re.compile(r"[A-Z]{0,3}KXKR$")
+# The Korean region suffix, whose last four characters vary by panel line:
+# EKXKR, GAKXKR and SKXKR alongside EFXKR and ESXKR.  Anchoring on KXKR read
+# the first three as a suffix and the last two as part of the model, so
+# LS32HG806ESXKR and 32HG806 were two products -- and the full name could not
+# reach its own catalogue record, S32HG806.  The bounded prefix is unchanged,
+# so a longer regional tail (WBGCXKR, EBGCXKR) is still not a suffix here.
+_KOREAN_REGION_SUFFIX = re.compile(r"[A-Z]{0,3}XKR$")
 
 
 def _model_code_aliases(aliases: Mapping[object, object] | None) -> dict[str, str]:
