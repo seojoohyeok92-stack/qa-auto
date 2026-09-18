@@ -53,6 +53,27 @@ def _first_text(value: Any) -> str:
     return ""
 
 
+# Marketplace identifiers a Historical case may carry into its Learning row.
+# Provenance only: nothing routes, scopes or retrieves on these.
+_CARRIED_MARKET_PROVENANCE = (
+    "account_code",
+    "origin_store_code",
+    "source_question_id",
+    "external_inquiry_id",
+    "seller_product_id",
+    "vendor_item_id",
+    "product_id",
+    "source_created_at",
+    "seller_answer_selection",
+    "inquiry_comment_id",
+    "seller_answer_provenance",
+    "source_origin_detail",
+    "captured_from_inquiry_id",
+    "confirmed_canonical_model",
+    "model_identity_source",
+)
+
+
 class LearningService:
     """승인/등록 트랜잭션의 결과만 복제하는 격리된 Learning Layer."""
 
@@ -933,6 +954,21 @@ class LearningService:
                 "shared_cross_market_learning": shared_cross_market,
                 "origin_market": origin_market,
                 "market_applicability": applicability,
+                # The marketplace identifiers the case carries, copied so a
+                # Learning row names the account and listing it came from
+                # without a join back to Historical.  Nested under one key so
+                # it cannot collide with a field a reader already looks up --
+                # a bare ``product_id`` here would change product identity --
+                # and only keys the case actually has are copied.
+                **(
+                    {"market_provenance": carried}
+                    if (carried := {
+                        key: historical_metadata[key]
+                        for key in _CARRIED_MARKET_PROVENANCE
+                        if key in historical_metadata
+                    })
+                    else {}
+                ),
             },
             "active": True,
         }

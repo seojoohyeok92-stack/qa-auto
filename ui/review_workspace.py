@@ -70,6 +70,9 @@ from services.learning_feedback_service import LearningFeedbackService
 from services.learning_privacy_service import LearningPrivacyService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
 from services.dps_agent_client import get_dps_agent_status
+from services.coupang_seller_answer_learning_service import (
+    CoupangSellerAnswerLearningService,
+)
 from services.local_auth_service import Permission
 from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
@@ -1348,6 +1351,69 @@ def _source_seller_answer(inquiry: dict[str, Any]) -> str:
     return str(inquiry.get("seller_answer") or "").strip()
 
 
+def _render_seller_answer_learning(
+    database: Database, inquiry: dict[str, Any]
+) -> None:
+    """The one action this read-only panel offers: keep this reply as Learning.
+
+    The answer itself stays read-only.  Nothing here edits, approves,
+    registers or generates anything -- it only records that a person judged
+    this marketplace reply worth keeping, and only when they click.
+
+    An inquiry the historical backfill already promoted reads as captured on
+    the first render, so the button is never offered for work already done.
+    """
+
+    service = CoupangSellerAnswerLearningService(database)
+    try:
+        status = service.status(inquiry)
+    except Exception:  # noqa: BLE001 - a read-only panel never fails to draw
+        LOGGER.exception("seller answer learning status failed")
+        return
+    inquiry_id = int(inquiry["id"])
+    if status.captured:
+        st.button(
+            "Learning 반영 완료",
+            key=f"seller_answer_learning_{inquiry_id}",
+            disabled=True,
+            use_container_width=True,
+        )
+        st.caption(
+            "이 판매자 답변은 이미 Learning에 반영되어 있습니다"
+            + (
+                f" (Learning #{status.learning_example_id})."
+                if status.learning_example_id
+                else "."
+            )
+        )
+        return
+    if not status.available:
+        if status.message:
+            st.caption(status.message)
+        return
+    if not can(Permission.STAFF_EDIT):
+        return
+    if st.button(
+        "Learning 반영",
+        key=f"seller_answer_learning_{inquiry_id}",
+        use_container_width=True,
+    ):
+        try:
+            saved = service.capture(inquiry_id, actor=current_actor())
+        except Exception as error:  # noqa: BLE001 - shown, never raised at staff
+            LOGGER.exception("seller answer learning capture failed")
+            st.error(f"Learning 반영에 실패했습니다: {error}")
+        else:
+            st.success(
+                f"판매자 답변을 Learning에 반영했습니다 (Learning #{saved['id']})."
+            )
+            st.rerun()
+    st.caption(
+        "쿠팡 실제 판매자 답변을 Learning에 반영합니다. "
+        "답변 수정·승인·등록은 열리지 않습니다."
+    )
+
+
 def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
     """What an approver can do next, which depends on the marketplace.
 
@@ -1895,6 +1961,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "마켓에서 조회한 기존 판매자 답변입니다. "
                     "이 시스템이 등록한 답변이 아니며 읽기 전용입니다."
                 )
+                _render_seller_answer_learning(database, inquiry)
             elif selected_view == NAVER_POSTED_VIEW:
                 if posted_answer_available:
                     st.text_area(
