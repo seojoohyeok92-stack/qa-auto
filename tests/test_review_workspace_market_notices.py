@@ -1,9 +1,8 @@
 """What the review workspace tells an approver to do next.
 
-Approval only produces a Final Answer; registering it is a separate step.  On
-a market production does not post to, that step does not exist and the button
-beside it is disabled -- so the notice must not send an approver off to
-register something that cannot be registered.
+Approval only produces a Final Answer; registering it is a separate step.  The
+notice must match the button beside it: it may point at that step only on a
+market a person can actually register to, and must never name another market.
 """
 
 from __future__ import annotations
@@ -27,10 +26,13 @@ def test_naver_still_points_at_the_registration_step() -> None:
 @pytest.mark.parametrize(
     "inquiry", [COUPANG_NS, COUPANG_PLUS], ids=["ns", "plus"]
 )
-def test_coupang_says_registration_is_off_rather_than_offering_it(inquiry) -> None:
+def test_coupang_now_points_at_its_own_registration_step(inquiry) -> None:
+    """Manual Coupang registration is open, so the notice offers that step."""
+
     notice = _approval_next_step_notice(inquiry)
-    assert notice == "승인 완료했습니다. 현재 쿠팡 답변 등록은 비활성화되어 있습니다."
-    assert "진행할 수 있습니다" not in notice
+    assert notice == (
+        "승인 완료했습니다. 아래에서 쿠팡 답변 등록을 별도로 진행할 수 있습니다."
+    )
 
 
 @pytest.mark.parametrize(

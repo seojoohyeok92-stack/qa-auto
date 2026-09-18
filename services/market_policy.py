@@ -48,6 +48,13 @@ ANSWER_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 AUTOMATIC_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER})
 DPS_MARKETS: frozenset[str] = frozenset({NAVER})
 POST_MARKETS: frozenset[str] = frozenset({NAVER})
+# Registering an answer a person is looking at, on their explicit click.  It is
+# deliberately NOT ``POST_MARKETS``: that set also decides which stores the
+# auto-post queue selects and which inquiries the screen treats as read-only,
+# so adding a market there would open automatic posting and re-open answer
+# editing on inquiries the marketplace has already answered.  This opens the
+# button and nothing else.
+MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 KAKAO_MARKETS: frozenset[str] = frozenset({NAVER})
 
 # Wording that names one marketplace's own procedure.  An answer for another
@@ -154,6 +161,17 @@ def is_store_post_enabled(store_code: object) -> bool:
     """Whether an answer may be registered at this store's marketplace."""
 
     return _market_in(market_of(store_code), POST_MARKETS)
+
+
+def is_store_manual_post_enabled(store_code: object) -> bool:
+    """Whether a person may register an answer for this store themselves.
+
+    Automatic posting is ``is_store_post_enabled`` and stays separate: a
+    market may be answerable by hand long before anything may answer it
+    unattended.
+    """
+
+    return _market_in(market_of(store_code), MANUAL_POST_MARKETS)
 
 
 def is_kakao_market_enabled(market: object) -> bool:

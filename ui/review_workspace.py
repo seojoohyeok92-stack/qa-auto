@@ -57,10 +57,12 @@ from services.approval_service import (
     ApprovalService,
 )
 from services.market_policy import (
+    COUPANG,
     NAVER,
     is_store_answer_generation_enabled,
     is_store_automatic_generation_enabled,
     is_store_dps_enabled,
+    is_store_manual_post_enabled,
     is_store_post_enabled,
     market_of,
     store_display_name,
@@ -75,6 +77,7 @@ from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
 )
 from services.naver_post_dry_run_service import NaverPostDryRunService
+from services.coupang_post_service import CoupangPostService
 from services.naver_post_service import NaverPostService
 from services.post_review_service import PostReviewService
 from services.runtime_diagnostics import (
@@ -1390,7 +1393,7 @@ def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
     """
 
     market = store_display_name(inquiry.get("store_code"))
-    if is_store_post_enabled(inquiry.get("store_code")):
+    if is_store_manual_post_enabled(inquiry.get("store_code")):
         return f"승인 완료했습니다. 아래에서 {market} 답변 등록을 별도로 진행할 수 있습니다."
     return f"승인 완료했습니다. 현재 {market} 답변 등록은 비활성화되어 있습니다."
 
@@ -1661,7 +1664,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         # the button's name but must not be able to press it: there is no post
         # client for it and the answer path is closed.
         post_market_name = store_display_name(inquiry.get("store_code"))
-        post_market_read_only = not is_store_post_enabled(inquiry.get("store_code"))
+        post_market_read_only = not is_store_manual_post_enabled(
+            inquiry.get("store_code")
+        )
         registration_start = top_actions[3].button(
             f"{post_market_name} 답변 등록",
             disabled=(
@@ -4249,6 +4254,10 @@ def _render_naver_post_prepare(
     confirm_key = f"naver_post_confirm_{inquiry_id}"
     start_key = f"naver_post_flow_start_{inquiry_id}"
     settings = NaverPostSettings.from_environment()
+    # Same panel, same two steps.  Only the preflight and the request differ,
+    # because Coupang has no posted-answer snapshot to resolve a target from
+    # and no NAVER_POST_ENABLED switch of its own.
+    coupang = market_of(inquiry.get("store_code")) == COUPANG
     if not (
         st.session_state.get(start_key)
         or st.session_state.get(confirm_key)
@@ -4285,7 +4294,7 @@ def _render_naver_post_prepare(
     }
     actions = st.columns([1.2, 4.6], gap="small")
     actual = bool(st.session_state.pop(start_key, False))
-    if settings.enabled:
+    if coupang or settings.enabled:
         actions[1].caption(
             "수동 등록 모드 · 현재 Final Answer의 안전조건 확인 후 명시적 확인이 필요합니다."
         )
@@ -4294,9 +4303,15 @@ def _render_naver_post_prepare(
             "NAVER_POST_ENABLED=false · 네이버 실제 등록 기능이 잠겨 있습니다."
         )
     if actual:
-        preflight = NaverPostDryRunService(database).run(
-            inquiry_id, manual_confirmed=True,
-        ).to_dict()
+        preflight = (
+            CoupangPostService(database).preflight(
+                inquiry_id, retry_requested=post_status == "POST_FAILED",
+            )
+            if coupang
+            else NaverPostDryRunService(database).run(
+                inquiry_id, manual_confirmed=True,
+            ).to_dict()
+        )
         st.session_state[result_key] = preflight
         if preflight.get("eligible"):
             st.session_state[confirm_key] = True
@@ -4351,7 +4366,11 @@ def _render_naver_post_prepare(
             st.session_state.pop(start_key, None)
             st.rerun()
         if confirm:
-            outcome = NaverPostService(database).post(
+            poster = (
+                CoupangPostService(database) if coupang
+                else NaverPostService(database)
+            )
+            outcome = poster.post(
                 inquiry_id,
                 actor=current_actor(),
                 confirmed=True,
@@ -4365,16 +4384,17 @@ def _render_naver_post_prepare(
 
     post_result = st.session_state.get(post_result_key)
     if isinstance(post_result, dict):
+        result_market = store_display_name(inquiry.get("store_code"))
         if post_result.get("status") == "POSTED":
-            st.success("네이버 등록 완료")
+            st.success(f"{result_market} 등록 완료")
         elif post_result.get("status") == "POST_UNKNOWN":
             st.error(
                 "등록 결과를 확정할 수 없습니다. 자동 재시도하지 말고 "
-                "네이버 상태를 확인해 주세요."
+                f"{result_market} 상태를 확인해 주세요."
             )
         elif post_result.get("status") not in {"BLOCKED", None}:
             st.error(
-                "네이버 등록 실패 · "
+                f"{result_market} 등록 실패 · "
                 f"{post_result.get('error_code') or 'UNKNOWN'}"
             )
         elif post_result.get("status") == "BLOCKED":
@@ -4472,7 +4492,7 @@ def render_review_workspace(
         # Registration and DPS are write paths for this marketplace.  Where
         # a market has neither, the panels are not drawn at all rather than
         # drawn full of controls that refuse.
-        if is_store_post_enabled(inquiry.get("store_code")):
+        if is_store_manual_post_enabled(inquiry.get("store_code")):
             _render_naver_post_prepare(database, inquiry)
     with dps_column:
         with st.container(

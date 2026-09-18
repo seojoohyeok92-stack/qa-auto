@@ -150,20 +150,46 @@ class CoupangAccountSettings:
     access_key: str = ""
     secret_key: str = ""
     vendor_id: str = ""
+    # The Seller Portal (WING) account id this seller answers as.  Coupang
+    # rejects a reply whose ``replyBy`` does not belong to the ``vendorId``,
+    # so it is per account like the keys above.  Reading an inquiry never
+    # needs it, which is why ``configured`` below ignores it: requiring it
+    # would make a collect-only account look unconfigured and stop the sync.
+    wing_id: str = ""
 
     @property
     def configured(self) -> bool:
         return bool(self.access_key and self.secret_key and self.vendor_id)
 
     @property
+    def post_configured(self) -> bool:
+        """Whether this account may also answer, not only read."""
+
+        return bool(self.configured and self.wing_id)
+
+    @property
     def partially_configured(self) -> bool:
         return any((self.access_key, self.secret_key, self.vendor_id)) and not self.configured
 
+    @property
+    def env_prefix(self) -> str:
+        return "COUPANG_2" if self.account_code == COUPANG_OJE_PLUS else "COUPANG"
+
     def missing_variables(self) -> tuple[str, ...]:
-        prefix = "COUPANG_2" if self.account_code == COUPANG_OJE_PLUS else "COUPANG"
-        names = (f"{prefix}_ACCESS_KEY", f"{prefix}_SECRET_KEY", f"{prefix}_VENDOR_ID")
+        names = (
+            f"{self.env_prefix}_ACCESS_KEY",
+            f"{self.env_prefix}_SECRET_KEY",
+            f"{self.env_prefix}_VENDOR_ID",
+        )
         values = (self.access_key, self.secret_key, self.vendor_id)
         return tuple(name for name, value in zip(names, values) if not value)
+
+    def missing_post_variables(self) -> tuple[str, ...]:
+        """What is still missing before this account may answer an inquiry."""
+
+        return self.missing_variables() + (
+            () if self.wing_id else (f"{self.env_prefix}_WING_ID",)
+        )
 
 
 # What each Coupang seller account is called on screen.  Kept apart from the
@@ -185,6 +211,7 @@ def get_coupang_accounts() -> tuple[CoupangAccountSettings, ...]:
             access_key=os.getenv("COUPANG_ACCESS_KEY", "").strip(),
             secret_key=os.getenv("COUPANG_SECRET_KEY", "").strip(),
             vendor_id=os.getenv("COUPANG_VENDOR_ID", "").strip(),
+            wing_id=os.getenv("COUPANG_WING_ID", "").strip(),
         ),
         CoupangAccountSettings(
             account_code=COUPANG_OJE_PLUS,
@@ -192,6 +219,7 @@ def get_coupang_accounts() -> tuple[CoupangAccountSettings, ...]:
             access_key=os.getenv("COUPANG_2_ACCESS_KEY", "").strip(),
             secret_key=os.getenv("COUPANG_2_SECRET_KEY", "").strip(),
             vendor_id=os.getenv("COUPANG_2_VENDOR_ID", "").strip(),
+            wing_id=os.getenv("COUPANG_2_WING_ID", "").strip(),
         ),
     )
     return tuple(account for account in accounts if account.configured)
@@ -207,6 +235,7 @@ def get_coupang_account(account_code: str) -> CoupangAccountSettings:
             os.getenv("COUPANG_ACCESS_KEY", "").strip(),
             os.getenv("COUPANG_SECRET_KEY", "").strip(),
             os.getenv("COUPANG_VENDOR_ID", "").strip(),
+            os.getenv("COUPANG_WING_ID", "").strip(),
         ),
         COUPANG_OJE_PLUS: CoupangAccountSettings(
             COUPANG_OJE_PLUS,
@@ -214,6 +243,7 @@ def get_coupang_account(account_code: str) -> CoupangAccountSettings:
             os.getenv("COUPANG_2_ACCESS_KEY", "").strip(),
             os.getenv("COUPANG_2_SECRET_KEY", "").strip(),
             os.getenv("COUPANG_2_VENDOR_ID", "").strip(),
+            os.getenv("COUPANG_2_WING_ID", "").strip(),
         ),
     }
     account = all_accounts.get(target)
