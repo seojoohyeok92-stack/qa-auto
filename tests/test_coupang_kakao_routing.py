@@ -115,6 +115,32 @@ def coupang_inquiry(
     return row_id
 
 
+PRODUCT_NAME = "삼탠바이미(32\" M50D + VI) / 화이트 / 메인코드"
+OPTION_NAME = "스탠드형 방문설치 32인치"
+
+
+def seed_catalog(database: Database, *, account: str = "OJE_NS") -> None:
+    """The catalogue rows the dashboard's own enrichment reads the name from."""
+
+    from repositories.coupang_product_catalog_repository import (
+        CoupangProductCatalogRepository,
+    )
+
+    catalog = CoupangProductCatalogRepository(database)
+    catalog.upsert_product(
+        account_code=account,
+        data={
+            "sellerProductId": SPID, "status": "APPROVED",
+            "sellerProductName": PRODUCT_NAME,
+        },
+        sync_token="t",
+    )
+    catalog.upsert_option(
+        account_code=account, seller_product_id=SPID,
+        item={"vendorItemId": VENDOR_ITEM, "itemName": OPTION_NAME},
+    )
+
+
 def add_draft(database: Database, inquiry_id: int, answer: str = ANSWER) -> int:
     with database.transaction() as connection:
         cursor = connection.execute(
@@ -331,3 +357,99 @@ def test_opening_kakao_opens_neither_generation_nor_automatic_posting() -> None:
     assert market_policy.post_enabled_store_codes(
         ["COUPANG_OJE_NS", "COUPANG_OJE_PLUS", "OJE_PLUS"]
     ) == ["OJE_PLUS"]
+
+
+# --- the product name the dashboard already shows --------------------------------
+
+@pytest.mark.parametrize("account", ["OJE_NS", "OJE_PLUS"])
+def test_a_registration_notification_names_the_product(
+    database, outbox, account,
+) -> None:
+    """A/C: the name is the dashboard's, for either seller account.
+
+    A Coupang row stores only ids, so the raw inquiry has no product name and
+    the message used to read "상품명: -" for an inquiry whose card showed the
+    product.
+    """
+
+    seed_catalog(database, account=account)
+    inquiry_id = coupang_inquiry(database, account=account, inquiry_id="17000020")
+    add_draft(database, inquiry_id)
+
+    assert post(database, inquiry_id, RecordingTransport()).status == "POSTED"
+
+    message = events(outbox)[0]["message"]
+    assert f"상품명: {PRODUCT_NAME}" in message
+    assert f"옵션명: {OPTION_NAME}" in message
+    assert "상품명: -" not in message
+
+
+def test_the_notified_name_is_the_one_the_screen_reads(database, outbox) -> None:
+    """Same repository call, so the two can never disagree."""
+
+    seed_catalog(database)
+    inquiry_id = coupang_inquiry(database, inquiry_id="17000021")
+    add_draft(database, inquiry_id)
+    row = InquiryRepository(database)
+    displayed = row.get_by_source("COUPANG_OJE_NS", "COUPANG_ONLINE_INQUIRY", "17000021")
+
+    assert post(database, inquiry_id, RecordingTransport()).status == "POSTED"
+
+    assert f"상품명: {displayed['product_name']}" in events(outbox)[0]["message"]
+
+
+def test_an_inquiry_with_no_catalogued_name_keeps_the_dash(database, outbox) -> None:
+    """B: nothing is invented from the model, the option or the product id."""
+
+    inquiry_id = coupang_inquiry(database, inquiry_id="17000022")
+    add_draft(database, inquiry_id)
+
+    assert post(database, inquiry_id, RecordingTransport()).status == "POSTED"
+
+    message = events(outbox)[0]["message"]
+    assert "상품명: -" in message
+    # Not an id, not a model code, not the option text standing in for a name.
+    assert SPID not in message
+    assert VENDOR_ITEM not in message
+
+
+def test_another_inquiry_never_lends_its_product_name(database, outbox) -> None:
+    """The enrichment is keyed on the source id, so it must match this row."""
+
+    seed_catalog(database)
+    named = coupang_inquiry(database, inquiry_id="17000023")
+    add_draft(database, named)
+    assert post(database, named, RecordingTransport()).status == "POSTED"
+    assert f"상품명: {PRODUCT_NAME}" in events(outbox)[0]["message"]
+
+    # A different account has no catalogue row, so it gets no name at all.
+    other = coupang_inquiry(database, account="OJE_PLUS", inquiry_id="17000024")
+    add_draft(database, other)
+    assert post(database, other, RecordingTransport()).status == "POSTED"
+    assert "상품명: -" in events(outbox)[1]["message"]
+
+
+def test_a_missing_catalogue_never_blocks_the_registration(database, outbox) -> None:
+    """A display name is a display name; it cannot fail a confirmed post."""
+
+    from services.coupang_post_service import CoupangPostService as Service
+
+    inquiry_id = coupang_inquiry(database, inquiry_id="17000025")
+    add_draft(database, inquiry_id)
+
+    def exploding(*_args, **_kwargs):
+        raise RuntimeError("catalogue unavailable")
+
+    from api.coupang_post_client import CoupangPostClient
+
+    poster = Service(
+        database,
+        client=CoupangPostClient(
+            access_key="k", secret_key="s", transport=RecordingTransport(),
+        ),
+        account_resolver=lambda code: ACCOUNTS[str(code).upper()],
+    )
+    poster.inquiries.get_by_source = exploding
+
+    assert poster.post(inquiry_id, actor="관리자", confirmed=True).status == "POSTED"
+    assert "상품명: -" in events(outbox)[0]["message"]

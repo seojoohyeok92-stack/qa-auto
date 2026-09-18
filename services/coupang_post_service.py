@@ -114,6 +114,44 @@ class CoupangPostService:
             "BLOCKED", inquiry_id, None, None, code, message, 0
         )
 
+    def _display_names(self, inquiry: dict[str, Any]) -> tuple[str, str]:
+        """The product and option names the dashboard shows for this inquiry.
+
+        A Coupang row stores only ids -- the names are attached when it is
+        read for display, and ``get`` does not attach them.  That is why the
+        registration notification said "상품명: -" for an inquiry whose card
+        showed the product all along.
+
+        Read back through the same repository call the answer path and the
+        screen already use (``get_by_source``, which applies the marketplace
+        enrichment), never by assembling a name out of the model, the option
+        or the seller product id.  If there is genuinely no name, there is
+        none, and the message keeps its existing dash.
+        """
+
+        product = str(inquiry.get("product_name") or "").strip()
+        option = str(inquiry.get("option_name") or "").strip()
+        if product and option:
+            return product, option
+        try:
+            enriched = self.inquiries.get_by_source(
+                str(inquiry.get("store_code") or ""),
+                str(inquiry.get("source_type") or ""),
+                str(inquiry.get("source_question_id") or ""),
+            )
+        except Exception:  # noqa: BLE001 - a display name never blocks a post
+            return product, option
+        # The lookup is by source key, so a row that is not this one must not
+        # lend its product name to this inquiry's message.
+        if enriched is None or int(enriched.get("id") or 0) != int(
+            inquiry.get("id") or 0
+        ):
+            return product, option
+        return (
+            product or str(enriched.get("product_name") or "").strip(),
+            option or str(enriched.get("option_name") or "").strip(),
+        )
+
     def _complete_workflow(self, inquiry_id: int, *, attempt_id: int, actor: str) -> None:
         try:
             self.workflows.initialize_steps(inquiry_id)
@@ -407,12 +445,13 @@ class CoupangPostService:
         # duplicate it.  ``notify_qna_safely`` resolves the room from the
         # store code, so both Coupang accounts reach the one Coupang room and
         # a market that may not be notified still sends nothing.
+        product_name, option_name = self._display_names(inquiry)
         try:
             notify_qna_safely(
                 title="[쿠팡 Q&A 답변 등록 완료]",
                 store_code=store_code,
-                product=str(inquiry.get("product_name") or ""),
-                option_name=str(inquiry.get("option_name") or ""),
+                product=product_name,
+                option_name=option_name,
                 question=str(inquiry.get("content") or inquiry.get("title") or ""),
                 # The text Coupang just acknowledged, not the draft it came from.
                 answer=post_answer,
