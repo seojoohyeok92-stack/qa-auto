@@ -222,9 +222,28 @@ class CoupangHistoricalInquiryBackfillService:
                 return
 
             candidate = dict(work_item)
+            # The Coupang payload carries no product name, only ids; the names
+            # are attached when the row is read for display.  Reading it back
+            # through that same call is what stops a Historical case -- and the
+            # Learning row promoted from it -- recording no product at all.
+            display = self.inquiries.get_by_source(
+                str(work_item.get("store_code") or ""),
+                str(work_item.get("source_type") or ""),
+                str(work_item.get("source_question_id") or ""),
+            ) or {}
+            if int(display.get("id") or 0) != int(upsert.inquiry_id or 0):
+                display = {}
             candidate.update(
                 {
                     "local_inquiry_id": upsert.inquiry_id,
+                    # Only a name the catalogue actually holds.  Absent one the
+                    # field stays empty rather than being built from an id.
+                    "product_name": (
+                        str(display.get("product_name") or "").strip() or None
+                    ),
+                    "option_name": (
+                        str(display.get("option_name") or "").strip() or None
+                    ),
                     "seller_answer": normalized.seller_answer,
                     "source_answered": True,
                     "source_updated_at": normalized.answer_created_at

@@ -660,7 +660,7 @@ class LearningService:
         Historical promotion, which still applies it.
         """
 
-        inquiry = self.inquiries.get(int(inquiry_id))
+        inquiry = self._marketplace_inquiry(int(inquiry_id))
         clean = str(answer or "").strip()
         if inquiry is None or not clean:
             return None
@@ -754,6 +754,35 @@ class LearningService:
                 result["excluded"] += 1; continue
             self.repository.upsert(example); result["saved"] += 1
         return result
+
+    def _marketplace_inquiry(self, inquiry_id: int) -> dict[str, Any] | None:
+        """The inquiry as the screen shows it, for a market that needs that.
+
+        A Coupang row stores no product or option name -- only ids -- and the
+        names the dashboard shows are attached when it is read for display.
+        ``get`` does not attach them, so a Learning row kept from a Coupang
+        answer recorded no product at all while the card beside it named one.
+
+        The same read the answer path and the screen already use, not a new
+        catalogue query.  Naver rows are returned exactly as ``get`` returns
+        them, so nothing about Naver Learning changes.
+        """
+
+        inquiry = self.inquiries.get(int(inquiry_id))
+        if inquiry is None or non_naver_market(inquiry.get("store_code")) is None:
+            return inquiry
+        enriched = self.inquiries.get_by_source(
+            str(inquiry.get("store_code") or ""),
+            str(inquiry.get("source_type") or ""),
+            str(inquiry.get("source_question_id") or ""),
+        )
+        # Keyed on the source id, so a row that is not this one must not lend
+        # its product name to this inquiry.
+        if enriched is None or int(enriched.get("id") or 0) != int(
+            inquiry.get("id") or 0
+        ):
+            return inquiry
+        return enriched
 
     def capture_seller_answer(self, *, inquiry_id: int, answer: str) -> dict[str, Any] | None:
         inquiry = self.inquiries.get(inquiry_id)
