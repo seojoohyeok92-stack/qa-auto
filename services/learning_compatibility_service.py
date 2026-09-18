@@ -5,7 +5,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
-from repositories.product_catalog_repository import canonical_model_identity
+from repositories.product_catalog_repository import (
+    ProductCatalogRepository,
+    canonical_model_identity,
+)
 from services.product_fact_guard import (
     DIMENSION_TOKEN,
     extract_model_code,
@@ -344,6 +347,32 @@ def _clean(value: object) -> str | None:
     return text or None
 
 
+def _catalog_aliases() -> Mapping[str, Any] | None:
+    """The operator-maintained model-code equivalences, or ``None``.
+
+    ``canonical_model_identity`` applies them only when it is given them,
+    and this module was the one caller that did not.  Product Catalog,
+    Product Knowledge and the Coupang mapping service all pass them, so the
+    same two codes could be one product to the catalogue and two to
+    Learning: a 43-inch answer stored under ``LH43BEHHLGFXKR`` was reported
+    as a different model from the option's own representative ``LH43BEDH``
+    and went unused.
+
+    Which codes are equivalent stays where it already is -- ``MODEL_ALIASES``
+    in the catalogue -- so this adds no rule of its own and cannot widen
+    one.  The catalogue read is cached on the file's path, mtime and size.
+
+    ``None`` when the catalogue cannot be read, which restores exactly the
+    previous behaviour: comparing two identities must not fail because a
+    catalogue file is missing.
+    """
+
+    try:
+        return ProductCatalogRepository().catalog().get("aliases")
+    except Exception:  # noqa: BLE001 - identity comparison never blocks
+        return None
+
+
 def _model_code(*values: object) -> str | None:
     # Only the first two inputs are explicit model-code fields.  Product names
     # and options must be pattern-scanned; treating the whole display name as a
@@ -353,7 +382,9 @@ def _model_code(*values: object) -> str | None:
         if explicit:
             code = explicit.upper()
             if code not in MODEL_STOPWORDS and not _is_dimension_token(code):
-                return canonical_model_identity(code) or code
+                return canonical_model_identity(
+                    code, aliases=_catalog_aliases()
+                ) or code
     for value in values[2:]:
         text = str(value or "").upper()
         candidates = [
@@ -364,7 +395,9 @@ def _model_code(*values: object) -> str | None:
         ]
         if candidates:
             code = max(candidates, key=len).upper()
-            return canonical_model_identity(code) or code
+            return canonical_model_identity(
+                code, aliases=_catalog_aliases()
+            ) or code
     return None
 
 
