@@ -2182,6 +2182,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         ):
             evaluation_source = AnswerProvenance.NAVER_POSTED.value
             evaluation_reference_id = int(posted_answer_record["id"])
+        elif (
+            selected_view == COUPANG_SELLER_VIEW
+            and _source_seller_answer(inquiry)
+        ):
+            # A market with no posted-answer row: the reply is keyed on the
+            # inquiry, the same reference the positive capture records.
+            evaluation_source = AnswerProvenance.HISTORICAL_VERIFIED.value
+            evaluation_reference_id = inquiry_id
         elif selected_view == "Final Answer" and final_answer:
             final_provenance = str(approval_trace.get("provenance") or "")
             if final_provenance == AnswerProvenance.NAVER_POSTED.value:
@@ -2286,7 +2294,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         _render_negative_learning_saved(
             display_negative, inquiry_id=inquiry_id
         )
-        if not read_only:
+        if not read_only or _seller_answer_learning_approval(inquiry):
             with st.expander("이 답변이 잘못됨", expanded=False):
                 st.caption(
                     "현재 선택한 답변을 삭제하지 않고 Negative Learning으로 기록합니다. "
@@ -2420,7 +2428,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         _render_excluded_learning_saved(
             display_excluded, inquiry_id=inquiry_id
         )
-        if not read_only:
+        if not read_only or _seller_answer_learning_approval(inquiry):
             with st.expander("학습 제외", expanded=False):
                 st.caption(
                     "좋고 나쁨을 평가하지 않고, 선택한 답변을 향후 Learning 반영 대상에서 제외합니다. 원본 답변은 삭제하지 않습니다."
@@ -2905,10 +2913,10 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         if not _seller_answer_learning_approval(inquiry):
             approve = False
             cancel = False
-        negative_save = False
-        negative_revoke = False
-        excluded_save = False
-        excluded_revoke = False
+            negative_save = False
+            negative_revoke = False
+            excluded_save = False
+            excluded_revoke = False
 
     generation_stage = "button"
     generation_correlation_id: str | None = None

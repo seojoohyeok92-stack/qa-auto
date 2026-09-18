@@ -22,6 +22,7 @@ from repositories.coupang_product_mapping_repository import (
 from repositories.database import Database
 from repositories.historical_case_repository import HistoricalCaseRepository
 from repositories.inquiry_repository import InquiryRepository
+from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.approval_service import ApprovalService
@@ -654,3 +655,140 @@ def test_the_read_only_panel_offers_approval_and_nothing_else(database) -> None:
     assert market_policy.is_store_automatic_generation_enabled(
         "COUPANG_OJE_NS"
     ) is False
+
+
+# --- Negative Learning and 학습 제외, through the Naver paths --------------------
+#
+# The seller answer stays read-only; judging it is Learning management, which
+# is what the Naver screen already offers for an answer it did not write.
+
+EVALUATION_SOURCE = "HISTORICAL_VERIFIED"
+
+
+def _feedback(database: Database):
+    from services.learning_feedback_service import LearningFeedbackService
+
+    return LearningFeedbackService(database)
+
+
+def test_negative_learning_uses_the_naver_dashboard_path(database) -> None:
+    """C: the existing capture_dashboard_negative, on the marketplace reply."""
+
+    inquiry_id = coupang_inquiry(database)
+
+    rows = _feedback(database).capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=EVALUATION_SOURCE,
+        original_answer_reference_id=inquiry_id,
+        correction_reason="FACT_ERROR",
+        correction_note="설치 옵션 설명이 실제와 다릅니다",
+        actor="관리자",
+    )
+
+    assert rows
+    saved = rows[0]
+    assert saved["learning_signal_type"] == "NEGATIVE"
+    assert saved["original_answer_source"] == EVALUATION_SOURCE
+    assert int(saved["original_answer_reference_id"]) == inquiry_id
+    assert saved["active"] is True
+    # It evaluated the marketplace reply, not an invented body.
+    assert SELLER_ANSWER.split()[0] in str(saved["original_answer_masked"])
+
+
+def test_negative_learning_can_be_revoked_like_naver(database) -> None:
+    inquiry_id = coupang_inquiry(database)
+    feedback = _feedback(database)
+    feedback.capture_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=EVALUATION_SOURCE,
+        original_answer_reference_id=inquiry_id,
+        correction_reason="FACT_ERROR",
+        actor="관리자",
+    )
+
+    feedback.revoke_dashboard_negative(
+        inquiry_id=inquiry_id,
+        original_answer_source=EVALUATION_SOURCE,
+        original_answer_reference_id=inquiry_id,
+        reason="다시 확인함",
+        actor="관리자",
+    )
+
+    active = LearningFeedbackRepository(database).active_dashboard_feedback(
+        inquiry_id=inquiry_id,
+        original_answer_source=EVALUATION_SOURCE,
+        original_answer_reference_id=inquiry_id,
+        signal_types=("NEGATIVE",),
+    )
+    assert active == []
+
+
+def test_learning_exclusion_uses_the_naver_dashboard_path(database) -> None:
+    """E: the existing capture_dashboard_excluded, unchanged."""
+
+    inquiry_id = coupang_inquiry(database)
+
+    saved = _feedback(database).capture_dashboard_excluded(
+        inquiry_id=inquiry_id,
+        original_answer_source=EVALUATION_SOURCE,
+        original_answer_reference_id=inquiry_id,
+        exclusion_reason="CUSTOMER_SPECIFIC",
+        exclusion_note="이 주문에만 해당하는 안내",
+        actor="관리자",
+    )
+
+    assert saved["learning_signal_type"] == "EXCLUDED"
+    assert saved["original_answer_source"] == EVALUATION_SOURCE
+    assert int(saved["original_answer_reference_id"]) == inquiry_id
+    assert saved["active"] is True
+
+
+def test_an_evaluation_reference_that_is_not_this_inquiry_is_refused(
+    database,
+) -> None:
+    inquiry_id = coupang_inquiry(database)
+
+    with pytest.raises(LookupError):
+        _feedback(database).capture_dashboard_negative(
+            inquiry_id=inquiry_id,
+            original_answer_source=EVALUATION_SOURCE,
+            original_answer_reference_id=inquiry_id + 999,
+            correction_reason="FACT_ERROR",
+            actor="관리자",
+        )
+
+
+def test_the_panel_offers_every_naver_learning_control(database) -> None:
+    """A/B/D: the same controls the Naver review screen offers."""
+
+    from ui import review_workspace
+
+    inquiry = inquiry_of(database, coupang_inquiry(database))
+    inquiry["seller_answer"] = SELLER_ANSWER
+    assert review_workspace._is_read_only_inquiry(inquiry) is True
+    assert review_workspace._seller_answer_learning_approval(inquiry) is True
+
+
+def test_the_seller_answer_is_one_text_for_every_decision(database) -> None:
+    """Approval, negative and exclusion all judge the same reply."""
+
+    from services.coupang_seller_answer_learning_service import (
+        marketplace_seller_answer,
+    )
+
+    inquiry = inquiry_of(database, coupang_inquiry(database))
+    assert marketplace_seller_answer(inquiry) == SELLER_ANSWER
+    # Ambiguous comment lists stay undecided here too.
+    ambiguous = inquiry_of(database, coupang_inquiry(
+        database, inquiry_id="170000002", comments=[
+            {"inquiryCommentId": "c1", "content": "고객 추가 문의",
+             "inquiryCommentAt": "2026-09-17T11:00:00+09:00"},
+            {"inquiryCommentId": "c2", "content": SELLER_ANSWER,
+             "inquiryCommentAt": "2026-09-17T12:00:00+09:00"},
+        ],
+    ))
+    assert marketplace_seller_answer(ambiguous) == ""
+    # A Naver inquiry is not this function's business.
+    assert marketplace_seller_answer(
+        inquiry_of(database, naver_inquiry(database))
+    ) == ""

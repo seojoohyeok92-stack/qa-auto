@@ -63,6 +63,35 @@ UNAVAILABLE_REASONS: dict[str, str] = {
 }
 
 
+def marketplace_seller_answer(inquiry: dict[str, Any]) -> str:
+    """The single unambiguous seller reply this inquiry stored, or ``""``.
+
+    The one definition of "the answer" for this inquiry, so the Learning
+    decisions taken on the screen -- 승인, 이 답변이 잘못됨, 학습 제외 --
+    are all taken on the same text.  Which of several comments is the
+    seller's is not decided here, for the same reason the historical import
+    does not decide it.
+    """
+
+    if market_of(inquiry.get("store_code")) != COUPANG:
+        return ""
+    raw = inquiry.get("raw_json")
+    raw = raw if isinstance(raw, dict) else {}
+    metadata = inquiry.get("source_metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    account_code = str(
+        metadata.get("account_code")
+        or account_of_store(inquiry.get("store_code"))
+        or ""
+    ).strip()
+    normalized = CoupangInquiryNormalizer().online(
+        raw, account_code=account_code or None
+    )
+    if normalized.answer_selection_status == "MULTI_COMMENT_REVIEW":
+        return ""
+    return str(normalized.seller_answer or "")
+
+
 @dataclass(frozen=True)
 class SellerAnswerLearningStatus:
     """What the screen may offer for this inquiry, and why."""

@@ -128,6 +128,17 @@ class LearningFeedbackService:
             if posted is None or int(posted["id"]) != reference_id:
                 raise LookupError("평가할 네이버 실제 등록 답변을 찾을 수 없습니다.")
             original, draft_id = str(posted.get("answer_body") or ""), None
+        elif provenance is AnswerProvenance.HISTORICAL_VERIFIED:
+            # The marketplace's own reply, on a market with no posted-answer
+            # row: it is keyed on the inquiry, as the positive capture keys it.
+            from services.coupang_seller_answer_learning_service import (
+                marketplace_seller_answer,
+            )
+
+            if reference_id != int(inquiry_id):
+                raise LookupError("평가할 마켓 판매자 답변을 찾을 수 없습니다.")
+            original = marketplace_seller_answer(inquiry)
+            draft_id = None
         else:
             raise ValueError("Dashboard에서 평가할 수 없는 답변 출처입니다.")
         original = format_final_answer(
@@ -323,6 +334,17 @@ class LearningFeedbackService:
             if posted is None or int(posted["id"]) != reference_id:
                 raise LookupError("평가할 네이버 실제 등록 답변을 찾을 수 없습니다.")
             original = str(posted.get("answer_body") or "")
+            draft_id = None
+        elif provenance is AnswerProvenance.HISTORICAL_VERIFIED:
+            # The marketplace's own reply, on a market with no posted-answer
+            # row: it is keyed on the inquiry, as the positive capture keys it.
+            from services.coupang_seller_answer_learning_service import (
+                marketplace_seller_answer,
+            )
+
+            if reference_id != int(inquiry_id):
+                raise LookupError("평가할 마켓 판매자 답변을 찾을 수 없습니다.")
+            original = marketplace_seller_answer(inquiry)
             draft_id = None
         else:
             raise ValueError("Dashboard에서 평가할 수 없는 답변 출처입니다.")
