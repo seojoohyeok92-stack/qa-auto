@@ -29,6 +29,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import time
@@ -47,6 +48,9 @@ from dps.dps_ui_automation import NO_RESULT_MARKERS, DpsUiAutomation
 from dps.sales_detail import merge_list_and_detail, parse_flat_detail
 
 DEFAULT_CDP_PORT = 9333
+# The shape the production parser already treats as a DPS 판매번호 / 전자주문번호
+# (``parse_lookup_result`` long_numbers: ``\d{8,20}``).
+_SALES_NUMBER = re.compile(r"\d{8,20}")
 AUTOMATION_METHOD = "CHROME_CDP_DOM_V1"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # The purchase-request list the current pywinauto path drives.
@@ -308,15 +312,15 @@ function isWrite(t){return WRITE_WORDS.some(w=>t.indexOf(w)>=0);}
 """
 
 PAGE_STATE_JS = r"""
-(()=>{const all=docs();let text='';let password=false;
+((markers)=>{const all=docs();let text='';let password=false;
  for(const {d} of all){text+=' '+norm(d.body?d.body.innerText:'');
   if(d.querySelector('input[type=password]'))password=true;}
  return {url:location.href,title:document.title,password,
-  text:text.slice(0,4000),frames:all.length};})
+  marker_hits:markers.filter(m=>text.indexOf(m)>=0),frames:all.length};})
 """
 
 FILL_AND_QUERY_JS = r"""
-((order,start,end)=>{
+((order,start,end,token)=>{
  const inputs=[];for(const {d} of docs()) for(const el of d.querySelectorAll('input'))
   {const ty=(el.type||'text').toLowerCase();if(['text','search','number','tel',''].includes(ty)&&vis(el)&&!el.disabled)inputs.push(el);}
  const orderCands=inputs.map(el=>({el,label:labelOf(el)})).filter(c=>
@@ -340,25 +344,41 @@ FILL_AND_QUERY_JS = r"""
  const button=(near.length?near:buttons)[0];
  if(!button)return {ok:false,code:'QUERY_BUTTON_NOT_FOUND'};
  const readback={order:norm(target.value),start:norm(periods[0].value),end:norm(periods[1].value)};
+ for(const {d} of docs()) for(const el of d.querySelectorAll('tr,[role=row],div,span,p,td,li,strong'))
+  el.setAttribute('data-cdp-before',token);
  button.click();
  return {ok:true,readback,button:button.tagName,order_candidates:orderCands.length};
 })
 """
 
 RESULT_SNAPSHOT_JS = r"""
-((markers)=>{const texts=[];const seen=new Set();let headers=[];const rows=[];let loading=false;
+((markers,order,token)=>{const texts=[];const seen=new Set();let headers=[];const rows=[];let loading=false;
+ let staleOrderRows=0;let formTablesSkipped=0;
  const add=t=>{if(t&&!seen.has(t)&&texts.length<240){seen.add(t);texts.push(t);}};
+ const fresh=el=>!token||el.getAttribute('data-cdp-before')!==token;
+ const isForm=t=>!!t.querySelector('select,textarea,input:not([type=checkbox]):not([type=radio]):not([type=hidden])');
+ const headersFor=t=>{let hs=Array.from(t.querySelectorAll('th,[role=columnheader]')).map(txt).filter(Boolean);
+  for(let a=t.parentElement,i=0;!hs.length&&a&&i<4;a=a.parentElement,i++){
+   const ths=Array.from(a.querySelectorAll('th,[role=columnheader]')).filter(th=>!isForm(th.closest('table')||th));
+   hs=ths.map(txt).filter(Boolean);}
+  return hs;};
  for(const {d} of docs()){
   for(const el of d.querySelectorAll('[class*=loading],[id*=loading],[class*=progress],[class*=spinner]'))if(vis(el))loading=true;
   for(const el of d.querySelectorAll('div,span,p,td,li,strong')){if(!vis(el))continue;const t=txt(el);
-   if(t&&t.length<80&&(markers.some(m=>t.indexOf(m)>=0)||/로딩|처리중|조회중|loading/i.test(t))){add(t);if(/로딩|처리중|조회중|loading/i.test(t))loading=true;}}
+   if(!t||t.length>=80)continue;
+   if(/로딩|처리중|조회중|loading/i.test(t)){loading=true;continue;}
+   if(fresh(el)&&markers.some(m=>t.indexOf(m)>=0))add(t);}
   for(const table of d.querySelectorAll('table,[role=grid]')){if(!vis(table))continue;
-   const hs=Array.from(table.querySelectorAll('th,[role=columnheader]')).map(txt).filter(Boolean);
-   if(hs.length&&!headers.length)headers=hs;
+   if(isForm(table)){formTablesSkipped++;continue;}
    for(const tr of table.querySelectorAll('tr,[role=row]')){const cells=Array.from(tr.querySelectorAll('td,[role=gridcell]'));
-    if(cells.length<2)continue;const vals=cells.map(txt);const key=JSON.stringify(vals);
+    if(cells.length<2)continue;const vals=cells.map(txt);
+    if(!vals.includes(order))continue;
+    if(!fresh(tr)){staleOrderRows++;continue;}
+    if(!headers.length)headers=headersFor(table);
+    const key=JSON.stringify(vals);
     if(!rows.some(r=>JSON.stringify(r)===key)&&rows.length<100){rows.push(vals);vals.forEach(add);}}}}
- return {raw_result_texts:texts,table_headers:headers.slice(0,40),table_rows:rows,loading};})
+ return {raw_result_texts:texts,table_headers:headers.slice(0,40),table_rows:rows,loading,
+  stale_order_rows:staleOrderRows,form_tables_skipped:formTablesSkipped};})
 """
 
 SCROLL_GRID_JS = r"""
@@ -368,8 +388,9 @@ SCROLL_GRID_JS = r"""
 """
 
 CLICK_SALES_LINK_JS = r"""
-((order,sales)=>{const hits=[];for(const {d} of docs()) for(const tr of d.querySelectorAll('tr,[role=row]'))
- {const cells=Array.from(tr.querySelectorAll('td,[role=gridcell]')).map(txt);if(!cells.includes(order))continue;
+((order,sales,token)=>{const hits=[];for(const {d} of docs()) for(const tr of d.querySelectorAll('tr,[role=row]'))
+ {if(token&&tr.getAttribute('data-cdp-before')===token)continue;
+  const cells=Array.from(tr.querySelectorAll('td,[role=gridcell]')).map(txt);if(!cells.includes(order))continue;
   for(const a of tr.querySelectorAll('a,[onclick],span,u')){if(txt(a)===sales&&vis(a)){hits.push(a);break;}}}
  if(!hits.length)return {ok:false,code:'DPS_SALES_LINK_NOT_FOUND',rows:0};
  hits[0].click();return {ok:true,rows:hits.length};})
@@ -455,51 +476,57 @@ class CdpDpsReader:
             if not self._allowed(url):
                 continue
             page = self.browser.open_page(target)
-            state = dict(page.evaluate(_call(PAGE_STATE_JS)) or {})
+            state = dict(page.evaluate(_call(PAGE_STATE_JS, list(PURCHASE_PAGE_TEXT_MARKERS))) or {})
             if state.get("password") or any(m in url for m in LOGIN_URL_MARKERS):
                 login_seen = True
                 page.close()
                 continue
-            if any(marker in str(state.get("text") or "") for marker in PURCHASE_PAGE_TEXT_MARKERS):
+            if state.get("marker_hits"):
                 return target, page, state
             page.close()
         return None, None, {"code": "DPS_LOGIN_REQUIRED" if login_seen else "DPS_TAB_NOT_FOUND"}
 
-    def _wait_for_result(self, page: Any, before: dict[str, Any], expected: str
-                         ) -> dict[str, Any]:
-        before_signature = DpsUiAutomation._result_signature(before)
+    def _wait_for_result(self, page: Any, expected: str, token: str) -> dict[str, Any]:
+        """Wait for *this* query's answer, never for "something is on screen".
+
+        Only two things end the wait: a fresh row whose cell equals the
+        queried order (stable over two polls, loading finished), or a fresh
+        no-result message. Rows and messages that were on screen before 조회
+        carry the ``token`` mark and are never read -- that is what keeps a
+        previous lookup's row, left by either backend, from answering this
+        one. A search form or an unrelated table is not a result at all.
+        Anything else runs out the clock and fails closed.
+        """
+
         deadline = self.clock() + max(1.0, self.result_timeout)
-        latest, stable, scrolled = before, 0, 0
+        latest: dict[str, Any] = {}
+        stable, scrolled = 0, 0
+        script = _call(RESULT_SNAPSHOT_JS, list(NO_RESULT_MARKERS), expected, token)
         while self.clock() < deadline:
             self.sleep(self.poll_interval)
-            latest = dict(page.evaluate(_call(RESULT_SNAPSHOT_JS, list(NO_RESULT_MARKERS))) or {})
-            folded = "\n".join(latest.get("raw_result_texts") or []).casefold()
-            if any(marker.casefold() in folded for marker in NO_RESULT_MARKERS):
-                return {"status": "no_result", "snapshot": latest}
-            rows = latest.get("table_rows") or []
-            exact = any(expected in [str(v).strip() for v in row] for row in rows)
+            latest = dict(page.evaluate(script) or {})
             if latest.get("loading"):
                 stable = 0
                 continue
-            if exact:
+            folded = "\n".join(latest.get("raw_result_texts") or []).casefold()
+            rows = latest.get("table_rows") or []
+            if not rows and any(marker.casefold() in folded for marker in NO_RESULT_MARKERS):
+                return {"status": "no_result", "snapshot": latest}
+            if rows:
                 stable += 1
                 if stable >= 2:
                     return {"status": "complete", "snapshot": latest}
                 continue
             stable = 0
-            changed = DpsUiAutomation._result_signature(latest) != before_signature
             # A virtual grid renders only what is on screen; bring the rest in
             # before deciding the order is not there.
-            if changed and rows and scrolled < 30 and page.evaluate(_call(SCROLL_GRID_JS, 400)):
+            if scrolled < 30 and page.evaluate(_call(SCROLL_GRID_JS, 400)):
                 scrolled += 1
-                continue
-            if changed and rows:
-                return {"status": "complete", "snapshot": latest}
         return {"status": "timeout", "snapshot": latest}
 
-    def _open_detail(self, page: Any, known_ids: set[str], order: str, sales: str
-                     ) -> tuple[Any, str | None, dict[str, Any]]:
-        clicked = dict(page.evaluate(_call(CLICK_SALES_LINK_JS, order, sales)) or {})
+    def _open_detail(self, page: Any, known_ids: set[str], order: str, sales: str,
+                     token: str) -> tuple[Any, str | None, dict[str, Any]]:
+        clicked = dict(page.evaluate(_call(CLICK_SALES_LINK_JS, order, sales, token)) or {})
         if not clicked.get("ok"):
             return None, None, {"status": clicked.get("code") or "DPS_SALES_LINK_NOT_FOUND",
                                 "invocation_count": 0}
@@ -541,8 +568,9 @@ class CdpDpsReader:
                 code = state.get("code") or "DPS_TAB_NOT_FOUND"
                 return self._failure(code, "DPS 구매요청리스트 탭을 찾지 못했거나 로그인이 필요합니다.")
             known_ids = {str(item.get("id") or "") for item in self.browser.pages()}
-            before = dict(page.evaluate(_call(RESULT_SNAPSHOT_JS, list(NO_RESULT_MARKERS))) or {})
-            filled = dict(page.evaluate(_call(FILL_AND_QUERY_JS, order, dps_period_start, dps_period_end)) or {})
+            token = os.urandom(6).hex()
+            filled = dict(page.evaluate(_call(FILL_AND_QUERY_JS, order, dps_period_start,
+                                              dps_period_end, token)) or {})
             dialogs.extend(getattr(page, "dialogs", []) or [])
             if any(d.get("type") != "alert" for d in dialogs):
                 return self._failure("DIALOG_CONFIRM_REFUSED", "조회 중 확인 대화상자가 떠 중단했습니다.",
@@ -553,7 +581,7 @@ class CdpDpsReader:
             readback = dict(filled.get("readback") or {})
             if readback.get("order") != order:
                 return self._failure("INPUT_VERIFY_FAILED", "입력한 주문번호를 확인하지 못했습니다.")
-            polling = self._wait_for_result(page, before, order)
+            polling = self._wait_for_result(page, order, token)
             after = dict(polling["snapshot"])
             if polling["status"] == "timeout":
                 return self._failure("SEARCH_RESULT_TIMEOUT", "DPS 조회 결과 로딩 시간이 초과되었습니다.")
@@ -576,16 +604,28 @@ class CdpDpsReader:
                         "status": "NO_DPS_RESULT", "message": "해당 주문번호의 DPS 조회 결과가 없습니다.",
                         "data": {**parsed["data"], "naver_order_id": order},
                         "diagnostics": diagnostics, **base}
-            if not parsed["found"]:
+            # The success invariant: the production parser matched exactly one
+            # fresh row carrying this order number, and the 판매번호 it read is
+            # a real sales number from that same row. A label that happens to
+            # sit next to "판매번호" ("기간") is neither.
+            matched_row = [str(value).strip() for value in
+                           parsed.get("diagnostics", {}).get("matched_row") or []]
+            if not parsed["found"] or order not in matched_row:
                 return self._failure("LOOKUP_RESULT_NOT_FOUND",
-                                     "조회는 완료했지만 결과 항목을 해석하지 못했습니다.", diagnostics)
+                                     "조회는 완료했지만 이 주문번호의 결과 행을 확인하지 못했습니다.",
+                                     diagnostics)
+            sales_value = str(parsed["data"].get("dps_sales_number") or "").strip()
+            if not (_SALES_NUMBER.fullmatch(sales_value) and sales_value in matched_row
+                    and sales_value != order):
+                return self._failure("DPS_SALES_NUMBER_MISSING",
+                                     "결과 행에서 DPS 판매번호를 확인하지 못했습니다.", diagnostics)
             detail_lookup = {"attempted": False, "opened": False, "parsed": False,
                              "closed": False, "status": "NOT_ATTEMPTED", "invocation_count": 0}
             detail = None
             sales = str(parsed["data"].get("dps_sales_number") or "").strip()
             if sales:
                 detail_lookup["attempted"] = True
-                detail_page, detail_id, opened = self._open_detail(page, known_ids, order, sales)
+                detail_page, detail_id, opened = self._open_detail(page, known_ids, order, sales, token)
                 detail_lookup.update(opened)
                 if detail_page is not None:
                     detail_lookup["opened"] = True
@@ -595,6 +635,13 @@ class CdpDpsReader:
                                                table_rows=snapshot.get("rows") or [])
                     detail_lookup["parsed"] = bool(detail.get("customer_info") or detail.get("detail_items"))
                     detail_lookup["status"] = "DETAIL_PARSED" if detail_lookup["parsed"] else "DETAIL_PARSE_FAILED"
+                    # The page that opened must be this sale's: a detail that
+                    # names another 판매번호 is not evidence for this order.
+                    shown = str(dict(detail.get("customer_info") or {}).get("dps_sales_number") or "").strip()
+                    if shown and shown != sales:
+                        detail_lookup["parsed"] = False
+                        detail_lookup["status"] = "DETAIL_PARSE_FAILED"
+                        detail = None
                     diagnostics.update({"detail_raw_headers": snapshot.get("headers"),
                                         "detail_raw_rows": snapshot.get("rows")})
                     if detail_id is not None:

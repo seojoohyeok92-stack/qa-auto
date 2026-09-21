@@ -17,6 +17,7 @@ import http.server
 import json
 import os
 import shutil
+import sys
 import socket
 import subprocess
 import tempfile
@@ -56,7 +57,12 @@ FRAME = r"""<html><body>
 <table><tr><th>온라인판매 주문번호</th><td><input id="ord" type="text"></td>
 <th>상품주문번호</th><td><input id="pord" type="text"></td></tr>
 <tr><th>조회기간</th><td><input id="s" type="text" value="2026-08-01"> ~
-<input id="e" type="text" value="2026-08-31"></td></tr></table>
+<input id="e" type="text" value="2026-08-31"></td></tr>
+<tr><td>판매번호</td><td><input type="text"></td><td>기간</td><td><input type="text"></td>
+<td>품명</td><td><input type="text"></td><td>인수자명</td><td><input type="text"></td>
+<td>배송상태</td><td><select><option>전체</option><option>구매요청</option><option>설치완료</option><option>배송중</option></select></td></tr>
+</table>
+<table class="notice"><tr><td>공지</td><td>판매번호 기간 인수자명 안내</td></tr></table>
 <button id="q">조회</button> <button id="save">저장</button>
 <div id="loading" class="loading" style="display:none">조회중</div>
 <div id="out"></div>
@@ -68,7 +74,9 @@ function row(o, s){ return '<tr><td>'+o+'</td><td>LH43BEFHLGFXKR</td><td>1</td><
   + '<td><a href="#" onclick="window.top.__detailOpens++;window.open(\'sd010_0048_DP_SSearchSalesMain.do.html?sales='+s+'\',\'detail\');return false;">'+s+'</a></td>'
   + '<td>__EORDER__</td><td>구매요청</td></tr>'; }
 function grid(body){ return '<table><thead><tr>'+H.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+body+'</tbody></table>'; }
+const H_SALES = {'__H1__':'3100000001','__H2__':'3100000002','__H3__':'3100000003'};
 document.getElementById('q').onclick = () => {
+  if (window.top.__freeze) return;   // a page that never answers this query
   const o = document.getElementById('ord').value;
   if (o === '__CONFIRM__') { if (!confirm('저장하시겠습니까?')) return; }
   document.getElementById('loading').style.display = 'block';
@@ -78,6 +86,11 @@ document.getElementById('q').onclick = () => {
     const out = document.getElementById('out');
     if (o === '__NONE__') { out.innerHTML = '<div>조회 결과가 없습니다</div>'; return; }
     if (o === '__MALFORMED__') { out.innerHTML = '<table><tr><td>'+o+'</td></tr></table>'; return; }
+    if (o === '__FORMONLY__') { return; }
+    if (o === '__UNRELATED__') { out.innerHTML = '<table><tr><td>판매번호</td><td>기간</td><td>품명</td><td>인수자명</td></tr></table>'; return; }
+    if (o === '__OTHERONLY__') { out.innerHTML = grid(row('__OTHER__','9100000001')); return; }
+    if (o === '__BADDETAIL__') { out.innerHTML = grid(row(o,'__SALES__').replace('sd010_0048_DP_SSearchSalesMain.do.html','notdetail.html')); return; }
+    if (H_SALES[o]) { out.innerHTML = grid(row(o, H_SALES[o])); return; }
     if (o === '__MULTI__') { out.innerHTML = grid(row('__OTHER__','9100000001') + row(o,'__SALES__') + row(o,'__SALES__')); return; }
     if (o === '__VIRTUAL__') {
       out.innerHTML = '<div id="vs" style="height:120px;overflow:auto"><div id="sp" style="height:1200px;position:relative"><div id="win" style="position:absolute;top:0;width:100%"></div></div></div>';
@@ -96,7 +109,7 @@ DETAIL = """<html><head><title>판매조회</title></head><body>
 <div style="display:flex"><div style="width:380px"><strong>판매처정보</strong>
 <table><tr><th>판매경로</th><td><input value="온라인"></td></tr></table></div>
 <div style="width:380px"><strong>고객정보</strong><table>
-<tr><th>판매번호</th><td><input value="__SALES__"></td></tr>
+<tr><th>판매번호</th><td><input id="salesno" value=""></td></tr>
 <tr><th>구매자</th><td><input value="홍*동"></td></tr>
 <tr><th>인수자</th><td><input value="테스트인수자"></td></tr>
 <tr><th>요구납기일</th><td><input value="2026-09-30"></td></tr></table></div>
@@ -104,8 +117,20 @@ DETAIL = """<html><head><title>판매조회</title></head><body>
 <tr><th>주문금액</th><td><input value="700,000"></td></tr></table></div></div>
 <div style="margin-top:40px"><strong>품목상세내역</strong><table>
 <thead><tr><th>행번</th><th>모델</th><th>수량</th><th>판매단가</th><th>판매금액</th><th>요구납기일</th></tr></thead>
-<tbody><tr><td>1</td><td>LH43BEFHLGFXKR</td><td>1</td><td>700,000</td><td>700,000</td><td>2026-09-24</td></tr></tbody>
-</table></div></body></html>"""
+<tbody id="items"></tbody>
+</table></div>
+<script>
+const sales = new URLSearchParams(location.search).get('sales');
+document.getElementById('salesno').value = sales;
+const ITEMS = {
+  '3100000001': [['LH50BEHHLGFXKR','2026-09-04']],
+  '3100000002': [['LS32DM500EKXKR','2026-09-02']],
+  '3100000003': [['HA-MTS1S43WHT','2026-09-09'],['HA-MTSHELFWHT','2026-09-09'],['LH43BEHHLGFXKR','2026-09-09']],
+};
+const items = ITEMS[sales] || [['LH43BEFHLGFXKR','2026-09-24']];
+document.getElementById('items').innerHTML = items.map((it, i) =>
+  '<tr><td>'+(i+1)+'</td><td>'+it[0]+'</td><td>1</td><td>100,000</td><td>100,000</td><td>'+it[1]+'</td></tr>').join('');
+</script></body></html>"""
 
 LOGIN = """<html><head><title>Samsung DPS 로그인</title></head><body>
 <input type="text" placeholder="아이디"><input type="password"></body></html>"""
@@ -125,6 +150,7 @@ def site(tmp_path_factory):
         "purchase.html": PURCHASE, "frame.html": frame,
         "sd010_0048_DP_SSearchSalesMain.do.html": DETAIL.replace("__SALES__", SALES),
         "login.html": LOGIN,
+        "notdetail.html": "<html><head><title>안내</title></head><body>준비중</body></html>",
         "missing.html": "<html><body>구매요청리스트<div>입력 없음</div></body></html>",
     }.items():
         # Real DPS pages declare their charset; so must the fixtures.
@@ -338,8 +364,8 @@ DPS_TARGET = {"id": "t1", "type": "page", "url": "https://www.dps2u.co.kr/x", "t
 
 def _script(on_snapshot):
     def run(expression):
-        if "password" in expression and "frames" in expression:
-            return {"password": False, "text": "구매요청리스트 온라인판매 주문번호"}
+        if "marker_hits" in expression:
+            return {"password": False, "marker_hits": ["구매요청리스트"]}
         if "orderCands" in expression:
             return {"ok": True, "readback": {"order": ORDER}}
         if "raw_result_texts" in expression:
@@ -418,3 +444,154 @@ def test_production_default_is_unchanged():
     assert DPS_MARKETS == frozenset({"NAVER"})
     assert "client or lookup_dps_order" in inspect.getsource(DpsEnrichmentService.__init__)
     assert lookup_dps_order.__module__ == "services.dps_agent_client"
+
+
+# ======================================================================
+# Server 5-case false success (2026-09-21) -- regressions
+# ======================================================================
+#
+# The search form ("판매번호 | 기간", "품명 | 인수자명", 배송상태 select) was read
+# as the result grid, parse_lookup_result's label->next-text fallback turned
+# it into sales_number="기간" / product_name="인수자명", and the lookup came back
+# SUCCESS / LOOKUP_COMPLETE with no row and no detail.
+
+
+def _failed(result):
+    return (result["success"] is False and
+            normalize_dps_result(result, order_id=ORDER, elapsed_seconds=1)["lookup_status"] != "SUCCESS")
+
+
+def test_B_search_form_is_never_the_result_grid(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__FORMONLY__", result_timeout=3.0)
+    assert _failed(result), result
+    assert result.get("data", {}).get("dps_sales_number") != "기간"
+
+
+def test_C_unrelated_table_is_not_success(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    assert _failed(_lookup(browser, "__UNRELATED__", result_timeout=3.0))
+
+
+def test_D_result_grid_without_this_order_is_not_success(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    assert _failed(_lookup(browser, "__OTHERONLY__", result_timeout=3.0))
+
+
+def test_F_detail_failure_keeps_the_existing_partial_contract(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__BADDETAIL__", detail_timeout=2.0)
+    assert result["found"] is True
+    assert result["data"]["dps_sales_number"] == SALES
+    assert result["status"] == "RESULT_FOUND_DETAIL_PARTIAL"
+    assert result["detail_lookup"]["status"] == "DETAIL_OPEN_FAILED"
+    assert result["installation_date"] is None
+    normalized = normalize_dps_result(result, order_id="__BADDETAIL__", elapsed_seconds=1)
+    assert normalized["installation_date"] is None
+    assert "DPS_REQUIRED_DATE_MISSING" in normalized["warnings"]
+
+
+def test_G_previous_other_order_row_is_not_this_result(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    _lookup(browser, "__OTHERONLY__", result_timeout=2.0)      # leaves OTHER's row
+    result = _lookup(browser, ORDER)
+    assert result["found"] and result["data"]["dps_sales_number"] == SALES
+
+
+def test_G_previous_same_order_row_is_not_reused(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    assert _lookup(browser, ORDER)["found"] is True            # leaves ORDER's row
+    _top_eval(browser, "window.__freeze = true")                # 조회 now does nothing
+    try:
+        result = _lookup(browser, ORDER, result_timeout=3.0)
+    finally:
+        _top_eval(browser, "window.__freeze = false")
+    assert _failed(result), result
+
+
+@pytest.mark.parametrize("order,sales,models,date,rows", [
+    ("__H1__", "3100000001", ["LH50BEHHLGFXKR"], "2026-09-04", 1),
+    ("__H2__", "3100000002", ["LS32DM500EKXKR"], "2026-09-02", 1),
+    ("__H3__", "3100000003", ["HA-MTS1S43WHT", "HA-MTSHELFWHT", "LH43BEHHLGFXKR"],
+     "2026-09-09", 3),
+])
+def test_H_server_representative_contracts(chrome, site, order, sales, models, date, rows):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, order)
+    normalized = normalize_dps_result(result, order_id=order, elapsed_seconds=1)
+    assert normalized["lookup_status"] == "SUCCESS"
+    assert normalized["sales_number"] == sales
+    assert normalized["required_delivery_date"] == date
+    assert normalized["installation_date"] == date
+    assert normalized["required_delivery_date_row_count"] == rows
+    assert sorted(i["model_name"] for i in result["data"]["detail_items"]) == sorted(models)
+
+
+def test_invariant_label_pairs_without_a_row_never_succeed():
+    """The server shape, fed straight to the reader: texts but no order row."""
+
+    ticks = iter(range(0, 10_000))
+    page = FakePage(_script(lambda: {
+        "raw_result_texts": ["판매번호", "기간", "품명", "인수자명", "배송상태", "전체 구매요청 설치완료"],
+        "table_headers": [], "table_rows": [], "loading": False}))
+    result = CdpDpsReader(FakeBrowser([DPS_TARGET], page), result_timeout=5,
+                          clock=lambda: float(next(ticks)), sleep=lambda s: None).perform_lookup(
+        order_id=ORDER, dps_period_start="2026-09-01", dps_period_end="2026-09-21")
+    assert result["success"] is False and result["code"] == "SEARCH_RESULT_TIMEOUT"
+
+
+def test_invariant_order_row_without_a_sales_number_is_not_success():
+    page = FakePage(_script(lambda: {
+        "raw_result_texts": [ORDER, "LH43BEFHLGFXKR"],
+        "table_headers": ["온라인판매 주문번호", "모델명"],
+        "table_rows": [[ORDER, "LH43BEFHLGFXKR"]], "loading": False}))
+    result = CdpDpsReader(FakeBrowser([DPS_TARGET], page), poll_interval=0).perform_lookup(
+        order_id=ORDER, dps_period_start="2026-09-01", dps_period_end="2026-09-21")
+    assert result["success"] is False
+    assert result["code"] == "DPS_SALES_NUMBER_MISSING"
+
+
+def _compare_module():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts" / "dps_cdp_compare.py"
+    spec = importlib.util.spec_from_file_location("dps_cdp_compare", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_A_execute_stops_when_preflight_cannot_see_the_purchase_tab(tmp_path, monkeypatch):
+    module = _compare_module()
+    calls = []
+    monkeypatch.setattr(module, "preflight", lambda port: {
+        "cdp_purchase_tab": False, "cdp_tab_code": "DPS_TAB_NOT_FOUND"})
+    monkeypatch.setattr(module, "lookup_dps_order_cdp", lambda **kw: calls.append("CDP"))
+    import services.dps_agent_client as agent
+    monkeypatch.setattr(agent, "lookup_dps_order", lambda **kw: calls.append("OLD"))
+    orders = tmp_path / "orders.csv"
+    orders.write_text("order_id,order_date\n2026090100000001,2026-09-01\n", encoding="utf-8")
+    out = tmp_path / "report.json"
+    monkeypatch.setattr(sys, "argv", ["x", "--csv", str(orders), "--execute", "--out", str(out)])
+
+    assert module.main() == 2
+    assert calls == []
+    report = json.loads(out.read_bytes().decode("ascii"))
+    assert report["decision"] == "SWITCH_BLOCKED_PREFLIGHT"
+    assert report["blocked_reason"].startswith("CDP_PURCHASE_TAB_NOT_READY")
+
+
+def test_report_json_is_ascii_and_round_trips(tmp_path):
+    module = _compare_module()
+    report = {"old": {"delivery_status": "전체 구매요청 설치완료", "product_name": "인수자명"}}
+    out = tmp_path / "r.json"
+    module.write_report(str(out), report)
+    raw = out.read_bytes()
+    assert all(byte < 128 for byte in raw)          # identical under CP949 or UTF-8
+    assert json.loads(raw.decode("cp949")) == report

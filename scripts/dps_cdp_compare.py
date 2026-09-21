@@ -115,6 +115,32 @@ def preflight(port: int) -> dict[str, Any]:
     return report
 
 
+def preflight_block_reason(preflight_result: dict[str, Any]) -> str | None:
+    """Why --execute must not start, or None when both sides are ready."""
+
+    if preflight_result.get("cdp_error"):
+        return f"CDP_UNAVAILABLE:{preflight_result['cdp_error']}"
+    if preflight_result.get("cdp_purchase_tab") is not True:
+        return f"CDP_PURCHASE_TAB_NOT_READY:{preflight_result.get('cdp_tab_code') or 'UNKNOWN'}"
+    if preflight_result.get("cdp_tab_code"):
+        return f"CDP_TAB_ERROR:{preflight_result['cdp_tab_code']}"
+    return None
+
+
+def write_report(path: str, report: dict[str, Any]) -> None:
+    """ASCII-only JSON (non-ASCII as JSON unicode escapes).
+
+    Windows PowerShell 5.1 ``Get-Content -Raw`` reads a BOM-less file as the
+    ANSI code page (CP949), and a UTF-8 Korean byte sequence can then swallow
+    a closing quote -- ``ConvertFrom-Json`` fails on a file that Python reads
+    fine. Pure ASCII reads the same in every encoding.
+    """
+
+    text = json.dumps(report, ensure_ascii=True, indent=1)
+    json.loads(text)
+    Path(path).write_text(text, encoding="ascii")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     source = parser.add_mutually_exclusive_group(required=True)
@@ -133,9 +159,20 @@ def main() -> int:
     orders = load_orders(args)
     report["planned_orders"] = [mask(row["order_id"]) for row in orders]
     if not args.execute:
-        print(json.dumps(report, ensure_ascii=False, indent=1))
+        print(json.dumps(report, ensure_ascii=True, indent=1))
         print("preflight only: DPS calls 0 (add --execute to compare)")
         return 0
+    blocked = preflight_block_reason(report["preflight"])
+    if blocked:
+        # Fail closed before either backend runs: a comparison against a CDP
+        # side that cannot see the purchase list measures nothing, and OLD
+        # alone is not a comparison.
+        report.update({"decision": "SWITCH_BLOCKED_PREFLIGHT", "blocked_reason": blocked,
+                       "counts": {"OLD": 0, "CDP": 0}})
+        write_report(args.out, report)
+        print(json.dumps({k: report[k] for k in ("decision", "blocked_reason", "counts")},
+                         ensure_ascii=True, indent=1))
+        return 2
 
     from services.dps_agent_client import lookup_dps_order
 
@@ -183,10 +220,10 @@ def main() -> int:
         "decision": ("SWITCH_BLOCKED_MISMATCH" if mismatch["FIELD_MISMATCH_COUNT"]
                      else "NO_MISMATCH_IN_SAMPLE"),
     })
-    Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_report(args.out, report)
     print(json.dumps({key: report[key] for key in (
         "counts", "FIELD_MISMATCH_COUNT", "DATE_MISMATCH_COUNT", "STATUS_MISMATCH_COUNT",
-        "timing_seconds", "decision")}, ensure_ascii=False, indent=1))
+        "timing_seconds", "decision")}, ensure_ascii=True, indent=1))
     return 0
 
 
