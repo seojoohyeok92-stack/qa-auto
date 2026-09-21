@@ -45,7 +45,13 @@ from dps.dates import (
     validate_dps_lookup_period,
 )
 from dps.dps_ui_automation import NO_RESULT_MARKERS, DpsUiAutomation
-from dps.sales_detail import merge_list_and_detail, parse_flat_detail
+from dps.sales_detail import (
+    ITEM_FIELDS,
+    canonical_detail_label,
+    merge_list_and_detail,
+    normalize_label,
+    parse_flat_detail,
+)
 
 DEFAULT_CDP_PORT = 9333
 # The shape the production parser already treats as a DPS 판매번호 / 전자주문번호
@@ -403,21 +409,81 @@ CLICK_SALES_LINK_JS = r"""
 """
 
 DETAIL_SNAPSHOT_JS = r"""
-(()=>{const records=[];let headers=[];let rows=[];let marker=false;
+(()=>{const records=[];let marker=false;
+ const SEL='th,td,a,label,span,div,input,select,textarea,strong,li,font,b,p';
  for(const {d,ox,oy} of docs()){
   if(norm(d.body?d.body.innerText:'').indexOf('품목상세내역')>=0)marker=true;
-  for(const el of d.querySelectorAll('th,td,label,span,div,input,select,textarea,strong,li')){
-   if(!vis(el)||records.length>=1500)continue;const tag=el.tagName;
-   const leaf=['INPUT','SELECT','TEXTAREA'].includes(tag)||!el.querySelector('th,td,div,input,select,table,span,label');
+  for(const el of d.querySelectorAll(SEL)){
+   if(!vis(el)||records.length>=3000)continue;const tag=el.tagName;
+   const field=['INPUT','SELECT','TEXTAREA'].includes(tag);
+   // a leaf: nothing inside it carries text of its own, so one cell -- a
+   // TD.theadFree, a TD.tcontentFree, or the <a> inside a TD -- is one record
+   const leaf=field||!Array.from(el.querySelectorAll(SEL)).some(c=>txt(c));
    if(!leaf)continue;const t=txt(el);if(!t)continue;const r=el.getBoundingClientRect();
-   records.push({name:t,control_type:['INPUT','SELECT','TEXTAREA'].includes(tag)?'Edit':(tag==='TD'||tag==='TH')?'DataItem':'Text',
-    top:Math.round(r.top+oy),left:Math.round(r.left+ox),bottom:Math.round(r.bottom+oy),right:Math.round(r.right+ox)});}
-  for(const table of d.querySelectorAll('table')){
-   const hs=Array.from(table.querySelectorAll('th')).map(txt);
-   if(!(hs.includes('요구납기일')&&(hs.includes('모델')||hs.includes('모델명'))))continue;
-   headers=hs;rows=Array.from(table.querySelectorAll('tbody tr')).map(tr=>Array.from(tr.querySelectorAll('td')).map(txt)).filter(r=>r.length>=2);}}
- return {records,headers,rows,marker};})
+   records.push({name:t,control_type:field?'Edit':(tag==='TD'||tag==='TH')?'DataItem':tag==='A'?'Hyperlink':'Text',
+    class_name:String(el.className||'').slice(0,60),
+    top:Math.round(r.top+oy),left:Math.round(r.left+ox),bottom:Math.round(r.bottom+oy),right:Math.round(r.right+ox)});}}
+ return {records,marker};})
 """
+
+
+def detail_item_table(records: list[dict[str, Any]]) -> tuple[list[str], list[list[str]]]:
+    """``DpsUiAutomation._detail_table`` over DOM rectangles, rule for rule.
+
+    The production reader does not look for a <table>: it finds the one row of
+    cells whose labels are item fields (모델, 수량, 판매금액, 요구납기일, ...),
+    at least three distinct, and reads every cell below it into the column
+    whose span contains the cell's centre -- exactly one cell, else empty --
+    keeping rows that carry a digit. The same arithmetic on the page's own
+    boxes works whether the header is TH or TD.theadFree and whether header
+    and body are one table or two nested ones. The one addition: a cell drawn
+    twice at the same place with the same text (a cloned header or row) is one
+    cell, where UIA would have exposed one element.
+    """
+
+    def label(record: dict[str, Any]) -> str:
+        return canonical_detail_label(record.get("name")) or normalize_label(record.get("name"))
+
+    def band(record: dict[str, Any]) -> int:
+        return int(round(int(record.get("top") or 0) / 5.0) * 5)
+
+    unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for record in records:
+        key = (normalize_label(record.get("name")), band(record),
+               int(round(int(record.get("left") or 0) / 5.0) * 5))
+        unique.setdefault(key, record)
+    cells = list(unique.values())
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for record in cells:
+        if label(record) in ITEM_FIELDS and record.get("control_type") != "Edit":
+            grouped.setdefault(band(record), []).append(record)
+    header_cells = max(grouped.values(), key=lambda values: len({label(v) for v in values}),
+                       default=[])
+    if len({label(value) for value in header_cells}) < 3:
+        return [], []
+    header_cells = sorted(header_cells, key=lambda value: int(value.get("left") or 0))
+    headers = [label(value) for value in header_cells]
+    header_top = min(int(value.get("top") or 0) for value in header_cells)
+    rows_by_y: dict[int, list[dict[str, Any]]] = {}
+    for record in cells:
+        if record.get("control_type") not in {"Text", "Cell", "DataItem", "Hyperlink"}:
+            continue
+        if int(record.get("top") or 0) <= header_top + 5:
+            continue
+        rows_by_y.setdefault(band(record), []).append(record)
+    rows: list[list[str]] = []
+    for key in sorted(rows_by_y):
+        row: list[str] = []
+        for header in header_cells:
+            left, right = int(header.get("left") or 0), int(header.get("right") or 0)
+            values = {
+                normalize_label(value.get("name")) for value in rows_by_y[key]
+                if left <= (int(value.get("left") or 0) + int(value.get("right") or 0)) / 2 <= right
+            }
+            row.append(next(iter(values)) if len(values) == 1 else "")
+        if any(row) and any(re.search(r"\d", value) for value in row):
+            rows.append(row)
+    return headers, rows[:100]
 
 
 def _call(script: str, *args: Any) -> str:
@@ -550,7 +616,7 @@ class CdpDpsReader:
                         "status": "DETAIL_OPENED", "window_form": "NEW_WINDOW",
                         "invocation_count": 1}
             same = dict(page.evaluate(_call(DETAIL_SNAPSHOT_JS)) or {})
-            if same.get("marker") and same.get("headers"):
+            if same.get("marker") and detail_item_table(same.get("records") or [])[0]:
                 return page, None, {"status": "DETAIL_OPENED",
                                     "window_form": "SAME_WINDOW_OR_MODAL",
                                     "invocation_count": 1}
@@ -650,10 +716,14 @@ class CdpDpsReader:
                 if detail_page is not None:
                     detail_lookup["opened"] = True
                     snapshot = dict(detail_page.evaluate(_call(DETAIL_SNAPSHOT_JS)) or {})
+                    item_headers, item_rows = detail_item_table(snapshot.get("records") or [])
+                    snapshot.update(headers=item_headers, rows=item_rows)
                     detail = parse_flat_detail(snapshot.get("records") or [],
-                                               table_headers=snapshot.get("headers") or [],
-                                               table_rows=snapshot.get("rows") or [])
-                    detail_lookup["parsed"] = bool(detail.get("customer_info") or detail.get("detail_items"))
+                                               table_headers=item_headers,
+                                               table_rows=item_rows)
+                    # A detail without a single item row has not been read:
+                    # the installation date lives only in those rows.
+                    detail_lookup["parsed"] = bool(detail.get("detail_items"))
                     detail_lookup["status"] = "DETAIL_PARSED" if detail_lookup["parsed"] else "DETAIL_PARSE_FAILED"
                     # The page that opened must be this sale's: a detail that
                     # names another 판매번호 is not evidence for this order.

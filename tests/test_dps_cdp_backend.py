@@ -57,7 +57,9 @@ PURCHASE = """<html><head><title>Samsung DPS</title></head><body>
 <script>
 window.__detailOpens = 0; window.__transferOpens = 0; window.__infoOpens = 0;
 function go_sendSearchMain(s) { window.__detailOpens++;
-  window.open((s === '__BAD_SALES__' ? 'notdetail.html' : 'sd010_0048_DP_SSearchSalesMain.do.html') + '?sales=' + s, 'detail'); }
+  const live = ['3141000001','3141000003','3141000004'].includes(s);
+  window.open((s === '__BAD_SALES__' ? 'notdetail.html'
+    : live ? 'sd010_0050_DP_SSearchSalesMain.do.html' : 'sd010_0048_DP_SSearchSalesMain.do.html') + '?sales=' + s, 'detail'); }
 function go_transterPop(s) { window.__transferOpens++; }
 function go_infoPop(o, c, n) { window.__infoOpens++; }
 </script></body></html>"""
@@ -88,7 +90,8 @@ function row(o, s, opt){ opt = opt || {};
     + '<td>' + salesCell + '</td>'
     + '<td>' + link('go_transterPop', s, '__TRANSFER__') + '</td><td>비고</td></tr>'; }
 function grid(body){ return '<table class="grid"><tbody>' + body + '</tbody></table>'; }
-const H_SALES = {'__H1__':'3100000001','__H2__':'3100000002','__H3__':'3100000003'};
+const H_SALES = {'__H1__':'3100000001','__H2__':'3100000002','__H3__':'3100000003',
+  '__L1__':'3141000001','__L3__':'3141000003','__L4__':'3141000004'};
 document.getElementById('q').onclick = () => {
   if (window.top.__freeze) return;   // a page that never answers this query
   const o = document.getElementById('ord').value;
@@ -150,6 +153,42 @@ document.getElementById('items').innerHTML = items.map((it, i) =>
   '<tr><td>'+(i+1)+'</td><td>'+it[0]+'</td><td>1</td><td>100,000</td><td>100,000</td><td>'+it[1]+'</td></tr>').join('');
 </script></body></html>"""
 
+LIVE_DETAIL = """<html><head><title>판매조회</title>
+<style>td{width:150px;height:22px;padding:0;overflow:hidden;white-space:nowrap}
+table{table-layout:fixed;border-collapse:collapse}</style></head><body>
+<table><tr><td class="theadFree">판매처정보</td><td></td><td></td>
+<td class="theadFree">고객정보</td><td></td><td></td><td class="theadFree">입금정보</td></tr>
+<tr><td class="theadFree">판매경로</td><td class="tcontentFree">온라인</td><td></td>
+<td class="theadFree">판매번호</td><td class="tcontentFree" id="salesno"></td><td></td>
+<td class="theadFree">주문금액</td><td class="tcontentFree">1,234,000</td></tr>
+<tr><td></td><td></td><td></td><td class="theadFree">인수자</td><td class="tcontentFree">테스트인수자B</td></tr>
+<tr><td></td><td></td><td></td><td class="theadFree">요구납기일</td><td class="tcontentFree">2026-10-30</td></tr>
+</table>
+<div id="itemsSection" style="margin-top:30px"><div class="title">품목상세내역</div>
+<table class="outer"><tr><td style="width:750px">
+  <table class="head"><tr><td class="theadFree">행번</td><td class="theadFree">모델</td>
+  <td class="theadFree">수량</td><td class="theadFree">판매금액</td><td class="theadFree">요구납기일</td></tr></table>
+  <div style="position:relative;height:80px"><table class="body" id="b1" style="position:absolute;top:0;left:0"></table>
+  <table class="body" id="b2" style="position:absolute;top:0;left:0"></table></div>
+</td></tr></table></div>
+<script>
+const sales = new URLSearchParams(location.search).get('sales');
+document.getElementById('salesno').textContent = sales;
+const ITEMS = {
+  '3141000001': [['LH50BEHHLGFXKR','1','1,234,000','2026-09-04']],
+  '3141000003': [['HA-MTS1S43WHT','1','50,000','2026-09-09'],['HA-MTSHELFWHT','1','20,000','2026-09-09'],
+                 ['LH43BEHHLGFXKR','1','700,000','2026-09-09']],
+};
+if (sales === '3141000004') { document.getElementById('itemsSection').remove(); }
+else {
+  const body = (ITEMS[sales] || []).map((it, i) => '<tr><td class="tcontentFree">' + (i + 1) + '</td>'
+    + '<td class="tcontentFree left pl10">' + it[0] + '</td><td class="tcontentFree">' + it[1] + '</td>'
+    + '<td class="tcontentFree">' + it[2] + '</td><td class="tcontentFree">' + it[3] + '</td></tr>').join('');
+  document.getElementById('b1').innerHTML = body;
+  if (sales === '3141000003') document.getElementById('b2').innerHTML = body;   // same DOM drawn twice
+}
+</script></body></html>"""
+
 LOGIN = """<html><head><title>Samsung DPS 로그인</title></head><body>
 <input type="text" placeholder="아이디"><input type="password"></body></html>"""
 
@@ -169,6 +208,7 @@ def site(tmp_path_factory):
     for name, body in {
         "purchase.html": PURCHASE.replace("__BAD_SALES__", BAD_SALES), "frame.html": frame,
         "sd010_0048_DP_SSearchSalesMain.do.html": DETAIL.replace("__SALES__", SALES),
+        "sd010_0050_DP_SSearchSalesMain.do.html": LIVE_DETAIL,
         "login.html": LOGIN,
         "notdetail.html": "<html><head><title>안내</title></head><body>준비중</body></html>",
         "missing.html": "<html><body>구매요청리스트<div>입력 없음</div></body></html>",
@@ -688,3 +728,82 @@ def test_live_onclick_quote_forms_are_both_read():
                     "parent.go_sendSearchMain( '3141538283' )"):
         assert js.search(onclick).group(2) == "3141538283"
     assert js.search("parent.go_transterPop('3141538283');") is None
+
+
+# ======================================================================
+# Live 판매상세 (sd010_0050): TD.theadFree headers, TD.tcontentFree data,
+# split nested header/body tables. Read the way DpsUiAutomation._detail_table
+# reads it -- by position, not by <th>.
+# ======================================================================
+
+
+def test_live_detail_A_B_C_td_header_and_content_map_every_item_field(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__L1__")
+    normalized = normalize_dps_result(result, order_id="__L1__", elapsed_seconds=1)
+    assert result["status"] == "RESULT_FOUND_WITH_DETAIL", result["detail_lookup"]
+    assert result["diagnostics"]["detail_raw_headers"] == ["행번", "모델", "수량", "판매금액", "요구납기일"]
+    [item] = result["data"]["detail_items"]
+    assert (item["model_name"], item["quantity"], item["sale_amount"]) == (
+        "LH50BEHHLGFXKR", 1, "1,234,000")
+    assert normalized["required_delivery_date"] == "2026-09-04"
+    assert normalized["installation_date"] == "2026-09-04"   # never the 고객정보 2026-10-30
+    assert normalized["date_parse_status"] == "PARSED"
+    assert normalized["required_delivery_date_row_count"] == 1
+
+
+def test_live_detail_D_E_F_nested_tables_duplicate_dom_and_three_real_items(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__L3__")
+    normalized = normalize_dps_result(result, order_id="__L3__", elapsed_seconds=1)
+    models = [item["model_name"] for item in result["data"]["detail_items"]]
+    assert models == ["HA-MTS1S43WHT", "HA-MTSHELFWHT", "LH43BEHHLGFXKR"]   # 3, not 6
+    assert normalized["required_delivery_date_row_count"] == 3
+    assert normalized["installation_date"] == "2026-09-09"
+
+
+def test_live_detail_G_customer_info_without_items_is_not_with_detail(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__L4__")
+    assert result["status"] == "RESULT_FOUND_DETAIL_PARTIAL"
+    assert result["detail_lookup"]["status"] == "DETAIL_PARSE_FAILED"
+    assert result["data"]["detail_items"] == []
+    normalized = normalize_dps_result(result, order_id="__L4__", elapsed_seconds=1)
+    assert normalized["installation_date"] is None
+    assert normalized["date_parse_status"] == "MISSING"
+
+
+def test_live_detail_H_I_recipient_and_sales_number_label_value(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__L1__")
+    assert result["data"]["recipient_name"] == "테스트인수자B"
+    assert result["data"]["dps_sales_number"] == "3141000001"
+    assert result["detail_lookup"]["status"] == "DETAIL_CLOSED"   # detail 판매번호 == clicked
+
+
+def test_item_table_is_production_detail_table_arithmetic():
+    """detail_item_table on records alone: header band, centre-in-span, digits."""
+
+    from dps.cdp_backend import detail_item_table
+
+    def cell(name, left, top, kind="DataItem", width=100):
+        return {"name": name, "control_type": kind, "left": left, "right": left + width,
+                "top": top, "bottom": top + 20}
+
+    records = [
+        cell("요구납기일", 400, 10), cell("2026-10-30", 500, 10),       # customer row
+        cell("모델", 0, 100), cell("수량", 100, 100), cell("요구납기일", 200, 100),
+        cell("모델", 0, 100),                                              # cloned header
+        cell("LH50BEHHLGFXKR", 0, 130), cell("1", 100, 130), cell("2026-09-04", 200, 130),
+        cell("LH50BEHHLGFXKR", 0, 130),                                    # cloned row
+        cell("합계", 0, 160, width=60),                                   # no digit: dropped
+        cell("메모입력", 0, 190, kind="Edit"),                             # Edit: not a cell
+    ]
+    headers, rows = detail_item_table(records)
+    assert headers == ["모델", "수량", "요구납기일"]
+    assert rows == [["LH50BEHHLGFXKR", "1", "2026-09-04"]]
+    assert detail_item_table([cell("모델", 0, 0), cell("수량", 100, 0)]) == ([], [])  # < 3 labels
