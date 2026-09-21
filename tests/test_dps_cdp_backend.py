@@ -69,7 +69,7 @@ FRAME = r"""<html><body>
 <th>상품주문번호</th><td><input id="pord" type="text"></td></tr>
 <tr><th>조회기간</th><td><input id="s" type="text" value="2026-08-01"> ~
 <input id="e" type="text" value="2026-08-31"></td></tr>
-<tr><td>판매번호</td><td><input type="text"></td><td>기간</td><td><input type="text"></td>
+<tr><td class="theadFree">판매번호</td><td><input type="text"></td><td class="theadFree">기간</td><td><input type="text"></td>
 <td>품명</td><td><input type="text"></td><td>인수자명</td><td><input type="text"></td>
 <td>배송상태</td><td><select><option>전체</option><option>구매요청</option><option>설치완료</option><option>배송중</option></select></td></tr>
 </table>
@@ -83,16 +83,26 @@ window.top.__saves = 0;
 document.getElementById('save').onclick = () => { window.top.__saves++; };
 const link = (fn, arg, text) => '<a href="javascript:;" onclick="parent.' + fn + '(\'' + arg + '\');">' + text + '</a>';
 function row(o, s, opt){ opt = opt || {};
-  const salesCell = opt.noSend ? s : (opt.sendArgs || [s]).map(a => link('go_sendSearchMain', a, opt.sendText || a)).join('');
-  return '<tr><td><input type="checkbox"></td><td>1</td><td>구매요청</td>'
+  const salesCell = opt.blankSales ? '' : opt.noSend ? s
+    : (opt.sendArgs || [s]).map(a => link('go_sendSearchMain', a, opt.sendText || a)).join('');
+  return '<tr><td><input type="checkbox"></td><td>1</td><td>2026-09-01</td>'
     + '<td><a href="javascript:;" onclick="parent.go_infoPop(\'' + o + '\',\'NCP_1ORWWI_01\',\'10\');">' + o + '</a></td>'
-    + '<td>LH43BEFHLGFXKR</td><td>1</td><td>700,000</td><td>홍*동</td><td>2026-09-01</td>'
+    + '<td>' + (opt.product || 'LH43BEFHLGFXKR') + '</td><td>1</td><td>700,000</td><td>홍*동</td><td>A01</td>'
     + '<td>' + salesCell + '</td>'
-    + '<td>' + link('go_transterPop', s, '__TRANSFER__') + '</td><td>비고</td></tr>'; }
-function grid(body){ return '<table class="grid"><tbody>' + body + '</tbody></table>'; }
+    + '<td>' + link('go_transterPop', s, '__TRANSFER__') + '</td><td>' + (opt.status || '구매요청') + '</td></tr>'; }
+// The live list: the column names sit in a separate table#tblSort (TD cells,
+// no TH), which is where DpsUiAutomation reads them from.
+const HEAD = ['선택','No','주문일자','온라인판매 주문번호','모델명','수량','판매금액','구매자','배송처',
+              'DPS판매번호','전자주문번호','상태'];
+function grid(body, noHead){ return (noHead ? '' : '<table id="tblSort"><tr>' + HEAD.map(h => '<td>' + h + '</td>').join('') + '</tr></table>')
+  + '<table class="grid"><tbody>' + body + '</tbody></table>'; }
+const LIST = {'__P1__':['3141000101','LH50BEHHLGFXKR외1건','구매요청'],
+              '__P2__':['3141000102','LS49DG930SKXKR','구매요청'],
+              '__P3__':['3141000103','LS32DM500EKXKR','배송완료']};
 const H_SALES = {'__H1__':'3100000001','__H2__':'3100000002','__H3__':'3100000003',
   '__L1__':'3141000001','__L3__':'3141000003','__L4__':'3141000004'};
 document.getElementById('q').onclick = () => {
+  window.top.__queries = (window.top.__queries || 0) + 1;
   if (window.top.__freeze) return;   // a page that never answers this query
   const o = document.getElementById('ord').value;
   if (o === '__CONFIRM__') { if (!confirm('저장하시겠습니까?')) return; }
@@ -112,7 +122,11 @@ document.getElementById('q').onclick = () => {
     if (o === '__TWOSEND__') { out.innerHTML = grid(row(o,'__SALES__',{sendArgs:['__SALES__','9100000002']})); return; }
     if (o === '__TEXTMISMATCH__') { out.innerHTML = grid(row(o,'__SALES__',{sendText:'9100000003'})); return; }
     if (H_SALES[o]) { out.innerHTML = grid(row(o, H_SALES[o])); return; }
-    if (o === '__MULTI__') { out.innerHTML = grid(row('__OTHER__','9100000001') + row(o,'__SALES__') + row(o,'__SALES__')); return; }
+    if (LIST[o]) { out.innerHTML = grid(row(o, LIST[o][0], {product: LIST[o][1], status: LIST[o][2]})); return; }
+    if (o === '__BLANKSALES__') { out.innerHTML = grid(row(o, '3141000199', {blankSales: true, product: 'LH50BEHHLGFXKR외1건', status: '구매요청'})); return; }
+    if (o === '__BLANKNOHEAD__') { out.innerHTML = grid(row(o, '3141000198', {blankSales: true}), true); return; }
+    if (o === '__NOHEADER__') { out.innerHTML = grid(row(o, '3141000104', {product: 'LS32DM500EKXKR', status: '배송완료'}), true); return; }
+    if (o === '__MULTI__') { out.innerHTML = grid(row('__OTHER__','9100000001',{product:'OTHERMODEL1', status:'배송완료'}) + row(o,'__SALES__') + row(o,'__SALES__')); return; }
     if (o === '__VIRTUAL__') {
       out.innerHTML = '<div id="vs" style="height:120px;overflow:auto"><div id="sp" style="height:1200px;position:relative"><div id="win" style="position:absolute;top:0;width:100%"></div></div></div>';
       const vs = document.getElementById('vs');
@@ -674,7 +688,7 @@ def test_live_A_B_sales_number_is_the_go_sendSearchMain_argument(chrome, site):
     assert result["data"]["dps_sales_number"] == SALES
     assert result["data"]["dps_sales_number"] != TRANSFER         # B
     assert result["diagnostics"]["sales_link_candidates"] == 1
-    assert result["table_headers"] == []                           # as live
+    assert result["table_headers"][3] == "온라인판매 주문번호"      # from table#tblSort
 
 
 def test_live_C_F_digits_without_the_sales_link_are_not_guessed(chrome, site):
@@ -807,3 +821,160 @@ def test_item_table_is_production_detail_table_arithmetic():
     assert headers == ["모델", "수량", "요구납기일"]
     assert rows == [["LH50BEHHLGFXKR", "1", "2026-09-04"]]
     assert detail_item_table([cell("모델", 0, 0), cell("수량", 100, 0)]) == ([], [])  # < 3 labels
+
+
+# ======================================================================
+# List field parity: product_name / delivery_status / installation_status
+# come from the purchase-list row, under the headers DpsUiAutomation reads
+# (table#tblSort, thead cells) -- never from the detail items.
+# ======================================================================
+
+
+@pytest.mark.parametrize("order,product,status", [
+    ("__P1__", "LH50BEHHLGFXKR외1건", "구매요청"),    # A 5601형
+    ("__P2__", "LS49DG930SKXKR", "구매요청"),         # B 4111형
+    ("__P3__", "LS32DM500EKXKR", "배송완료"),         # C 5661형
+])
+def test_list_A_B_C_product_and_status_come_from_the_list_row(chrome, site, order, product, status):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, order)
+    normalized = normalize_dps_result(result, order_id=order, elapsed_seconds=1)
+    assert normalized["lookup_status"] == "SUCCESS"
+    assert normalized["product_name"] == product          # the list value, not a detail model
+    assert normalized["delivery_status"] == status
+    assert normalized["installation_status"] == status
+    # the detail still answers the date, exactly as before
+    assert normalized["installation_date"] == "2026-09-24"
+
+
+def test_list_D_search_form_status_and_thead_labels_are_never_used(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, ORDER)
+    headers = result["table_headers"]
+    assert "기간" not in headers and "배송상태" not in headers
+    normalized = normalize_dps_result(result, order_id=ORDER, elapsed_seconds=1)
+    assert normalized["delivery_status"] == "구매요청"
+    assert "전체" not in normalized["delivery_status"]
+
+
+def test_list_E_another_orders_row_is_never_read(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__MULTI__")
+    normalized = normalize_dps_result(result, order_id="__MULTI__", elapsed_seconds=1)
+    assert normalized["product_name"] == "LH43BEFHLGFXKR"
+    assert normalized["delivery_status"] == "구매요청"      # not OTHER's 배송완료
+
+
+def test_list_F_no_header_means_empty_not_guessed(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__NOHEADER__")
+    normalized = normalize_dps_result(result, order_id="__NOHEADER__", elapsed_seconds=1)
+    assert result["table_headers"] == []
+    assert normalized["product_name"] is None
+    assert normalized["delivery_status"] is None and normalized["installation_status"] is None
+    assert normalized["sales_number"] == "3141000104"      # the sales link still decides the sale
+
+
+# ======================================================================
+# Blank 판매번호: an exact row where DPS has not issued a sales number yet is
+# data, not an extraction failure -- production's contract, unchanged.
+# ======================================================================
+
+
+def test_blank_1_sales_number_present_keeps_the_existing_flow(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__P1__")
+    assert result["status"] == "RESULT_FOUND_WITH_DETAIL"
+    assert result["data"]["dps_sales_number"] == "3141000101"
+
+
+def test_blank_2_3_blank_sales_cell_is_production_partial_not_an_error(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__BLANKSALES__")
+    assert result["success"] is True and result["code"] == "LOOKUP_COMPLETE"
+    assert result["status"] == "RESULT_FOUND_DETAIL_PARTIAL"
+    assert result["detail_lookup"]["status"] == "DPS_SALES_NUMBER_MISSING"
+    assert result["detail_lookup"]["attempted"] is False
+    assert result["diagnostics"]["sales_number_cell"] == "BLANK"
+    assert _row_link_counts(browser) == [0, 0]              # no detail, no fallback link
+    normalized = normalize_dps_result(result, order_id="__BLANKSALES__", elapsed_seconds=1)
+    assert normalized["lookup_status"] == "SUCCESS"         # not AUTOMATION_ERROR
+    assert normalized["sales_number"] is None               # not the transfer number
+    assert normalized["installation_date"] is None
+    assert normalized["product_name"] == "LH50BEHHLGFXKR외1건"    # 3: list fields kept
+    assert normalized["delivery_status"] == normalized["installation_status"] == "구매요청"
+
+
+def test_blank_4_value_shown_but_not_semantically_confirmed_fails_closed(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__NOSEND__")                 # digits in the cell, no link
+    assert result["success"] is False and result["code"] == "DPS_SALES_NUMBER_MISSING"
+
+
+def test_blank_5_sales_number_only_in_another_row_is_never_taken(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__SENDOTHERONLY__")
+    assert result["success"] is False and result["code"] == "DPS_SALES_NUMBER_MISSING"
+
+
+def test_blank_without_headers_cannot_be_proven_and_fails_closed(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__BLANKNOHEAD__")
+    assert result["success"] is False and result["code"] == "DPS_SALES_NUMBER_MISSING"
+
+
+# ======================================================================
+# scripts/dps_cdp_list_debug.py -- reads the row already on screen through the
+# lookup's own tab finder, snapshot script and parser; presses nothing.
+# ======================================================================
+
+
+def _list_debug_module():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts" / "dps_cdp_list_debug.py"
+    spec = importlib.util.spec_from_file_location("dps_cdp_list_debug", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_list_debug_reports_what_parse_lookup_result_receives_without_clicking(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    assert _lookup(browser, "__P1__")["found"] is True          # leaves the row on screen
+    before = _top_eval(browser, "[window.__queries, window.__detailOpens, window.__transferOpens]")
+
+    report = _list_debug_module().diagnose(browser, "__P1__", allowed_hosts=("127.0.0.1",))
+
+    assert _top_eval(browser, "[window.__queries, window.__detailOpens, window.__transferOpens]") == before
+    assert report["clicked"] is False
+    assert report["backend_features"] == {"list_header_rules": True, "debug_argument": True}
+    assert report["RAW_LIST_HEADERS"][3] == "온라인판매 주문번호"
+    assert report["HEADER_COUNT"] == report["ROW_VALUE_COUNT"] == 12
+    assert report["HEADERS_ALIGNED_WITH_ROW"] is True
+    assert report["ORDER_COLUMN_INDEX"] == {"in_row": 3, "in_headers": 3}
+    assert report["RAW_LIST_HEADER_ELEMENTS"][0]["in_tblSort"] is True
+    assert {"tag", "class", "x", "y"} <= set(report["RAW_EXACT_ROW_CELLS"][3])
+    output = report["PARSE_LOOKUP_RESULT_OUTPUT"]
+    assert output["found"] is True
+    assert output["data"]["model_name"] == "LH50BEHHLGFXKR외1건"
+    assert output["data"]["delivery_status"] == "구매요청"
+    # nothing personal: the buyer column is masked
+    assert report["RAW_EXACT_ROW_VALUES"][7] == "<masked-personal>"
+    json.dumps(report, ensure_ascii=True)
+
+
+def test_production_snapshot_call_carries_no_debug_payload(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__P1__")
+    assert "debug" not in result and "debug" not in result.get("diagnostics", {})

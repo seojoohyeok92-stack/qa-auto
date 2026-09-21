@@ -363,15 +363,43 @@ FILL_AND_QUERY_JS = r"""
 """
 
 RESULT_SNAPSHOT_JS = r"""
-((markers,order,token)=>{const texts=[];const seen=new Set();let headers=[];const rows=[];let loading=false;
+((markers,order,token,debug)=>{const texts=[];const seen=new Set();let headers=[];const rows=[];let loading=false;
  let staleOrderRows=0;let formTablesSkipped=0;const salesEvidence=[];
+ // debug (4th argument, diagnostics only): where each header and matched-row
+ // cell came from. Production passes three arguments and gets none of it.
+ const dbg={headers:[],rows:[]};
+ const meta=(el,t,i)=>{const r=el.getBoundingClientRect();return {index:i,text:t,tag:el.tagName,
+  class:String(el.className||'').slice(0,60),id:String(el.id||'').slice(0,40),
+  in_tblSort:!!(el.closest&&el.closest('table#tblSort')),x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width)};};
  const add=t=>{if(t&&!seen.has(t)&&texts.length<240){seen.add(t);texts.push(t);}};
  const fresh=el=>!token||el.getAttribute('data-cdp-before')!==token;
  const isForm=t=>!!t.querySelector('select,textarea,input:not([type=checkbox]):not([type=radio]):not([type=hidden])');
- const headersFor=t=>{let hs=Array.from(t.querySelectorAll('th,[role=columnheader]')).map(txt).filter(Boolean);
-  for(let a=t.parentElement,i=0;!hs.length&&a&&i<4;a=a.parentElement,i++){
-   const ths=Array.from(a.querySelectorAll('th,[role=columnheader]')).filter(th=>!isForm(th.closest('table')||th));
-   hs=ths.map(txt).filter(Boolean);}
+ // DpsUiAutomation.collect_result_snapshot's header sources, in document
+ // order over the document that holds the result row (its result root):
+ //   a td whose class contains "thead"               (DataItem + thead)
+ //   the cells of table#tblSort's rows               (parent automation_id tblSort)
+ //   th / [role=columnheader]                        (Header / HeaderItem)
+ //   a text leaf whose own or parent class/id says header/thead/columnheader
+ // then, only if none: the result texts that are known header words
+ // (_infer_headers_from_texts). Nothing inside the search form counts, and
+ // nothing inside a data row does.
+ const HINT=/header|thead|columnheader/i;const KNOWN=['판매번호','주문번호','상품명','모델명','수량','설치예정일','배송예정일','설치상태','진행상태'];
+ const inForm=el=>{const t=el.closest('table');return !!(t&&isForm(t));};
+ const listHeaders=(d,dataRows)=>{const hs=[];const push=(t,el)=>{if(t&&!hs.includes(t)){hs.push(t);
+   if(debug)dbg.headers.push({...meta(el,t,hs.length-1),source:'rule'});}};
+  const inData=el=>dataRows.some(tr=>tr.contains(el));
+  for(const el of d.querySelectorAll('*')){if(!vis(el)||inForm(el)||inData(el))continue;const tag=el.tagName;
+   const cls=String(el.className||'')+' '+(el.id||'');
+   if(tag==='TR'&&el.closest('table#tblSort')){for(const c of el.querySelectorAll('td,th'))push(txt(c),c);continue;}
+   if(el.closest('table#tblSort'))continue;
+   if(tag==='TD'&&/thead/i.test(String(el.className||''))){push(txt(el),el);continue;}
+   if(tag==='TH'||el.getAttribute('role')==='columnheader'){push(txt(el),el);continue;}
+   if(['SPAN','DIV','P','FONT','B','STRONG','LABEL'].includes(tag)&&!el.children.length){
+    const pc=el.parentElement?String(el.parentElement.className||'')+' '+(el.parentElement.id||''):'';
+    if(HINT.test(cls)||HINT.test(pc))push(txt(el),el);}}
+  if(!hs.length&&dataRows.length){for(const el of d.querySelectorAll('td,th,span,div')){
+   if(!vis(el)||inForm(el)||inData(el)||el.children.length)continue;const t=txt(el);
+   if(KNOWN.includes(t)){hs.push(t);if(debug)dbg.headers.push({...meta(el,t,hs.length-1),source:'inferred'});}}}
   return hs;};
  for(const {d} of docs()){
   for(const el of d.querySelectorAll('[class*=loading],[id*=loading],[class*=progress],[class*=spinner]'))if(vis(el))loading=true;
@@ -379,17 +407,21 @@ RESULT_SNAPSHOT_JS = r"""
    if(!t||t.length>=80)continue;
    if(/로딩|처리중|조회중|loading/i.test(t)){loading=true;continue;}
    if(fresh(el)&&markers.some(m=>t.indexOf(m)>=0))add(t);}
+  const docRows=[];
   for(const table of d.querySelectorAll('table,[role=grid]')){if(!vis(table))continue;
    if(isForm(table)){formTablesSkipped++;continue;}
    for(const tr of table.querySelectorAll('tr,[role=row]')){const cells=Array.from(tr.querySelectorAll('td,[role=gridcell]'));
     if(cells.length<2)continue;const vals=cells.map(txt);
     if(!vals.includes(order))continue;
     if(!fresh(tr)){staleOrderRows++;continue;}
-    if(!headers.length)headers=headersFor(table);
+    docRows.push(tr);
+    if(debug)dbg.rows.push(cells.map((c,i)=>meta(c,vals[i],i)));
     const key=JSON.stringify(vals);
     if(!rows.some(r=>JSON.stringify(r)===key)&&rows.length<100){rows.push(vals);vals.forEach(add);
-     for(const l of salesLinks(tr))salesEvidence.push({sales:l.sales,text:l.text});}}}}
+     for(const l of salesLinks(tr))salesEvidence.push({sales:l.sales,text:l.text});}}}
+  if(docRows.length&&!headers.length)headers=listHeaders(d,docRows);}
  return {raw_result_texts:texts,table_headers:headers.slice(0,40),table_rows:rows,loading,
+  ...(debug?{debug:dbg}:{}),
   stale_order_rows:staleOrderRows,form_tables_skipped:formTablesSkipped,sales_links:salesEvidence};})
 """
 
@@ -623,6 +655,30 @@ class CdpDpsReader:
             self.sleep(self.poll_interval)
         return None, None, {"status": "DETAIL_OPEN_FAILED", "invocation_count": 1}
 
+    @staticmethod
+    def _sales_cell_proven_blank(snapshot: dict[str, Any], matched_row: list[str],
+                                 parsed: dict[str, Any]) -> bool:
+        """Whether the row *shows* no 판매번호, as opposed to one we failed to read.
+
+        Proven only when every piece agrees: no go_sendSearchMain element in
+        the exact row at all, the production headers name exactly one sales
+        number column, the row lines up with those headers cell for cell (the
+        parser's own direct mapping), that cell is empty, and the parser read
+        no sales number either. Missing headers prove nothing -- then it is a
+        reading failure and fails closed.
+        """
+
+        if snapshot.get("sales_links"):
+            return False
+        headers = [normalize_label(value).replace(" ", "")
+                   for value in snapshot.get("table_headers") or []]
+        columns = [index for index, value in enumerate(headers)
+                   if value in {"DPS판매번호", "판매번호"}]
+        if len(columns) != 1 or len(matched_row) != len(headers):
+            return False
+        return (matched_row[columns[0]] == ""
+                and not str(parsed["data"].get("dps_sales_number") or "").strip())
+
     def perform_lookup(
         self, *, order_id: str, dps_period_start: str, dps_period_end: str,
         product_order_id: str | None = None, dps_date_source: str | None = None,
@@ -701,10 +757,20 @@ class CdpDpsReader:
             }
             diagnostics["sales_link_candidates"] = len(candidates)
             sales_value = next(iter(candidates)) if len(candidates) == 1 else ""
-            if not (sales_value and sales_value in matched_row):
+            if sales_value and sales_value in matched_row:
+                parsed["data"]["dps_sales_number"] = sales_value
+            elif self._sales_cell_proven_blank(after, matched_row, parsed):
+                # DPS has not issued a 판매번호 for this order yet. That is data,
+                # not a reading failure, and production treats it so:
+                # lookup_sales_detail stops at DPS_SALES_NUMBER_MISSING without
+                # opening anything and the lookup ends RESULT_FOUND_DETAIL_PARTIAL.
+                # The branch below does exactly that when the sales number is
+                # empty; no other number stands in for it.
+                parsed["data"]["dps_sales_number"] = None
+                diagnostics["sales_number_cell"] = "BLANK"
+            else:
                 return self._failure("DPS_SALES_NUMBER_MISSING",
                                      "결과 행에서 DPS 판매번호를 확인하지 못했습니다.", diagnostics)
-            parsed["data"]["dps_sales_number"] = sales_value
             detail_lookup = {"attempted": False, "opened": False, "parsed": False,
                              "closed": False, "status": "NOT_ATTEMPTED", "invocation_count": 0}
             detail = None
