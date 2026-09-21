@@ -7,7 +7,7 @@ from typing import Any
 from answer.fact_selection import SelectedFacts
 from answer.facts import AnswerFacts
 from answer.inquiry_analysis import InquiryAnalysis
-from answer.text_utils import mask_personal_information
+from answer.text_utils import OFFICIAL_CONTACT_NUMBERS, mask_personal_information
 
 
 FORBIDDEN_KEYS = {
@@ -75,7 +75,17 @@ class PromptBuilder:
         "전달된 자료(Facts, Product Catalog, Learning, Historical, 주문/DPS)에 "
         "없는 배송일, 주문상태, 설치일, 상품정보, 정책, "
         "기사 방문시간, 반품 가능 여부를 추측하지 않는다. "
-        "전화번호, 주소, OTP, 인증정보, 토큰, Cookie, Session을 출력하지 않는다. "
+        # "전화번호를 출력하지 않는다" had no exception, so the model dropped
+        # the published service numbers even when the evidence in front of it
+        # carried them: 10635 was sent 1588-3366 four times and answered
+        # "삼성전자 서비스센터에 접수해 주세요" with no number. The exception is
+        # the same explicit list every masking layer already honours.
+        "고객·주문자·수령자의 전화번호, 주소, OTP, 인증정보, 토큰, Cookie, "
+        "Session을 출력하지 않는다. 단 공식 공개 업무번호("
+        + ", ".join(OFFICIAL_CONTACT_NUMBERS)
+        + ")는 전달된 근거에 있고 A/S·서비스센터 접수·판매처 고객센터 연락 "
+        "안내에 필요할 때 그대로 쓸 수 있다. 근거에 없는 번호를 만들거나 관련 "
+        "없는 답변에 번호를 덧붙이지 않는다. "
         "인사말(예: 안녕하세요)과 마무리 인사(예: 감사합니다)는 별도 Template이 "
         "자동으로 추가하므로 답변 본문에 포함하지 않는다."
     )

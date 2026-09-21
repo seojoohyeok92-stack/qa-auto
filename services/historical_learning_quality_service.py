@@ -77,8 +77,11 @@ TEMPORARY = re.compile(
 # "해당 제품은 QLED 패널을 사용합니다" points at the product under discussion,
 # which is how every catalogue answer refers to it, so 해당 only marks the
 # asker's own when it sits on something an order actually has.
+# The gap between the name and the noun stays on one line: every answer opens
+# "안녕하세요 고객님" and the body starts on the next line, so a greeting followed
+# by "상품 대표이미지와 동일하게..." is not a statement about their 상품.
 _ASKERS_ORDER = (
-    r"(?:고객님|귀하)(?:의|께서)?\s*(?:주문|상품|제품|배송|설치)"
+    r"(?:고객님|귀하)(?:의|께서)?[^\S\n]*(?:주문|상품|제품|배송|설치)"
     r"|해당\s*(?:주문|배송|설치|건)"
     r"|(?:주문|구매|결제)하신\s*(?:상품|제품|건)"
 )
@@ -97,7 +100,10 @@ _SCHEDULED_DAY = (
 ORDER_SPECIFIC = re.compile(
     rf"{_ASKERS_ORDER}|{_IDENTIFIER_READ_BACK}|{_SCHEDULED_DAY}|"
     r"배송\s*완료(?:로|처리)|"
-    r"(?:발송|출고|구성품|스탠드|본품).{0,24}(?:누락|완료|진행)|"
+    # 진행 describing what kind of product it is ("삼성기사님께서 설치 진행해주시는
+    # 상품입니다") is the product's policy, not an event on one order.
+    r"(?:발송|출고|구성품|스탠드|본품).{0,24}"
+    r"(?:누락|완료|진행(?!\s*(?:해\s*)?(?:주시는|드리는|되는|하는)\s*(?:상품|제품)))|"
     r"누락(?:된|된 것으로|으로)|익일\s*(?:출고|발송)|"
     r"(?:오늘|내일|금일)\s*(?:출고|발송|도착)|송장\s*번호|"
     r"판매\s*번호|(?:해당|고객님|현재).{0,12}배송\s*기사.{0,16}(?:배정|연락|방문)|"

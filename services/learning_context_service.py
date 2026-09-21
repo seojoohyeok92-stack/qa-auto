@@ -14,14 +14,17 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
-from services.similar_answer_service import SimilarAnswerService
+from services.similar_answer_service import SimilarAnswerService, _normalized_answer
 from services.historical_case_service import HistoricalCaseService
 from services.historical_learning_quality_service import is_data_unsafe
 from repositories.learning_provenance_repository import LearningProvenanceRepository
 from repositories.feedback_signal_provenance_repository import (
     FeedbackSignalProvenanceRepository,
 )
-from services.learning_evidence_policy import order_identifier_request_reason
+from services.learning_evidence_policy import (
+    contamination_reason,
+    order_identifier_request_reason,
+)
 from services.learning_signal_service import LearningSignalService
 from services.learning_compatibility_service import (
     GENERIC_TOPICS,
@@ -691,6 +694,16 @@ class LearningContextService:
         purchase_is_confirmed = purchase_confirmed(
             semantic_analysis, order_id_validated=current_order_id_validated,
         )
+        # The model the operator confirmed for this Coupang option, when there
+        # is one. ``answer.facts`` carries it only with that provenance, and
+        # Product Knowledge already looks it up by it; the Learning search
+        # re-read the model from the display option instead, so the same
+        # product scored as two: option "LH43BEDH" against a Learning stored
+        # under the confirmed LH43BEDHLGFXKR took the -0.20 MODEL_MISMATCH
+        # penalty (inquiry 3779 / L318383, 4080 / L318421). The comparison
+        # itself is unchanged -- ``canonical_model_identity`` and
+        # MODEL_ALIASES decide sameness as before.
+        confirmed_model_code = str(facts.product.get("model_code") or "").strip() or None
         for question in questions:
             atomic = next(
                 (item for item in semantic_atomic if item.text.strip() == question),
@@ -739,7 +752,7 @@ class LearningContextService:
                 store_code=store_code,
                 intent=intent_data.get("category") or intent_data.get("primary_intent"),
                 product_name=product_name,
-                model_code=question_guard.model_code,
+                model_code=confirmed_model_code or question_guard.model_code,
                 inquiry_type=inquiry_type,
                 product_id=question_guard.product_id,
                 option_name=(
@@ -1030,6 +1043,7 @@ class LearningContextService:
         historical_traces: list[dict[str, Any]] = []
         historical_order_scope_rejections = 0
         historical_topic_scope_rejections = 0
+        historical_redaction_rejections = 0
         for question in questions:
             detailed = self.historical.search_detailed(
                 question,
@@ -1060,6 +1074,16 @@ class LearningContextService:
                     is not None
                 ):
                     historical_order_scope_rejections += 1
+                    continue
+                # The rule the Learning search already applies to its own rows
+                # (``similar_answer_service``): a reply stored with
+                # "<masked-phone>" in it records that a number was removed, and
+                # shown to the model it is copied. Historical cases never had
+                # the check, so the legacy "구체적 배송 가능 여부는
+                # <masked-phone>로 문의해 주세요" reached the prompt beside the
+                # real service number. The row stays in the database.
+                if contamination_reason(item.get("seller_answer")) is not None:
+                    historical_redaction_rejections += 1
                     continue
                 # A historical case has no semantic metadata of its own, and
                 # the general topic gate lets a candidate through on UNCERTAIN
@@ -1110,6 +1134,44 @@ class LearningContextService:
             item for item in historical
             if int(item["id"]) not in promoted_case_ids
         ][:3]
+        # The same reply, for the same product, already in the prompt as a
+        # Learning. Excluding by ``historical_case_id`` above only catches a
+        # Learning that names the case it was promoted from; a legacy Learning
+        # saved from the same inquiry (L114 / H35, both inquiry 1888) names
+        # none, so one seller answer was sent as fact and again as reference.
+        #
+        # Deliberately narrow: identical text after whitespace -- the identity
+        # ``_normalized_answer`` already gives the Learning dedupe -- *and* the
+        # same stated source model and product name. The same sentence written
+        # for another model (L318386 43BEH / H444 43BEF) is kept, because
+        # whether it applies here is exactly what the reader has to judge.
+        def _evidence_key(answer: object, origin: object) -> tuple[Any, ...]:
+            origin = origin if isinstance(origin, dict) else {}
+            return (
+                _normalized_answer(answer),
+                origin.get("source_model_code"),
+                origin.get("source_product_name"),
+            )
+
+        delivered: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for item in context["similar_approved_answers"]:
+            delivered.setdefault(
+                _evidence_key(item.get("answer"), item.get("evidence_origin")),
+                {"learning_example_id": item.get("learning_example_id")},
+            )
+        historical_duplicates: list[dict[str, Any]] = []
+        distinct_historical: list[dict[str, Any]] = []
+        for item in historical:
+            key = _evidence_key(item.get("seller_answer"), item.get("evidence_origin"))
+            if key[0] and key in delivered:
+                historical_duplicates.append({
+                    "historical_case_id": int(item["id"]),
+                    "same_as": delivered[key],
+                })
+                continue
+            delivered[key] = {"historical_case_id": int(item["id"])}
+            distinct_historical.append(item)
+        historical = distinct_historical
 
         signals_by_question = dict(zip(questions, signal_contexts))
         evidence_map: list[dict[str, Any]] = []
@@ -1421,6 +1483,12 @@ class LearningContextService:
                 "HISTORICAL_TOPIC_SCOPE_MISMATCH": (
                     historical_topic_scope_rejections
                 ),
+                "HISTORICAL_REDACTION_TOKEN_CONTAMINATED": (
+                    historical_redaction_rejections
+                ),
+                "HISTORICAL_DUPLICATE_OF_DELIVERED_EVIDENCE": len(
+                    historical_duplicates
+                ),
                 # Removed, not "removed or kept with a note".
                 #
                 # ``learning_quality_rejections`` holds both kinds of finding:
@@ -1548,6 +1616,9 @@ class LearningContextService:
             ),
             "selected_count": len(historical),
             "selected_historical_case_ids": [int(item["id"]) for item in historical],
+            # Not delivered because the same text for the same product already
+            # is; kept here so the omission stays traceable.
+            "duplicate_of_delivered_evidence": historical_duplicates,
             "subquestions": historical_traces,
         }
         if inquiry_id is not None:
