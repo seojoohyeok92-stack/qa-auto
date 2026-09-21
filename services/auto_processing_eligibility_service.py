@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from answer.source_adapter import answer_request_from_inquiry
 from services.auto_post_validation_service import AutoPostTechnicalValidator
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.market_policy import is_store_dps_enabled
 
 
 REVIEW_ROUTES = {
@@ -122,6 +123,72 @@ def delivery_period_claim(answer: object) -> str | None:
 
     found = _DELIVERY_PERIOD_CLAIM.search(str(answer or ""))
     return found.group(0) if found else None
+
+
+# A general lead time answered from GENERAL_DELIVERY_ESTIMATE evidence. That
+# evidence proves how long this product usually takes and nothing about this
+# customer, so an answer resting on it is held when it says more than that:
+# a day, a weekday, a visit time, or where the order or the stock stands now.
+GENERAL_DELIVERY_ESTIMATE_SOURCE = "GENERAL_DELIVERY_ESTIMATE"
+GENERAL_ESTIMATE_EXACT_SCHEDULE = "GENERAL_ESTIMATE_EXACT_SCHEDULE"
+GENERAL_ESTIMATE_NOT_HEDGED = "GENERAL_ESTIMATE_NOT_HEDGED"
+GENERAL_ESTIMATE_CURRENT_STATE = "GENERAL_ESTIMATE_CURRENT_STATE"
+_HELD_DELIVERY_STATUSES = frozenset({"NEEDS_DPS", "DELIVERY_SCHEDULE_REVIEW"})
+_EXACT_SCHEDULE_CLAIM = re.compile(
+    r"\d{1,2}\s*월\s*\d{1,2}\s*일|(?<![\d.])\d{1,2}\s*/\s*\d{1,2}(?!\d)"
+    r"|20\d{2}\s*[년./-]\s*\d{1,2}"
+    r"|[월화수목금토일]요일"
+    r"|(?:오늘|내일|모레|금일|명일|이번\s*주|다음\s*주)\s*(?:중|안|내)?\s*"
+    r"(?:출고|발송|도착|배송|설치|방문|받)"
+    r"|(?:오전|오후)\s*\d{1,2}\s*시(?!\s*(?:이전|전|까지))"
+)
+_CURRENT_STATE_CLAIM = re.compile(
+    r"재고|품절|입고|출고\s*(?:되었|됐|완료)|발송\s*(?:되었|됐|완료)"
+    r"|배송\s*중|배송\s*(?:이\s*)?완료|설치\s*(?:가\s*)?완료"
+)
+_ESTIMATE_HEDGE = re.compile(
+    r"약|보통|일반적으로|평균|정도|예상|이내|내외|가량|대략"
+    r"|소요될\s*수|걸릴\s*수|달라질\s*수|변동"
+)
+
+
+def general_estimate_grounded(hybrid: Mapping[str, Any]) -> bool:
+    """Whether the delivery part of this answer rests on a general lead time.
+
+    True only when some sub-question was mapped to GENERAL_DELIVERY_ESTIMATE
+    and no delivery sub-question is still waiting on DPS or held for having no
+    order -- one grounded delivery atom does not speak for another.
+    """
+
+    evidence = hybrid.get("subquestion_evidence")
+    if not isinstance(evidence, list):
+        return False
+    rows = [item for item in evidence if isinstance(item, dict)]
+    return bool(
+        any(item.get("source") == GENERAL_DELIVERY_ESTIMATE_SOURCE for item in rows)
+        and not any(
+            str(item.get("status") or "") in _HELD_DELIVERY_STATUSES
+            for item in rows
+        )
+    )
+
+
+def general_estimate_answer_violation(answer: object) -> str | None:
+    """Why this general-estimate answer says more than its evidence, or None."""
+
+    from answer.answer_format import extract_answer_body
+
+    body = extract_answer_body(str(answer or "")) or str(answer or "")
+    if _EXACT_SCHEDULE_CLAIM.search(body):
+        return GENERAL_ESTIMATE_EXACT_SCHEDULE
+    if _CURRENT_STATE_CLAIM.search(body):
+        return GENERAL_ESTIMATE_CURRENT_STATE
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
+        if _DELIVERY_PERIOD_CLAIM.search(sentence) and not _ESTIMATE_HEDGE.search(
+            sentence
+        ):
+            return GENERAL_ESTIMATE_NOT_HEDGED
+    return None
 
 
 # Appended when the coverage evaluator found a question the answer left
@@ -772,12 +839,26 @@ class AutoProcessingEligibilityService:
             for marker in ("REVIEW", "MANUAL", "BLOCKED", "FAILED", "UNCONFIRMED")
         ):
             reasons.append(f"ROUTE_{normalized_route or 'UNKNOWN'}")
+        # The pre-purchase block and the order/DPS gates below exist because
+        # no schedule can be stated without an order date. A general lead time
+        # for this product is not a schedule, and when GPT② answered from one
+        # alone those gates have nothing to protect -- the answer itself is
+        # checked instead, for saying more than a general estimate.
+        general_estimate = general_estimate_grounded(hybrid)
+        if general_estimate:
+            violation = general_estimate_answer_violation(answer)
+            if violation:
+                reasons.append(violation)
         workflow_blocks = plan.get("workflow_block_reasons")
         if isinstance(workflow_blocks, (list, tuple)):
             reasons.extend(
                 str(item).upper()
                 for item in workflow_blocks
                 if str(item).upper() in _PERSISTED_WORKFLOW_BLOCKS
+                and not (
+                    general_estimate
+                    and str(item).upper() == "PRE_PURCHASE_DELIVERY_UNRESOLVED"
+                )
             )
         product_guard_value = metadata.get("product_fact_guard")
         product_guard = (
@@ -832,6 +913,24 @@ class AutoProcessingEligibilityService:
         # all. The reasons are still recorded (soft) for diagnostics.
         order_request_route = normalized_route == "ORDER_ID_REQUEST"
         order_required = bool(plan.get("requires_order_lookup"))
+        # Naver only, because only Naver has DPS: there the missing piece is a
+        # lookup that did not run (no order number) or ran and found no date,
+        # and the general lead time is what remains to say. A failed or
+        # disabled lookup keeps its hold -- the date may exist and nobody has
+        # seen it -- and Coupang keeps every order/DPS gate it had.
+        order_id_missing = (
+            str(plan.get("order_id_status") or "").upper() != "VALID"
+        )
+        general_estimate_fallback = bool(
+            general_estimate
+            and is_store_dps_enabled(inquiry.get("store_code"))
+            and (
+                order_id_missing
+                or str(plan.get("dps_lookup_status") or "").upper() == "SUCCESS"
+            )
+        )
+        if general_estimate_fallback:
+            order_required = order_required and not order_id_missing
         if order_required and str(plan.get("order_id_status") or "").upper() != "VALID":
             reasons.append(
                 "ORDER_ID_REQUESTED_FROM_CUSTOMER" if order_request_route
@@ -846,7 +945,11 @@ class AutoProcessingEligibilityService:
         # customer's eventual schedule answer, but it is neither executable
         # nor evidence for the safe request asking for the missing order id.
         # Other routes retain the full DPS trust/snapshot gates.
-        dps_required = bool(plan.get("requires_dps_lookup")) and not order_request_route
+        dps_required = (
+            bool(plan.get("requires_dps_lookup"))
+            and not order_request_route
+            and not general_estimate_fallback
+        )
         if dps_required and str(plan.get("dps_lookup_status") or "").upper() == "DISABLED":
             reasons.append("DPS_LOOKUP_DISABLED")
         if dps_required and str(plan.get("dps_lookup_status") or "").upper() != "SUCCESS":

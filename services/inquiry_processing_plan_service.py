@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 import dataclasses
+from datetime import datetime, timedelta
 from typing import Any
 
 from answer.inquiry_processing_plan import InquiryProcessingPlan
@@ -16,12 +17,52 @@ from services.semantic_analysis import (
     SemanticAnalysis,
     delivery_schedule_needs_review,
 )
-from answer.inquiry_analysis import InquiryAnalysis
+from answer.inquiry_analysis import AnswerStrategy, InquiryAnalysis
+from repositories.answer_repository import AnswerRepository
+from services.market_policy import is_store_dps_enabled
 from services.phase9_answer_policy import build_delivery_answer_context
 from workflow.models import StepCode
 
 
 GENERAL_ORDER_ID = re.compile(r"\d{16}")
+# A message that is nothing but an order number: the number, the words that
+# introduce it, and the courtesies around it. Anything else left over -- a
+# question, a request, a topic -- means the customer said something of their
+# own, and it is read as that instead.
+_ORDER_NUMBER_FILLER = re.compile(
+    r"(?:일반|네이버)?\s*주문\s*번호|번호|입니다|이에요|예요|이요|요|"
+    r"다시|보내\s*드립니다|보내\s*드려요|보내요|남깁니다|남겨\s*드립니다|"
+    r"전달\s*드립니다|드립니다|부탁\s*드립니다|부탁\s*드려요|부탁해요|"
+    r"확인\s*(?:부탁|해\s*주세요|해주세요|요청)?|이게|이것|이거|제|저의|"
+    r"여기|네|안녕하세요|감사합니다|고맙습니다|[\s.,!?~:·\-()\[\]]"
+)
+# Delivery intents whose missing piece is exactly an order number. A schedule
+# change is not one of them: an order number does not move a date.
+_SCHEDULE_READ_INTENTS = frozenset({
+    "DELIVERY_DATE", "DELIVERY_TIME", "INSTALLATION_DATE",
+    "INSTALLATION_TIME", "DELIVERY_STATUS",
+})
+ORDER_NUMBER_FOLLOWUP_WINDOW = timedelta(days=7)
+
+
+def order_number_only(question: object, order_id: str) -> bool:
+    """Whether the message is only an order number, and nothing of its own."""
+
+    text = str(question or "")
+    if not order_id or order_id not in re.sub(r"\s+", "", text):
+        return False
+    remainder = re.sub(r"\d", "", text)
+    return not _ORDER_NUMBER_FILLER.sub("", remainder)
+
+
+def _moment(value: object) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else None
+
+
 FAILED_DPS_STATES = {
     "AGENT_OFFLINE",
     "TIMEOUT",
@@ -48,6 +89,80 @@ class InquiryProcessingPlanService:
         self.analysis = analysis or InquiryAnalysisService()
         self.dps = DpsRepository(database)
         self.workflows = WorkflowRepository(database)
+        self.answers = AnswerRepository(database)
+
+    def _order_number_followup(
+        self, inquiry: dict[str, Any], order_id: str,
+    ) -> dict[str, Any] | None:
+        """The delivery inquiry this bare order number was asked for, if any.
+
+        Not conversation state. It links exactly one shape: the system asked
+        this customer for an order number to look up a delivery or
+        installation schedule, and the customer's next inquiry on the same
+        listing is that number and nothing else. Every clause is required,
+        because the customer key is weak -- Naver's writer id is masked to a
+        prefix, so it is trusted only together with the same store and the
+        same listing, and only for the customer's most recent earlier
+        inquiry. Coupang has no DPS and carries no writer id at all, and a
+        customer inquiry without one is never linked: an unidentifiable prior
+        is no prior.
+        """
+
+        store = str(inquiry.get("store_code") or "")
+        writer = str(inquiry.get("masked_writer_id") or "").strip()
+        listing = str(inquiry.get("product_id") or "").strip()
+        registered = _moment(
+            inquiry.get("registered_at") or inquiry.get("created_at")
+        )
+        if not (
+            is_store_dps_enabled(store) and writer and listing and registered
+        ):
+            return None
+        if not order_number_only(inquiry.get("content"), order_id):
+            return None
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, registered_at, created_at, order_id
+                FROM inquiries
+                WHERE store_code = ? AND source_type = ?
+                  AND masked_writer_id = ? AND product_id = ? AND id <> ?
+                """,
+                (store, inquiry.get("source_type"), writer, listing,
+                 int(inquiry["id"])),
+            ).fetchall()
+        earlier = sorted(
+            (
+                (moment, row)
+                for row in rows
+                if (moment := _moment(row["registered_at"] or row["created_at"]))
+                and moment < registered
+            ),
+            key=lambda pair: pair[0],
+        )
+        if not earlier:
+            return None
+        moment, prior = earlier[-1]
+        if registered - moment > ORDER_NUMBER_FOLLOWUP_WINDOW:
+            return None
+        draft = self.answers.latest_for_inquiry(int(prior["id"])) or {}
+        metadata = draft.get("metadata_json")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        prior_plan = metadata.get("processing_plan")
+        prior_plan = prior_plan if isinstance(prior_plan, dict) else {}
+        intent = str(prior_plan.get("detected_intent") or "").upper()
+        if not (
+            str(metadata.get("selected_answer_route") or "") == "ORDER_ID_REQUEST"
+            and prior_plan.get("is_delivery") is True
+            and intent in _SCHEDULE_READ_INTENTS
+        ):
+            return None
+        return {
+            "previous_inquiry_id": int(prior["id"]),
+            "previous_intent": intent,
+            "previous_route": "ORDER_ID_REQUEST",
+            "linkage": "STORE+SOURCE+MASKED_WRITER_ID+PRODUCT_ID+MOST_RECENT",
+        }
 
     @staticmethod
     def _raw(inquiry: dict[str, Any]) -> dict[str, Any]:
@@ -147,6 +262,37 @@ class InquiryProcessingPlanService:
         # semantic-aware plan says external order evidence is unnecessary,
         # every order-state field must say the same thing so no downstream
         # gate can reinterpret an unrelated blank as an order failure.
+        # "This inquiry carries an order number" is not "this inquiry needs an
+        # order lookup" -- except when the number is the whole message and it
+        # answers the order-number request the system made on this
+        # customer's previous delivery inquiry. Then that one intent, and
+        # nothing else from the previous inquiry, carries over.
+        order_number_followup = None
+        if (
+            order_id_status == "VALID"
+            # GPT① may read a bare number as ORDER_IDENTIFICATION and ask
+            # for an order lookup; what it cannot see is the schedule
+            # question the number was sent for.
+            and not analysis.requires_dps_lookup
+            and not analysis.delivery_question
+        ):
+            order_number_followup = self._order_number_followup(
+                inquiry, order_id,
+            )
+            if order_number_followup is not None:
+                analysis = dataclasses.replace(
+                    analysis,
+                    detected_intent=order_number_followup["previous_intent"],
+                    requires_order_lookup=True,
+                    requires_dps_lookup=True,
+                    requires_order_id=True,
+                    purchase_confirmed=True,
+                    answer_strategy=AnswerStrategy.DIRECT_FACT_ANSWER,
+                    reasons=(
+                        *analysis.reasons,
+                        "이전 배송 문의에서 요청한 주문번호를 받은 문의입니다.",
+                    ),
+                )
         if not analysis.requires_order_lookup:
             order_id_status = "NOT_REQUIRED"
 
@@ -369,4 +515,5 @@ class InquiryProcessingPlanService:
             analysis=analysis,
             semantic_routing=(dict(semantic_routing) if semantic_routing else None),
             workflow_block_reasons=workflow_block_reasons,
+            order_number_followup=order_number_followup,
         )

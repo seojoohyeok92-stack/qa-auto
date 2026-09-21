@@ -390,6 +390,104 @@ def current_schedule_scope_reason(text: object) -> str | None:
     return found.group(0) if found else None
 
 
+# A general delivery lead time: how long this product usually takes, as
+# opposed to when one customer's order arrives. "43인치 제품의 경우 구매일로부터
+# 설치까지 1~2주 정도 소요되실 예정입니다" is the first; "현재 확인되는 설치
+# 예정일은 8월 14일" is the second, and the first is only reusable if it is
+# read apart from the second.
+#
+# Read per sentence, because that is the unit a claim lives in. One approved
+# answer routinely carries both a standing lead time and a fact that was only
+# true that day -- "블랙은 스탠드 품절로 2주, 화이트는 3시까지 주문 시 당일
+# 출고" -- and admitting or refusing the whole row would either reuse the stock
+# fact or throw the standing policy away.
+_LEAD_TIME = re.compile(
+    r"\d+\s*[~\-～]\s*\d+\s*(?:영업일|일|주|개월)"
+    r"|약\s*\d+\s*(?:영업일|일|주|개월)"
+    r"|\d+\s*(?:영업일|주일|개월)"
+    r"|\d+\s*(?:주|일)\s*(?:정도|가량|이내|안에|쯤|내외)"
+    r"|당일\s*(?:출고|발송)"
+)
+# What the duration is the duration *of*. "작성 후 발송까지 1~2일" is how long a
+# trade statement takes by e-mail and "5영업일 내에 발송" is a review reward;
+# both carry a lead time and neither is about receiving the product. Bare 발송
+# is therefore not a subject on its own -- documents are 발송 too -- while
+# "구매일로부터 약 1-2주 소요되는 상품입니다" names no delivery word and is one.
+_DELIVERY_SUBJECT = re.compile(
+    r"배송|설치|도착|출고|수령|받아\s*보|받으실|납기|구매일\s*로부터"
+)
+_OTHER_SUBJECT = re.compile(
+    r"명세서|영수증|상품권|포인트|리뷰|환불|환급|메일|네이버\s*폼|폼\s*작성"
+)
+# A lead time that holds only while something lasts: a stock-out, an event
+# backlog, a surge. "삼성 감사 페스티벌 여파로 약 1~2주" was true for one
+# fortnight in August and is not this product's lead time.
+_TEMPORARY_LEAD_TIME = re.compile(
+    r"품절|재고|입고|지연|여파|폭주|주문량|페스티벌|감사제|행사|이벤트|명절|연휴"
+    # "희망하신 날짜와 1~2일 차이가 발생할 수 있으며" is a margin on a date
+    # the customer chose, not how long the product takes.
+    r"|차이|오차"
+)
+# A named day is one order's schedule, never a lead time.
+_SPECIFIC_DAY = re.compile(
+    r"\d{1,2}\s*월\s*\d{1,2}\s*일|(?<![\d.])\d{1,2}\s*/\s*\d{1,2}(?!\d)"
+    r"|20\d{2}\s*[년./-]"
+    r"|(?:오늘|내일|모레|금일|명일)\s*(?:출고|발송|도착|배송|설치)"
+    r"|이번\s*주|다음\s*주"
+    r"|[월화수목금토일]요일"
+)
+# Colour is the variant the corpus actually splits lead times on (M5 white
+# ships the same day, black waits for the stand). A claim that names one is
+# that variant's lead time, and is usable only when the customer's own option
+# names the same one.
+_VARIANT_WORDS = (
+    "화이트", "블랙", "그레이", "실버", "베이지", "핑크", "네이비",
+    "white", "black",
+)
+
+
+def _claim_sentences(answer: object) -> list[str]:
+    body = extract_answer_body(str(answer or "")) or str(answer or "")
+    return [
+        " ".join(part.split())
+        for part in re.split(r"(?<=[.!?])\s+|\n+|(?<=다\.)", body)
+        if part.strip()
+    ]
+
+
+def general_delivery_estimate_claims(
+    answer: object, *, option_name: object = None,
+) -> tuple[str, ...]:
+    """The sentences of ``answer`` that state a reusable general lead time.
+
+    Empty when the answer states none. A sentence qualifies only when it names
+    a duration of delivery or installation and nothing that ties it to one
+    order, one day, one stock level or one event, and -- when it is scoped to a
+    colour -- only when the customer's option is that colour. Without a known
+    option a colour-scoped lead time is not used: the wider claim cannot be
+    narrowed on a guess.
+    """
+
+    option = str(option_name or "").lower()
+    claims: list[str] = []
+    for sentence in _claim_sentences(answer):
+        if not _LEAD_TIME.search(sentence):
+            continue
+        if not _DELIVERY_SUBJECT.search(sentence):
+            continue
+        if (
+            _OTHER_SUBJECT.search(sentence)
+            or _TEMPORARY_LEAD_TIME.search(sentence)
+            or _SPECIFIC_DAY.search(sentence)
+        ):
+            continue
+        named = [word for word in _VARIANT_WORDS if word in sentence.lower()]
+        if named and not any(word in option for word in named):
+            continue
+        claims.append(sentence)
+    return tuple(claims)
+
+
 def order_identifier_request_reason(answer: object) -> str | None:
     """Which "tell us your order number" phrasing this answer carries, or None.
 

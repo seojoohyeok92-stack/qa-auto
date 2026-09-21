@@ -50,6 +50,10 @@ class InquiryProcessingPlan:
     # persistence, but must never re-read legacy intent/subtype metadata to
     # invent a new semantic hold.
     workflow_block_reasons: tuple[str, ...] = ()
+    # Set only when this inquiry is a bare order number answering the
+    # system's own order-number request on the customer's previous delivery
+    # inquiry: which inquiry it continues, and why that link was trusted.
+    order_number_followup: dict[str, Any] | None = None
 
     @property
     def delivery_question(self) -> bool:

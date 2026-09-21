@@ -874,6 +874,12 @@ class AnswerService:
         ]
         if len([item for item in questions if item]) > 1:
             return False
+        # A bare order number answering our own order-number request carries
+        # the previous inquiry's schedule question, which GPT① cannot see in
+        # the number alone. The plan already verified that link.
+        plan = request.metadata.get("processing_plan")
+        if isinstance(plan, dict) and plan.get("order_number_followup"):
+            return True
         # Phase9 may still complete a genuine current-order workflow (missing
         # order number / confirmed DPS facts).  A pre-purchase policy answer
         # is semantic evidence for GPT②, not an early final response.
@@ -881,6 +887,59 @@ class AnswerService:
         return bool(
             understanding.get("need_order") or understanding.get("need_dps")
         )
+
+    # Phase9 routes that say only that no date can be given yet.
+    _GENERAL_ESTIMATE_FALLBACK_ROUTES = frozenset({
+        "ORDER_ID_REQUEST",
+        "DELIVERY_DATE_UNCONFIRMED",
+        "DPS_LOOKUP_FAILED",
+    })
+
+    def _general_delivery_estimate_fallback(
+        self,
+        request: AnswerRequest,
+        phase9_result: AnswerResult,
+        analysis: InquiryAnalysis,
+    ) -> bool:
+        """Whether a general lead time exists to offer beside a missing date.
+
+        Asked of the same evidence ladder GPT② will read, so the two cannot
+        disagree: the shortcut is lifted only when that ladder maps a
+        GENERAL_DELIVERY_ESTIMATE row. Never raises -- a failed probe keeps
+        the shortcut, which is the behaviour this replaced.
+        """
+
+        route = str(phase9_result.metadata.get("selected_answer_route") or "")
+        if route not in self._GENERAL_ESTIMATE_FALLBACK_ROUTES:
+            return False
+        semantic = request.metadata.get("_semantic_routing_value")
+        if semantic is None or not getattr(semantic, "usable", False):
+            return False
+        try:
+            from answer.facts import build_answer_facts
+            from services.learning_context_service import LearningContextService
+
+            facts = build_answer_facts(request, phase9_result)
+            intent = HybridAnswerService._deterministic_intent(
+                facts, analysis, phase9_result, semantic,
+            )
+            context = LearningContextService(
+                self.database, hard_conflicts_only=True,
+            ).build(facts, intent, semantic_analysis=semantic)
+        except Exception:  # noqa: BLE001 - the probe never blocks a reply
+            LOGGER.exception("일반 배송기간 근거 확인 실패")
+            return False
+        evidence = context.get("subquestion_evidence")
+        found = isinstance(evidence, list) and any(
+            isinstance(item, dict)
+            and item.get("source") == "GENERAL_DELIVERY_ESTIMATE"
+            for item in evidence
+        )
+        request.metadata["general_delivery_estimate_fallback"] = {
+            "phase9_route": route,
+            "evidence_found": bool(found),
+        }
+        return bool(found)
 
     @staticmethod
     def _record_pipeline_trace(
@@ -2600,6 +2659,24 @@ class AnswerService:
                         "correlation_id": correlation_id,
                     },
                 )
+            if phase9_shortcut:
+                # Phase9's three "no date to give" replies -- send your order
+                # number, no date registered yet, the lookup failed -- are
+                # the right final answer only when there is nothing else to
+                # say. When this product has a general lead time on record,
+                # that is still worth saying, so GPT② composes the reply with
+                # the Phase9 text as one of its candidates. Without one, the
+                # shortcut stands exactly as before.
+                shortcut_preview = apply_phase9_rule_policy(
+                    request, base_rule_result, phase9_analysis,
+                )
+                if self._general_delivery_estimate_fallback(
+                    request, shortcut_preview, phase9_analysis,
+                ):
+                    phase9_shortcut = False
+                    self._record_template_candidate(
+                        request, shortcut_preview, source="PHASE9",
+                    )
             if (
                 is_delivery_schedule
                 and not phase9_shortcut

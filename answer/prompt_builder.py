@@ -163,6 +163,24 @@ class PromptBuilder:
         " 단정하지 않는다. 현재 상품의 호환 조건도 근거에 없으면 unresolved 로"
         " 남긴다. 후보의 수치와 Product Catalog 수치가 다르면 Product Catalog 를"
         " 따른다. 근거에 없는 항목은 '-'·'미확인'처럼 나열하지 않는다.",
+        # A general lead time and this customer's schedule are different
+        # facts, and only the second is DPS's. The evidence map says which one
+        # an item may be answered from (source GENERAL_DELIVERY_ESTIMATE).
+        "배송·설치 기간: 일반 배송기간(예: '일반적으로 약 1~2주 소요')과 현재 고객"
+        " 주문의 일정(예: '이 주문은 9월 28일 설치 예정')을 구분한다. 현재 주문의"
+        " 날짜는 현재 Order/DPS 근거가 있을 때만 말하고, DPS 설치예정일이 있으면"
+        " 그 날짜를 일반 배송기간보다 우선해 '예정일'로 안내하며 기사 배차·현장"
+        " 상황에 따라 변경될 수 있음을 함께 안내한다. DPS에 없는 방문 시간은 만들지"
+        " 않는다. source 가 GENERAL_DELIVERY_ESTIMATE 인 질문은 해당"
+        " general_delivery_estimate claims 에 있는 기간만 '약/보통/일반적으로 ~"
+        " 소요될 수 있습니다'처럼 일반 예상으로 안내하고(서로 다르면 가장 최근"
+        " source_date 의 claim), 날짜·요일·방문 시간·'반드시'로 바꾸지 않으며,"
+        " 실제 일정은 다를 수 있다고 밝힌다. 주문번호가 없어 일정 조회를 못 한"
+        " 경우에는 PHASE9 주문번호 요청 후보의 안내(일반 주문번호, 상품주문번호가"
+        " 아닌 번호, 구매내역 확인 경로, 비밀글)를 함께 유지한다. 이렇게 안내한 질문은 답한 것이므로"
+        " 정확한 날짜가 없다는 이유만으로 unresolved 로 남기지 않는다. 같은"
+        " 후보에 있는 재고·입고·품절·출고 여부·행사 지연·특정 날짜 문장은 현재"
+        " 사실로 쓰지 않으며, 기간이 끝난 임시 배송 안내는 사용하지 않는다.",
     )
 
     # What each product block in ``input`` means, and how far each may be

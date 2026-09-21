@@ -23,6 +23,7 @@ from repositories.feedback_signal_provenance_repository import (
 )
 from services.learning_evidence_policy import (
     contamination_reason,
+    general_delivery_estimate_claims,
     order_identifier_request_reason,
 )
 from services.learning_signal_service import LearningSignalService
@@ -35,6 +36,7 @@ from services.semantic_analysis import (
     CURRENT_ORDER_DELIVERY_ACTIONS,
     PRE_PURCHASE_DELIVERY_ACTIONS,
     SemanticAnalysis,
+    TIMING_ATTRIBUTE,
     delivery_schedule_needs_review,
     purchase_confirmed,
 )
@@ -684,6 +686,7 @@ class LearningContextService:
         negative_correction_contexts: list[dict[str, Any]] = []
         order_scope_by_question: dict[str, bool | None] = {}
         pre_purchase_by_question: dict[str, bool] = {}
+        timing_by_question: dict[str, bool] = {}
         schedule_by_question: dict[str, bool | None] = {}
         # A validated order id on the inquiry proves the order exists whatever
         # the wording says, so it settles the same question the understanding
@@ -855,6 +858,13 @@ class LearningContextService:
             )
             schedule_by_question[question] = _schedule_scoped(
                 semantic_analysis, atomic,
+            )
+            # Whether this sub-question asks *when* or *how long* -- GPT①'s
+            # own reading of the property asked. "배송지 변경 되나요", "배송비",
+            # "출고됐나요" share the delivery actions and ask something else.
+            timing_by_question[question] = bool(
+                atomic is not None
+                and str(atomic.requested_attribute).upper() == TIMING_ATTRIBUTE
             )
 
         def merged(key: str, limit: int | None = None) -> list[dict[str, Any]]:
@@ -1174,6 +1184,45 @@ class LearningContextService:
         historical = distinct_historical
 
         signals_by_question = dict(zip(questions, signal_contexts))
+        claim_option = inquiry.get("option_name") or facts.product.get("option_name")
+
+        def general_estimates(
+            rows: list[dict[str, Any]], answer_key: str,
+        ) -> list[tuple[dict[str, Any], tuple[str, ...]]]:
+            """Rows that state this product's general lead time, and where.
+
+            Only the same product: a lead time is a property of the listing,
+            and 43인치's 1~2주 says nothing about M5. Order-specific and
+            time-bound rows never reach here -- the pool above already removed
+            them -- and ``general_delivery_estimate_claims`` keeps only the
+            sentences that state a lead time and nothing about one order.
+            """
+
+            found = []
+            for row in rows:
+                origin = row.get("evidence_origin")
+                origin = origin if isinstance(origin, dict) else {}
+                # SAME_PRODUCT, or the one identity the compatibility gate
+                # stops at for a policy topic: both sides carry the same
+                # canonical model code (``canonical_model_identity`` already
+                # made them comparable). A missing code on either side is
+                # not a match.
+                source_model = str(origin.get("source_model_code") or "")
+                same_model = bool(
+                    source_model
+                    and source_model == str(origin.get("current_model_code") or "")
+                )
+                if str(origin.get("identity") or "") != "SAME_PRODUCT" and not (
+                    same_model
+                ):
+                    continue
+                claims = general_delivery_estimate_claims(
+                    row.get(answer_key), option_name=claim_option,
+                )
+                if claims:
+                    found.append((row, claims))
+            return found
+
         evidence_map: list[dict[str, Any]] = []
         for question in questions:
             historical_ids: list[int] = []
@@ -1238,7 +1287,64 @@ class LearningContextService:
             ):
                 schedule_specific = True
             pre_purchase_delivery = pre_purchase_by_question.get(question, False)
-            if pre_purchase_delivery:
+            # A general lead time is a different fact from this customer's
+            # schedule, and it can exist when the schedule does not: before
+            # an order, or when the order has no date yet. It is offered only
+            # in the two places a schedule is missing, and only as itself --
+            # never as the customer's date. A confirmed DPS date is checked
+            # first and is never replaced by it.
+            general_estimate_rows: list[
+                tuple[dict[str, Any], tuple[str, ...]]
+            ] = []
+            general_estimate_cases: list[
+                tuple[dict[str, Any], tuple[str, ...]]
+            ] = []
+            if timing_by_question.get(question) and (
+                pre_purchase_delivery
+                or (schedule_specific and not confirmed_schedule)
+            ):
+                general_estimate_rows = general_estimates(
+                    approved_for_question, "answer",
+                )
+                general_estimate_cases = general_estimates(
+                    historical_for_question, "seller_answer",
+                )
+            general_estimate_claims = sorted(
+                (
+                    {
+                        **(
+                            {"learning_id": int(row["learning_example_id"])}
+                            if "learning_example_id" in row
+                            else {"historical_case_id": int(row["id"])}
+                        ),
+                        "source_date": row.get("source_date")
+                        or row.get("answer_updated_at")
+                        or row.get("inquiry_created_at"),
+                        "claims": list(claims),
+                    }
+                    for row, claims in (
+                        *general_estimate_rows, *general_estimate_cases,
+                    )
+                ),
+                key=lambda item: str(item.get("source_date") or ""),
+                reverse=True,
+            )
+            if general_estimate_claims:
+                # The one thing that may be said without an order date: how
+                # long this product usually takes. Only the qualifying rows
+                # are mapped, so nothing else in the retrieved set -- another
+                # customer's day, a stock note -- becomes grounds here.
+                status = "CANDIDATE" if semantic_atomic else "ANSWERABLE"
+                evidence_ids = [
+                    int(row["learning_example_id"])
+                    for row, _ in general_estimate_rows
+                ]
+                historical_ids = [
+                    int(row["id"]) for row, _ in general_estimate_cases
+                ]
+                source = "GENERAL_DELIVERY_ESTIMATE"
+                evidence_coverage = "SUPPORTED"
+            elif pre_purchase_delivery:
                 # Checked before every evidence branch, so nothing can settle
                 # it. A CORRECTION signal an operator wrote -- "아직 구매하지
                 # 않은 고객의 배송문의이다. 배송기간을 유추할수 없으므로
@@ -1365,6 +1471,20 @@ class LearningContextService:
                     # actually supporting this sub-question (see
                     # answer/evidence_support.py).
                     "evidence_coverage": evidence_coverage,
+                    **(
+                        {
+                            "general_delivery_estimate": general_estimate_claims,
+                            # Why a general lead time is all there is: no
+                            # order yet, or an order without a date.
+                            "current_order_schedule": (
+                                "NO_CONFIRMED_ORDER"
+                                if pre_purchase_delivery
+                                else "NOT_CONFIRMED"
+                            ),
+                        }
+                        if source == "GENERAL_DELIVERY_ESTIMATE"
+                        else {}
+                    ),
                 }
             )
         # What the semantic pass understood, kept where generation can read it.
@@ -1401,6 +1521,18 @@ class LearningContextService:
                 "No order is confirmed to exist. Do not state a delivery "
                 "period, a dispatch cutoff or an arrival date, and do not ask "
                 "for an order number. Staff will answer this item."
+            ),
+            # Keyed by source rather than status: the row is an ordinary
+            # CANDIDATE, and this says what its only grounds may be used for.
+            "GENERAL_DELIVERY_ESTIMATE": (
+                "Source GENERAL_DELIVERY_ESTIMATE: the customer's own schedule "
+                "is not confirmed, and the only grounds are the listed "
+                "general_delivery_estimate claims for this product. State that "
+                "lead time as a general estimate (약/보통/일반적으로 ... 소요될 "
+                "수 있습니다), using the most recent claim when they differ. "
+                "Never turn it into this customer's date, weekday or visit "
+                "time, and never repeat stock, dispatch-status or event wording "
+                "from those rows. Say that the actual schedule may differ."
             ),
         }
         selected_ids = [

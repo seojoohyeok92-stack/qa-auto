@@ -144,12 +144,13 @@ PURCHASE_STATES: frozenset[str] = frozenset({
 # apart from evidence stating the asked one. UNKNOWN is the honest default and
 # never licenses an answer on its own.
 UNKNOWN_ATTRIBUTE = "UNKNOWN"
+TIMING_ATTRIBUTE = "TIMING"
 REQUESTED_ATTRIBUTES: frozenset[str] = frozenset({
     "EXISTENCE_OR_CAPABILITY",   # 있는지 / 되는지 / 지원하는지
     "PERMISSION_OR_OPTION",      # 해도 되는지 / 안 해도 되는지 / 선택 가능한지
     "ACTOR",                     # 누가 하는지 / 누가 부담하는지
     "AMOUNT_OR_COST",            # 얼마인지
-    "TIMING",                    # 언제 / 얼마나 걸리는지
+    TIMING_ATTRIBUTE,            # 언제 / 얼마나 걸리는지
     "METHOD_OR_PROCEDURE",       # 어떻게 하는지
     "LOCATION_OR_CONTACT",       # 어디서 / 어디에 문의하는지
     "SPEC_VALUE",                # 규격 / 수치 / 입력값
