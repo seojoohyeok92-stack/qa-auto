@@ -1,17 +1,24 @@
-"""Operational, read-only Coupang Online Inquiry sync.
+"""Operational Coupang Online Inquiry sync.
 
-Coupang is collected and displayed; nothing answers it.  So this is the whole
-path, and nothing else is reachable from here:
+The read path is the whole of what this service does itself:
 
     CoupangReadClient.list_online_inquiries(answered_type="ALL")
       -> CoupangInquiryNormalizer.online(payload, account_code=...)
       -> to_work_item() -> normalize_work_item()
       -> InquiryRepository.upsert_work_item()
 
-``InquirySyncService.sync`` is deliberately not used.  Around the same upsert it
-records a Naver posted answer, initializes workflow steps, writes activity logs,
-can create an auto-post event and can run AutomaticDraftService -- every one of
-which is wrong for a market production only reads.
+``InquirySyncService.sync`` is still deliberately not used.  Around the same
+upsert it records a Naver posted answer, runs AutomaticDraftService inline and
+writes Naver-shaped activity logs, none of which belongs here.
+
+What it does share is the one durable handover: a newly collected inquiry is
+announced on ``auto_sync_events``, the same outbox the Naver sync writes and
+the same one ``naver_auto_post_scheduler`` drains.  Without it a Coupang row
+was invisible to automatic processing no matter what the market gates said --
+nothing ever offered it to a scheduler.  Announcing it is not deciding it:
+every gate downstream (automatic generation, eligibility, auto post) still
+answers for itself, and a market that may not be posted to simply never leaves
+the queue.
 
 Each seller account is its own identity (``COUPANG_OJE_NS`` /
 ``COUPANG_OJE_PLUS``): inquiry ids are account-local, and a row carries its
@@ -86,6 +93,10 @@ class CoupangInquirySyncResult:
     updated: int = 0
     unchanged: int = 0
     failed: int = 0
+    # Newly collected inquiries handed to the shared auto-processing
+    # outbox, and the ones the handover itself could not record.
+    announced: int = 0
+    announce_failed: int = 0
     error: str | None = None
 
     @property
@@ -255,10 +266,53 @@ class CoupangInquirySyncService:
             ready = normalize_work_item(work_item)
             if ready["store_code"] != coupang_store_code(account_code):
                 raise ValueError("normalized store_code does not match the account")
-            outcome = self.inquiries.upsert_work_item(ready).outcome
-            setattr(result, outcome, getattr(result, outcome) + 1)
+            upsert = self.inquiries.upsert_work_item(ready)
+            setattr(result, upsert.outcome, getattr(result, upsert.outcome) + 1)
+            if upsert.created:
+                self._announce(upsert.inquiry_id, ready, result)
         except Exception:
             result.failed += 1
+
+    def _announce(
+        self,
+        inquiry_id: int,
+        ready: dict[str, Any],
+        result: CoupangInquirySyncResult,
+    ) -> None:
+        """Put a newly collected inquiry on the shared auto-processing outbox.
+
+        Only a genuinely new row, so a re-sync of the same inquiry announces
+        nothing and cannot queue it twice.  Isolated from the sync the way the
+        Naver side isolates it: a queue that cannot be written must never fail
+        the collection that succeeded.
+        """
+
+        try:
+            from repositories.auto_post_event_repository import (
+                AutoPostEventRepository,
+            )
+            from repositories.auto_post_repository import AutoPostRepository
+
+            runtime_enabled = bool(
+                AutoPostRepository(self.inquiries.database)
+                .settings()
+                .get("runtime_auto_post_enabled")
+            )
+            event = AutoPostEventRepository(self.inquiries.database).create(
+                inquiry_id=int(inquiry_id),
+                store_code=str(ready.get("store_code") or ""),
+                external_id=str(
+                    ready.get("external_inquiry_id")
+                    or ready.get("source_question_id")
+                    or ""
+                ),
+                source_sync_id=None,
+                runtime_enabled=runtime_enabled,
+            )
+            if event is not None:
+                result.announced += 1
+        except Exception:  # noqa: BLE001 - the inquiry is collected either way
+            result.announce_failed += 1
 
 
 def run_operational_sync(database: Database) -> list[CoupangInquirySyncResult]:

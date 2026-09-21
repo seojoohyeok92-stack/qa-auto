@@ -5,14 +5,15 @@ by market, so a Coupang question entered the answer pipeline, was held for
 review, and the hold notification went out reading "네이버 등록: 안 됨" for
 something nobody asked on Naver.
 
-Two things are pinned here.  The queue still offers no Coupang rows at all,
-which is where the cost is — no draft, no GPT, no DPS.  And the notification
-boundary refuses any market production may not answer for.
+Two things are pinned here, and neither is the list of markets in scope.  The
+scope is applied in SQL, before the ordering and the LIMIT, so a market
+outside it is never offered no matter how many rows it has.  And a
+notification names the market it is actually about.
 
-Coupang is notified now, because a person can register a Coupang answer by
-hand.  What that changed is the room it goes to, never the queue: the defect
-above was automatic posting reaching a market, and ``POST_MARKETS`` is still
-Naver alone.
+Coupang has since been admitted to that scope, on its own decision, and is
+notified in its own room.  The defect was never that a particular market was
+in the queue; it was a queue that had no scope at all, and a message that
+assumed the only market there could be.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from repositories.inquiry_repository import InquiryRepository
 from services.market_policy import (
     KAKAO_MARKETS,
     POST_MARKETS,
+    is_store_automatic_post_enabled,
     is_store_post_enabled,
     market_of,
     post_enabled_store_codes,
@@ -76,11 +78,19 @@ def test_store_codes_map_to_markets(store_code, market) -> None:
     assert market_of(store_code) == market
 
 
-def test_only_naver_is_posted_automatically_in_production() -> None:
+def test_post_markets_is_now_only_the_read_only_rule() -> None:
+    """What is left of it: which answered inquiries may still be edited.
+
+    The auto-post queue was split out into ``AUTOMATIC_POST_MARKETS``, so
+    adding a market here no longer means "may be posted to" -- it means the
+    answer path and the screens stop treating an answered inquiry as final.
+    """
+
     assert POST_MARKETS == frozenset({"NAVER"})
     assert is_store_post_enabled(NAVER_STORE) is True
     assert is_store_post_enabled(COUPANG_NS) is False
     assert is_store_post_enabled(COUPANG_PLUS) is False
+    assert is_store_automatic_post_enabled(COUPANG_NS) is True
 
 
 def test_both_answerable_markets_are_notified() -> None:
@@ -89,16 +99,23 @@ def test_both_answerable_markets_are_notified() -> None:
     assert KAKAO_MARKETS == frozenset({"NAVER", "COUPANG"})
 
 
-def test_enabled_store_filter_drops_every_coupang_account() -> None:
+def test_the_queue_scope_is_the_markets_it_may_post_to() -> None:
+    """Both answerable markets are in scope now, and a blank code never is."""
+
     assert post_enabled_store_codes(
         [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
-    ) == [NAVER_STORE]
+    ) == [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
+    assert post_enabled_store_codes(["", None, "   "]) == []
 
 
 # --- the queue that caused it ----------------------------------------------
 
-def test_auto_post_queue_no_longer_offers_coupang(tmp_path) -> None:
-    """The root cause: candidates() had no market scope."""
+def test_the_auto_post_queue_is_scoped_by_market_not_unscoped(tmp_path) -> None:
+    """The root cause was candidates() having no market scope at all.
+
+    The scope is still applied in SQL; what it admits has changed now that a
+    Coupang answer may be posted.  A market outside it is still never offered.
+    """
 
     database = _database(tmp_path)
     _inquiry(database, store_code=NAVER_STORE, question_id="n1")
@@ -106,21 +123,25 @@ def test_auto_post_queue_no_longer_offers_coupang(tmp_path) -> None:
     _inquiry(database, store_code=COUPANG_PLUS, question_id="c2")
     repository = AutoPostRepository(database)
 
-    unscoped = repository.candidates(max_retries=3)
     scoped = repository.candidates(
         max_retries=3,
         store_codes=post_enabled_store_codes(repository.distinct_store_codes()),
     )
 
-    # Without a scope the Coupang rows qualify - which is exactly what happened.
-    assert {row["store_code"] for row in unscoped} == {
+    # The scope is still applied in SQL; it now admits both answerable
+    # markets, and an empty scope still selects nothing at all.
+    assert {row["store_code"] for row in scoped} == {
         NAVER_STORE, COUPANG_NS, COUPANG_PLUS
     }
-    assert {row["store_code"] for row in scoped} == {NAVER_STORE}
+    assert repository.candidates(max_retries=3, store_codes=[]) == []
 
 
-def test_coupang_volume_cannot_starve_the_naver_queue(tmp_path) -> None:
-    """Ordered by arrival and cut by LIMIT: filtering must happen in SQL."""
+def test_the_scope_is_applied_in_sql_before_the_limit(tmp_path) -> None:
+    """Ordered by arrival and cut by LIMIT: filtering must happen in SQL.
+
+    A scope that excluded the only Naver row would leave the page empty
+    rather than silently returning the rows it was told to skip.
+    """
 
     database = _database(tmp_path)
     for index in range(20):
@@ -129,8 +150,7 @@ def test_coupang_volume_cannot_starve_the_naver_queue(tmp_path) -> None:
     repository = AutoPostRepository(database)
 
     rows = repository.candidates(
-        max_retries=3, limit=5,
-        store_codes=post_enabled_store_codes(repository.distinct_store_codes()),
+        max_retries=3, limit=5, store_codes=[NAVER_STORE],
     )
     assert [row["source_question_id"] for row in rows] == ["n-last"]
 

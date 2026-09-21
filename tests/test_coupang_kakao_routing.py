@@ -345,18 +345,15 @@ def test_a_repeated_registration_does_not_duplicate_the_notification(
 
 # --- G / H. nothing else was opened ---------------------------------------------
 
-def test_opening_kakao_opens_neither_generation_nor_automatic_posting() -> None:
+def test_kakao_opened_a_room_and_nothing_else() -> None:
+    """Every later opening is its own gate; the room is not one of them."""
+
     for store in ("COUPANG_OJE_NS", "COUPANG_OJE_PLUS"):
         assert market_policy.is_kakao_market_enabled("COUPANG") is True
         assert market_policy.is_store_answer_generation_enabled(store) is True
         assert market_policy.is_store_manual_post_enabled(store) is True
-        # Still closed.
-        assert market_policy.is_store_automatic_generation_enabled(store) is False
-        assert market_policy.is_store_post_enabled(store) is False
+        # DPS is the one capability Coupang still does not have.
         assert market_policy.is_store_dps_enabled(store) is False
-    assert market_policy.post_enabled_store_codes(
-        ["COUPANG_OJE_NS", "COUPANG_OJE_PLUS", "OJE_PLUS"]
-    ) == ["OJE_PLUS"]
 
 
 # --- the product name the dashboard already shows --------------------------------

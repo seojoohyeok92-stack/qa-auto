@@ -45,7 +45,7 @@ MARKET_DISPLAY_NAMES: dict[str, str] = {
 # DPS schedule, nothing posts them and nothing notifies about them -- each of
 # those opens later by its own explicit decision.
 ANSWER_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
-AUTOMATIC_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER})
+AUTOMATIC_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 DPS_MARKETS: frozenset[str] = frozenset({NAVER})
 POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # Registering an answer a person is looking at, on their explicit click.  It is
@@ -55,6 +55,14 @@ POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # editing on inquiries the marketplace has already answered.  This opens the
 # button and nothing else.
 MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
+# Which markets the unattended pipeline may register an answer at.  This is
+# the auto-post queue's own scope, split out of ``POST_MARKETS`` because that
+# set had four consumers and only one of them was the queue: the other three
+# decide whether an answered inquiry is read-only on screen and in the answer
+# path.  Adding a market there would have re-opened answer editing on
+# inquiries the marketplace has already answered, which is a different
+# decision from letting the pipeline post.
+AUTOMATIC_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 KAKAO_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 
 # Wording that names one marketplace's own procedure.  An answer for another
@@ -158,7 +166,13 @@ def is_store_dps_enabled(store_code: object) -> bool:
 
 
 def is_store_post_enabled(store_code: object) -> bool:
-    """Whether an answer may be registered at this store's marketplace."""
+    """Whether the answer path and the screens treat this store as postable.
+
+    Not the auto-post queue's gate -- that is
+    ``is_store_automatic_post_enabled``.  What is left here is the read-only
+    rule: a market production cannot post to must not offer answer editing
+    on an inquiry the marketplace has already answered.
+    """
 
     return _market_in(market_of(store_code), POST_MARKETS)
 
@@ -166,9 +180,9 @@ def is_store_post_enabled(store_code: object) -> bool:
 def is_store_manual_post_enabled(store_code: object) -> bool:
     """Whether a person may register an answer for this store themselves.
 
-    Automatic posting is ``is_store_post_enabled`` and stays separate: a
-    market may be answerable by hand long before anything may answer it
-    unattended.
+    Unattended posting is ``is_store_automatic_post_enabled`` and stays
+    separate: a market may be answerable by hand long before anything may
+    answer it unattended.
     """
 
     return _market_in(market_of(store_code), MANUAL_POST_MARKETS)
@@ -180,8 +194,14 @@ def is_kakao_market_enabled(market: object) -> bool:
     return _market_in(market, KAKAO_MARKETS)
 
 
+def is_store_automatic_post_enabled(store_code: object) -> bool:
+    """Whether the unattended pipeline may register this store's answers."""
+
+    return _market_in(market_of(store_code), AUTOMATIC_POST_MARKETS)
+
+
 def post_enabled_store_codes(store_codes: Iterable[object]) -> list[str]:
-    """Keep only the stores whose market production may post to.
+    """Keep only the stores the auto-post queue may act on.
 
     Used to scope the auto-post candidate query.  Filtering after the query
     would not be enough: the queue is ordered by arrival and limited, so a
@@ -192,7 +212,8 @@ def post_enabled_store_codes(store_codes: Iterable[object]) -> list[str]:
     return [
         text
         for code in store_codes
-        if (text := str(code or "").strip()) and is_store_post_enabled(text)
+        if (text := str(code or "").strip())
+        and is_store_automatic_post_enabled(text)
     ]
 
 

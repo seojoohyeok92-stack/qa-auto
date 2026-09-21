@@ -4,7 +4,11 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Iterable
 
 from kakao_notify import notify_qna_safely
-from services.market_policy import post_enabled_store_codes
+from services.market_policy import (
+    COUPANG,
+    market_of,
+    post_enabled_store_codes,
+)
 from repositories.answer_repository import AnswerRepository
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
@@ -60,6 +64,10 @@ class AutoPostPipelineService:
         self.logs = LogRepository(database)
         self.drafts = draft_service or AutomaticDraftService(database)
         self.posts = post_service or NaverPostService(database)
+        # An injected service owns every market; otherwise Coupang gets its
+        # own client, built on first use so a Naver-only run never touches it.
+        self._injected_posts = post_service
+        self._coupang_posts = None
         self.dps_status_provider = dps_status_provider or get_dps_session_status
         self.eligibility = AutoProcessingEligibilityService()
         if confirmation_service is not None:
@@ -74,6 +82,43 @@ class AutoPostPipelineService:
             # Injected post services are Mock/DryRun test paths and must never
             # cause an accidental external read.
             self.confirmation = None
+
+    @staticmethod
+    def _is_coupang(inquiry: dict[str, Any]) -> bool:
+        return market_of(inquiry.get("store_code")) == COUPANG
+
+    def _poster_for(self, inquiry: dict[str, Any]):
+        """The post service for this inquiry's marketplace.
+
+        The pipeline up to here -- candidate, draft, eligibility, Final Answer
+        -- is one path for every market.  Only the request differs, so only
+        the request is chosen here, and an injected service (mock, dry run)
+        still owns every market so a test cannot reach a real client.
+        """
+
+        if self._injected_posts is not None:
+            return self._injected_posts
+        if self._is_coupang(inquiry):
+            if self._coupang_posts is None:
+                from services.coupang_post_service import CoupangPostService
+
+                self._coupang_posts = CoupangPostService(self.database)
+            return self._coupang_posts
+        return self.posts
+
+    def _confirms_remotely(self, inquiry: dict[str, Any]) -> bool:
+        """Whether this market's post is verified by re-reading it now.
+
+        Naver publishes the answer to its own read model, so the pipeline
+        re-reads it and compares the body.  Coupang has no such read here: its
+        answer becomes visible as ``source_answered`` on the next Coupang
+        sync, which is the same marketplace-truth rule the manual Coupang post
+        already follows.  Asking the Naver confirmation about a Coupang
+        inquiry would not check anything -- it refuses the source type
+        outright -- and would turn every successful post into a failure.
+        """
+
+        return not self._is_coupang(inquiry)
 
     def _hold_for_review(
         self,
@@ -533,14 +578,24 @@ class AutoPostPipelineService:
                         "actor": "SYSTEM_AUTO_POST",
                     },
                 )
-                result = self.posts.post(
-                    inquiry_id,
-                    actor="SYSTEM_AUTO_POST",
-                    confirmed=True,
-                    retry_requested=str(fresh.get("post_status") or "").upper() == "POST_FAILED",
-                    automatic=True,
-                    auto_post_run_id=run_id,
-                )
+                poster = self._poster_for(fresh)
+                post_arguments: dict[str, Any] = {
+                    "actor": "SYSTEM_AUTO_POST",
+                    "confirmed": True,
+                    "retry_requested": (
+                        str(fresh.get("post_status") or "").upper()
+                        == "POST_FAILED"
+                    ),
+                }
+                if not self._is_coupang(fresh):
+                    # The Naver service records which unattended run posted;
+                    # the Coupang one takes no run context and needs none.
+                    # Keyed on the market, not on which object was chosen, so
+                    # an injected service is called the way its market's real
+                    # one would be.
+                    post_arguments["automatic"] = True
+                    post_arguments["auto_post_run_id"] = run_id
+                result = poster.post(inquiry_id, **post_arguments)
                 if result.status == "POSTED":
                     # The answer is on the customer's inquiry either way.
                     #
@@ -562,7 +617,9 @@ class AutoPostPipelineService:
                     # Only ``succeeded_count`` waits for the confirmation, since
                     # an unconfirmed post is not a confirmed success.
                     confirmation_error: Exception | None = None
-                    if self.confirmation is not None:
+                    if self.confirmation is not None and self._confirms_remotely(
+                        fresh
+                    ):
                         try:
                             self.confirmation.confirm(inquiry_id, run_id=run_id)
                         except Exception as error:  # noqa: BLE001 - re-raised below

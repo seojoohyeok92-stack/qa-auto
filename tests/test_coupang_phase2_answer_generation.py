@@ -1,10 +1,11 @@
-"""Phase 2-1: a person may generate, review and approve a Coupang answer.
+"""Phase 2-1: what a Coupang answer is made of, and what it is never made of.
 
-Nothing generates one unasked, nothing looks up a Coupang order or DPS
-schedule, nothing posts it and nothing notifies about it.  What the answer
-path is handed is pinned too: the product and option names the dashboard
-shows, the model an operator confirmed for the option (never a guess), the
-COUPANG_ONLY Learning both seller accounts share, and no Naver procedure.
+A person may generate, review and approve one; the unattended path may do the
+same, on the gates opened for it since.  Order and DPS lookups stay closed
+either way.  What the answer path is handed is pinned here: the product and
+option names the dashboard shows, the model an operator confirmed for the
+option (never a guess), the COUPANG_ONLY Learning both seller accounts share,
+and no Naver procedure.
 """
 
 from __future__ import annotations
@@ -212,31 +213,54 @@ def test_naver_keeps_every_action() -> None:
 
 
 @pytest.mark.parametrize("store", ["COUPANG_OJE_NS", "COUPANG_OJE_PLUS"])
-def test_coupang_generation_is_open_and_everything_else_closed(store) -> None:
+def test_coupang_is_answered_automatically_but_never_looked_up(store) -> None:
     assert market_policy.is_store_answer_generation_enabled(store) is True
-    assert market_policy.is_store_automatic_generation_enabled(store) is False
-    assert market_policy.is_store_dps_enabled(store) is False
-    # Automatic posting stays closed; a person may register by hand, and a
-    # registration they make is notified.
-    assert market_policy.is_store_post_enabled(store) is False
+    assert market_policy.is_store_automatic_generation_enabled(store) is True
     assert market_policy.is_store_manual_post_enabled(store) is True
+    assert market_policy.is_store_automatic_post_enabled(store) is True
     assert market_policy.is_kakao_market_enabled("COUPANG") is True
+    # Order and delivery lookups stay closed, and so does the read-only rule
+    # that keeps an answered Coupang inquiry from being edited.
+    assert market_policy.is_store_dps_enabled(store) is False
+    assert market_policy.is_store_post_enabled(store) is False
 
 
-# --- B. only a person starts generation ---------------------------------------------
+# --- B. the unattended path now starts it too ---------------------------------------
 
-def test_automatic_generation_skips_coupang_without_calling_answer_service(database) -> None:
+def test_automatic_generation_now_reaches_the_answer_service(database) -> None:
+    """Coupang uses the Naver automatic path; an answered one still does not."""
+
     inquiry_id = coupang_inquiry(database)
+    service_double = RecordingEngine()
+
+    outcome = AutomaticDraftService(
+        database, answer_service=AnswerService(
+            database, engine=service_double,
+            hybrid_service=RecordingHybrid(),
+            product_knowledge=RecordingKnowledge(),
+        ),
+    ).ensure_for_inquiry(inquiry_id)
+
+    assert outcome.status in {"CREATED", "EXISTING"}
+    assert draft_count(database) == 1
+
+
+def test_automatic_generation_still_skips_an_answered_coupang_inquiry(
+    database,
+) -> None:
+    inquiry_id = coupang_inquiry(database, answered=True)
     recorder = Recorder()
 
-    outcome = AutomaticDraftService(database, answer_service=recorder).ensure_for_inquiry(inquiry_id)
+    outcome = AutomaticDraftService(
+        database, answer_service=recorder,
+    ).ensure_for_inquiry(inquiry_id)
 
-    assert outcome.status == "SKIPPED_MANUAL_GENERATION_ONLY"
+    assert outcome.status == "SKIPPED_ALREADY_ANSWERED"
     assert recorder.calls == 0
     assert draft_count(database) == 0
 
 
-def test_auto_post_candidates_never_include_coupang(database) -> None:
+def test_auto_post_candidates_now_include_both_coupang_accounts(database) -> None:
     coupang_inquiry(database, account="OJE_NS", inquiry_id="1")
     coupang_inquiry(database, account="OJE_PLUS", inquiry_id="2")
     naver_inquiry(database)
@@ -245,7 +269,9 @@ def test_auto_post_candidates_never_include_coupang(database) -> None:
         max_retries=3,
         store_codes=market_policy.post_enabled_store_codes(repository.distinct_store_codes()),
     )
-    assert {row["store_code"] for row in rows} == {"OJE_PLUS"}
+    assert {row["store_code"] for row in rows} == {
+        "OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"
+    }
 
 
 def test_an_explicit_generate_creates_a_draft(database) -> None:

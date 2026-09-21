@@ -476,16 +476,21 @@ def test_the_preflight_reports_the_same_refusal_the_post_would(database) -> None
 
 # --- N / O. nothing else was opened ---------------------------------------------
 
-def test_manual_post_is_open_but_automatic_posting_is_not() -> None:
+def test_the_manual_path_is_unchanged_by_the_automatic_one() -> None:
+    """Automatic processing was opened afterwards; manual POST is untouched.
+
+    A person's click still posts through this service, with no approval or
+    eligibility requirement of its own -- the gate it reads is the manual
+    one, and it is the same one it read before.
+    """
+
     for store in ("COUPANG_OJE_NS", "COUPANG_OJE_PLUS"):
         assert market_policy.is_store_manual_post_enabled(store) is True
-        # The auto-post queue scopes on this one, so it stays closed.
-        assert market_policy.is_store_post_enabled(store) is False
-        assert market_policy.is_store_automatic_generation_enabled(store) is False
         assert market_policy.is_store_dps_enabled(store) is False
-    assert market_policy.post_enabled_store_codes(
-        ["COUPANG_OJE_NS", "COUPANG_OJE_PLUS", "OJE_PLUS"]
-    ) == ["OJE_PLUS"]
+        # ``POST_MARKETS`` is the legacy set that four other consumers read;
+        # the auto-post queue was split out of it and is open on its own.
+        assert market_policy.is_store_post_enabled(store) is False
+        assert market_policy.is_store_automatic_post_enabled(store) is True
 
 
 def test_an_answered_coupang_inquiry_stays_read_only() -> None:

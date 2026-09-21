@@ -1,8 +1,13 @@
-"""Register one Coupang answer, on an operator's explicit click.
+"""Register one Coupang answer, whether a person asked or the pipeline did.
 
-Manual posting only.  Nothing schedules this, nothing retries it, and the
-auto-post pipeline cannot reach it: Coupang is absent from ``POST_MARKETS``,
-which is what scopes that queue.
+This began as the manual path and is still the whole of it: an operator's
+click posts through ``post()``, with no approval or eligibility requirement
+of its own.  The unattended pipeline now calls the same method for a Coupang
+inquiry, having already made its own decision -- draft, eligibility, Final
+Answer -- exactly as it does before calling the Naver service.  Nothing here
+was relaxed for it, so every gate below applies to both callers.
+
+Still no retry of its own, in either case.
 
 A confirmed registration notifies the Coupang operations room, through the one
 notification path Naver uses.  Only success does, because that is the only
@@ -81,7 +86,7 @@ class CoupangPostResult:
 
 
 class CoupangPostService:
-    """The manual Coupang counterpart of ``NaverPostService.post``."""
+    """The Coupang counterpart of ``NaverPostService.post``."""
 
     def __init__(
         self,
@@ -378,8 +383,12 @@ class CoupangPostService:
                 payload_hash=hashlib.sha256(path.encode("utf-8")).hexdigest(),
                 actor=str(actor or "").strip() or "operator",
                 answer_field=answer_field,
-                # The click is the approval, exactly as on the Naver manual
-                # path; this must not reapply the automatic Final Answer gate.
+                # The approval has already been made by whoever called:
+                # the operator's click on the manual path, and the
+                # pipeline's own eligibility verdict and Final Answer on the
+                # unattended one.  Re-applying the Naver automatic gate here
+                # would either re-decide a decision already taken or refuse
+                # the manual click outright.
                 allow_unapproved=True,
             )
         except NaverPostAlreadyAnsweredError:

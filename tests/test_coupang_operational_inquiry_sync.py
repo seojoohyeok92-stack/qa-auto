@@ -434,21 +434,36 @@ def test_the_dashboard_reads_a_new_row_and_nothing_acts_on_it_unasked(database) 
     assert total == 1
     assert str(listed[0].get("source_question_id") or listed[0].get("inquiry_id")) == "42"
 
+    from repositories.auto_post_event_repository import AutoPostEventRepository
     from services.market_policy import (
         is_store_automatic_generation_enabled,
-        is_store_post_enabled,
+        is_store_dps_enabled,
     )
-    # Phase 2-1: a person may generate an answer for it; nothing does so
-    # unasked and nothing posts it.
-    assert is_store_automatic_generation_enabled("COUPANG_OJE_PLUS") is False
-    assert is_store_post_enabled("COUPANG_OJE_PLUS") is False
+    # Automatic processing was opened later, so the row is now offered to the
+    # shared queue -- and the operator switch, which is off here, is what
+    # decides whether anything acts on it.  DPS never does.
+    assert is_store_automatic_generation_enabled("COUPANG_OJE_PLUS") is True
+    assert is_store_dps_enabled("COUPANG_OJE_PLUS") is False
+    events = AutoPostEventRepository(database)
+    assert events.get_for_inquiry(
+        int(listed[0]["id"])
+    )["status"] == "BLOCKED_AUTO_POST_OFF"
+    assert events.pending_inquiry_ids(exclude_inquiry_ids=set(), limit=10) == []
 
 
 # --- 14, 15 nothing but inquiries ----------------------------------------------
 
-def test_a_cycle_writes_no_table_but_inquiries(database) -> None:
+def test_a_cycle_writes_no_table_but_inquiries_and_the_queue(database) -> None:
+    """Two tables, both of them the sync's own: the row, and its offer.
+
+    The offer is what connects Coupang to the existing automatic pipeline.
+    Nothing else -- historical_cases, Learning, answer_drafts, workflow_steps,
+    naver_posted_answers, activity_logs -- is touched by a sync cycle.
+    """
+
+    moving = ("inquiries", "auto_sync_events")
     service(database, {"OJE_NS": Transport(recent([inquiry("1")]))}).sync_account("OJE_NS")
-    before = snapshot(database, skip=("inquiries",))
+    before = snapshot(database, skip=moving)
     transports = {
         "OJE_NS": Transport(recent([inquiry("1", answered=True), inquiry("2")])),
         "OJE_PLUS": Transport(recent([inquiry("3", answered=True)])),
@@ -457,14 +472,19 @@ def test_a_cycle_writes_no_table_but_inquiries(database) -> None:
     results = service(database, transports).sync_accounts()
 
     assert sum(r.new for r in results) == 2 and sum(r.updated for r in results) == 1
-    after = snapshot(database, skip=("inquiries",))
-    # SQLite's own AUTOINCREMENT counter for inquiries moves with an INSERT;
-    # that entry, and only that entry, may differ.
+    assert sum(r.announced for r in results) == 2
+    after = snapshot(database, skip=moving)
+    # SQLite's own AUTOINCREMENT counters for those two move with an INSERT;
+    # those entries, and only those, may differ.
     for state in (before, after):
-        state["sqlite_sequence"] = [r for r in state["sqlite_sequence"] if r[0] != "inquiries"]
-    # historical_cases, Learning, answer_drafts, workflow_steps,
-    # naver_posted_answers, activity_logs, auto_sync_events ...
+        state["sqlite_sequence"] = [r for r in state["sqlite_sequence"] if r[0] not in moving]
     assert after == before
+    # One offer per new inquiry, and only for the new ones: the re-synced
+    # inquiry "1" was announced by the first cycle and never again.
+    with database.connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM auto_sync_events"
+        ).fetchone()[0] == 3
 
 
 def test_no_production_path_is_entered(database, monkeypatch) -> None:
@@ -519,6 +539,12 @@ def test_the_service_imports_only_the_read_path() -> None:
         "api.coupang_read_client", "config", "repositories.database",
         "repositories.inquiry_repository", "services.coupang_inquiry_normalizer",
         "services.inquiry_sync_service",
+        # The queue the announcement writes to, and the operator switch that
+        # decides the event's initial status.  Both are repositories: the
+        # sync still enters no service that answers, posts or notifies, which
+        # is what the disjoint check below keeps true.
+        "repositories.auto_post_event_repository",
+        "repositories.auto_post_repository",
     }
     names = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
     used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
