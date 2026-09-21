@@ -42,6 +42,8 @@ ORDER = "2026091912345678"
 OTHER = "2026091987654321"
 SALES = "9100123456"
 EORDER = "5100999888777"
+TRANSFER = "3141000999"      # the go_transterPop number beside the sales number
+BAD_SALES = "9100999999"     # opens a page that is not 판매조회
 CHROME = next((p for p in (
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -51,7 +53,14 @@ CHROME = next((p for p in (
 # ----------------------------------------------------------------- fixtures
 PURCHASE = """<html><head><title>Samsung DPS</title></head><body>
 <div>판매 &gt; 온라인판매 &gt; 구매요청리스트</div>
-<iframe id="main" src="frame.html" style="width:1200px;height:800px"></iframe></body></html>"""
+<iframe id="main" src="frame.html" style="width:1200px;height:800px"></iframe>
+<script>
+window.__detailOpens = 0; window.__transferOpens = 0; window.__infoOpens = 0;
+function go_sendSearchMain(s) { window.__detailOpens++;
+  window.open((s === '__BAD_SALES__' ? 'notdetail.html' : 'sd010_0048_DP_SSearchSalesMain.do.html') + '?sales=' + s, 'detail'); }
+function go_transterPop(s) { window.__transferOpens++; }
+function go_infoPop(o, c, n) { window.__infoOpens++; }
+</script></body></html>"""
 
 FRAME = r"""<html><body>
 <table><tr><th>온라인판매 주문번호</th><td><input id="ord" type="text"></td>
@@ -62,18 +71,23 @@ FRAME = r"""<html><body>
 <td>품명</td><td><input type="text"></td><td>인수자명</td><td><input type="text"></td>
 <td>배송상태</td><td><select><option>전체</option><option>구매요청</option><option>설치완료</option><option>배송중</option></select></td></tr>
 </table>
-<table class="notice"><tr><td>공지</td><td>판매번호 기간 인수자명 안내</td></tr></table>
+<table class="notice"><tr><td>공지</td><td>판매번호 기간 인수자명 안내</td>
+<td><a href="javascript:;" onclick="parent.go_sendSearchMain('9999999999');">9999999999</a></td></tr></table>
 <button id="q">조회</button> <button id="save">저장</button>
 <div id="loading" class="loading" style="display:none">조회중</div>
 <div id="out"></div>
 <script>
-window.top.__detailOpens = 0; window.top.__saves = 0;
+window.top.__saves = 0;
 document.getElementById('save').onclick = () => { window.top.__saves++; };
-const H = ['온라인판매 주문번호','모델명','수량','판매금액','구매자','DPS판매번호','전자주문번호','상태'];
-function row(o, s){ return '<tr><td>'+o+'</td><td>LH43BEFHLGFXKR</td><td>1</td><td>700,000</td><td>홍*동</td>'
-  + '<td><a href="#" onclick="window.top.__detailOpens++;window.open(\'sd010_0048_DP_SSearchSalesMain.do.html?sales='+s+'\',\'detail\');return false;">'+s+'</a></td>'
-  + '<td>__EORDER__</td><td>구매요청</td></tr>'; }
-function grid(body){ return '<table><thead><tr>'+H.map(h=>'<th>'+h+'</th>').join('')+'</tr></thead><tbody>'+body+'</tbody></table>'; }
+const link = (fn, arg, text) => '<a href="javascript:;" onclick="parent.' + fn + '(\'' + arg + '\');">' + text + '</a>';
+function row(o, s, opt){ opt = opt || {};
+  const salesCell = opt.noSend ? s : (opt.sendArgs || [s]).map(a => link('go_sendSearchMain', a, opt.sendText || a)).join('');
+  return '<tr><td><input type="checkbox"></td><td>1</td><td>구매요청</td>'
+    + '<td><a href="javascript:;" onclick="parent.go_infoPop(\'' + o + '\',\'NCP_1ORWWI_01\',\'10\');">' + o + '</a></td>'
+    + '<td>LH43BEFHLGFXKR</td><td>1</td><td>700,000</td><td>홍*동</td><td>2026-09-01</td>'
+    + '<td>' + salesCell + '</td>'
+    + '<td>' + link('go_transterPop', s, '__TRANSFER__') + '</td><td>비고</td></tr>'; }
+function grid(body){ return '<table class="grid"><tbody>' + body + '</tbody></table>'; }
 const H_SALES = {'__H1__':'3100000001','__H2__':'3100000002','__H3__':'3100000003'};
 document.getElementById('q').onclick = () => {
   if (window.top.__freeze) return;   // a page that never answers this query
@@ -89,7 +103,11 @@ document.getElementById('q').onclick = () => {
     if (o === '__FORMONLY__') { return; }
     if (o === '__UNRELATED__') { out.innerHTML = '<table><tr><td>판매번호</td><td>기간</td><td>품명</td><td>인수자명</td></tr></table>'; return; }
     if (o === '__OTHERONLY__') { out.innerHTML = grid(row('__OTHER__','9100000001')); return; }
-    if (o === '__BADDETAIL__') { out.innerHTML = grid(row(o,'__SALES__').replace('sd010_0048_DP_SSearchSalesMain.do.html','notdetail.html')); return; }
+    if (o === '__BADDETAIL__') { out.innerHTML = grid(row(o,'__BAD_SALES__')); return; }
+    if (o === '__NOSEND__') { out.innerHTML = grid(row(o,'__SALES__',{noSend:true})); return; }
+    if (o === '__SENDOTHERONLY__') { out.innerHTML = grid(row('__OTHER__','9100000001') + row(o,'__SALES__',{noSend:true})); return; }
+    if (o === '__TWOSEND__') { out.innerHTML = grid(row(o,'__SALES__',{sendArgs:['__SALES__','9100000002']})); return; }
+    if (o === '__TEXTMISMATCH__') { out.innerHTML = grid(row(o,'__SALES__',{sendText:'9100000003'})); return; }
     if (H_SALES[o]) { out.innerHTML = grid(row(o, H_SALES[o])); return; }
     if (o === '__MULTI__') { out.innerHTML = grid(row('__OTHER__','9100000001') + row(o,'__SALES__') + row(o,'__SALES__')); return; }
     if (o === '__VIRTUAL__') {
@@ -145,9 +163,11 @@ def _free_port() -> int:
 @pytest.fixture(scope="module")
 def site(tmp_path_factory):
     root = tmp_path_factory.mktemp("dps_site")
-    frame = FRAME.replace("__EORDER__", EORDER).replace("__OTHER__", OTHER).replace("__SALES__", SALES)
+    frame = (FRAME.replace("__EORDER__", EORDER).replace("__OTHER__", OTHER)
+             .replace("__BAD_SALES__", BAD_SALES).replace("__TRANSFER__", TRANSFER)
+             .replace("__SALES__", SALES))
     for name, body in {
-        "purchase.html": PURCHASE, "frame.html": frame,
+        "purchase.html": PURCHASE.replace("__BAD_SALES__", BAD_SALES), "frame.html": frame,
         "sd010_0048_DP_SSearchSalesMain.do.html": DETAIL.replace("__SALES__", SALES),
         "login.html": LOGIN,
         "notdetail.html": "<html><head><title>안내</title></head><body>준비중</body></html>",
@@ -486,7 +506,7 @@ def test_F_detail_failure_keeps_the_existing_partial_contract(chrome, site):
     _reset(browser, port, f"{site}/purchase.html")
     result = _lookup(browser, "__BADDETAIL__", detail_timeout=2.0)
     assert result["found"] is True
-    assert result["data"]["dps_sales_number"] == SALES
+    assert result["data"]["dps_sales_number"] == BAD_SALES
     assert result["status"] == "RESULT_FOUND_DETAIL_PARTIAL"
     assert result["detail_lookup"]["status"] == "DETAIL_OPEN_FAILED"
     assert result["installation_date"] is None
@@ -595,3 +615,76 @@ def test_report_json_is_ascii_and_round_trips(tmp_path):
     raw = out.read_bytes()
     assert all(byte < 128 for byte in raw)          # identical under CP949 or UTF-8
     assert json.loads(raw.decode("cp949")) == report
+
+
+# ======================================================================
+# Live DOM sales-number contract (server 2026-09-21): headers are empty and
+# the sale is named by the row's go_sendSearchMain('<판매번호>') link.
+# ======================================================================
+
+
+def _row_link_counts(browser):
+    return _top_eval(browser, "[window.__detailOpens, window.__transferOpens]")
+
+
+def test_live_A_B_sales_number_is_the_go_sendSearchMain_argument(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, ORDER)
+    assert result["data"]["dps_sales_number"] == SALES
+    assert result["data"]["dps_sales_number"] != TRANSFER         # B
+    assert result["diagnostics"]["sales_link_candidates"] == 1
+    assert result["table_headers"] == []                           # as live
+
+
+def test_live_C_F_digits_without_the_sales_link_are_not_guessed(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__NOSEND__")      # search area has a decoy link
+    assert result["success"] is False
+    assert result["code"] == "DPS_SALES_NUMBER_MISSING"
+    assert _row_link_counts(browser) == [0, 0]
+
+
+def test_live_D_sales_link_in_another_orders_row_is_not_used(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__SENDOTHERONLY__")
+    assert result["code"] == "DPS_SALES_NUMBER_MISSING"
+
+
+def test_live_E_click_opens_only_the_sales_link(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, ORDER)
+    assert result["status"] == "RESULT_FOUND_WITH_DETAIL"
+    assert _row_link_counts(browser) == [1, 0]    # never go_transterPop
+
+
+def test_live_two_different_sales_links_are_not_chosen_between(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    result = _lookup(browser, "__TWOSEND__")
+    assert result["code"] == "DPS_SALES_NUMBER_MISSING"
+    assert result["diagnostics"]["sales_link_candidates"] == 2
+
+
+def test_live_link_text_disagreeing_with_its_argument_is_rejected(chrome, site):
+    browser, port = chrome
+    _reset(browser, port, f"{site}/purchase.html")
+    assert _lookup(browser, "__TEXTMISMATCH__")["code"] == "DPS_SALES_NUMBER_MISSING"
+
+
+def test_live_onclick_quote_forms_are_both_read():
+    """go_sendSearchMain('…') and go_sendSearchMain("…") -- the JS pattern."""
+
+    import re as _re
+    from dps.cdp_backend import _PRELUDE
+
+    pattern = _re.search(r"const SEND_SALES=/(.+)/;", _PRELUDE).group(1)
+    js = _re.compile(pattern.replace("\\/", "/"))
+    for onclick in ("parent.go_sendSearchMain('3141538283');",
+                    'parent.go_sendSearchMain("3141538283");',
+                    "parent.go_sendSearchMain( '3141538283' )"):
+        assert js.search(onclick).group(2) == "3141538283"
+    assert js.search("parent.go_transterPop('3141538283');") is None

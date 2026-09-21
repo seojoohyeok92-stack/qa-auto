@@ -309,6 +309,11 @@ function labelOf(el){const d=el.ownerDocument;let parts=[];
    for(let i=0;p&&i<2;i++,p=p.previousElementSibling){const t=txt(p);if(t&&t.length<30){parts.push(t);break;}}}
   return norm(parts.join(' '));}
 function isWrite(t){return WRITE_WORDS.some(w=>t.indexOf(w)>=0);}
+// The purchase list opens a sale with parent.go_sendSearchMain('<판매번호>');
+// the other 10-digit link in the same row calls go_transterPop instead.
+const SEND_SALES=/go_sendSearchMain\(\s*(['"])\s*(\d+)\s*\1\s*\)/;
+function salesLinks(tr){const out=[];for(const el of tr.querySelectorAll('[onclick]')){
+  const m=SEND_SALES.exec(el.getAttribute('onclick')||'');if(m)out.push({el,sales:m[2],text:txt(el)});}return out;}
 """
 
 PAGE_STATE_JS = r"""
@@ -353,7 +358,7 @@ FILL_AND_QUERY_JS = r"""
 
 RESULT_SNAPSHOT_JS = r"""
 ((markers,order,token)=>{const texts=[];const seen=new Set();let headers=[];const rows=[];let loading=false;
- let staleOrderRows=0;let formTablesSkipped=0;
+ let staleOrderRows=0;let formTablesSkipped=0;const salesEvidence=[];
  const add=t=>{if(t&&!seen.has(t)&&texts.length<240){seen.add(t);texts.push(t);}};
  const fresh=el=>!token||el.getAttribute('data-cdp-before')!==token;
  const isForm=t=>!!t.querySelector('select,textarea,input:not([type=checkbox]):not([type=radio]):not([type=hidden])');
@@ -376,9 +381,10 @@ RESULT_SNAPSHOT_JS = r"""
     if(!fresh(tr)){staleOrderRows++;continue;}
     if(!headers.length)headers=headersFor(table);
     const key=JSON.stringify(vals);
-    if(!rows.some(r=>JSON.stringify(r)===key)&&rows.length<100){rows.push(vals);vals.forEach(add);}}}}
+    if(!rows.some(r=>JSON.stringify(r)===key)&&rows.length<100){rows.push(vals);vals.forEach(add);
+     for(const l of salesLinks(tr))salesEvidence.push({sales:l.sales,text:l.text});}}}}
  return {raw_result_texts:texts,table_headers:headers.slice(0,40),table_rows:rows,loading,
-  stale_order_rows:staleOrderRows,form_tables_skipped:formTablesSkipped};})
+  stale_order_rows:staleOrderRows,form_tables_skipped:formTablesSkipped,sales_links:salesEvidence};})
 """
 
 SCROLL_GRID_JS = r"""
@@ -391,7 +397,7 @@ CLICK_SALES_LINK_JS = r"""
 ((order,sales,token)=>{const hits=[];for(const {d} of docs()) for(const tr of d.querySelectorAll('tr,[role=row]'))
  {if(token&&tr.getAttribute('data-cdp-before')===token)continue;
   const cells=Array.from(tr.querySelectorAll('td,[role=gridcell]')).map(txt);if(!cells.includes(order))continue;
-  for(const a of tr.querySelectorAll('a,[onclick],span,u')){if(txt(a)===sales&&vis(a)){hits.push(a);break;}}}
+  for(const l of salesLinks(tr)){if(l.sales===sales&&(!l.text||l.text===sales)&&vis(l.el)){hits.push(l.el);break;}}}
  if(!hits.length)return {ok:false,code:'DPS_SALES_LINK_NOT_FOUND',rows:0};
  hits[0].click();return {ok:true,rows:hits.length};})
 """
@@ -614,11 +620,25 @@ class CdpDpsReader:
                 return self._failure("LOOKUP_RESULT_NOT_FOUND",
                                      "조회는 완료했지만 이 주문번호의 결과 행을 확인하지 못했습니다.",
                                      diagnostics)
-            sales_value = str(parsed["data"].get("dps_sales_number") or "").strip()
-            if not (_SALES_NUMBER.fullmatch(sales_value) and sales_value in matched_row
-                    and sales_value != order):
+            # The live grid has no header cells, so the parser cannot name the
+            # 판매번호 column. The row names it itself: the element whose onclick
+            # calls go_sendSearchMain('<판매번호>'). Exactly one such value, in
+            # this row, agreeing with its own link text -- never a guess from
+            # digits or position (the go_transterPop number beside it is not it).
+            candidates = {
+                str(link.get("sales") or "").strip()
+                for link in after.get("sales_links") or []
+                if isinstance(link, dict)
+                and _SALES_NUMBER.fullmatch(str(link.get("sales") or "").strip())
+                and str(link.get("sales")).strip() != order
+                and str(link.get("text") or "").strip() in ("", str(link.get("sales")).strip())
+            }
+            diagnostics["sales_link_candidates"] = len(candidates)
+            sales_value = next(iter(candidates)) if len(candidates) == 1 else ""
+            if not (sales_value and sales_value in matched_row):
                 return self._failure("DPS_SALES_NUMBER_MISSING",
                                      "결과 행에서 DPS 판매번호를 확인하지 못했습니다.", diagnostics)
+            parsed["data"]["dps_sales_number"] = sales_value
             detail_lookup = {"attempted": False, "opened": False, "parsed": False,
                              "closed": False, "status": "NOT_ATTEMPTED", "invocation_count": 0}
             detail = None
