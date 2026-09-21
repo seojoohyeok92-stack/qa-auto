@@ -141,6 +141,28 @@ class PromptBuilder:
         "사용한 후보와 사용하지 않은 후보를 모두 이유와 함께 보고한다.",
         "어떤 질문에 대해 쓸 수 있는 근거가 없으면 그 질문만 unresolved로"
         " 남기고, 답할 수 있는 다른 질문까지 회피하지 않는다.",
+        # A symptom is not a verdict. The as_guide route (서비스센터 접수 → 기사
+        # 판정 → 판매처) is what may be said; whether it *is* a defect, and what
+        # follows for this customer, is decided by the inspection and by staff.
+        "제품 이상·불량 의심 증상에는 불량 여부를 판정하지 않는다. 근거에 있는"
+        " 점검·접수 절차만 안내하고(예: 서비스센터 접수 → 기사 점검 → 불량으로"
+        " 판정되는 경우 판매처로 다시 연락), 교환·환불·회수·보상 여부나 그 일정은"
+        " 약속하지 않는다.",
+        # Compatibility with a product the catalogue does not identify. Replies
+        # were held because the model could not say yes or no, even when it had
+        # correctly given our product's verified conditions -- which is the
+        # answer that can be given.
+        "현재 상품과 다른 제품(고객이 가진 TV·모니터 등, Product Catalog 에서"
+        " 식별되지 않는 제품)과의 호환 문의: 같은 외부 제품과 현재 상품 조합에"
+        " 대해 답한 후보가 있고 Product Catalog 와 어긋나지 않으면 그 결론을"
+        " 사용할 수 있다. 그런 후보가 없으면 외부 제품의 사양·크기·무게를"
+        " 모델명·화면 크기·브랜드로 추측하지 말고, Product Catalog 에 있는 현재"
+        " 상품의 호환 조건(지원 크기, VESA, 하중, 장착 조건 등)만 안내한 뒤"
+        " 고객이 보유 제품의 규격과 비교하도록 안내한다. 이렇게 조건을 안내한"
+        " 질문은 답한 것이므로 unresolved 로 남기지 않되 호환된다/안 된다고"
+        " 단정하지 않는다. 현재 상품의 호환 조건도 근거에 없으면 unresolved 로"
+        " 남긴다. 후보의 수치와 Product Catalog 수치가 다르면 Product Catalog 를"
+        " 따른다. 근거에 없는 항목은 '-'·'미확인'처럼 나열하지 않는다.",
     )
 
     # What each product block in ``input`` means, and how far each may be

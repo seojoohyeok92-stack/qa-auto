@@ -196,6 +196,175 @@ _EVIDENCE_EXEMPT_ROUTES = frozenset({
 POLICY_STAFF_ONLY_ACTIONS = frozenset({"CANCEL_RETURN", "DAMAGE_REPORT"})
 RETURN_OR_DAMAGE_POLICY_REVIEW = "RETURN_OR_DAMAGE_POLICY_REVIEW"
 
+# The one part of a DAMAGE_REPORT the store lets the system answer: how a
+# suspected defect is checked. Real inquiry 10635 ("모니터 화면에 검은 타원형이
+# 보이는데 어떻게 하면 되나요?", DAMAGE_REPORT + METHOD_OR_PROCEDURE) was
+# answered from the Product Knowledge A/S route -- 서비스센터 접수, 기사 판정,
+# then the seller -- validator PASS, can_auto_post, and held by the action
+# alone. What the customer asks is read from GPT ①'s requested_attribute:
+# how / where / whether A/S is possible is a procedure; when a replacement
+# ships (TIMING), who is liable (ACTOR), what it costs, or "do it for me"
+# (ACTION_EXECUTION) stay with staff, and so does every CANCEL_RETURN.
+#
+# Naver only. The audit found no full defect procedure evidence for Coupang,
+# so its hold is unchanged. A missing store code is not Naver.
+_DEFECT_PROCEDURE_ATTRIBUTES = frozenset({
+    "METHOD_OR_PROCEDURE", "LOCATION_OR_CONTACT", "EXISTENCE_OR_CAPABILITY",
+    "UNKNOWN",
+})
+# The answer itself may only describe the inspection route. A sentence that
+# settles the case -- "불량입니다", "교환해 드리겠습니다", "환불됩니다" -- keeps
+# the hold unless the same sentence makes it conditional on the inspection
+# ("점검 후 불량으로 확인되는 경우 판매처로 연락해 주세요"). This can only keep a
+# hold; it never opens one.
+_DEFECT_VERDICT = re.compile(
+    r"(?:초기\s*)?불량(?:입니다|이\s*맞|으로\s*(?:확인|판정)(?:됩니다|되었|했))"
+    r"|하자(?:입니다|가\s*맞)"
+)
+_CASE_COMMITMENT = re.compile(
+    r"(?:교환|환불|반품|회수|수거|보상|배상|재발송|새\s*제품)[^.\n]{0,24}?"
+    r"(?:해\s*드리겠|해\s*드립니다|해드리겠|해드립니다|가능합니다|됩니다|"
+    r"진행하겠|진행해\s*드리|처리하겠|처리해\s*드리|예정입니다|발송)"
+)
+_INSPECTION_CONDITION = re.compile(
+    r"경우|따라|확인되면|판정되면|판정\s*후|판정\s*결과|점검\s*후|점검\s*결과|"
+    r"확인\s*후|거친\s*후|받은\s*후|받으신\s*후|이라면|라면"
+)
+
+
+def _defect_process_guidance_only(
+    questions: Any, *, answer: str, store_code: object,
+) -> bool:
+    from services.market_policy import NAVER, market_of
+
+    if market_of(store_code) != NAVER:
+        return False
+    items = [item for item in questions if isinstance(item, Mapping)]
+    if not items:
+        return False
+    for item in items:
+        action = str(item.get("action") or "").strip().upper()
+        attribute = str(item.get("requested_attribute") or "UNKNOWN").strip().upper()
+        if action == "CANCEL_RETURN":
+            return False
+        if action == "DAMAGE_REPORT" and attribute not in _DEFECT_PROCEDURE_ATTRIBUTES:
+            return False
+    for sentence in re.split(r"(?<=[.!?。])\s+|\n+", str(answer or "")):
+        if not (_DEFECT_VERDICT.search(sentence) or _CASE_COMMITMENT.search(sentence)):
+            continue
+        if not _INSPECTION_CONDITION.search(sentence):
+            return False
+    return True
+
+
+# Compatibility with a product the catalogue does not know (the customer's own
+# TV, another brand's monitor). GPT ② may answer it two ways: from a Learning
+# written for the same pairing, or by stating only *our* product's verified
+# conditions and leaving the comparison to the customer. Two things neither
+# way allows, checked here on the answer that would be published -- both can
+# only add a hold, never lift one:
+#
+# 1. A definite yes/no with nothing behind it. An unconditional "호환됩니다" /
+#    "장착 불가합니다" needs a Learning or a product fact GPT ② reports having
+#    used. A conditional one ("VESA가 100x100이고 10kg 이하라면 장착
+#    가능합니다") restates our conditions and is spec guidance.
+# 2. Our product's measurement disagreeing with the catalogue. A past answer
+#    saying 50kg does not outrank a current product fact saying 10kg. For each
+#    measurement the catalogue states (weight/load, screen size, VESA), a value
+#    the answer states must be one the catalogue states -- unless the customer
+#    wrote it, which is them describing their own product.
+PRODUCT_COMPATIBILITY_NOT_VERIFIED = "PRODUCT_COMPATIBILITY_NOT_VERIFIED"
+_COMPATIBILITY_VERDICT = re.compile(
+    r"(?:호환|장착|부착|거치)\s*(?:이|은|는|도|이\s*모두)?\s*"
+    r"(?:가능(?:합니다|해요|하십니다)|불가(?:능)?(?:합니다|해요)?|됩니다|되십니다|"
+    r"되지\s*않|안\s*됩니다)"
+)
+_COMPATIBILITY_CONDITION = re.compile(r"라면|으면|이면|하면|맞으면|경우")
+_WEIGHT_CLAIM = re.compile(r"(\d+(?:\.\d+)?)\s*(?:kg|킬로)", re.IGNORECASE)
+_SIZE_CLAIM = re.compile(r"(\d+(?:\.\d+)?)\s*인치")
+_VESA_PAIR = re.compile(r"(\d{2,4})\s*[xX×*]\s*(\d{2,4})")
+_FACT_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_INCH_RANGE = re.compile(r"(\d+(?:\.\d+)?)\s*[~\-]\s*(\d+(?:\.\d+)?)\s*인치")
+_CATALOG_INCHES = re.compile(r"(\d+(?:\.\d+)?)\s*(?:인치|\")")
+
+
+def _catalog_measurements(facts: Any) -> dict[str, set[Any]]:
+    classes: dict[str, set[Any]] = {
+        "weight": set(), "size": set(), "vesa": set(), "weight_stated": set(),
+    }
+    for fact in facts if isinstance(facts, (list, tuple)) else ():
+        if not isinstance(fact, Mapping):
+            continue
+        key = str(fact.get("field_key") or "").lower()
+        value = fact.get("value")
+        text = (
+            " ".join(str(item) for item in value.values())
+            if isinstance(value, Mapping)
+            else " ".join(str(item) for item in value)
+            if isinstance(value, (list, tuple))
+            else str(value or "")
+        )
+        if "vesa" in key:
+            classes["vesa"].update(
+                (int(a), int(b)) for a, b in _VESA_PAIR.findall(f"{key} {text}")
+            )
+        # What our mount carries is what a compatibility answer is checked
+        # against; what our product weighs is also a true thing to say (a new
+        # TV's 25.3kg beside the bundled bracket's MAX 50), so it is accepted
+        # but never starts a check by itself.
+        elif "load" in key or "mount_weight" in key:
+            classes["weight"].update(float(n) for n in _FACT_NUMBER.findall(text))
+        elif "weight" in key:
+            classes["weight_stated"].update(
+                float(n) for n in _FACT_NUMBER.findall(text)
+            )
+        elif "screen_size" in key:
+            # Inches only: "214.7 cm" is the same 85-inch panel in another
+            # unit, and comparing the two numbers would call it a conflict.
+            for low, high in _INCH_RANGE.findall(text):
+                classes["size"].update({float(low), float(high)})
+            classes["size"].update(float(n) for n in _CATALOG_INCHES.findall(text))
+    return classes
+
+
+def _compatibility_answer_findings(
+    *, answer: str, customer_text: str, metadata: Mapping[str, Any],
+    gpt_draft: Mapping[str, Any],
+) -> bool:
+    """True when the published compatibility answer is not safe to send."""
+
+    used = bool(gpt_draft.get("used_learning_ids")) or bool(
+        gpt_draft.get("used_product_facts")
+    )
+    for sentence in re.split(r"(?<=[.!?。])\s+|\n+", answer):
+        if (
+            _COMPATIBILITY_VERDICT.search(sentence)
+            and not _COMPATIBILITY_CONDITION.search(sentence)
+            and not used
+        ):
+            return True
+    catalog = _catalog_measurements(metadata.get("product_catalog"))
+    customer_weights = {float(n) for n in _WEIGHT_CLAIM.findall(customer_text)}
+    customer_sizes = {float(n) for n in _SIZE_CLAIM.findall(customer_text)}
+    customer_vesa = {(int(a), int(b)) for a, b in _VESA_PAIR.findall(customer_text)}
+    stated = (
+        ("weight", {float(n) for n in _WEIGHT_CLAIM.findall(answer)} - customer_weights),
+        ("size", {float(n) for n in _SIZE_CLAIM.findall(answer)} - customer_sizes),
+        ("vesa", {(int(a), int(b)) for a, b in _VESA_PAIR.findall(answer)} - customer_vesa),
+    )
+    for name, values in stated:
+        known = catalog[name]
+        if not known:
+            continue
+        if name == "vesa":
+            known = known | {(b, a) for a, b in known}
+        if name == "weight":
+            known = known | catalog["weight_stated"]
+        if values - known:
+            return True
+    return False
+
+
 # These values are persisted by ``InquiryProcessingPlanService`` while GPT①'s
 # already-authoritative understanding is in scope.  This allowlist deliberately
 # prevents arbitrary old metadata (intent, subtype, manual-review flags) from
@@ -793,8 +962,32 @@ class AutoProcessingEligibilityService:
                 for item in questions
                 if isinstance(item, Mapping)
             }
-            if asked_actions & POLICY_STAFF_ONLY_ACTIONS:
+            if asked_actions & POLICY_STAFF_ONLY_ACTIONS and not (
+                _defect_process_guidance_only(
+                    questions, answer=answer,
+                    store_code=inquiry.get("store_code"),
+                )
+            ):
                 reasons.append(RETURN_OR_DAMAGE_POLICY_REVIEW)
+            asks_compatibility = any(
+                isinstance(item, Mapping)
+                and str(item.get("requested_attribute") or "").strip().upper()
+                == "COMPATIBILITY"
+                for item in questions
+            )
+            if asks_compatibility and _compatibility_answer_findings(
+                answer=answer,
+                customer_text=" ".join(
+                    [str(inquiry.get("content") or "")]
+                    + [
+                        str(item.get("text") or "")
+                        for item in questions if isinstance(item, Mapping)
+                    ]
+                ),
+                metadata=metadata,
+                gpt_draft=gpt_draft,
+            ):
+                reasons.append(PRODUCT_COMPATIBILITY_NOT_VERIFIED)
 
         # Confidence remains operator telemetry only.  It is deliberately in
         # SOFT_REASONS and therefore cannot change publishability.
