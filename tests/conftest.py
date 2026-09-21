@@ -53,6 +53,17 @@ os.environ.setdefault("DPS_PASSIVE_IDLE_ENABLED", "false")
 # corpus explicitly exercises the retained ON architecture; individual OFF
 # tests override this value with ``monkeypatch``.
 os.environ.setdefault("DPS_AUTOMATIC_LOOKUP_ENABLED", "true")
+# Production DPS reads go to the operator's CDP Chrome on 9222. A test must
+# never reach one that happens to be open on a developer PC, nor remember or
+# start its profile: point the production seam at a closed port and a
+# throwaway state file.
+import tempfile as _tempfile  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+import dps.cdp_session as _cdp_session  # noqa: E402
+
+_cdp_session.PRODUCTION_CDP_PORT = 1
+_cdp_session.STATE_FILE = _Path(_tempfile.mkdtemp(prefix="dps-cdp-state-")) / "dps_cdp_session.json"
 
 
 # --- network egress guard --------------------------------------------------

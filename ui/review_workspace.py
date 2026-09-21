@@ -71,7 +71,7 @@ from services.market_policy import (
 from services.learning_feedback_service import LearningFeedbackService
 from services.learning_privacy_service import LearningPrivacyService
 from services.dps_lookup_orchestrator import DpsLookupOrchestrator
-from services.dps_agent_client import get_dps_agent_status
+from dps.cdp_session import cdp_session_status
 from services.local_auth_service import Permission
 from services.inquiry_processing_plan_service import (
     InquiryProcessingPlanService,
@@ -3780,7 +3780,7 @@ def _render_dps(database: Database, inquiry: dict[str, Any]) -> None:
             "runtime_session_marker", str(uuid.uuid4())
         )
         try:
-            agent_status = get_dps_agent_status()
+            agent_status = cdp_session_status()
         except Exception as diagnostic_error:
             agent_status = {
                 "agent_running": False,

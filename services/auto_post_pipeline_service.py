@@ -23,7 +23,7 @@ from services.auto_processing_eligibility_service import (
 )
 from services.automatic_draft_service import AutomaticDraftService
 from services.naver_post_service import NaverPostService
-from services.dps_agent_client import get_dps_session_status
+from dps.cdp_session import cdp_session_status
 from workflow.models import InquiryStatus
 from workflow.models import StepCode
 
@@ -68,7 +68,7 @@ class AutoPostPipelineService:
         # own client, built on first use so a Naver-only run never touches it.
         self._injected_posts = post_service
         self._coupang_posts = None
-        self.dps_status_provider = dps_status_provider or get_dps_session_status
+        self.dps_status_provider = dps_status_provider or cdp_session_status
         self.eligibility = AutoProcessingEligibilityService()
         if confirmation_service is not None:
             self.confirmation = confirmation_service

@@ -387,7 +387,20 @@ def ensure_dps_session_monitor() -> dict[str, Any]:
     }
 
 
+# The pywinauto agent is kept, dormant, while production reads DPS over CDP
+# (dps.cdp_session). While this is True nothing starts it: every legacy
+# entry point (lookup, login/open helpers, session monitor) goes through
+# start_dps_agent and stops here. A code switch, not an env setting.
+LEGACY_AGENT_DORMANT = True
+
+
 def start_dps_agent() -> dict[str, Any]:
+    if LEGACY_AGENT_DORMANT:
+        return {
+            "ok": False, "success": False, "agent_running": False,
+            "code": "LEGACY_DPS_AGENT_DORMANT", "error_code": "LEGACY_DPS_AGENT_DORMANT",
+            "message": "DPS 조회는 CDP로 전환되어 이전 DPS Agent는 실행하지 않습니다.",
+        }
     current = get_dps_agent_status()
     if current.get("agent_running"):
         return current

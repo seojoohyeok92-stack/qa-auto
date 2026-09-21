@@ -5,7 +5,7 @@ from typing import Any
 
 import streamlit as st
 
-from services.dps_agent_client import get_dps_agent_status
+from dps.cdp_session import cdp_session_status
 from ui.session_identity import current_identity
 
 
@@ -31,9 +31,15 @@ def _change_page(page_code: str, *, kpi_filter: str | None = None) -> None:
 @st.cache_data(ttl=20, show_spinner=False)
 def _cached_dps_status() -> dict[str, Any]:
     try:
-        return get_dps_agent_status()
+        return cdp_session_status()
     except Exception as error:
-        return {"agent_running": False, "error_code": error.__class__.__name__}
+        return {"session_status": "CONNECTION_FAILED", "error_code": error.__class__.__name__}
+
+
+_DPS_SESSION_LABELS = {
+    "READY": "정상", "LOGIN_REQUIRED": "로그인 필요", "CHROME_NOT_FOUND": "Chrome 미실행",
+    "DPS_PAGE_NOT_FOUND": "구매요청리스트 필요", "CONNECTION_FAILED": "연결 실패",
+}
 
 
 def sidebar_system_status(
@@ -53,7 +59,7 @@ def sidebar_system_status(
     )
     return [
         {"label": "DB 상태", "status": "정상" if (db_status or {}).get("ok") else "오류", "tone": "ok" if (db_status or {}).get("ok") else "error"},
-        {"label": "DPS Agent", "status": "정상" if dps.get("agent_running") else "미시작", "tone": "ok" if dps.get("agent_running") else "muted"},
+        {"label": "DPS (CDP)", "status": _DPS_SESSION_LABELS.get(str(dps.get("session_status") or "").upper(), "확인 필요"), "tone": "ok" if str(dps.get("session_status") or "").upper() == "READY" else "warning"},
         {"label": "네이버 API", "status": f"설정됨 {configured_store_count}" if configured_store_count else "오류", "tone": "warning" if configured_store_count else "error"},
         {"label": "GPT Provider", "status": provider if provider not in {"OPENAI", "REAL"} or has_openai else "키 확인", "tone": "ok" if provider in {"OPENAI", "REAL"} and has_openai else "warning"},
         {"label": "Chrome 연결", "status": "정상" if browser_connected else "미시작", "tone": "ok" if browser_connected else "muted"},

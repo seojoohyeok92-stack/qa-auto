@@ -279,79 +279,55 @@ def test_synced_seller_answer_is_observed_without_automatic_learning(tmp_path: P
     assert any(row["event_code"] == "SELLER_ANSWER_OBSERVED" for row in events)
 
 
-def test_streamlit_startup_starts_missing_dps_agent_exactly_once(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    from services import dps_agent_client
-
-    statuses = iter(
-        [
-            {"agent_running": False, "legacy_agent_running": False},
-            {"agent_running": True, "legacy_agent_running": False},
-        ]
-    )
-    launches: list[tuple] = []
-    monkeypatch.setenv("DPS_SESSION_MONITOR_ENABLED", "true")
-    monkeypatch.setattr(dps_agent_client, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(dps_agent_client, "get_dps_agent_status", lambda: next(statuses))
-    monkeypatch.setattr(dps_agent_client.time, "sleep", lambda _: None)
-    monkeypatch.setattr(
-        dps_agent_client.subprocess,
-        "Popen",
-        lambda *args, **kwargs: launches.append((args, kwargs)),
-    )
-
-    result = dps_agent_client.ensure_dps_session_monitor()
-    assert result["agent_running"] is True
-    assert len(launches) == 1
-    assert launches[0][0][0][1:] == ["-m", "dps.agent_server"]
-
-
-def test_existing_dps_agent_is_reused_without_subprocess(monkeypatch) -> None:
+def _forbid_legacy_agent_launch(monkeypatch, tmp_path: Path) -> list[object]:
     from services import dps_agent_client
 
     launches: list[object] = []
     monkeypatch.setenv("DPS_SESSION_MONITOR_ENABLED", "true")
+    monkeypatch.setattr(dps_agent_client, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
         dps_agent_client,
         "get_dps_agent_status",
-        lambda: {"agent_running": True, "legacy_agent_running": False},
+        lambda: {"agent_running": False, "legacy_agent_running": False},
     )
-    monkeypatch.setattr(
-        dps_agent_client.subprocess,
-        "Popen",
-        lambda *args, **kwargs: launches.append((args, kwargs)),
-    )
-    result = dps_agent_client.ensure_dps_session_monitor()
-    assert result["agent_running"] is True
-    assert launches == []
-
-
-def test_streamlit_rerun_does_not_launch_second_agent(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    from services import dps_agent_client
-
-    statuses = iter(
-        [
-            {"agent_running": False, "legacy_agent_running": False},
-            {"agent_running": True, "legacy_agent_running": False},
-            {"agent_running": True, "legacy_agent_running": False},
-        ]
-    )
-    launches: list[object] = []
-    monkeypatch.setenv("DPS_SESSION_MONITOR_ENABLED", "true")
-    monkeypatch.setattr(dps_agent_client, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(dps_agent_client, "get_dps_agent_status", lambda: next(statuses))
     monkeypatch.setattr(dps_agent_client.time, "sleep", lambda _: None)
     monkeypatch.setattr(
         dps_agent_client.subprocess,
         "Popen",
         lambda *args, **kwargs: launches.append((args, kwargs)),
     )
-    assert dps_agent_client.ensure_dps_session_monitor()["agent_running"] is True
-    assert dps_agent_client.ensure_dps_session_monitor()["agent_running"] is True
-    assert len(launches) == 1
+    return launches
+
+
+def test_streamlit_startup_uses_cdp_hook_not_legacy_agent(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # Production DPS moved to CDP: startup runs the CDP Chrome hook and the
+    # pywinauto agent stays dormant even with the session monitor enabled.
+    from services import dps_agent_client
+
+    launches = _forbid_legacy_agent_launch(monkeypatch, tmp_path)
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    assert "ensure_cdp_chrome_on_start()" in source
+    assert "ensure_dps_session_monitor" not in source
+
+    result = dps_agent_client.start_dps_agent()
+    assert result["code"] == "LEGACY_DPS_AGENT_DORMANT"
+    assert result["agent_running"] is False
+    assert dps_agent_client.ensure_dps_session_monitor().get("agent_running") is not True
+    assert launches == []
+
+
+def test_streamlit_rerun_does_not_launch_legacy_agent(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from services import dps_agent_client
+
+    launches = _forbid_legacy_agent_launch(monkeypatch, tmp_path)
+    for _ in range(3):
+        dps_agent_client.ensure_dps_session_monitor()
+        dps_agent_client.start_dps_agent()
+    assert launches == []
 
 
 @pytest.mark.parametrize("runtime_enabled", [False, True])

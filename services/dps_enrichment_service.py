@@ -13,7 +13,7 @@ from repositories.dps_repository import DpsRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.workflow_repository import WorkflowRepository
-from services.dps_agent_client import lookup_dps_order
+from dps.cdp_session import lookup_dps_order_production
 from services.dps_lookup_policy import (
     DpsLookupDecision,
     DpsLookupPolicy,
@@ -49,7 +49,10 @@ class DpsEnrichmentService:
         settings: DpsSettings | None = None,
     ) -> None:
         self.database = database
-        self.client = client or lookup_dps_order
+        # Naver DPS reads go through CDP/DOM. The pywinauto agent client
+        # (services.dps_agent_client.lookup_dps_order) is kept dormant and
+        # is not a fallback.
+        self.client = client or lookup_dps_order_production
         self.policy = policy or DpsLookupPolicy()
         self.settings = settings or DpsSettings.from_environment()
         self.dps = DpsRepository(database)

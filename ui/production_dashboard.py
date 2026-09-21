@@ -19,7 +19,7 @@ from repositories.dashboard_preferences_repository import (
 from repositories.naver_sync_repository import NaverSyncRepository
 from services.dashboard_operations_service import DashboardOperationsService
 from services.auto_post_runtime_service import AutoPostRuntimeService
-from services.dps_agent_client import get_dps_session_status
+from dps.cdp_session import cdp_session_status
 from services.dps_lookup_policy import DpsSettings
 from ui.session_identity import current_identity
 
@@ -56,7 +56,7 @@ def _auto_post_status(
 
 @st.cache_data(ttl=15, show_spinner=False)
 def _cached_dps_session_status() -> dict[str, Any]:
-    return get_dps_session_status()
+    return cdp_session_status()
 
 
 def _dps_session_label(status: object) -> str:

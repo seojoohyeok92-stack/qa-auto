@@ -53,7 +53,8 @@ from dps.sales_detail import (
     parse_flat_detail,
 )
 
-DEFAULT_CDP_PORT = 9333
+# The operations DPS Chrome's remote-debugging port.
+DEFAULT_CDP_PORT = 9222
 # The shape the production parser already treats as a DPS 판매번호 / 전자주문번호
 # (``parse_lookup_result`` long_numbers: ``\d{8,20}``).
 _SALES_NUMBER = re.compile(r"\d{8,20}")
