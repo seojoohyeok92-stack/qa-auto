@@ -385,12 +385,17 @@ def test_capturing_opens_no_answer_edit_approval_or_registration(database) -> No
         assert connection.execute(
             "SELECT COUNT(*) FROM naver_post_attempts"
         ).fetchone()[0] == 0
-    # Keeping an answer as Learning opens nothing that answers unattended.
+    # Keeping an answer as Learning opened nothing by itself.  Automatic
+    # processing was opened later by its own decision, and it still never
+    # touches this inquiry: an answered one is skipped before any work.
     assert market_policy.is_store_post_enabled("COUPANG_OJE_NS") is False
     assert market_policy.is_store_dps_enabled("COUPANG_OJE_NS") is False
-    assert market_policy.is_store_automatic_generation_enabled(
-        "COUPANG_OJE_NS"
-    ) is False
+    from services.automatic_draft_service import AutomaticDraftService
+
+    assert AutomaticDraftService(database).ensure_for_inquiry(
+        inquiry_id
+    ).status == "SKIPPED_ALREADY_ANSWERED"
+    assert draft_count(database) == 0
 
 
 # --- model scope ----------------------------------------------------------------
@@ -647,13 +652,11 @@ def test_the_read_only_panel_offers_approval_and_nothing_else(database) -> None:
     naver = inquiry_of(database, naver_inquiry(database))
     naver["seller_answer"] = "네이버 답변"
     assert review_workspace._seller_answer_learning_approval(naver) is False
-    # Nothing was opened for answering unattended.  Manual registration and
-    # its notification are separate decisions, each opened on its own.
+    # This panel opened nothing else.  Manual registration, the Kakao room
+    # and automatic processing are separate decisions, each opened on its
+    # own; the read-only rule that governs this screen is unchanged by them.
     assert market_policy.is_store_post_enabled("COUPANG_OJE_NS") is False
     assert market_policy.is_store_dps_enabled("COUPANG_OJE_NS") is False
-    assert market_policy.is_store_automatic_generation_enabled(
-        "COUPANG_OJE_NS"
-    ) is False
 
 
 # --- Negative Learning and 학습 제외, through the Naver paths --------------------

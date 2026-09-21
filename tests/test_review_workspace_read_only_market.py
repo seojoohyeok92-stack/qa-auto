@@ -65,11 +65,24 @@ def test_an_unrecognised_non_empty_code_is_still_treated_as_naver() -> None:
 # --- selecting an inquiry must not generate ----------------------------------
 
 def test_selection_generates_only_where_automatic_generation_is_open() -> None:
+    """Both answerable markets draft on selection now, and an unanswerable
+    one never would.
+
+    This is the visible consequence of opening automatic generation for
+    Coupang: selecting a Coupang inquiry drafts for it exactly as selecting a
+    Naver one does, instead of waiting for a person to ask.  The read-only
+    rule above is what keeps that away from inquiries Coupang has already
+    answered.
+    """
+
     from services.market_policy import is_store_automatic_generation_enabled
 
     assert is_store_automatic_generation_enabled("OJE_PLUS") is True
-    assert is_store_automatic_generation_enabled("COUPANG_OJE_NS") is False
-    assert is_store_automatic_generation_enabled("COUPANG_OJE_PLUS") is False
+    assert is_store_automatic_generation_enabled("COUPANG_OJE_NS") is True
+    assert is_store_automatic_generation_enabled("COUPANG_OJE_PLUS") is True
+    assert _is_read_only_inquiry(
+        {"store_code": "COUPANG_OJE_NS", "source_answered": True}
+    ) is True
 
 
 def test_the_selection_call_is_gated_by_automatic_generation() -> None:
