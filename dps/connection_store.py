@@ -153,6 +153,7 @@ class ConnectionStore:
             "next_keepalive_due_at",
             "keepalive_due",
             "keepalive_deferred_reason",
+            "last_keepalive_result",
             "consecutive_keepalive_failures",
             "keepalive_lock_skips",
             "last_monitor_event",

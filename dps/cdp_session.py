@@ -71,8 +71,12 @@ def lookup_dps_order_production(naver_order_id: str | None = None, **kwargs: Any
     takes the existing review/hold path.
     """
 
+    from dps.keepalive_runtime import run_with_dps_lookup_priority
+
     reader = CdpDpsReader(_browser())
-    return lookup_dps_order_cdp(naver_order_id, reader=reader, **kwargs)
+    return run_with_dps_lookup_priority(
+        lambda: lookup_dps_order_cdp(naver_order_id, reader=reader, **kwargs)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +132,10 @@ def cdp_session_status(*, port: int | None = None, browser: Any | None = None) -
             else:
                 session = "DPS_PAGE_NOT_FOUND"
     ready = session == "READY"
+    from dps.keepalive_runtime import dps_keepalive_runtime_status
+
     return {
+        **dps_keepalive_runtime_status(),
         **base, "ok": ready, "success": ready, "session_status": session,
         "login_status": "LOGGED_IN" if ready else session,
         "browser_connected": base["chrome_running"],
@@ -205,6 +212,24 @@ def chrome_browser_processes() -> list[dict[str, Any]]:
         processes.append({"pid": row.get("ProcessId"), "executable": row.get("ExecutablePath"),
                           "argv": argv})
     return processes
+
+
+def cdp_chrome_process_ids(*, port: int | None = None) -> set[int]:
+    """Return only browser PIDs serving the production CDP port."""
+
+    target_port = int(port or PRODUCTION_CDP_PORT)
+    result: set[int] = set()
+    for process in chrome_browser_processes():
+        argv = list(process.get("argv") or [])
+        if _flag(argv, "remote-debugging-port") != str(target_port):
+            continue
+        try:
+            process_id = int(process.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if process_id > 0:
+            result.add(process_id)
+    return result
 
 
 def _flag(argv: list[str], name: str) -> str | None:

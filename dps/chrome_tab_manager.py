@@ -68,6 +68,7 @@ class ChromeTabManager:
         *,
         keywords: Iterable[str] = DEFAULT_DPS_KEYWORDS,
         allowed_hosts: Iterable[str] = ("dps2u.co.kr",),
+        allowed_process_ids_provider: Callable[[], Iterable[int]] | None = None,
         logger: logging.Logger | None = None,
         desktop_factory: Callable[..., Any] | None = None,
     ) -> None:
@@ -79,6 +80,7 @@ class ChromeTabManager:
         )
         self.logger = logger or logging.getLogger(__name__)
         self._desktop_factory = desktop_factory or Desktop
+        self.allowed_process_ids_provider = allowed_process_ids_provider
         self.last_connection_failure_reason = ""
         self.last_tab_scan_failed = False
 
@@ -127,11 +129,29 @@ class ChromeTabManager:
             self.logger.exception("Chrome 최상위 창 목록을 읽지 못했습니다.")
             return []
 
+        allowed_process_ids: set[int] | None = None
+        if self.allowed_process_ids_provider is not None:
+            try:
+                allowed_process_ids = {
+                    int(value)
+                    for value in self.allowed_process_ids_provider()
+                    if int(value) > 0
+                }
+            except Exception:
+                self.logger.exception("DPS CDP Chrome process lookup failed")
+                allowed_process_ids = set()
+
         chrome: list[Any] = []
         for window in windows:
             try:
                 class_name = str(window.element_info.class_name or "")
                 if "chrome_widgetwin" not in class_name.casefold():
+                    continue
+                process_id = self.process_id_for_window(int(window.handle))
+                if (
+                    allowed_process_ids is not None
+                    and process_id not in allowed_process_ids
+                ):
                     continue
                 process_name = self.process_name_for_window(int(window.handle))
                 if process_name and process_name.casefold() != "chrome.exe":
@@ -149,6 +169,19 @@ class ChromeTabManager:
         return chrome
 
     @staticmethod
+    def process_id_for_window(hwnd: int) -> int:
+        if os.name != "nt" or hwnd <= 0:
+            return 0
+        try:
+            process_id = ctypes.c_ulong()
+            ctypes.windll.user32.GetWindowThreadProcessId(
+                hwnd, ctypes.byref(process_id)
+            )
+            return int(process_id.value or 0)
+        except Exception:
+            return 0
+
+    @staticmethod
     def process_name_for_window(hwnd: int) -> str:
         """Chrome_WidgetWin을 사용하는 VS Code 등 다른 앱을 제외합니다."""
 
@@ -158,14 +191,13 @@ class ChromeTabManager:
         try:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
-            process_id = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
-            if not process_id.value:
+            process_id = ChromeTabManager.process_id_for_window(hwnd)
+            if not process_id:
                 return ""
             process_handle = kernel32.OpenProcess(
                 0x1000,  # PROCESS_QUERY_LIMITED_INFORMATION
                 False,
-                process_id.value,
+                process_id,
             )
             if not process_handle:
                 return ""

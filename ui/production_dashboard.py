@@ -283,7 +283,13 @@ def render_realtime_operations(
         ),
         ("Auto Post", post_status),
         ("DPS Agent", "ON" if dps_session.get("agent_running") else "OFF"),
-        ("DPS Keepalive", "ON" if dps_env.keepalive_enabled else "OFF"),
+        (
+            "DPS Keepalive",
+            "ON"
+            if dps_session.get("keepalive_runtime_enabled")
+            and dps_session.get("keepalive_runtime_running")
+            else "OFF",
+        ),
         ("최근 Sync", format_datetime_kst(
             sync_state.get("last_completed_at"), empty="없음"
         )),
@@ -322,6 +328,12 @@ def render_realtime_operations(
             f"Idle {dps_session.get('dps_idle_minutes') if dps_session.get('dps_idle_minutes') is not None else '-'}분 · "
             f"세션 유지 기준 {dps_env.keepalive_interval_minutes}분 · "
             f"DPS 데이터 갱신 {dps_lookup_settings.refresh_interval_minutes}분"
+        )
+        st.caption(
+            "DPS Keepalive "
+            f"다음 실행 {format_datetime_kst(dps_session.get('next_keepalive_due_at'), empty='없음')} · "
+            f"최근 결과 {dps_session.get('last_keepalive_result') or '없음'} · "
+            f"로그인 필요 {'예' if dps_session.get('session_status') == 'LOGIN_REQUIRED' else '아니오'}"
         )
         columns = st.columns(7, gap="small")
         details = (

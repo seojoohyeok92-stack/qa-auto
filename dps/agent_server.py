@@ -413,6 +413,7 @@ class DpsWindowsAgent:
         self.next_keepalive_due_at = state.get("next_keepalive_due_at")
         self.keepalive_due = bool(state.get("keepalive_due", False))
         self.keepalive_deferred_reason = state.get("keepalive_deferred_reason")
+        self.last_keepalive_result = state.get("last_keepalive_result")
         self.keepalive_lock_skips = int(state.get("keepalive_lock_skips") or 0)
         self.last_monitor_event = state.get("last_monitor_event")
         self.last_passive_monitor_at = state.get("last_passive_monitor_at")
@@ -523,6 +524,7 @@ class DpsWindowsAgent:
                 "next_keepalive_due_at": self.next_keepalive_due_at,
                 "keepalive_due": self.keepalive_due,
                 "keepalive_deferred_reason": self.keepalive_deferred_reason,
+                "last_keepalive_result": self.last_keepalive_result,
                 "consecutive_keepalive_failures": (
                     self.consecutive_keepalive_failures
                 ),
@@ -688,6 +690,7 @@ class DpsWindowsAgent:
 
     def _record_keepalive_retry_reason(self, reason: str) -> None:
         normalized = str(reason or "KEEPALIVE_FAILED").upper()
+        self.last_keepalive_result = normalized[:200]
         self.keepalive_deferred_reason = f"{normalized}_RETRY_COOLDOWN"[:200]
         self._save_state()
 
@@ -731,6 +734,9 @@ class DpsWindowsAgent:
     ) -> dict[str, Any]:
         self.keepalive_lock_skips += 1
         self.keepalive_deferred_reason = str(reason or "UNKNOWN")[:200]
+        self.last_keepalive_result = (
+            f"DEFERRED:{self.keepalive_deferred_reason}"
+        )[:200]
         self.last_checked_at = now_iso()
         urgent = self._keepalive_is_urgent()
         self.last_monitor_event = (
@@ -975,6 +981,8 @@ class DpsWindowsAgent:
                     }
                 assert candidate is not None
                 target_hwnd = candidate.hwnd
+                if self.actual_lookup_waiting.is_set():
+                    return self._defer_keepalive("CDP_LOOKUP_WAITING")
                 state = self._detect_candidate_state(candidate)
                 status = self._monitor_status_for(
                     login_state=str(state.get("login_state") or ""),
@@ -1067,6 +1075,7 @@ class DpsWindowsAgent:
                     )
                 self.consecutive_keepalive_failures = 0
                 self.last_keepalive_at = now_iso()
+                self.last_keepalive_result = "SUCCESS"
                 self._record_dps_activity(
                     "KEEPALIVE_SUCCESS",
                     interval_seconds=keepalive_interval_seconds,
@@ -2167,6 +2176,7 @@ class DpsWindowsAgent:
                 self.session_settings.keepalive_interval_minutes
             ),
             keepalive_deferred_reason=self.keepalive_deferred_reason,
+            last_keepalive_result=self.last_keepalive_result,
             keepalive_retry_due_at=keepalive_retry_due_at,
             keepalive_retry_deferred=keepalive_retry_deferred,
             keepalive_retry_cooldown_seconds=(

@@ -54,6 +54,42 @@ VERDICT_LABELS = {
     "CONTEXT_INCOMPATIBLE": "상황이 다름",
 }
 
+_DEFAULT_UNUSED_REASON = "모델이 이 자료를 답변 근거로 선택하지 않음"
+_INTERNAL_USAGE_REASON_LABELS = {
+    "PROVIDER_DID_NOT_USE_REFERENCE": _DEFAULT_UNUSED_REASON,
+    "PROVIDER_DID_NOT_USE_SIGNAL": _DEFAULT_UNUSED_REASON,
+    "FINAL_FALLBACK_OR_VALIDATOR_REJECTION": (
+        "최종 답변 fallback 또는 validator 판정으로 사용되지 않음"
+    ),
+    "GUIDANCE_SIGNAL_NOT_FACT_CHECKED": (
+        "안내성 자료로 사실 근거 사용 판정 대상이 아님"
+    ),
+}
+
+
+def _usage_reason_for_display(
+    *,
+    provider_reason: object = None,
+    system_reason: object = None,
+) -> str:
+    """Return an operator-facing usage reason without leaking internal codes."""
+
+    for value in (provider_reason, system_reason):
+        reason = str(value or "").strip()
+        if not reason:
+            continue
+        normalized = reason.upper()
+        if normalized in _INTERNAL_USAGE_REASON_LABELS:
+            return _INTERNAL_USAGE_REASON_LABELS[normalized]
+        if (
+            reason == normalized
+            and "_" in reason
+            and reason.replace("_", "").isalnum()
+        ):
+            return "시스템 판정으로 이 자료를 답변 근거로 사용하지 않음"
+        return reason
+    return _DEFAULT_UNUSED_REASON
+
 
 def _loads(value: object) -> dict[str, Any]:
     """A stored metadata blob as a mapping, or an empty one."""
@@ -351,14 +387,14 @@ def render_answer_learning_provenance(
     }
     usage_reasons = {
         ("HISTORICAL", int(item["historical_case_id"])): str(
-            item.get("reason") or "Provider 미선택"
+            item.get("reason") or ""
         )
         for item in historical_usage
         if isinstance(item, dict) and item.get("historical_case_id") is not None
     }
     usage_reasons.update({
         ("LEARNING", int(item["learning_id"])): str(
-            item.get("reason") or "Provider 미선택"
+            item.get("reason") or ""
         )
         for item in usage
         if isinstance(item, dict) and item.get("learning_id") is not None
@@ -545,12 +581,11 @@ def render_answer_learning_provenance(
                     + (
                         ""
                         if used
-                        else " - " + str(
-                            row.get("usage_reason")
-                            or usage_reasons.get(
-                                (str(row["reference_kind"]), reference_id),
-                                outcome or "Provider 미선택",
-                            )
+                        else " - " + _usage_reason_for_display(
+                            provider_reason=usage_reasons.get(
+                                (str(row["reference_kind"]), reference_id)
+                            ),
+                            system_reason=row.get("usage_reason"),
                         )
                     )
                 ),
@@ -617,7 +652,9 @@ def render_answer_learning_provenance(
                 + (
                     ""
                     if persisted_status == "USED"
-                    else " - " + str(row.get("usage_reason") or "Provider 미선택")
+                    else " - " + _usage_reason_for_display(
+                        system_reason=row.get("usage_reason")
+                    )
                 ),
             })
         st.dataframe(display, hide_index=True, width="stretch")

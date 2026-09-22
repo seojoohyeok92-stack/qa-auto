@@ -26,6 +26,7 @@ from services.naver_auto_post_scheduler import (
     reset_auto_post_runtime_on_process_start,
 )
 from dps.cdp_session import ensure_cdp_chrome_on_start
+from dps.keepalive_runtime import ensure_dps_keepalive_runtime
 from services.work_queue_service import (
     WorkItem,
     WorkQueueError,
@@ -1142,6 +1143,9 @@ def main() -> None:
         # DPS Chrome (CDP, port 9222): reuse it, or start the recorded DPS
         # profile once. The legacy pywinauto agent is not started.
         ensure_cdp_chrome_on_start()
+        # Reuse only the legacy read-only keepalive action. Production order
+        # lookup remains CDP-only; no Agent server or lookup endpoint starts.
+        ensure_dps_keepalive_runtime()
     with profile_stage("repository_init"):
         configured_stores = get_configured_stores()
     current_page = str(st.session_state.get("current_page") or "dashboard")
