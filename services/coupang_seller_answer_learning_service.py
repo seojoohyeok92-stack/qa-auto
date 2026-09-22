@@ -152,6 +152,22 @@ class CoupangSellerAnswerLearningService:
             raise LookupError(f"Inquiry not found: {inquiry_id}")
         return self.status(inquiry)
 
+    def provenance_for_inquiry(self, inquiry: dict[str, Any]) -> dict[str, Any]:
+        """Validated marketplace-answer provenance for feedback capture.
+
+        Negative/Correction Learning evaluates the same single seller reply as
+        Positive Learning.  Returning the already-built provenance keeps the
+        answer selection and account identity rules in one place.
+        """
+
+        prepared = self._prepare(inquiry)
+        if isinstance(prepared, str):
+            raise ValueError(
+                UNAVAILABLE_REASONS.get(prepared, "Learning에 반영할 수 없습니다.")
+            )
+        _answer, provenance = prepared
+        return dict(provenance)
+
     # -- approval ----------------------------------------------------------
 
     def approve_for_learning(

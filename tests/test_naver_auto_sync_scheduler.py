@@ -580,7 +580,7 @@ render_dashboard_actions(
     assert not app.exception
     button = next(
         item for item in app.button
-        if item.label == "네이버 문의 동기화"
+        if item.label == "문의 동기화"
     )
     assert button.disabled
     assert any("이미 동기화가 진행 중" in item.value for item in app.info)

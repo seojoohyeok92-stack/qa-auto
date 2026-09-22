@@ -14,6 +14,7 @@ from repositories.workflow_repository import WorkflowRepository
 from repositories.post_review_repository import PostReviewRepository
 from services.automatic_draft_service import AutomaticDraftService
 from services.learning_service import LearningService
+from services.market_policy import market_of
 from workflow.models import StepCode
 
 
@@ -456,10 +457,10 @@ class InquirySyncService:
                             AutoPostRepository,
                         )
 
-                        runtime_enabled = bool(
-                            AutoPostRepository(self.inquiries.database)
-                            .settings()
-                            .get("runtime_auto_post_enabled")
+                        runtime_enabled = AutoPostRepository(
+                            self.inquiries.database
+                        ).platform_enabled(
+                            market_of(normalized.get("store_code"))
                         )
                         event = AutoPostEventRepository(
                             self.inquiries.database

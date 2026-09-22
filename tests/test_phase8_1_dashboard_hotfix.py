@@ -116,7 +116,7 @@ render_dashboard_actions(
     )
     assert not at.exception
     labels = {button.label: button for button in at.button}
-    assert "네이버 문의 동기화" in labels
+    assert "문의 동기화" in labels
     assert "화면 새로고침" in labels
     assert "선택 문의 주문 조회" not in labels
     assert "관리자 진단" not in labels
@@ -141,7 +141,7 @@ render_dashboard_actions(
     )
     sync = next(
         button for button in at.button
-        if button.label == "네이버 문의 동기화"
+        if button.label == "문의 동기화"
     )
     assert sync.disabled
 
@@ -153,18 +153,15 @@ def test_sync_completion_is_presented_after_rerun(tmp_path: Path) -> None:
 from app import render_dashboard_actions
 from config import StoreConfig
 from repositories.database import Database
-class Result:
-    def to_dict(self):
-        return {{
-            "requested_store_count":2,"fetched_count":12,
-            "created_count":3,"updated_count":9,"failed_count":0,
-            "completed_at":"2026-07-30T10:05:00+09:00"
-        }}
 class Sync:
     def __init__(self, database): pass
-    def run(self, **kwargs): return Result()
+    def run(self, **kwargs):
+        return {{"status":"SUCCESS","platforms":[{{
+            "label":"네이버","status":"SUCCESS","fetched":12,
+            "new":3,"updated":9,"failed":0
+        }}]}}
 import app
-app.InquirySyncOrchestrator=Sync
+app.ManualInquirySyncService=Sync
 db=Database(r"{path}")
 db.initialize()
 render_dashboard_actions(
@@ -174,13 +171,12 @@ render_dashboard_actions(
     )
     next(
         button for button in at.button
-        if button.label == "네이버 문의 동기화"
+        if button.label == "문의 동기화"
     ).click()
     at.run(timeout=20)
     assert not at.exception
     assert at.success
-    assert any("동기화 완료" in item.value for item in at.success)
-    assert {metric.value for metric in at.metric} >= {"12", "3", "9", "0"}
+    assert any("네이버: 조회 12" in item.value for item in at.success)
 
 
 def test_sync_failure_shows_safe_log_id_without_traceback(
@@ -196,7 +192,7 @@ class Sync:
     def __init__(self, database): pass
     def run(self, **kwargs): raise RuntimeError("private failure detail")
 import app
-app.InquirySyncOrchestrator=Sync
+app.ManualInquirySyncService=Sync
 db=Database(r"{path}")
 db.initialize()
 render_dashboard_actions(
@@ -206,7 +202,7 @@ render_dashboard_actions(
     )
     next(
         button for button in at.button
-        if button.label == "네이버 문의 동기화"
+        if button.label == "문의 동기화"
     ).click()
     at.run(timeout=20)
     assert not at.exception

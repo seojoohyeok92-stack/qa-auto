@@ -99,6 +99,7 @@ class AutoPostEventRepository:
         owner_id: str,
         event_only_inquiry_id: int | None = None,
         exclude_inquiry_ids: Iterable[int] = (),
+        store_codes: Iterable[str] | None = None,
         lease_seconds: int = 600,
     ) -> dict[str, Any] | None:
         now_value = _now()
@@ -113,6 +114,14 @@ class AutoPostEventRepository:
                 ",".join("?" for _ in excluded)
             )
             parameters += excluded
+        store_scope = self._store_scope(store_codes)
+        if store_scope is not None:
+            if not store_scope:
+                return None
+            where_id += " AND store_code IN ({})".format(
+                ",".join("?" for _ in store_scope)
+            )
+            parameters += store_scope
         with self.database.transaction() as connection:
             row = connection.execute(
                 f"""
@@ -152,6 +161,7 @@ class AutoPostEventRepository:
         *,
         exclude_inquiry_ids: Iterable[int] = (),
         limit: int = 25,
+        store_codes: Iterable[str] | None = None,
     ) -> list[int]:
         """Return queued inquiry ids without claiming their POST events."""
         excluded = tuple(
@@ -164,6 +174,14 @@ class AutoPostEventRepository:
                 ",".join("?" for _ in excluded)
             )
             parameters.extend(excluded)
+        store_scope = self._store_scope(store_codes)
+        if store_scope is not None:
+            if not store_scope:
+                return []
+            where += " AND store_code IN ({})".format(
+                ",".join("?" for _ in store_scope)
+            )
+            parameters.extend(store_scope)
         parameters.append(max(1, min(int(limit), 100)))
         with self.database.connection() as connection:
             rows = connection.execute(
@@ -216,20 +234,46 @@ class AutoPostEventRepository:
             )
         return cursor.rowcount == 1
 
-    def block_new_claims(self) -> int:
+    @staticmethod
+    def _store_scope(
+        store_codes: Iterable[str] | None,
+    ) -> tuple[str, ...] | None:
+        if store_codes is None:
+            return None
+        return tuple(dict.fromkeys(
+            text for code in store_codes
+            if (text := str(code or "").strip())
+        ))
+
+    def block_new_claims(
+        self, *, store_codes: Iterable[str] | None = None
+    ) -> int:
         now = _stamp()
+        scope = self._store_scope(store_codes)
+        if scope is not None and not scope:
+            return 0
+        where = ""
+        parameters: list[Any] = [now]
+        if scope is not None:
+            where = " AND store_code IN ({})".format(
+                ",".join("?" for _ in scope)
+            )
+            parameters.extend(scope)
         with self.database.transaction() as connection:
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE auto_sync_events
                 SET status='BLOCKED_AUTO_POST_OFF', updated_at=?
                 WHERE status='PENDING'
+                  {where}
                 """,
-                (now,),
+                parameters,
             )
         return int(cursor.rowcount)
 
-    def unblock_after_runtime_enable(self) -> int:
+    def unblock_after_runtime_enable(
+        self, *, store_codes: Iterable[str] | None = None
+    ) -> int:
         """Return OFF-period events to the claimable queue on re-enable.
 
         ``create()`` stamps events synced while the operator switch was OFF
@@ -242,14 +286,25 @@ class AutoPostEventRepository:
         which still applies every existing safety/validation check.
         """
         now = _stamp()
+        scope = self._store_scope(store_codes)
+        if scope is not None and not scope:
+            return 0
+        where = ""
+        parameters: list[Any] = [now]
+        if scope is not None:
+            where = " AND store_code IN ({})".format(
+                ",".join("?" for _ in scope)
+            )
+            parameters.extend(scope)
         with self.database.transaction() as connection:
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE auto_sync_events
                 SET status='PENDING', updated_at=?
                 WHERE status='BLOCKED_AUTO_POST_OFF'
+                  {where}
                 """,
-                (now,),
+                parameters,
             )
         return int(cursor.rowcount)
 

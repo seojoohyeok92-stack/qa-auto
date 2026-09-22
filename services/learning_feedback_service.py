@@ -25,7 +25,7 @@ from repositories.naver_posted_answer_repository import (
     NaverPostedAnswerRepository,
 )
 from services.learning_privacy_service import LearningPrivacyService
-from services.market_policy import non_naver_market
+from services.market_policy import COUPANG, market_of, non_naver_market
 from services.learning_signal_service import LearningSignalService
 
 
@@ -429,6 +429,7 @@ class LearningFeedbackService:
                 "original_intent": inquiry.get("inquiry_type"),
                 "evaluated_answer_provenance": provenance.value,
                 "positive_learning_created": False,
+                **self._market_feedback_metadata(inquiry, provenance),
             },
             "active": True,
         }
@@ -463,6 +464,39 @@ class LearningFeedbackService:
             actor=actor,
         )
         return saved
+
+    def _market_feedback_metadata(
+        self,
+        inquiry: dict[str, Any],
+        provenance: AnswerProvenance,
+    ) -> dict[str, Any]:
+        market = market_of(inquiry.get("store_code"))
+        metadata: dict[str, Any] = {
+            "origin_market": market,
+            "market_applicability": f"{market}_ONLY" if market else None,
+            "shared_cross_market_learning": False,
+            "origin_store_code": inquiry.get("store_code"),
+        }
+        if (
+            market == COUPANG
+            and provenance is AnswerProvenance.HISTORICAL_VERIFIED
+        ):
+            from services.coupang_seller_answer_learning_service import (
+                CoupangSellerAnswerLearningService,
+            )
+
+            metadata.update(
+                CoupangSellerAnswerLearningService(
+                    self.database
+                ).provenance_for_inquiry(inquiry)
+            )
+            metadata.update({
+                "origin_market": COUPANG,
+                "market_applicability": "COUPANG_ONLY",
+                "shared_cross_market_learning": False,
+                "seller_answer_provenance": "MARKETPLACE_SELLER_ANSWER",
+            })
+        return metadata
 
     def capture_dashboard_excluded(
         self,

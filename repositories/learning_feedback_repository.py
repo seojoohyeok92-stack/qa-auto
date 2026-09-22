@@ -16,6 +16,10 @@ from repositories.learning_manager_query import (
     manager_search_sql,
 )
 from services.learning_privacy_service import LearningPrivacyService
+from repositories.learning_repository import (
+    is_market_applicable,
+    market_from_store_code,
+)
 
 
 class LearningFeedbackRepository:
@@ -534,7 +538,10 @@ class LearningFeedbackRepository:
               SELECT 1 FROM learning_signals AS ls
               WHERE ls.learning_feedback_id = lf.id AND ls.active = 1
           )
-          AND (i.store_code = ? OR i.store_code IS NULL OR ? IS NULL)
+          AND (
+              i.store_code = ? OR i.store_code IS NULL OR ? IS NULL
+              OR json_extract(lf.metadata_json, '$.market_applicability') = ?
+          )
         ORDER BY lf.id DESC
         LIMIT ?
     """
@@ -550,12 +557,28 @@ class LearningFeedbackRepository:
         """
 
         safe_limit = max(1, min(int(limit), 1000))
+        effective_market = market_from_store_code(store_code)
+        coupang_scope = "COUPANG_ONLY" if effective_market == "COUPANG" else "__NONE__"
         with self.database.connection() as connection:
             rows = connection.execute(
                 self._LEGACY_MEMO_SELECT,
-                (store_code, store_code, safe_limit),
+                (store_code, store_code, coupang_scope, safe_limit),
             ).fetchall()
-        return [dict(row) for row in rows if row is not None]
+        values: list[dict[str, Any]] = []
+        for row in rows:
+            if row is None:
+                continue
+            item = dict(row)
+            metadata = item.get("metadata_json")
+            metadata = (
+                metadata
+                if isinstance(metadata, dict)
+                else deserialize_json(metadata)
+            )
+            if is_market_applicable(metadata, effective_market):
+                item["metadata_json"] = metadata
+                values.append(item)
+        return values
 
     def candidates(self, signal_type: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:

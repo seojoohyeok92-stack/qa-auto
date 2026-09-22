@@ -18,7 +18,8 @@ from ui.market_labels import (
     ALL_MARKETS_LABEL,
     market_label,
     markets_for_stores,
-    stores_in_market,
+    normalized_market_selection,
+    stores_in_markets,
 )
 from ui.components import (
     PRIORITY_LABELS,
@@ -492,19 +493,25 @@ def render_filter_bar(
             "문의 검색", placeholder="주문번호, 상품명, 문의 검색", key=keys["search"]
         )
     with store_col:
-        # One market at a time.  Several markets at once is what 전체 is for,
-        # and a multiselect here stacked a row of removable chips that pushed
-        # the rest of the filter bar off the line.
         market_options = [ALL_MARKETS, *markets_for_stores(available_stores)]
-        selected_market = st.selectbox(
+        previous_market = st.session_state.get(keys["market"])
+        if previous_market is not None and not isinstance(previous_market, list):
+            # Streamlit retains widget state across a hot deployment.  Carry
+            # the old selectbox value into the new multi-select once.
+            st.session_state[keys["market"]] = normalized_market_selection(
+                previous_market
+            )
+        selected_markets = st.multiselect(
             "마켓",
             market_options,
+            default=[ALL_MARKETS],
             format_func=lambda code: (
                 ALL_MARKETS_LABEL if code == ALL_MARKETS else market_label(code)
             ),
             key=keys["market"],
         )
-        stores = stores_in_market(available_stores, selected_market)
+        selected_markets = normalized_market_selection(selected_markets)
+        stores = stores_in_markets(available_stores, selected_markets)
     with status_col:
         answer_status = st.selectbox(
             "문의 상태", ["전체 상태", "미답변", "답변 완료"], key=keys["status"]
@@ -581,7 +588,7 @@ def render_filter_bar(
     return {
         "search_query": search_query,
         "answer_status": answer_code,
-        "market": selected_market,
+        "market": selected_markets,
         "source": source_code,
         "sort_mode": sort_mode,
         "stores": stores,

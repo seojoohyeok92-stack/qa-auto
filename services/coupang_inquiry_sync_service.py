@@ -293,11 +293,9 @@ class CoupangInquirySyncService:
             )
             from repositories.auto_post_repository import AutoPostRepository
 
-            runtime_enabled = bool(
-                AutoPostRepository(self.inquiries.database)
-                .settings()
-                .get("runtime_auto_post_enabled")
-            )
+            runtime_enabled = AutoPostRepository(
+                self.inquiries.database
+            ).platform_enabled("COUPANG")
             event = AutoPostEventRepository(self.inquiries.database).create(
                 inquiry_id=int(inquiry_id),
                 store_code=str(ready.get("store_code") or ""),

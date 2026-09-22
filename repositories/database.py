@@ -2174,6 +2174,29 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        34,
+        (
+            """
+            ALTER TABLE naver_auto_post_settings
+            ADD COLUMN naver_enabled INTEGER NOT NULL DEFAULT 0
+                CHECK (naver_enabled IN (0,1))
+            """,
+            """
+            ALTER TABLE naver_auto_post_settings
+            ADD COLUMN coupang_enabled INTEGER NOT NULL DEFAULT 0
+                CHECK (coupang_enabled IN (0,1))
+            """,
+            # The former switch controlled both marketplaces.  Copying its
+            # effective value prevents a deployment from changing behaviour
+            # merely because the single switch was split on screen.
+            """
+            UPDATE naver_auto_post_settings
+            SET naver_enabled=enabled, coupang_enabled=enabled
+            WHERE id=1
+            """,
+        ),
+    ),
 )
 
 

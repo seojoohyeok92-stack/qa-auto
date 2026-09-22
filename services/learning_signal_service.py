@@ -35,6 +35,7 @@ from services.learning_evidence_policy import (
     order_identifier_request_reason,
 )
 from services.learning_privacy_service import LearningPrivacyService
+from services.market_policy import market_of
 from services.similar_answer_service import (
     SimilarAnswerService,
     normalize_learning_question,
@@ -191,6 +192,7 @@ class LearningSignalService:
             identity=identity,
         )
         scope = normalize_fact_scope(fact_scope) or profile.scope
+        origin_market = market_of(inquiry.get("store_code"))
         source_key = self._source_key(
             origin.value, kind.value, inquiry_id, learning_feedback_id,
             learning_example_id, historical_case_id, masked_text,
@@ -209,7 +211,14 @@ class LearningSignalService:
             "product_scope": scope,
             "topics_json": list(profile.topics),
             "product_identity_json": identity.to_dict(),
-            "metadata_json": {"actor": str(actor or "직원")},
+            "metadata_json": {
+                "actor": str(actor or "직원"),
+                "origin_market": origin_market,
+                "market_applicability": (
+                    f"{origin_market}_ONLY" if origin_market else None
+                ),
+                "shared_cross_market_learning": False,
+            },
             "active": True,
             "actor": str(actor or "직원"),
         }
@@ -633,6 +642,7 @@ class LearningSignalService:
             return []
 
         inquiry_id = inquiry.get("id") or inquiry.get("inquiry_id")
+        origin_market = market_of(inquiry.get("store_code"))
         identity = extract_product_identity(
             product_id=product_id or inquiry.get("product_id"),
             product_name=product_name or inquiry.get("product_name"),
@@ -683,6 +693,11 @@ class LearningSignalService:
                     "product_identity_json": identity.to_dict(),
                     "metadata_json": {
                         "actor": str(actor or "SYSTEM_AUTO_EXTRACTION"),
+                        "origin_market": origin_market,
+                        "market_applicability": (
+                            f"{origin_market}_ONLY" if origin_market else None
+                        ),
+                        "shared_cross_market_learning": False,
                         "diff_categories": [
                             item.value for item in candidate.diff_categories
                         ],

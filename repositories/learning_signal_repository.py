@@ -4,6 +4,10 @@ from typing import Any
 
 from repositories.database import Database
 from repositories.inquiry_repository import deserialize_json, serialize_json
+from repositories.learning_repository import (
+    is_market_applicable,
+    market_from_store_code,
+)
 
 
 def confirmation_key(
@@ -133,7 +137,9 @@ class LearningSignalRepository:
 
         safe_limit = max(1, min(int(limit), 2000))
         kind_clause = ""
-        params: list[Any] = [store_code, store_code]
+        effective_market = market_from_store_code(store_code)
+        coupang_scope = "COUPANG_ONLY" if effective_market == "COUPANG" else "__NONE__"
+        params: list[Any] = [store_code, store_code, coupang_scope]
         if signal_kinds:
             kind_clause = " AND ls.signal_kind IN (" + ",".join(
                 "?" for _ in signal_kinds
@@ -153,7 +159,11 @@ class LearningSignalRepository:
                 LEFT JOIN inquiries i ON i.id=ls.inquiry_id
                 WHERE ls.active=1
                   AND ls.confirmation_status NOT IN ('REJECTED','SUPERSEDED')
-                  AND (ls.store_code=? OR ls.store_code IS NULL OR ? IS NULL)
+                  AND (
+                      ls.store_code=? OR ls.store_code IS NULL OR ? IS NULL
+                      OR json_extract(ls.metadata_json,
+                          '$.market_applicability')=?
+                  )
                   AND (
                       ls.generation_mode<>'MANUAL'
                       OR (
@@ -177,7 +187,16 @@ class LearningSignalRepository:
                 """,
                 (*params, *(signal_kinds or ()), safe_limit),
             ).fetchall()
-        return [item for row in rows if (item := self._row(row)) is not None]
+        return [
+            item
+            for row in rows
+            if (item := self._row(row)) is not None
+            and is_market_applicable(
+                item.get("metadata_json")
+                if isinstance(item.get("metadata_json"), dict) else {},
+                effective_market,
+            )
+        ]
 
     def for_learning_example(self, learning_example_id: int) -> list[dict[str, Any]]:
         with self.database.connection() as connection:

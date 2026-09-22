@@ -54,10 +54,8 @@ st.write("ROUTE_VALUE", filters["route"])
     assert not app.exception
     assert any("ROUTE_VALUE ALL" in item.value for item in app.markdown)
     assert {item.label for item in app.text_input} >= {"문의 검색"}
-    # The store picker is a single 마켓 dropdown now: one market at a time,
-    # and no row of removable chips across the filter bar.
-    assert "Store" not in {item.label for item in app.multiselect}
-    assert {item.label for item in app.selectbox} >= {"마켓", "문의 상태", "Route"}
+    assert {item.label for item in app.multiselect} >= {"마켓"}
+    assert {item.label for item in app.selectbox} >= {"문의 상태", "Route"}
     route = next(item for item in app.selectbox if item.label == "Route")
     assert route.options == ["ALL", "ORDER_ID_REQUEST", "TEMPLATE"]
     assert any(button.label == "새로고침" for button in app.button)
@@ -108,7 +106,8 @@ render_realtime_operations(db)
     labels = {metric.label for metric in app.metric}
     assert "Auto Processing" not in labels
     buttons = {button.label: button for button in app.button}
-    assert buttons["자동처리"].disabled
+    assert buttons["Naver"].disabled
+    assert buttons["Coupang"].disabled
     assert "관리자 모드" in buttons
     assert app.warning
     warning_text = " ".join(str(w.value) for w in app.warning)
@@ -144,10 +143,11 @@ render_realtime_operations(db)
     app = run(script)
     assert not app.exception
     buttons = {button.label: button for button in app.button}
-    assert not buttons["자동처리"].disabled
+    assert not buttons["Naver"].disabled
+    assert not buttons["Coupang"].disabled
     assert not app.warning
 
-    app.button(key="production_auto_processing_toggle").click().run(timeout=40)
+    app.button(key="production_naver_auto_processing_toggle").click().run(timeout=40)
     assert not app.exception
     dialog_buttons = {button.label: button for button in app.button}
     assert "자동등록 시작" in dialog_buttons
@@ -158,19 +158,22 @@ render_realtime_operations(db)
     app.run(timeout=40)
     assert not app.exception
     buttons = {button.label: button for button in app.button}
-    assert not buttons["● 자동처리"].disabled
+    assert not buttons["● Naver"].disabled
+    assert not buttons["● Coupang"].disabled
     rendered = "\n".join(item.value for item in app.markdown)
     assert "#26734d" in rendered
 
     app.run(timeout=40)
     buttons = {button.label: button for button in app.button}
-    assert not buttons["● 자동처리"].disabled
+    assert not buttons["● Naver"].disabled
 
-    app.button(key="production_auto_processing_toggle").click().run(timeout=40)
+    app.button(key="production_naver_auto_processing_toggle").click().run(timeout=40)
     assert not app.exception
-    assert AutoPostRepository(database).settings()["enabled"] is False
+    settings = AutoPostRepository(database).settings()
+    assert settings["naver_enabled"] is False
+    assert settings["coupang_enabled"] is True
     buttons = {button.label: button for button in app.button}
-    assert not buttons["자동처리"].disabled
+    assert not buttons["Naver"].disabled
 
 
 def test_dashboard_bottom_sections_show_operations_and_learning(
@@ -257,7 +260,7 @@ app.main()
     )
     assert not app.exception
     labels = {item.label for item in app.expander}
-    assert any(label.startswith("네이버 문의 동기화") for label in labels)
+    assert any(label.startswith("문의 동기화") for label in labels)
     assert "오늘 운영 통계" not in labels
     assert "Learning Repository" not in labels
     assert "관리자 Scheduler · 상세 설정" not in labels
@@ -285,7 +288,7 @@ app.main()
     labels = {item.label for item in app.expander}
     assert any(label.startswith("실시간 운영 상태") for label in labels)
     assert "관리자 Scheduler · 상세 설정" in labels
-    assert any(label.startswith("네이버 문의 동기화") for label in labels)
+    assert any(label.startswith("문의 동기화") for label in labels)
     assert "오늘 운영 통계" in labels
     assert "Learning Repository" in labels
     assert "관리자 상세" in labels

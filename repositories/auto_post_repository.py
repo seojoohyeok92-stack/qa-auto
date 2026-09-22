@@ -55,6 +55,16 @@ class AutoPostRepository:
             "max_retries": 1, "updated_at": None,
         }
         value["enabled"] = bool(value["enabled"])
+        value["naver_enabled"] = bool(
+            value.get("naver_enabled", value["enabled"])
+        )
+        value["coupang_enabled"] = bool(
+            value.get("coupang_enabled", value["enabled"])
+        )
+        value["platform_enabled"] = {
+            "NAVER": value["naver_enabled"],
+            "COUPANG": value["coupang_enabled"],
+        }
         value["runtime_auto_post_enabled"] = value["enabled"]
         # Version 1.0 operator terminology. Keep the legacy alias because the
         # scheduler and older deployments already persist this singleton row.
@@ -73,7 +83,8 @@ class AutoPostRepository:
             connection.execute(
                 """
                 UPDATE naver_auto_post_settings
-                SET enabled=?, interval_minutes=?, max_retries=?,
+                SET enabled=?, naver_enabled=?, coupang_enabled=?,
+                    interval_minutes=?, max_retries=?,
                     enabled_at=CASE
                         WHEN ?=1 AND enabled=0 THEN ?
                         WHEN ?=0 THEN NULL ELSE enabled_at END,
@@ -82,12 +93,68 @@ class AutoPostRepository:
                 WHERE id=1
                 """,
                 (
-                    int(bool(enabled)), interval, retries,
+                    int(bool(enabled)), int(bool(enabled)), int(bool(enabled)),
+                    interval, retries,
                     int(bool(enabled)), _utc_now(), int(bool(enabled)),
                     int(bool(enabled)), _utc_now(),
                 ),
             )
         return self.settings()
+
+    def save_platform_enabled(
+        self, market: str, enabled: bool
+    ) -> dict[str, Any]:
+        """Persist one marketplace switch and keep the legacy scheduler bit.
+
+        ``enabled`` remains the scheduler's process-wide run condition.  It is
+        true while either marketplace is enabled; the two new columns decide
+        which events that scheduler may claim.
+        """
+
+        normalized = str(market or "").strip().upper()
+        column = {
+            "NAVER": "naver_enabled",
+            "COUPANG": "coupang_enabled",
+        }.get(normalized)
+        if column is None:
+            raise ValueError(f"Unsupported auto-processing market: {market}")
+        now = _utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                f"""
+                UPDATE naver_auto_post_settings
+                SET {column}=?,
+                    enabled=CASE
+                        WHEN ?='naver_enabled'
+                        THEN MAX(?, coupang_enabled)
+                        ELSE MAX(naver_enabled, ?)
+                    END,
+                    enabled_at=CASE
+                        WHEN ?=1 AND enabled=0 THEN ?
+                        WHEN ?=0 AND (
+                            CASE WHEN ?='naver_enabled'
+                                 THEN coupang_enabled ELSE naver_enabled END
+                        )=0 THEN NULL
+                        ELSE enabled_at
+                    END,
+                    pause_reason=CASE WHEN ?=1 THEN NULL ELSE pause_reason END,
+                    updated_at=?
+                WHERE id=1
+                """,
+                (
+                    int(bool(enabled)), column, int(bool(enabled)),
+                    int(bool(enabled)), int(bool(enabled)), now,
+                    int(bool(enabled)), column, int(bool(enabled)), now,
+                ),
+            )
+        return self.settings()
+
+    def platform_enabled(self, market: object) -> bool:
+        return bool(
+            self.settings().get("platform_enabled", {}).get(
+                str(market or "").strip().upper(), False
+            )
+        )
 
     def set_pause_reason(self, reason: str | None) -> None:
         with self.database.transaction() as connection:

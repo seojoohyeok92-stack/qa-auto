@@ -45,14 +45,37 @@ def store_market(store_code: str | None) -> str | None:
     return market_from_store_code(store_code)
 
 
-def shows_market_badge(selected_market: str | None) -> bool:
+def normalized_market_selection(
+    selected_markets: str | Iterable[str] | None,
+) -> list[str]:
+    """Normalize the old scalar widget value and the new multi-value one."""
+
+    if selected_markets is None:
+        return [ALL_MARKETS]
+    values = (
+        [selected_markets]
+        if isinstance(selected_markets, str)
+        else list(selected_markets)
+    )
+    normalized = list(dict.fromkeys(
+        str(value).strip().upper()
+        for value in values
+        if str(value or "").strip()
+    ))
+    return normalized or [ALL_MARKETS]
+
+
+def shows_market_badge(
+    selected_markets: str | Iterable[str] | None,
+) -> bool:
     """Whether a list row should name its market.
 
     Only when every market is on screen: with one market picked the reader
     already knows which one each row is, and the badge would only repeat it.
     """
 
-    return str(selected_market or ALL_MARKETS).strip().upper() == ALL_MARKETS
+    selected = normalized_market_selection(selected_markets)
+    return ALL_MARKETS in selected or len(selected) > 1
 
 
 def store_market_label(store_code: str | None) -> str:
@@ -94,9 +117,7 @@ def stores_in_markets(
     """The store codes belonging to any of several markets."""
 
     codes = [str(code) for code in store_codes if str(code or "").strip()]
-    if markets is None:
-        return codes
-    wanted = {str(market).strip().upper() for market in markets if str(market or "").strip()}
-    if not wanted or ALL_MARKETS in wanted:
+    wanted = set(normalized_market_selection(markets))
+    if ALL_MARKETS in wanted:
         return codes
     return [code for code in codes if store_market(code) in wanted]

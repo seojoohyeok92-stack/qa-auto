@@ -17,7 +17,7 @@ from repositories.dashboard_preferences_repository import DashboardPreferencesRe
 from repositories.inquiry_repository import InquiryRepository
 from repositories.log_repository import LogRepository
 from repositories.naver_sync_repository import NaverSyncRepository
-from services.inquiry_sync_orchestrator import InquirySyncOrchestrator
+from services.manual_inquiry_sync_service import ManualInquirySyncService
 from services.naver_auto_sync_scheduler import (
     ensure_auto_sync_scheduler,
 )
@@ -43,6 +43,7 @@ from ui.dashboard import (
     render_kpi_cards,
 )
 from ui.market_labels import ALL_MARKETS as MARKET_ALL
+from ui.market_labels import normalized_market_selection
 from ui.market_labels import shows_market_badge
 from ui.inquiries import render_inquiries_page
 from ui.activity_log_panel import render_activity_log_panel
@@ -582,6 +583,33 @@ def _render_sync_result(database: Database | None = None) -> None:
             )
 
 
+def _render_manual_sync_result() -> None:
+    result = st.session_state.get("dashboard_combined_sync_result")
+    if not isinstance(result, dict):
+        return
+    platforms = result.get("platforms")
+    if not isinstance(platforms, list):
+        return
+    for item in platforms:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("key") or "마켓")
+        counts = (
+            f"조회 {int(item.get('fetched') or 0)} · "
+            f"신규 {int(item.get('new') or 0)} · "
+            f"갱신 {int(item.get('updated') or 0)} · "
+            f"실패 {int(item.get('failed') or 0)}"
+        )
+        status = str(item.get("status") or "FAILED").upper()
+        message = f"{label}: {counts}"
+        if status == "SUCCESS":
+            st.success(message)
+        elif status == "PARTIAL":
+            st.warning(message)
+        else:
+            st.error(message + (f" · {item.get('error')}" if item.get("error") else ""))
+
+
 def _render_auto_sync_controls(
     database: Database,
     *,
@@ -699,15 +727,15 @@ def render_dashboard_actions(
     )
     state = (operations or {}).get("auto_sync_state") or {}
     sync_summary = (
-        "네이버 문의 동기화 · "
+        "문의 동기화 · "
         f"최근 {format_datetime_kst(state.get('last_completed_at'), empty='없음')} · "
         f"조회 {state.get('fetched_count') or 0}건"
     )
     with st.expander(sync_summary, expanded=False):
         columns = st.columns([1.45, 1.1, 7.45], gap="small")
         sync_requested = columns[0].button(
-            "네이버 문의 동기화",
-            key="dashboard_naver_sync",
+            "문의 동기화",
+            key="dashboard_inquiry_sync",
             type="primary",
             width="stretch",
             disabled=(
@@ -742,17 +770,16 @@ def render_dashboard_actions(
         if sync_requested and database is not None:
             st.session_state["dashboard_sync_running"] = True
             try:
-                with st.spinner("연결된 스토어의 네이버 문의를 동기화하고 있습니다..."):
-                    result = InquirySyncOrchestrator(database).run(
-                        stores=configured_stores,
-                        sync_type="MANUAL",
+                with st.spinner("네이버와 쿠팡 문의를 동기화하고 있습니다..."):
+                    result = ManualInquirySyncService(database).run(
+                        stores=configured_stores
                     )
-                st.session_state["dashboard_sync_result"] = result.to_dict()
+                st.session_state["dashboard_combined_sync_result"] = result
                 load_dashboard_data.clear()
             except Exception as error:
                 log_id = str(uuid.uuid4())
                 LogRepository(database).record_system(
-                    "NAVER_INQUIRY_SYNC_UI_FAILED",
+                    "INQUIRY_SYNC_UI_FAILED",
                     "Dashboard 문의 동기화에 실패했습니다.",
                     level="ERROR",
                     details={
@@ -768,9 +795,10 @@ def render_dashboard_actions(
         error_id = st.session_state.pop("dashboard_sync_error", None)
         if error_id:
             st.error(
-                "네이버 문의 동기화를 완료하지 못했습니다. "
+                "문의 동기화를 완료하지 못했습니다. "
                 f"관리자 진단에서 로그 ID {error_id}를 확인해 주세요."
             )
+        _render_manual_sync_result()
         _render_sync_result(database)
     return operations
 
@@ -968,8 +996,8 @@ def render_dashboard_page(
     # on it yet.  Any market that can include them is served whole rather than
     # silently dropping them, so Route is read as ALL there.  The Naver-only
     # view keeps the Route filter exactly as it was.
-    selected_market = str(filters.get("market") or MARKET_ALL)
-    if selected_market != "NAVER":
+    selected_markets = normalized_market_selection(filters.get("market"))
+    if selected_markets != ["NAVER"]:
         route_filter = "ALL"
     with profile_stage("filter_work_items"):
         scoped_items = filter_work_items(

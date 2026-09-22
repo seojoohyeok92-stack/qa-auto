@@ -12,6 +12,7 @@ from repositories.auto_post_repository import AutoPostRepository
 from repositories.database import Database
 from repositories.log_repository import LogRepository
 from repositories.naver_sync_repository import NaverSyncRepository
+from services.market_policy import market_of
 
 
 class AutoPostRuntimeService:
@@ -138,6 +139,43 @@ class AutoPostRuntimeService:
         status = "RUNNING" if scheduler.started else "BLOCKED"
         return {"status": status, "settings": settings, **preflight}
 
+    def _market_store_codes(self, market: str) -> list[str]:
+        normalized = str(market or "").strip().upper()
+        return [
+            code for code in self.repository.distinct_store_codes()
+            if market_of(code) == normalized
+        ]
+
+    def enable_market(self, market: str) -> dict[str, Any]:
+        """Enable one market while retaining the shared production pipeline."""
+
+        normalized = str(market or "").strip().upper()
+        self.logs.record_system(
+            f"{normalized}_AUTO_PROCESSING_ENABLE_REQUESTED",
+            f"운영자가 {normalized} 자동처리 시작을 요청했습니다.",
+        )
+        preflight = self.preflight()
+        if not preflight["environment_ready"]:
+            return {"status": "DISABLED_BY_ENV", **preflight}
+        if preflight["blocking_reasons"]:
+            reason = str(preflight["blocking_reasons"][0])
+            return {"status": "BLOCKED", "reason": reason, **preflight}
+        settings = self.repository.save_platform_enabled(normalized, True)
+        unblocked = self.events.unblock_after_runtime_enable(
+            store_codes=self._market_store_codes(normalized)
+        )
+        self.repository.set_state("STARTING")
+        from services.naver_auto_post_scheduler import ensure_auto_post_scheduler
+
+        scheduler = ensure_auto_post_scheduler(self.database)
+        status = "RUNNING" if scheduler.started else "BLOCKED"
+        self.logs.record_system(
+            f"{normalized}_AUTO_PROCESSING_ENABLED",
+            f"{normalized} 자동처리를 활성화했습니다.",
+            details={"unblocked_event_count": unblocked, "status": status},
+        )
+        return {"status": status, "settings": settings, **preflight}
+
     def disable(self) -> dict[str, Any]:
         self.logs.record_system(
             "AUTO_POST_RUNTIME_DISABLE_REQUESTED",
@@ -166,6 +204,30 @@ class AutoPostRuntimeService:
             },
         )
         return {"status": state.get("status") or "STOPPED", "blocked": blocked}
+
+    def disable_market(self, market: str) -> dict[str, Any]:
+        """Disable one market without stopping collection or manual work."""
+
+        normalized = str(market or "").strip().upper()
+        self.logs.record_system(
+            f"{normalized}_AUTO_PROCESSING_DISABLE_REQUESTED",
+            f"운영자가 {normalized} 자동처리 중지를 요청했습니다.",
+        )
+        settings = self.repository.save_platform_enabled(normalized, False)
+        blocked = self.events.block_new_claims(
+            store_codes=self._market_store_codes(normalized)
+        )
+        from services.naver_auto_post_scheduler import ensure_auto_post_scheduler
+
+        scheduler = ensure_auto_post_scheduler(self.database)
+        if not settings.get("enabled"):
+            scheduler.stop()
+        self.logs.record_system(
+            f"{normalized}_AUTO_PROCESSING_DISABLED",
+            f"{normalized} 자동처리를 비활성화했습니다.",
+            details={"blocked_event_count": blocked},
+        )
+        return {"status": "OFF", "blocked": blocked, "settings": settings}
 
     def pause(self, reason: str) -> None:
         safe_reason = str(reason).upper()[:100]

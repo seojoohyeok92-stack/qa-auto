@@ -75,9 +75,12 @@ class Sync:
                 inserted_count=3,updated_count=0,unchanged_count=0,
                 skipped_count=0,failed_count=0,duration_ms=10
             )
-        return Result()
+        return {{"status":"SUCCESS","platforms":[{{
+            "label":"네이버","status":"SUCCESS","fetched":3,
+            "new":3,"updated":0,"failed":0
+        }}]}}
 
-app.InquirySyncOrchestrator=Sync
+app.ManualInquirySyncService=Sync
 render_dashboard_actions(
     db,[StoreConfig("STORE","스토어","id","secret",True)], []
 )
@@ -89,7 +92,7 @@ st.write("FILTER", st.session_state["dashboard_filter_signature"])
     app = _app(code)
     assert not app.exception
     assert any(
-        button.label == "네이버 문의 동기화" and not button.disabled
+        button.label == "문의 동기화" and not button.disabled
         for button in app.button
     )
     assert InquiryRepository(Database(path)).count() == 0
@@ -104,11 +107,11 @@ st.write("FILTER", st.session_state["dashboard_filter_signature"])
     next(
         button
         for button in app.button
-        if button.label == "네이버 문의 동기화"
+        if button.label == "문의 동기화"
     ).click()
     app = app.run(timeout=30)
     assert not app.exception
-    assert any("동기화 완료" in item.value for item in app.success)
+    assert any("네이버: 조회 3" in item.value for item in app.success)
     rendered = "\n".join(item.value for item in app.markdown)
     assert "LIST_COUNT `3`" in rendered
     assert "SELECTED keep-selected" in rendered
@@ -180,7 +183,7 @@ class Sync:
     def __init__(self, database): pass
     def run(self, **kwargs):
         raise RuntimeError("sensitive technical detail")
-app.InquirySyncOrchestrator=Sync
+app.ManualInquirySyncService=Sync
 db=Database(r"{path}")
 db.initialize()
 render_dashboard_actions(
@@ -191,7 +194,7 @@ render_dashboard_actions(
     next(
         button
         for button in app.button
-        if button.label == "네이버 문의 동기화"
+        if button.label == "문의 동기화"
     ).click()
     app = app.run(timeout=30)
     assert not app.exception

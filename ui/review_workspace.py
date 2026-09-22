@@ -2205,6 +2205,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             if reference_value is not None:
                 evaluation_reference_id = int(reference_value)
 
+        seller_answer_feedback_allowed = bool(
+            read_only
+            and evaluation_source == AnswerProvenance.HISTORICAL_VERIFIED.value
+            and evaluation_reference_id == inquiry_id
+            and _seller_answer_learning_approval(inquiry)
+        )
+        feedback_read_only_blocked = bool(
+            read_only and not seller_answer_feedback_allowed
+        )
+
         negative_save = False
         negative_revoke = False
         negative_reason = ""
@@ -2327,7 +2337,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     negative_revoke = st.button(
                         "Negative 평가 취소",
                         disabled=(
-                            read_only
+                            feedback_read_only_blocked
                             or not str(negative_revoke_reason or "").strip()
                             or not negative_revoke_confirmed
                         ),
@@ -2376,7 +2386,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     negative_save = st.button(
                         "Negative Learning 저장",
                         disabled=(
-                            read_only
+                            feedback_read_only_blocked
                             or evaluation_source is None
                             or evaluation_reference_id is None
                             or not negative_reason

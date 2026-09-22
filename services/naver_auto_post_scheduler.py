@@ -17,6 +17,7 @@ from repositories.database import Database
 from repositories.log_repository import LogRepository
 from repositories.naver_sync_repository import NaverSyncRepository
 from services.auto_post_pipeline_service import AutoPostPipelineService
+from services.market_policy import market_of, post_enabled_store_codes
 
 
 PROCESS_OWNER_ID = f"auto-post-{os.getpid()}-{uuid.uuid4().hex}"
@@ -184,6 +185,7 @@ class NaverAutoPostScheduler:
         pipeline: AutoPostPipelineService,
         *,
         exclude_inquiry_ids: set[int],
+        store_codes: list[str],
     ) -> None:
         """Generate queued drafts concurrently while POST remains serial.
 
@@ -197,6 +199,7 @@ class NaverAutoPostScheduler:
             return
         pending = self.events.pending_inquiry_ids(
             exclude_inquiry_ids=exclude_inquiry_ids,
+            store_codes=store_codes,
             limit=25,
         )
         answer_service = getattr(drafts, "answer_service", None)
@@ -252,6 +255,11 @@ class NaverAutoPostScheduler:
         event_only_inquiry_id: int | None = None,
     ) -> dict[str, Any]:
         settings = self.repository.settings()
+        platform_enabled = settings.get("platform_enabled") or {}
+        enabled_store_codes = post_enabled_store_codes([
+            code for code in self.repository.distinct_store_codes()
+            if platform_enabled.get(market_of(code), False)
+        ])
         environment = NaverAutoPostSettings.from_environment()
         post_environment = NaverPostSettings.from_environment()
         if not settings.get("enabled") or not environment.enabled or not post_environment.enabled:
@@ -298,6 +306,7 @@ class NaverAutoPostScheduler:
                     owner_id=self.owner_id,
                     event_only_inquiry_id=event_only_inquiry_id,
                     exclude_inquiry_ids=processed_inquiry_ids,
+                    store_codes=enabled_store_codes,
                 )
                 if event is None:
                     break
@@ -307,6 +316,7 @@ class NaverAutoPostScheduler:
                 self._prewarm_pending_drafts(
                     pipeline,
                     exclude_inquiry_ids=processed_inquiry_ids,
+                    store_codes=enabled_store_codes,
                 )
                 prewarmed = self._await_prewarmed_draft(inquiry_id)
                 self.logs.record_inquiry(

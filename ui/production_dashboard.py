@@ -71,8 +71,9 @@ def _dps_session_label(status: object) -> str:
 
 
 @st.dialog("자동등록 시작 확인")
-def _confirm_auto_post_start(database_path: str) -> None:
-    st.write("새로운 미답변 문의에 생성된 답변이 네이버에 자동 등록됩니다.")
+def _confirm_auto_post_start(database_path: str, market: str) -> None:
+    market_label = "네이버" if market == "NAVER" else "쿠팡"
+    st.write(f"새로운 {market_label} 미답변 문의의 자동처리를 시작합니다.")
     cancel, start = st.columns(2)
     if cancel.button("취소", width="stretch", key="auto_post_start_cancel"):
         st.rerun()
@@ -80,8 +81,10 @@ def _confirm_auto_post_start(database_path: str) -> None:
         "자동등록 시작", type="primary", width="stretch",
         key="auto_post_start_confirm",
     ):
-        result = AutoPostRuntimeService(Database(database_path)).enable()
-        st.session_state["auto_post_runtime_result"] = result["status"]
+        result = AutoPostRuntimeService(Database(database_path)).enable_market(market)
+        st.session_state["auto_post_runtime_result"] = (
+            f"{market_label} {result['status']}"
+        )
         st.rerun()
 
 
@@ -189,9 +192,10 @@ def render_realtime_operations(
     sync_env = NaverSyncSettings.from_environment()
     dps_env = DpsSessionSettings.from_environment()
     environment_ready = post_env.enabled and auto_env.enabled
-    persisted_runtime_enabled = bool(
-        post_settings.get("runtime_auto_post_enabled")
-    )
+    platform_enabled = post_settings.get("platform_enabled") or {}
+    naver_runtime_enabled = bool(platform_enabled.get("NAVER"))
+    coupang_runtime_enabled = bool(platform_enabled.get("COUPANG"))
+    persisted_runtime_enabled = naver_runtime_enabled or coupang_runtime_enabled
     sync_enabled = bool(sync_settings.get("enabled"))
     post_status = _auto_post_status(
         runtime_enabled=persisted_runtime_enabled,
@@ -212,36 +216,46 @@ def render_realtime_operations(
         if not ready
     ]
     with control:
-        control.caption(
-            "자동처리: **ON**" if persisted_runtime_enabled else "자동처리: **OFF**"
-        )
+        control.caption("플랫폼별 자동처리")
         start_help = "DB에 저장되는 서버 공용 스위치를 ON으로 전환합니다."
         if missing_env_flags:
             start_help = (
                 "다음 환경변수가 true가 아니어서 시작할 수 없습니다: "
                 + ", ".join(missing_env_flags)
             )
-        if persisted_runtime_enabled:
-            _render_toggle_style(
-                "production_auto_processing_toggle", "#26734d"
-            )
-        toggle_clicked = st.button(
-            "● 자동처리" if persisted_runtime_enabled else "자동처리",
-            width="stretch",
-            key="production_auto_processing_toggle",
-            disabled=not persisted_runtime_enabled and not environment_ready,
-            type="primary" if persisted_runtime_enabled else "secondary",
-            help=start_help,
-        )
+        toggle_columns = st.columns(2, gap="small")
+        clicked_market = None
+        for column, (market, label, enabled) in zip(
+            toggle_columns,
+            (
+                ("NAVER", "Naver", naver_runtime_enabled),
+                ("COUPANG", "Coupang", coupang_runtime_enabled),
+            ),
+        ):
+            key = f"production_{market.lower()}_auto_processing_toggle"
+            if enabled:
+                _render_toggle_style(key, "#26734d")
+            if column.button(
+                f"● {label}" if enabled else label,
+                width="stretch",
+                key=key,
+                disabled=not enabled and not environment_ready,
+                type="primary" if enabled else "secondary",
+                help=start_help,
+            ):
+                clicked_market = market
     with admin:
         admin_enabled = _render_admin_mode(database)
-    if toggle_clicked:
-        if persisted_runtime_enabled:
-            result = AutoPostRuntimeService(database).disable()
-            st.session_state["auto_post_runtime_result"] = result["status"]
+    if clicked_market:
+        clicked_enabled = bool(platform_enabled.get(clicked_market))
+        if clicked_enabled:
+            result = AutoPostRuntimeService(database).disable_market(clicked_market)
+            st.session_state["auto_post_runtime_result"] = (
+                f"{clicked_market} {result['status']}"
+            )
             st.rerun()
         else:
-            _confirm_auto_post_start(str(database.path))
+            _confirm_auto_post_start(str(database.path), clicked_market)
     changed = st.session_state.pop("auto_post_runtime_result", None)
     if changed:
         st.toast(f"자동처리 Runtime 상태: {changed}")
@@ -262,7 +276,11 @@ def render_realtime_operations(
     status_columns = st.columns(9, gap="small")
     values = (
         ("Auto Sync", _status(sync_state.get("status"), enabled=sync_enabled)),
-        ("Auto Processing", "ON" if persisted_runtime_enabled else "OFF"),
+        (
+            "Auto Processing",
+            f"N {'ON' if naver_runtime_enabled else 'OFF'} · "
+            f"C {'ON' if coupang_runtime_enabled else 'OFF'}",
+        ),
         ("Auto Post", post_status),
         ("DPS Agent", "ON" if dps_session.get("agent_running") else "OFF"),
         ("DPS Keepalive", "ON" if dps_env.keepalive_enabled else "OFF"),

@@ -22,7 +22,7 @@ def render_auto_post_controls(database: Database) -> None:
     environment = NaverAutoPostSettings.from_environment()
     post_environment = NaverPostSettings.from_environment()
     activation_ready = environment.enabled and post_environment.enabled
-    with st.expander("네이버 답변 자동등록", expanded=False):
+    with st.expander("답변 자동처리 상세", expanded=False):
         columns = st.columns([1.5, 1.5, 1.3, 1.2], gap="small")
         columns[0].checkbox(
             "Runtime 상태",
@@ -65,7 +65,13 @@ def render_auto_post_controls(database: Database) -> None:
             st.success("자동등록 운영 설정을 저장했습니다.")
         metrics = st.columns(8, gap="small")
         values = (
-            ("상태", "ON" if settings.get("enabled") else "OFF"),
+            (
+                "상태",
+                "N {naver} · C {coupang}".format(
+                    naver="ON" if settings.get("naver_enabled") else "OFF",
+                    coupang="ON" if settings.get("coupang_enabled") else "OFF",
+                ),
+            ),
             ("처리", state.get("processed_count") or 0),
             ("성공", state.get("succeeded_count") or 0),
             ("실패", state.get("failed_count") or 0),

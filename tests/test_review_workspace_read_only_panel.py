@@ -175,6 +175,14 @@ def test_the_learning_approval_is_offered_exactly_as_on_naver(coupang_app) -> No
     for label in ("Positive Learning 설정", "이 답변이 잘못됨", "학습 제외"):
         assert label in _labels(app.expander), label
     assert "Negative Learning 저장" in buttons
+    assert buttons["Negative Learning 저장"].disabled
+    next(
+        control for control in app.selectbox
+        if control.label == "잘못된 이유"
+    ).set_value("사실 오류")
+    app.run(timeout=60)
+    buttons = {button.label: button for button in app.button}
+    assert not buttons["Negative Learning 저장"].disabled
     assert "학습 제외 저장" in buttons
     assert "승인" in buttons and not buttons["승인"].disabled
     # Nothing is approved yet, so cancelling is not available.
