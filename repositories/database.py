@@ -2197,6 +2197,38 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        35,
+        (
+            # Historical answers remain auditable, but the former wall-mount
+            # procedure (buy the extra bracket, return only that bracket after
+            # installation, then request a partial refund) is no longer a
+            # current policy.  Use the existing validity axis instead of
+            # deleting or rewriting what was actually sent to customers.
+            # The seller phone number is deliberately not part of this match:
+            # it remains valid in unrelated support contexts.
+            """
+            UPDATE learning_examples
+            SET validity_active=0,
+                expired_at=COALESCE(
+                    expired_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                ),
+                validity_note='현재 정책과 충돌: 기존 브라켓 사용 시 브라켓 부분 반품/부분 환불 절차는 더 이상 답변 근거로 사용하지 않음',
+                updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE validity_active=1
+              AND (
+                    COALESCE(final_answer, '') LIKE '%브라켓%'
+                 OR COALESCE(final_answer, '') LIKE '%벽걸이암%'
+              )
+              AND (
+                    REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%부분반품%'
+                 OR REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%부분환불%'
+                 OR REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%환분가능%'
+                 OR REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%벽걸이암비용은환불가능%'
+              )
+            """,
+        ),
+    ),
 )
 
 

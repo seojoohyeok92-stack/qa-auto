@@ -23,7 +23,9 @@ hold the answer.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field as dataclass_field
+import re
+from dataclasses import dataclass, field as dataclass_field, replace
+from datetime import UTC, datetime
 from typing import Any, Iterable, Sequence
 
 from repositories.product_catalog_repository import (
@@ -204,9 +206,13 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
      ("refresh_rate",), ()),
     (("응답속도", "응답 속도", "ms"),
      ("response_time_ms",), ()),
-    (("인치", "화면크기", "화면 크기", "사이즈", "크기", "cm"),
-     ("screen_size", "display_size_cm", "dimensions_with_stand_mm",
-      "dimensions_without_stand_mm"), ()),
+    (("인치", "화면크기", "화면 크기", "사이즈", "크기", "제품 크기",
+      "가로", "세로", "높이", "깊이", "두께", "센치", "cm", "mm"),
+     ("screen_size", "display_size_cm", "dimensions_labelled",
+      "dimensions_product", "dimensions_with_stand", "dimensions_without_stand",
+      "dimensions_with_stand_mm", "dimensions_without_stand_mm", "width",
+      "screen_height_without_stand", "depth_screen", "total_height_with_stand",
+      "stand_depth"), ()),
     (("패널", "ips", "va", "tn"),
      ("panel_type",), ()),
     (("명암", "명암비", "contrast"), ("contrast_ratio",), ()),
@@ -652,6 +658,141 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
+_SOURCE_TIME_KEYS = (
+    "valid_from", "source_updated_at", "last_verified_at", "collected_at",
+    "effective_at", "approved_at",
+)
+
+
+def _parse_source_time(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _fact_source_time(fact: ProductFact) -> datetime | None:
+    times = [
+        parsed
+        for provenance in fact.provenance
+        for key in _SOURCE_TIME_KEYS
+        if (parsed := _parse_source_time(provenance.get(key))) is not None
+    ]
+    return max(times) if times else None
+
+
+def _fact_source_authority(fact: ProductFact) -> int:
+    """Authority already present in source provenance, before recency."""
+
+    sources = {
+        str(item.get("source_type") or "").upper()
+        for item in fact.provenance
+        if isinstance(item, dict)
+    }
+    if str(fact.source_type or "").strip():
+        sources.add(str(fact.source_type).upper())
+    if "API" in sources:
+        return 3
+    if sources & {"MANUAL_VISUAL_TRANSCRIPTION", "IMAGE_VISUAL"}:
+        return 2
+    if sources & {"IMAGE_TEXT", "OCR", "VISION"}:
+        return 1
+    return 0
+
+
+def _normalized_fact_value(fact: ProductFact) -> str:
+    value = fact.value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"number:{float(value):g}"
+    rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    compact = re.sub(r"\s+", "", rendered).lower().strip('"')
+    # Existing catalog normalization deliberately preserves display wording.
+    # "Max 60 Hz" and "Max 60" are the same refresh-rate observation, not a
+    # policy conflict.  Collapse a single labelled numeric value only when the
+    # whole value is that number plus a harmless max/unit wrapper.
+    numeric = re.fullmatch(
+        r"(?:max|최대)?(-?\d+(?:\.\d+)?)(?:hz|kg|mm|cm|w|ms|개|채널|%)?",
+        compact,
+        re.IGNORECASE,
+    )
+    if numeric:
+        return f"number:{float(numeric.group(1)):g}"
+    return compact
+
+
+def _exact_fact_conflict_key(fact: ProductFact) -> tuple[str, ...]:
+    """Identity and field first; timestamps never join different subjects."""
+
+    return (
+        str(fact.component_scope or ""),
+        str(fact.subject or ""),
+        str(fact.scope or ""),
+        normalize_model(fact.model_code),
+        str(fact.applies_to_product_id or ""),
+        str(fact.field_key or ""),
+    )
+
+
+def _resolve_exact_fact_conflicts(
+    facts: Sequence[ProductFact],
+) -> tuple[list[ProductFact], list[ProductFact]]:
+    """Resolve only contradictory values for one exact identity and field.
+
+    Authority precedes source time.  A reliable timestamp is used only inside
+    the top authority tier.  When equal-authority conflicting values have no
+    reliable time relation, none is guessed current: every value in that exact
+    group is withheld as CONFLICT/REVIEW evidence.
+    """
+
+    grouped: dict[tuple[str, ...], list[ProductFact]] = {}
+    for fact in facts:
+        grouped.setdefault(_exact_fact_conflict_key(fact), []).append(fact)
+    safe: list[ProductFact] = []
+    excluded: list[ProductFact] = []
+    for group in grouped.values():
+        values = {_normalized_fact_value(item) for item in group}
+        if len(values) <= 1:
+            safe.extend(group)
+            continue
+        top_authority = max(_fact_source_authority(item) for item in group)
+        authoritative = [
+            item for item in group
+            if _fact_source_authority(item) == top_authority
+        ]
+        authoritative_values = {
+            _normalized_fact_value(item) for item in authoritative
+        }
+        winners: list[ProductFact] = []
+        if len(authoritative_values) == 1:
+            winners = authoritative
+        else:
+            timed = [(item, _fact_source_time(item)) for item in authoritative]
+            if all(moment is not None for _item, moment in timed):
+                latest = max(moment for _item, moment in timed if moment is not None)
+                winners = [item for item, moment in timed if moment == latest]
+                if len({_normalized_fact_value(item) for item in winners}) > 1:
+                    winners = []
+        winner_ids = {item.canonical_fact_id for item in winners}
+        safe.extend(winners)
+        for item in group:
+            if item.canonical_fact_id in winner_ids:
+                continue
+            excluded.append(replace(
+                item,
+                safe_for_answer=False,
+                resolution_status="CONFLICT",
+                exclusion_reason=(
+                    "SUPERSEDED_BY_NEWER_AUTHORITATIVE_SOURCE"
+                    if winners else "EXACT_IDENTITY_FIELD_CONFLICT_NO_RELIABLE_TIME"
+                ),
+            ))
+    return safe, excluded
+
+
 # Every field the model catalogue can actually produce a value for. Kept beside
 # ``_catalog_facts``, which is the only place these keys are filled in.
 #
@@ -683,6 +824,13 @@ CATALOG_BACKED_FIELDS: frozenset[str] = frozenset({
     "hdmi_present", "usb_present", "ethernet_present", "rf_terminal",
     "bluetooth_present", "wifi_present", "stand_spacing",
     "vesa_mm", "weight_catalog",
+})
+
+PHYSICAL_DIMENSION_FIELDS: frozenset[str] = frozenset({
+    "dimensions_labelled", "dimensions_product", "dimensions_with_stand",
+    "dimensions_without_stand", "dimensions_with_stand_mm",
+    "dimensions_without_stand_mm", "width", "screen_height_without_stand",
+    "depth_screen", "total_height_with_stand", "stand_depth",
 })
 
 
@@ -877,9 +1025,20 @@ def required_fact_groups(question: object) -> tuple[frozenset[str], ...]:
         groups.append(frozenset({"resolution", "resolution_class"}))
     if any(
         word in text
-        for word in ("화면 크기", "화면크기", "화면 사이즈", "인치", "몇인치", "몇 인치")
+        for word in (
+            "화면 크기", "화면크기", "화면 사이즈", "몇인치", "몇 인치",
+            "인치인가", "인치 인가",
+        )
     ):
         groups.append(frozenset({"screen_size", "display_size_cm"}))
+    if any(
+        word in text
+        for word in (
+            "제품 크기", "제품크기", "가로", "세로", "높이", "깊이", "두께",
+            "몇센치", "몇 센치", "센치", "치수", "외형", "dimensions",
+        )
+    ):
+        groups.append(PHYSICAL_DIMENSION_FIELDS)
     if "usb" in text or "유에스비" in text:
         # Port count is catalogued; charging power is not. Naming only the
         # claim that has a field keeps "USB 몇 개인가요?" answerable while
@@ -1262,9 +1421,9 @@ class ProductKnowledgeService:
                     subject=subject, applies_to_product_id=(applies or key or None),
                     source_type=source_type,
                 ))
-                if len(safe) >= _PRODUCT_KNOWLEDGE_PROMPT_LIMIT:
-                    return safe, excluded
-        return safe, excluded
+        resolved, conflict_excluded = _resolve_exact_fact_conflicts(safe)
+        excluded.extend(conflict_excluded)
+        return resolved[:_PRODUCT_KNOWLEDGE_PROMPT_LIMIT], excluded
 
     @staticmethod
     def _catalog_facts(

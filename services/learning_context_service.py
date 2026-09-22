@@ -1184,6 +1184,7 @@ class LearningContextService:
         historical = distinct_historical
 
         signals_by_question = dict(zip(questions, signal_contexts))
+        learning_conflicts_by_question = dict(zip(questions, subquestion_traces))
         claim_option = inquiry.get("option_name") or facts.product.get("option_name")
 
         def general_estimates(
@@ -1239,6 +1240,10 @@ class LearningContextService:
             verified_for_question = question_signals.get("verified_facts", [])
             corrections_for_question = question_signals.get("corrections", [])
             conflicts_for_question = question_signals.get("conflicts", [])
+            learning_trace = learning_conflicts_by_question.get(question, {})
+            unresolved_learning_conflicts = learning_trace.get(
+                "unresolved_learning_conflicts", []
+            )
             explicit_current_schedule = bool(
                 re.search(
                     r"(?:예정일|도착일|배송일|설치일|말일까지|기다리다|"
@@ -1383,6 +1388,16 @@ class LearningContextService:
                     *(int(item["left_signal_id"]) for item in conflicts_for_question),
                     *(int(item["right_signal_id"]) for item in conflicts_for_question),
                 })
+            elif unresolved_learning_conflicts:
+                # Same exact application scope and topic, opposite claims, and
+                # no trustworthy effective/approval time relation.  Retrieval
+                # withheld both rows; preserve that uncertainty as the same
+                # CONFLICT/REVIEW contract used by verified feedback signals.
+                status = "CONFLICT"
+                evidence_ids = []
+                source = "CONFLICTING_ACTIVE_LEARNING_NO_RELIABLE_TIME"
+                evidence_coverage = "UNSUPPORTED"
+                historical_ids = []
             elif verified_for_question or corrections_for_question:
                 # A human-verified fact/correction outranks a plain Positive
                 # Learning example for the same sub-question (Acceptance
@@ -1465,6 +1480,7 @@ class LearningContextService:
                     "learning_ids": evidence_ids,
                     "historical_case_ids": historical_ids,
                     "feedback_signal_ids": feedback_signal_ids,
+                    "learning_conflicts": list(unresolved_learning_conflicts),
                     "answer_required": status in {"ANSWERABLE", "CANDIDATE"},
                     # Question -> Evidence Coverage: retrieval finding a
                     # candidate is not the same as that candidate's answer

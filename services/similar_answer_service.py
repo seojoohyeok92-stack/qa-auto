@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Any
 
 from answer.evidence_support import SUPPORTED_THRESHOLD, apply_answer_support
+from answer.learning_signal import facts_conflict
 from repositories.learning_repository import LearningRepository, market_from_store_code
+from repositories.product_catalog_repository import normalize_model
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
     extract_product_identity,
@@ -18,6 +21,7 @@ from services.learning_evidence_policy import (
     contamination_reason,
     estimation_reason,
     order_identifier_request_reason,
+    quantities_conflict,
 )
 from services.learning_privacy_service import LearningPrivacyService
 
@@ -113,6 +117,171 @@ def _normalized_answer(value: object) -> str:
     """
 
     return re.sub(r"\s+", "", str(value or ""))
+
+
+_LEARNING_EFFECTIVE_TIME_KEYS = (
+    "effective_at", "approved_at", "verified_at", "valid_from",
+)
+
+
+def _effective_time(item: dict[str, Any]) -> datetime | None:
+    """A policy-effective/approval time, never usage-mutated ``updated_at``."""
+
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    for key in _LEARNING_EFFECTIVE_TIME_KEYS:
+        raw = metadata.get(key) if key in metadata else item.get(key)
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _learning_scope_key(item: dict[str, Any]) -> tuple[str, str] | None:
+    """The exact application target already decided by compatibility."""
+
+    compatibility = item.get("compatibility")
+    compatibility = compatibility if isinstance(compatibility, dict) else {}
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    scope = str(
+        metadata.get("product_scope") or compatibility.get("product_scope") or ""
+    ).upper()
+    product = compatibility.get("candidate_product")
+    product = product if isinstance(product, dict) else {}
+    product_id = str(product.get("product_id") or item.get("source_product_id") or "").strip()
+    model = normalize_model(product.get("model_code") or item.get("model_code"))
+    if scope in {"POLICY", "CATEGORY"}:
+        category = str(product.get("category") or "").upper()
+        return (scope, category or "GENERAL")
+    if scope in {"PRODUCT", "LISTING"} and product_id:
+        return ("PRODUCT", product_id)
+    if model:
+        return ("MODEL", model)
+    if product_id:
+        return ("PRODUCT", product_id)
+    return None
+
+
+def _learning_topics(item: dict[str, Any]) -> frozenset[str]:
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    explicit = metadata.get("learning_topics")
+    if isinstance(explicit, list) and explicit:
+        return frozenset(str(value).upper() for value in explicit if str(value).strip())
+    # A classifier label is useful for retrieval relevance, but it is not a
+    # strong enough identity for destructive conflict elimination.  Without
+    # an explicitly stored sub-question/topic scope, retain both candidates
+    # and let the existing Validator/REVIEW path handle uncertainty.
+    return frozenset()
+
+
+def _learning_answers_conflict(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_answer = left.get("final_answer")
+    right_answer = right.get("final_answer")
+    return bool(
+        facts_conflict(left_answer, right_answer)
+        or quantities_conflict(left_answer, right_answer)
+    )
+
+
+def _has_human_conflict_authority(item: dict[str, Any]) -> bool:
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    source = str(item.get("learning_source") or "").upper()
+    return bool(
+        metadata.get("human_verified") is True
+        or source in {"APPROVED_EDITED", "AUTO_POST_CORRECTED", "MANUAL_CORRECTION"}
+    )
+
+
+def _resolve_latest_valid_conflicts(
+    ranked: list[tuple[float, dict[str, Any]]],
+    *, priority_for: Any,
+) -> tuple[list[tuple[float, dict[str, Any]]], list[dict[str, Any]]]:
+    """Resolve only explicit contradictions in one exact scope and topic.
+
+    Scope and authority precede time.  A newer row wins only when both rows
+    carry a reliable effective/approval timestamp.  Otherwise both sides are
+    withheld so the caller can surface CONFLICT/REVIEW instead of guessing.
+    """
+
+    removed: set[int] = set()
+    conflicts: list[dict[str, Any]] = []
+    profiles: list[tuple[int, dict[str, Any], tuple[str, str], frozenset[str]]] = []
+    for index, (_score, item) in enumerate(ranked):
+        if not _has_human_conflict_authority(item):
+            continue
+        scope = _learning_scope_key(item)
+        topics = _learning_topics(item)
+        if scope is not None and topics:
+            profiles.append((index, item, scope, topics))
+    by_scope: dict[
+        tuple[str, str], list[tuple[int, dict[str, Any], frozenset[str]]]
+    ] = {}
+    for index, item, scope, topics in profiles:
+        by_scope.setdefault(scope, []).append((index, item, topics))
+
+    for left_scope, scoped in by_scope.items():
+        for position, (_index, left, left_topics) in enumerate(scoped):
+            left_id = int(left["id"])
+            if left_id in removed:
+                continue
+            for _right_index, right, right_topics in scoped[position + 1:]:
+                right_id = int(right["id"])
+                if right_id in removed:
+                    continue
+                # Conflict elimination is destructive.  An overlapping broad
+                # multi-topic tag does not prove the two answers address the
+                # same sub-question; require one identical explicit topic.
+                common_topics = (
+                    left_topics
+                    if left_topics == right_topics and len(left_topics) == 1
+                    else frozenset()
+                )
+                if not common_topics or not _learning_answers_conflict(left, right):
+                    continue
+                left_priority = int(priority_for(left))
+                right_priority = int(priority_for(right))
+                left_time = _effective_time(left)
+                right_time = _effective_time(right)
+                winner: int | None = None
+                reason = "UNRESOLVED_NO_RELIABLE_TIME"
+                if left_priority != right_priority:
+                    winner = left_id if left_priority > right_priority else right_id
+                    reason = "HIGHER_AUTHORITY"
+                elif (
+                    left_time is not None
+                    and right_time is not None
+                    and left_time != right_time
+                ):
+                    winner = left_id if left_time > right_time else right_id
+                    reason = "NEWER_EFFECTIVE_APPROVAL"
+                if winner is None:
+                    removed.update((left_id, right_id))
+                else:
+                    removed.add(right_id if winner == left_id else left_id)
+                conflicts.append({
+                    "left_learning_id": left_id,
+                    "right_learning_id": right_id,
+                    "scope": list(left_scope),
+                    "topics": sorted(common_topics),
+                    "winner_learning_id": winner,
+                    "reason": reason,
+                    "left_effective_at": left_time.isoformat() if left_time else None,
+                    "right_effective_at": right_time.isoformat() if right_time else None,
+                })
+                if left_id in removed:
+                    break
+    return (
+        [pair for pair in ranked if int(pair[1]["id"]) not in removed],
+        conflicts,
+    )
 
 
 def _semantic_rank_bonus(rank: int) -> float:
@@ -685,6 +854,9 @@ class SimilarAnswerService:
             ),
             reverse=True,
         )
+        ranked, learning_conflicts = _resolve_latest_valid_conflicts(
+            ranked, priority_for=self._source_priority,
+        )
         # ``min(limit, 3)`` used to cap this at three whatever the caller asked
         # for, so 669 candidates that had already cleared validity, identity and
         # the relevance floor were reduced to three before GPT ② saw any of
@@ -714,6 +886,11 @@ class SimilarAnswerService:
             "above_threshold_count": len(ranked),
             "selected_count": len(selected),
             "selected_learning_ids": [int(item["id"]) for item in selected],
+            "learning_conflicts": learning_conflicts,
+            "unresolved_learning_conflicts": [
+                item for item in learning_conflicts
+                if item.get("winner_learning_id") is None
+            ],
             "minimum_relevance": minimum_relevance,
             "inquiry_type_mismatch_signal_count": type_mismatch_count,
             "rejection_counts": {
