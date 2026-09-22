@@ -522,11 +522,18 @@ def build_audit(catalog_path: Path, archive_db: Path) -> dict[str, Any]:
             )
 
     conflict_rows = []
+    seen_conflict_ids: set[str] = set()
     for row in canonical:
         resolution = str(row.get("resolution_status") or "").upper()
-        if resolution in {"CONFLICT", "UNRESOLVED"}:
+        conflict_id = str(row.get("canonical_fact_id") or "")
+        if (
+            resolution in {"CONFLICT", "UNRESOLVED"}
+            and conflict_id not in seen_conflict_ids
+        ):
+            seen_conflict_ids.add(conflict_id)
             conflict_rows.append(
                 {
+                    "canonical_fact_id": conflict_id,
                     "product_id": str(row.get("product_id") or ""),
                     "model": str(row.get("model_code") or ""),
                     "field": row.get("field") or "",
@@ -668,13 +675,13 @@ def build_audit(catalog_path: Path, archive_db: Path) -> dict[str, Any]:
         "verified_facts": sum(r["verified_facts"] for r in product_coverage),
         "runtime_eligible_facts": sum(r["runtime_eligible_facts"] for r in product_coverage),
         "extraction_missing": len(current_transcript_misses),
-        "parser_ontology_missing": len(current_unmapped),
+        "parser_ontology_missing": len(current_transcript_misses) + len(current_unmapped),
         "identity_scope_unresolved": sum(r["unresolved_identity"] + r["unresolved_scope"] for r in product_coverage),
         "conflicts": len(conflict_rows),
-        "runtime_unexposed_facts": len(runtime_gaps),
+        "runtime_unexposed_fact_links": len(runtime_gaps),
         "wrong_value_facts": 0,
         "facts_corrected_this_audit": 0,
-        "unresolved_facts": len(missing_facts) + len(conflict_rows) + len(runtime_gaps),
+        "unresolved_review_records": len(missing_facts) + len(conflict_rows) + len(runtime_gaps),
     }
     totals["product_distribution"] = dict(coverage_counts)
     totals["production_readiness"] = "NOT_READY"
