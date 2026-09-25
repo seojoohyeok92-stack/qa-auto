@@ -604,7 +604,9 @@ def test_definite_answers_are_not_flagged_uncertain(body: str) -> None:
     [
         ("삼성 4K UHD 사이니지TV 214cm(85인치), 스탠드", None),
         ("삼성 삼탠바이미 43인치(107cm) 4K UHD 비즈니스TV", None),
-        ("삼성 107.9cm(43인치) 비즈니스TV 4K UHD 1등급 LH43BEFHLGFXKR 스탠드형", "LH43BEFHLGFXKR"),
+        # The LH line reduces to its core like every other Samsung display
+        # notation, so this is 43BEF -- still a model code, still not 214CM.
+        ("삼성 107.9cm(43인치) 비즈니스TV 4K UHD 1등급 LH43BEFHLGFXKR 스탠드형", "43BEF"),
     ],
 )
 def test_dimension_tokens_are_not_model_codes(name: str, expected: str | None) -> None:

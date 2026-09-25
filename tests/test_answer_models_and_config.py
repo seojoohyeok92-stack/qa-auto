@@ -70,7 +70,7 @@ def test_config_loader_loads_expected_data() -> None:
     config = load_answer_config()
     assert config.answer_policy["hard_block_rules"]
     assert config.shipping["parcel_default_answer"]
-    assert len(config.model_catalog) == 1586
+    assert len(config.model_catalog) == 1592
     assert len(config.install_schedule_rules) == 9
 
 
@@ -81,7 +81,7 @@ def test_config_loader_is_independent_of_working_directory(
     clear_config_cache()
     monkeypatch.chdir(tmp_path)
     config = load_answer_config()
-    assert len(config.model_catalog) == 1586
+    assert len(config.model_catalog) == 1592
 
 
 def test_config_loader_reports_missing_file(tmp_path) -> None:

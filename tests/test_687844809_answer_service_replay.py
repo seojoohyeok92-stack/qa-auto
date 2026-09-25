@@ -313,8 +313,23 @@ def test_687844809_full_answer_service_replay(tmp_path, monkeypatch):
     catalog_fields = {fact.field_key: fact.value for fact in product_result.safe_facts}
     assert catalog_fields, "식별된 listing 인데 검증 사실이 하나도 없다"
     instructions = context["product_catalog"]["instructions"]
+    # 기록 전체가 아니라, 이 질문에 필요한 사실이 GPT ② 까지 도달하는지를 본다.
+    # Product Knowledge 는 prompt budget 안에서 질문 관련도 순으로 실리므로
+    # 기록이 통째로 들어간다고 가정할 수 없다. 대신 사라진 항목은 전부
+    # selection 보고에 이유와 함께 남아야 한다 -- 조용히 빠지는 것은 없다.
+    from services.product_knowledge_service import select_prompt_facts
+
+    _, _, selection = select_prompt_facts(
+        product_result.safe_facts,
+        requested_fields=product_result.requested_fields,
+        topics=product_result.topics,
+        question=QUESTION,
+    )
+    accounted = {item["field_key"] for item in selection["dropped"]}
     for field_key in catalog_fields:
-        assert field_key in instructions, field_key
+        assert field_key in instructions or field_key in accounted, field_key
+    # 질문이 요구한 항목은 budget 때문에 빠지지 않는다.
+    assert not selection["asked_fields_dropped"], selection["asked_fields_dropped"]
     # 상품명 자체는 판매 페이지 표기로서 프롬프트에 남아 있어야 한다.
     assert "사이니지" in prompt
     assert engine.calls >= 1 and captured["hybrid_request_metadata"].get(

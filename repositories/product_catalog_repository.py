@@ -45,7 +45,6 @@ def normalize_model(value: object) -> str:
 
 
 _MODEL_CODE_TEXT = re.compile(r"^[A-Za-z0-9-]+$")
-_SAMSUNG_DISPLAY_CORE = re.compile(r"^\d{2}[A-Z]+\d[A-Z0-9]*$")
 # The Korean region suffix, whose last four characters vary by panel line:
 # EKXKR, GAKXKR and SKXKR alongside EFXKR and ESXKR.  Anchoring on KXKR read
 # the first three as a suffix and the last two as part of the model, so
@@ -54,6 +53,64 @@ _SAMSUNG_DISPLAY_CORE = re.compile(r"^\d{2}[A-Z]+\d[A-Z0-9]*$")
 # so a longer regional tail (WBGCXKR, EBGCXKR) is still not a suffix here.
 _KOREAN_REGION_SUFFIX = re.compile(r"[A-Z]{0,3}XKR$")
 
+# The Korean business-display line is written BE43D-H: a size, the BE series, a
+# generation letter, and a fixed variant marker that every catalogued key in
+# the line carries -- BEAH, BECH, BEDH, BEFH and BETH all end in that H.  The
+# marker is notation, which is why one model reaches us as LH43BEHH, LH43BEH
+# and LH43BE-H.  The generation letter is not notation: with the marker off,
+# 43BEH and 43BED remain the two models they are.
+_BE_VARIANT_MARKER = re.compile(r"^(\d{2}BE[A-Z])H$")
+
+# A core that states its size first.  The monitor lines carry digits after the
+# series (32DM501) and the business-display lines do not (43BED), so neither
+# shape on its own recognises both.
+_SAMSUNG_DISPLAY_CORE = re.compile(r"^\d{2}[A-Z]+\d[A-Z0-9]*$")
+_SAMSUNG_BUSINESS_DISPLAY_CORE = re.compile(r"^\d{2}[A-Z]{2,}$")
+
+
+def _notation_core(normalized: str) -> str:
+    """Strip what is notation, leaving what names the model.
+
+    The ``LS``/``LH`` vendor prefix, the bare ``S`` form, the Korean region
+    suffix and the BE line's variant marker are all ways of writing a model
+    down.  Screen size, series and generation are the model itself and stay.
+    """
+
+    core = normalized
+    if core.startswith("LS") or (core.startswith("LH") and core[2:3].isdigit()):
+        core = core[2:]
+    elif core.startswith("S") and len(core) > 1 and core[1].isdigit():
+        core = core[1:]
+    core = _KOREAN_REGION_SUFFIX.sub("", core)
+    return _BE_VARIANT_MARKER.sub(r"\1", core)
+
+
+def _is_model_core(core: str) -> bool:
+    """Whether this reads as a complete, size-led Samsung display core."""
+
+    return bool(
+        _SAMSUNG_DISPLAY_CORE.fullmatch(core)
+        or _SAMSUNG_BUSINESS_DISPLAY_CORE.fullmatch(core)
+    )
+
+
+def _restates_the_model(alias: str, target: str) -> bool:
+    """Whether an alias names a different model rather than respelling one.
+
+    Structure may only judge a pair where both sides are complete model codes.
+    A marketing short name -- ``BE50D`` for ``LH50BEDH``, ``BE85F`` for
+    ``LH85BEFH`` -- carries no core to compare and remains the operator's
+    statement; an abbreviation of the target (``S43BM702`` for ``S43BM702UK``)
+    is still the same model.
+    """
+
+    alias_core, target_core = _notation_core(alias), _notation_core(target)
+    if not (_is_model_core(alias_core) and _is_model_core(target_core)):
+        return False
+    return not (
+        alias_core.startswith(target_core) or target_core.startswith(alias_core)
+    )
+
 
 def _model_code_aliases(aliases: Mapping[object, object] | None) -> dict[str, str]:
     """Return only explicit aliases that are themselves model-code-shaped.
@@ -61,6 +118,15 @@ def _model_code_aliases(aliases: Mapping[object, object] | None) -> dict[str, st
     ``MODEL_ALIASES`` also intentionally contains operator-maintained listing
     titles such as colour/size descriptions.  Those remain catalog matching
     hints; they must never become model identities.
+
+    Nor may a model-code row rewrite one model into another.  This is the only
+    place the catalogue can record that two codes are the same product, so it
+    has also been used to record that two *different* products answer alike --
+    "43BED and 43BEH differ by model year, the panels are the same".  Applied
+    here that became identity: BE43H-H and BE43D-H shared one canonical form,
+    and every path that compares identities served one product's evidence as
+    the other's with no way left to tell them apart.  An alias may respell a
+    model; restating it is an equivalence claim and stops at the door.
     """
 
     result: dict[str, str] = {}
@@ -75,6 +141,7 @@ def _model_code_aliases(aliases: Mapping[object, object] | None) -> dict[str, st
             len(normalized_alias) >= MIN_IDENTIFYING_LENGTH
             and _MODEL_TOKEN.fullmatch(normalized_alias)
             and normalized_target
+            and not _restates_the_model(normalized_alias, normalized_target)
         ):
             result[normalized_alias] = normalized_target
     return result
@@ -91,9 +158,10 @@ def canonical_model_identity(
     a single model-code token; bundle keys, listing titles, family names and
     option text return ``None``.  For the Samsung display codes present in the
     catalog, ``LS32DM501EKXKR``, ``S32DM501``, ``LS32DM501`` and
-    ``32DM501EKXKR`` therefore all become ``32DM501``.  Screen size and the
-    complete core remain part of the identity, so DM500/DM501 and 22D400/24D400
-    cannot collapse.
+    ``32DM501EKXKR`` therefore all become ``32DM501``, and ``LH43BEDHLGFXKR``,
+    ``LH43BEDH`` and ``LH43BED-H`` all become ``43BED``.  Screen size, series
+    and generation remain part of the identity, so DM500/DM501, 22D400/24D400
+    and 43BED/43BEH cannot collapse.
 
     Explicit model-code aliases still participate first.  Manual aliases that
     are listing descriptions deliberately do not: resolving ``M50D 32`` to a
@@ -108,17 +176,12 @@ def canonical_model_identity(
         return None
 
     mapped = _model_code_aliases(aliases).get(normalized, normalized)
-    # Samsung display codes in this catalog either state LS before the core,
-    # state S before it, or state the core directly.  Other Samsung families
-    # (LH/KQ/etc.) retain their recorded code unless an explicit alias maps
-    # them; the display rule must not guess their internal structure.
-    candidate = mapped
-    if candidate.startswith("LS"):
-        candidate = candidate[2:]
-    elif candidate.startswith("S") and len(candidate) > 1 and candidate[1].isdigit():
-        candidate = candidate[1:]
-    candidate = _KOREAN_REGION_SUFFIX.sub("", candidate)
-    if _SAMSUNG_DISPLAY_CORE.fullmatch(candidate):
+    # Samsung display codes in this catalog state LS or LH before the core,
+    # state S before it, or state the core directly.  Families whose internal
+    # structure this does not recognise (KQ/UN/etc.) retain their recorded
+    # code; the rule reduces a notation it can read and never guesses one.
+    candidate = _notation_core(mapped)
+    if _is_model_core(candidate):
         return candidate
     return mapped
 
@@ -262,16 +325,33 @@ class ProductCatalogRepository:
                 return CatalogMatch(key, dict(catalog[key]), status=UNIQUE_MATCH)
             return self._ambiguous(catalog, narrowed or partial)
 
-        # Only now, with nothing in the title naming a model, may an alias
-        # speak for the listing.
+        # Only now, with nothing in the title naming a *catalogued* model, may
+        # an alias speak for the listing.
+        #
+        # It may still be contradicted.  A title can write a model code this
+        # catalogue has no key for -- LH43BEHHLGFXKR is BE43H-H, and no key
+        # starts with it, so the rule above finds nothing.  The listing has
+        # named its product all the same, and a size-phrase alias must not
+        # overrule it: "삼성 107.9cm(43인치)" normalises to 1079CM43, which is
+        # inside every 43-inch title, so it elected LH43BEDH for a product the
+        # title said was a different model.  An alias that disagrees with the
+        # code in the title does not speak for that title.
+        stated = self._stated_model_identities(
+            f"{product_name} {option_name}", aliases,
+        )
         alias_keys = set()
         for alias, target in aliases.items():
             normalized = normalize_model(alias)
             if len(normalized) < MIN_IDENTIFYING_LENGTH or normalized not in haystack:
                 continue
             target_key = str(target)
-            if target_key in catalog:
-                alias_keys.add(target_key)
+            if target_key not in catalog:
+                continue
+            if stated:
+                identity = canonical_model_identity(target_key, aliases=aliases)
+                if identity is not None and identity not in stated:
+                    continue
+            alias_keys.add(target_key)
         if len(alias_keys) == 1:
             key = next(iter(alias_keys))
             return CatalogMatch(key, dict(catalog[key]), status=EXACT)
@@ -358,6 +438,25 @@ class ProductCatalogRepository:
             if _MODEL_TOKEN.fullmatch(token):
                 found.add(token)
         return found
+
+    @classmethod
+    def _stated_model_identities(
+        cls, text: object, aliases: Mapping[str, Any],
+    ) -> set[str]:
+        """The model identities a listing writes out for itself.
+
+        Only tokens that reduce to a recognised display core count.  A bundled
+        component (``FMS101W``, ``VI201S``) or a marketing short name has no
+        core to compare, so it neither speaks for the listing nor silences an
+        alias that does.
+        """
+
+        identities = set()
+        for token in cls._model_tokens(text):
+            identity = canonical_model_identity(token, aliases=aliases)
+            if identity and _is_model_core(identity):
+                identities.add(identity)
+        return identities
 
     @classmethod
     def _partial_key_candidates(

@@ -699,14 +699,16 @@ class RealCatalogKnowledge(RecordingKnowledge):
         self.catalog_repository = ProductCatalogRepository()
 
 
-def test_a_confirmed_43be_mapping_keeps_its_raw_model_and_names_the_representative(
+def test_a_confirmed_43be_mapping_keeps_its_raw_model_and_asks_for_that_model(
     database,
 ) -> None:
     """The operator's CONFIRMED mapping is provenance and is not rewritten.
 
-    43BED/43BEH/43BEDH are one product by model year, so the catalogue's
-    representative is what Product Knowledge is asked for -- while
-    ``canonical_model`` still records exactly what the operator confirmed.
+    ``LH43BEHHLGFXKR`` is BE43H-H.  Six alias rows once resolved it to the
+    neighbouring BE43D-H, so the answer was built from another model's record.
+    It has a catalogue record of its own now, and that is what Product
+    Knowledge is asked about, while ``canonical_model`` still records exactly
+    what the operator confirmed.
     """
 
     seed_catalog(database)
@@ -720,9 +722,10 @@ def test_a_confirmed_43be_mapping_keeps_its_raw_model_and_names_the_representati
 
     metadata = hybrid.requests[0].metadata
     assert metadata["canonical_model"] == "LH43BEHHLGFXKR"
-    assert metadata["model_code"] == "LH43BEDH"
+    assert metadata["model_code"] == "LH43BEHH"
+    assert metadata["model_code"] != "LH43BEDH"
     assert metadata["model_identity_source"] == "COUPANG_CONFIRMED_MAPPING"
-    assert knowledge.calls[0]["model_code"] == "LH43BEDH"
+    assert knowledge.calls[0]["model_code"] == "LH43BEHH"
 
     with database.connection() as connection:
         row = connection.execute(

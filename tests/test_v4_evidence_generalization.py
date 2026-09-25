@@ -948,12 +948,25 @@ def test_the_prompt_separates_every_evidence_kind(tmp_path, monkeypatch):
             assert field in item, (field, sorted(item))
 
 
-def test_relevant_evidence_is_never_lost_to_prompt_trimming(
-    tmp_path, monkeypatch,
-):
-    """예산 때문에 근거가 잘려나가지 않는다(여유가 실제로 있는지 측정)."""
+def test_relevant_evidence_survives_the_prompt_budget(tmp_path, monkeypatch):
+    """근거가 예산 때문에 유실되지 않는다.
+
+    이 테스트는 원래 "pre-trim 근거가 하나도 빠지지 않는다"를 요구했다. 그
+    시점에는 Product Knowledge가 통째로 프롬프트에 들어갔고 여유가 있었다.
+    지금은 두 가지가 달라졌다. Product Knowledge는 질문 관련도 순으로
+    24,000자 안에서만 실리고, VERIFIED v8.2 근거가 병합되어 한 모델이 가진
+    사실 자체가 늘었다. 그래서 가장 우선순위가 낮은 근거 하나가 예산에
+    밀리는 일은 설계상 정상이며, 그것을 실패로 볼 이유가 없다.
+
+    실패로 보아야 하는 것은 따로 있다. 질문이 요구한 사실이 사라지는 것,
+    Learning 근거가 통째로 없어지는 것, 비교 대상 한쪽만 남는 것, 그리고
+    무엇이 왜 빠졌는지 기록되지 않는 것이다. 아래는 그것들을 본다.
+    """
 
     from services.learning_context_service import DRAFT_PROMPT_BUDGET_CHARS
+    from services.product_knowledge_service import (
+        PRODUCT_KNOWLEDGE_PROMPT_BUDGET_CHARS,
+    )
 
     atoms = [
         _spec_atom("이 제품 해상도가 어떻게 되나요?"),
@@ -970,12 +983,63 @@ def test_relevant_evidence_is_never_lost_to_prompt_trimming(
         learning_products=(IDENTIFIED_PRODUCT, UNIDENTIFIED_PRODUCT),
     )
     assert run.prompt is not None, run.error
-    assert len(run.raw_prompt) < DRAFT_PROMPT_BUDGET_CHARS
+    inp = run.prompt["input"]
+    catalog = inp.get("product_catalog") or {}
+    facts = catalog.get("facts") or []
+    size = lambda value: len(json.dumps(value, ensure_ascii=False))
+
+    # 1. 최종 프롬프트는 예산 안에 들어온다.
+    assert len(run.raw_prompt) <= DRAFT_PROMPT_BUDGET_CHARS, len(run.raw_prompt)
+
+    # 2. Product Knowledge는 제 몫만 쓴다.
+    assert size(catalog) <= PRODUCT_KNOWLEDGE_PROMPT_BUDGET_CHARS, size(catalog)
+
+    # 3. 질문이 요구한 항목은 budget 때문에 빠지지 않는다.
+    from services.product_knowledge_service import (
+        ProductKnowledgeService, select_prompt_facts,
+    )
+
+    knowledge = ProductKnowledgeService().facts_for_inquiry(
+        product_id="", product_name=IDENTIFIED_PRODUCT, model_code="",
+        question=" ".join(a["text"] for a in atoms),
+        include_all_catalog_fields=True,
+    )
+    _, _, selection = select_prompt_facts(
+        knowledge.safe_facts,
+        requested_fields=knowledge.requested_fields,
+        topics=knowledge.topics,
+        question=" ".join(a["text"] for a in atoms),
+    )
+    assert not selection["asked_fields_dropped"], selection["asked_fields_dropped"]
+    assert selection["asked_fields_kept"], selection
+
+    # 4. 질문과 직접 관련된 사실이 실제로 프롬프트에 있다.
+    fields = {str(item.get("field_key")) for item in facts}
+    assert "resolution" in fields, sorted(fields)
+
+    # 5. 비교 대상이 된 모델은 어느 쪽도 빠지지 않는다.
+    models = {str(item.get("model_code")) for item in facts if item.get("model_code")}
+    assert {"LH50BEFH", "LH50BEFHLGFXKR"} <= models, sorted(models)
+    assert selection["models_kept"], selection
+
+    # 6. Learning 근거가 통째로 사라지지는 않는다.
+    learning = inp.get("similar_approved_answers") or []
+    assert learning, "Product Knowledge 때문에 Learning 근거가 0개가 되었다"
+
+    # 7. 빠진 것이 있다면 이유와 함께 기록된다. 우선순위가 가장 낮은
+    #    seller_style_examples 같은 근거는 예산이 필요하면 빠질 수 있다.
     hybrid = (run.outcome.result.metadata.get("hybrid") or {})
     budget = (hybrid.get("provider_telemetry") or {}).get("prompt_budget") or {}
     if budget:
-        assert not budget.get("dropped"), budget
-        assert budget.get("within_budget") is not False
+        assert budget.get("final_chars", 0) <= DRAFT_PROMPT_BUDGET_CHARS, budget
+        droppable = {"seller_style_examples", "historical_cases"}
+        for dropped in budget.get("dropped") or []:
+            assert dropped.get("component") in droppable, dropped
+            assert dropped.get("chars") and "records" in dropped, dropped
+    for dropped in selection["dropped"]:
+        assert dropped["reason"] in {
+            "DUPLICATE_VALUE", "PRODUCT_KNOWLEDGE_BUDGET",
+        }, dropped
 
 
 def test_the_source_data_is_never_written(tmp_path, monkeypatch):

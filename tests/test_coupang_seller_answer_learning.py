@@ -403,7 +403,11 @@ def test_capturing_opens_no_answer_edit_approval_or_registration(database) -> No
 def test_a_confirmed_mapping_scopes_the_row_and_keeps_its_raw_value(
     database,
 ) -> None:
-    """The 43-inch equivalence applies; the operator's mapping is not rewritten."""
+    """BE43H keeps its own identity; the operator's mapping is not rewritten.
+
+    Six alias rows once resolved LH43BEHHLGFXKR to LH43BEDH -- a different
+    model. The row is scoped to the model the operator actually confirmed.
+    """
 
     map_option(database, model="LH43BEHHLGFXKR")
     inquiry_id = coupang_inquiry(database)
@@ -414,11 +418,19 @@ def test_a_confirmed_mapping_scopes_the_row_and_keeps_its_raw_value(
     provenance = metadata["market_provenance"]
     assert provenance["confirmed_canonical_model"] == "LH43BEHHLGFXKR"
     assert provenance["model_identity_source"] == "COUPANG_CONFIRMED_MAPPING"
-    assert provenance["canonical_model"] == "LH43BEDH"
+    # The catalogue representative for that same model. The operator's raw
+    # code is kept beside it in confirmed_canonical_model and in the mapping
+    # row below, so nothing the operator wrote is rewritten away.
+    assert provenance["canonical_model"] == "LH43BEHH"
+    assert provenance["canonical_model"] != "LH43BEDH"
     # The scope the retrieval side compares on, not only a provenance note.
-    assert saved["model_code"] == "LH43BEDH"
-    assert metadata["product_identity"]["model_code"] == "LH43BEDH"
-    assert saved["model_code"] == "LH43BEDH"
+    # BE43H-H has a catalogue key of its own now, so the scope is that key --
+    # never the neighbouring BE43D-H's.
+    assert saved["model_code"] == "LH43BEHH"
+    assert saved["model_code"] != "LH43BEDH"
+    # The comparison identity is the canonical core of that same model.
+    assert metadata["product_identity"]["model_code"] == "43BEH"
+    assert metadata["product_identity"]["model_code"] != "43BED"
     with database.connection() as connection:
         row = connection.execute(
             "SELECT canonical_model, mapping_status FROM coupang_product_mappings"

@@ -23,7 +23,10 @@ from services.draft_generation_service import DraftGenerationService
 from services import learning_evidence_policy
 from services.gpt_understanding_service import GptUnderstandingService
 # ``required_fact_groups`` is no longer consulted here: see _product_fact_fields.
-from services.product_knowledge_service import SUBJECT_SENSITIVE_FIELDS
+from services.product_knowledge_service import (
+    SUBJECT_SENSITIVE_FIELDS,
+    select_prompt_facts,
+)
 from services.self_review_service import SelfReviewService
 
 
@@ -125,8 +128,39 @@ class HybridAnswerService:
                 "reason": getattr(knowledge, "unavailable_reason", None),
             }
         }
+        # How much of the record the prompt can carry.
+        #
+        # The whole record used to go in, and the prompt budget cleaned up
+        # afterwards by dropping evidence groups -- which meant a listing with
+        # a rich record spent the prompt on itself and left nothing for the
+        # Learning answers the inquiry had retrieved. Ranking here, against
+        # this inquiry, is what lets both fit: the record arrives already
+        # scoped to the question instead of arriving whole and crowding out
+        # everything ranked after it.
+        # Whether there is a record to carry at all is asked first, exactly as
+        # it was before: the fact surface below is only required of a result
+        # that renders a block, and a lighter stand-in that renders nothing is
+        # never asked for it.
         block = getattr(knowledge, "prompt_block", None)
         rendered = block() if callable(block) else ""
+        selection: dict[str, Any] = {}
+        if rendered:
+            selected, prompt_facts, selection = select_prompt_facts(
+                knowledge.safe_facts,
+                requested_fields=getattr(knowledge, "requested_fields", ()) or (),
+                topics=getattr(knowledge, "topics", ()) or (),
+                # Read by attribute, like the metadata above, so a caller that
+                # hands in a lighter object still gets a selection.
+                question=getattr(request, "question", ""),
+            )
+            # A stand-in whose ``prompt_block`` predates the selection argument
+            # renders its own facts and is left to do so.
+            try:
+                rendered = block(
+                    selected, also_reported=selection.get("merged_fields"),
+                )
+            except TypeError:
+                pass
         if rendered:
             context["product_catalog"] = {
                 "instructions": rendered,
@@ -134,12 +168,15 @@ class HybridAnswerService:
                 # backs telemetry and the review UI through
                 # ``result.metadata``; what goes in the prompt is the fields
                 # a reader can act on. See ``ProductFact.as_prompt_fact``.
-                "facts": [
-                    item.as_prompt_fact() for item in knowledge.safe_facts
-                ],
+                "facts": prompt_facts,
                 "product_id": knowledge.product_id,
                 "identity_status": getattr(knowledge, "identity_status", None),
             }
+            # What was left out and why. This is for the telemetry and the
+            # review UI, not for the model: a reader needs to tell a fact the
+            # record never had from one the budget cut, and the model does not.
+            # Keeping it out of the prompt also keeps it out of the budget.
+            request.metadata["product_knowledge_selection"] = selection
         # Models the listing could have meant, when it named no single one.
         # Reported as candidates and labelled as such: two 85-inch panels can
         # differ in exactly the field being asked about, so a candidate's

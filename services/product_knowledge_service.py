@@ -266,8 +266,20 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
       "자가 설치", "자가설치", "직접 설치", "혼자 설치", "혼자서 설치",
       "설치 어떻게",
       "기사님이 설치", "기사가 설치", "기사님이 해주", "기사님 설치해",
-      "기사님이 오셔서 설치", "설치기사", "설치 기사"),
+      "기사님이 오셔서 설치", "설치기사", "설치 기사",
+      # "설치는 누가 하나요?" names who installs as plainly as the phrasings
+      # above and matched none of them, so it reached no installation field.
+      # It asks who installs, not what installation costs, so it is routed
+      # here and nowhere else.
+      "설치는 누가", "누가 설치", "설치 누가", "설치 주체",
+      "설치해 주시나요", "설치해주시나요"),
      ("installation_method", "package_professional_installation"), ()),
+    # "설치 포함인가요?" is the one phrasing that genuinely asks both: whether
+    # the product is installed for the customer, and whether that is included
+    # rather than charged. It is the only place the two fields travel together.
+    (("설치 포함", "설치포함"),
+     ("installation_method", "package_professional_installation",
+      "additional_cost"), ()),
     (("에너지", "등급", "1등급"), ("energy_efficiency_grade",), ()),
     (("플리커", "깜빡"), ("flicker_free",), ()),
     (("눈부심", "아이세이버", "시력보호", "블루라이트"),
@@ -285,7 +297,21 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
     (("airplay", "에어플레이"), ("airplay_support",), ()),
     (("미러링", "screen mirroring", "screen_mirroring"),
      ("screen_mirroring", "mirroring_without_wifi"), ()),
-    (("운영체제", "os", "타이젠", "tizen"), ("operating_system",), ()),
+    (("운영체제", "os", "타이젠", "tizen"), ("operating_system", "os"), ()),
+    # What this listing charges on top of the price. The record holds it as
+    # additional_cost ("무료설치배송"), and nothing routed a question to it, so
+    # "설치비가 추가로 드나요?" read the record without ever asking for the one
+    # field that answers it.
+    #
+    # This is about price, not about who installs. Who installs is answered by
+    # the store's own confirmed statement in ``answer/engine.py`` -- "해당
+    # 상품은 삼성 기사님이 방문하여 설치하는 상품입니다." -- which GPT (2)
+    # receives as a candidate on a product predicate. Routing an
+    # installer-identity question to additional_cost would offer a delivery
+    # term as evidence for who does the work, which it is not.
+    (("설치비", "설치 비용", "설치비용", "추가 비용", "추가비용",
+      "추가 금액", "추가금액", "별도 비용", "별도비용"),
+     ("additional_cost",), ()),
     (("웹브라우저", "브라우저", "인터넷 사용"), ("web_browser",), ()),
     (("모델명", "모델코드", "모델 코드", "품번", "모델번호"),
      ("model_name", "model_code", "part_number"), ()),
@@ -372,11 +398,21 @@ class ProductFact:
 
         return _KNOWLEDGE_KINDS.get(self.volatility, "PRODUCT_RECORD")
 
-    def as_prompt_line(self) -> str:
-        """One evidence line for the provider prompt."""
+    def as_prompt_line(self, also_reported_as: "Sequence[str] | None" = None) -> str:
+        """One evidence line for the provider prompt.
 
+        ``also_reported_as`` names the other fields the record states with this
+        same value. They are carried here rather than dropped: the value is
+        written once, and which fields it was recorded under stays visible.
+        """
+
+        others = (
+            f"  also_reported_as: {', '.join(sorted(set(also_reported_as)))}\n"
+            if also_reported_as else ""
+        )
         return (
             f"- field: {self.field_key}\n"
+            f"{others}"
             f"  value: {_render_value(self.value)}\n"
             f"  verification: {self.verification_status}\n"
             f"  kind: {self.knowledge_kind}\n"
@@ -418,6 +454,201 @@ class ProductFact:
         if self.source_type:
             fact["source_type"] = self.source_type
         return fact
+
+
+# How much of the draft prompt this product's verified record may occupy.
+#
+# The record is not the only evidence the answer needs.  When a listing's
+# Product Knowledge became fully reachable, one product's facts grew to 37,225
+# characters of a 60,000 character prompt and the budget evicted every
+# retrieved Learning answer the inquiry had -- including the ones that
+# answered it.  Facts and Learning are ranked separately and then merged, so
+# neither can starve the other by arriving first.
+PRODUCT_KNOWLEDGE_PROMPT_BUDGET_CHARS = 24_000
+
+# What the rules footer of ``prompt_block`` costs, whatever the fact list is.
+_PROMPT_BLOCK_OVERHEAD_CHARS = 2_000
+
+# Two different fields holding the same text are only treated as one fact when
+# the text is long enough for the repeat to be what it looks like: a block of
+# source copy landing under several field names.  Short values collide by
+# coincidence -- ``eco_sensor`` and ``mini_wallmount`` are both "있음", and
+# front and stand colour are both BLACK -- and folding those together would
+# merge two facts that happen to agree, not one fact said twice.
+_MERGEABLE_VALUE_CHARS = 80
+
+# Verification states, most settled first.  Ordering is by how much of the
+# record has been confirmed, not by whether a fact may be quoted -- a fact
+# that reaches here is already safe.
+_VERIFICATION_RANK = (
+    "VERIFIED", "APPROVED", "CATALOG_JSON",
+    "CANDIDATE_REVIEW_RESOLVED", "CANDIDATE_NOT_APPROVED",
+)
+# Identity scopes, narrowest first.
+_SCOPE_RANK = ("EXACT_MODEL", "PRODUCT_LISTING", "MODEL_CATALOG")
+
+_WORD = re.compile(r"[0-9A-Za-z\uac00-\ud7a3]+")
+
+
+def _terms(text: object) -> set[str]:
+    return {word.lower() for word in _WORD.findall(str(text or "")) if len(word) > 1}
+
+
+def _normalized_value(value: object) -> str:
+    """A fact's value with spacing and case removed, for spotting repeats."""
+
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def _rank_index(value: object, order: tuple[str, ...]) -> int:
+    text = str(value or "").upper()
+    return order.index(text) if text in order else len(order)
+
+
+def _fact_relevance(
+    fact: "ProductFact", *, asked: set[str], wanted: set[str],
+) -> tuple:
+    """How directly this fact answers the inquiry. Larger sorts first.
+
+    The first three components are about the question, the rest about the
+    record.  A fact the inquiry actually asked for outranks a better-verified
+    fact it did not, because the prompt's job is to answer this question.
+    """
+
+    field_terms = _terms(fact.field_key.replace("_", " "))
+    return (
+        1 if fact.field_key in asked else 0,
+        len(field_terms & wanted),
+        len(_terms(fact.value) & wanted),
+        -_rank_index(fact.verification_status, _VERIFICATION_RANK),
+        -_rank_index(fact.scope, _SCOPE_RANK),
+        -len(_normalized_value(fact.value)),
+    )
+
+
+def select_prompt_facts(
+    facts: "Sequence[ProductFact]",
+    *,
+    requested_fields: "Sequence[str]" = (),
+    topics: "Sequence[str]" = (),
+    question: object = "",
+    budget_chars: int = PRODUCT_KNOWLEDGE_PROMPT_BUDGET_CHARS,
+) -> tuple[list["ProductFact"], list[dict[str, Any]], dict[str, Any]]:
+    """Choose the part of the record this prompt can afford to carry.
+
+    Three steps, in this order.  Repeats are collapsed first, because the same
+    value under a second field name costs the full price and adds nothing --
+    one listing spent 6,850 characters restating a single catalogue blob under
+    five presence flags.  What is left is ranked by how directly it answers
+    the inquiry.  Then the list is filled to the budget from the top.
+
+    Every model that appears in the record keeps its best fact before the
+    budget is spent on anything else, so a comparison question cannot end up
+    holding one side of the comparison.
+
+    Nothing is truncated mid-fact and nothing is cut by position: a fact is
+    either carried whole or reported as dropped.
+    """
+
+    asked = {str(field) for field in requested_fields or ()}
+    wanted = _terms(question) | {
+        term for topic in topics or () for term in _terms(topic)
+    }
+    for field in asked:
+        wanted |= _terms(field.replace("_", " "))
+
+    ordered = sorted(
+        facts, key=lambda item: _fact_relevance(item, asked=asked, wanted=wanted),
+        reverse=True,
+    )
+
+    # --- 1. the same value, said twice -------------------------------------
+    merged: dict[str, list[str]] = {}
+    deduped: list[ProductFact] = []
+    seen: dict[tuple[str, str], ProductFact] = {}
+    dropped: list[dict[str, Any]] = []
+    for fact in ordered:
+        normalized = _normalized_value(fact.value)
+        key = (str(fact.model_code or fact.product_id), normalized)
+        first = seen.get(key)
+        if first is None or (
+            fact.field_key != first.field_key
+            and len(normalized) < _MERGEABLE_VALUE_CHARS
+        ):
+            seen.setdefault(key, fact)
+            deduped.append(fact)
+            continue
+        if fact.field_key != first.field_key:
+            merged.setdefault(first.canonical_fact_id, []).append(fact.field_key)
+        dropped.append({
+            "field_key": fact.field_key,
+            "model_code": fact.model_code,
+            "reason": "DUPLICATE_VALUE",
+            "same_value_as": first.field_key,
+        })
+
+    # --- 2. one fact per model before the budget is spent ------------------
+    reserved: list[ProductFact] = []
+    for fact in deduped:
+        if not any(item.model_code == fact.model_code for item in reserved):
+            reserved.append(fact)
+
+    def prompt_fact(fact: "ProductFact") -> dict[str, Any]:
+        value = fact.as_prompt_fact()
+        also = merged.get(fact.canonical_fact_id)
+        if also:
+            value["also_reported_as"] = sorted(set(also))
+        return value
+
+    def cost(fact: "ProductFact") -> int:
+        return (
+            len(json.dumps(prompt_fact(fact), ensure_ascii=False, default=str))
+            + len(fact.as_prompt_line(merged.get(fact.canonical_fact_id)))
+        )
+
+    # --- 3. fill to the budget, most relevant first ------------------------
+    kept: list[ProductFact] = []
+    spent = _PROMPT_BLOCK_OVERHEAD_CHARS
+    for fact in deduped:
+        price = cost(fact)
+        if spent + price > budget_chars and fact not in reserved:
+            dropped.append({
+                "field_key": fact.field_key,
+                "model_code": fact.model_code,
+                "reason": "PRODUCT_KNOWLEDGE_BUDGET",
+                "chars": price,
+            })
+            continue
+        kept.append(fact)
+        spent += price
+
+    report = {
+        "budget_chars": budget_chars,
+        "available": len(facts),
+        "selected": len(kept),
+        "dropped": dropped,
+        "duplicate_values_merged": sum(
+            1 for item in dropped if item["reason"] == "DUPLICATE_VALUE"
+        ),
+        "dropped_for_budget": sum(
+            1 for item in dropped if item["reason"] == "PRODUCT_KNOWLEDGE_BUDGET"
+        ),
+        "asked_fields_kept": sorted(
+            {item.field_key for item in kept if item.field_key in asked}
+        ),
+        "asked_fields_dropped": sorted(
+            {
+                item["field_key"] for item in dropped
+                if item["field_key"] in asked
+                and item["reason"] == "PRODUCT_KNOWLEDGE_BUDGET"
+            }
+        ),
+        "models_kept": sorted({str(item.model_code or "") for item in kept}),
+        # Which fields were folded into which kept fact, so the rendered block
+        # can name them and a reader can see nothing was silently discarded.
+        "merged_fields": {key: sorted(set(value)) for key, value in merged.items()},
+    }
+    return kept, [prompt_fact(item) for item in kept], report
 
 
 @dataclass(frozen=True)
@@ -533,10 +764,20 @@ class ProductKnowledgeResult:
             lines.append(line)
         return "\n".join(lines)
 
-    def prompt_block(self) -> str:
-        if not self.safe_facts:
+    def prompt_block(
+        self,
+        facts: "Sequence[ProductFact] | None" = None,
+        *,
+        also_reported: "dict[str, Sequence[str]] | None" = None,
+    ) -> str:
+        chosen = tuple(self.safe_facts if facts is None else facts)
+        if not chosen:
             return ""
-        lines = "\n".join(item.as_prompt_line() for item in self.safe_facts)
+        names = also_reported or {}
+        lines = "\n".join(
+            item.as_prompt_line(names.get(item.canonical_fact_id)) for item in chosen
+        )
+        partial = len(chosen) < len(self.safe_facts)
         return (
             # The header stays as it was. Rewriting it to say the list is not
             # the product's complete attribute set was measured and reverted:
@@ -574,9 +815,24 @@ class ProductKnowledgeResult:
             # prepared for this question. Saying so is what makes the wider
             # list safe: the model has to choose, and choosing badly here
             # means answering with a field nobody asked about.
-            "- 위 목록은 이 상품의 전체 검증 기록이며 질문에 맞춰 미리 고른 "
-            "것이 아니다. 질문에 실제로 필요한 항목만 골라서 사용하고, "
-            "나머지는 답변에 나열하지 마라.\n"
+            + (
+                # What this list is has to stay true.  It used to say the list
+                # is the product's whole verified record and was not chosen
+                # for the question -- which is what makes a wide list safe to
+                # read.  Once the prompt budget makes it a selection, the same
+                # sentence would be a false claim about the evidence, so the
+                # two cases say what is actually in front of the model.
+                "- 위 목록은 이 상품의 검증 기록 중 이 질문과 가장 관련이 큰 "
+                "항목만 남긴 것이다. 기록에 있으나 여기 없는 항목이 있을 수 "
+                "있으므로, 없는 항목을 '이 상품에 없는 사양'으로 단정하지 "
+                "마라. 질문에 실제로 필요한 항목만 골라서 사용하고, 나머지는 "
+                "답변에 나열하지 마라.\n"
+                if partial else
+                "- 위 목록은 이 상품의 전체 검증 기록이며 질문에 맞춰 미리 고른 "
+                "것이 아니다. 질문에 실제로 필요한 항목만 골라서 사용하고, "
+                "나머지는 답변에 나열하지 마라.\n"
+            )
+            +
             "- kind=DEVICE_SPECIFICATION은 상품 자체의 사양이고, "
             "kind=LISTING_POLICY_SNAPSHOT은 이 판매 페이지의 현재 조건을 "
             "수집한 값이다. 후자는 고객의 주문 상태·배송일·현재 진행 상황의 "

@@ -63,7 +63,10 @@ def test_689732949_exact_dimensions_reach_runtime_without_all_fields_mode():
         fact for fact in result.safe_facts
         if fact.field_key in {"dimensions_product", "dimensions_labelled"}
     ]
-    assert result.identity_status == "LISTING_EXACT_API_MODEL"
+    # LH43BEDHLGFXKR reduces to the catalogued LH43BEDH, so the catalogue
+    # identifies it and the listing fallback is no longer needed. The facts
+    # below are the listing's own, exactly as before.
+    assert result.identity_status == "UNIQUE_MATCH"
     assert result.supports_question(question)
     assert dimensions
     assert any("967.5" in str(fact.value) and "561.4" in str(fact.value) for fact in dimensions)

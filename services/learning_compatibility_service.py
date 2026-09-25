@@ -352,15 +352,16 @@ def _catalog_aliases() -> Mapping[str, Any] | None:
 
     ``canonical_model_identity`` applies them only when it is given them,
     and this module was the one caller that did not.  Product Catalog,
-    Product Knowledge and the Coupang mapping service all pass them, so the
-    same two codes could be one product to the catalogue and two to
-    Learning: a 43-inch answer stored under ``LH43BEHHLGFXKR`` was reported
-    as a different model from the option's own representative ``LH43BEDH``
-    and went unused.
+    Product Knowledge and the Coupang mapping service all pass them, so one
+    model written two ways could be one product to the catalogue and two to
+    Learning, and the stored answer went unused.
 
     Which codes are equivalent stays where it already is -- ``MODEL_ALIASES``
-    in the catalogue -- so this adds no rule of its own and cannot widen
-    one.  The catalogue read is cached on the file's path, mtime and size.
+    in the catalogue -- so this adds no rule of its own and cannot widen one.
+    An alias that respells a model is applied; one that restates it as a
+    different model is refused there, so passing the table here cannot make
+    two products into one.  The catalogue read is cached on the file's path,
+    mtime and size.
 
     ``None`` when the catalogue cannot be read, which restores exactly the
     previous behaviour: comparing two identities must not fail because a

@@ -161,6 +161,8 @@ def test_a_historical_candidate_is_judged_the_same_way() -> None:
         ("LH43BEDH", "LH50BEDH"),
         ("50BEH", "50BEDH"),
         ("85BEH", "85BEDH"),
+        ("43BEH", "43BEDH"),
+        ("LH43BEHHLGFXKR", "LH43BEDH"),
         # And the two repaired families must not collapse into each other.
         ("27HG806", "32HG806"),
         ("LS27HG806EFXKR", "LS32HG806ESXKR"),
@@ -180,29 +182,62 @@ def test_models_that_differ_stay_different(left, right) -> None:
 
 # --- the change reaches only what the audit said it would -----------------------
 
-def test_only_the_two_audited_codes_changed_identity() -> None:
-    """A longer regional tail is still not treated as a suffix.
+def test_the_business_display_line_reduces_the_same_way_monitors_do() -> None:
+    """``LH`` names a core exactly as ``LS`` does, and the tail is a tail.
 
-    ``[A-Z]{0,3}`` bounds the prefix, so WBGCXKR/EBGCXKR/HLGFXKR and the other
-    LH/KQ/WMN tails are left alone -- which is what keeps this from becoming a
-    rule about product families it was never measured against.
+    This used to stop at ``LS``: an LH code kept whatever string it arrived
+    as, so LH43BEDHLGFXKR and LH43BEDH were two products, and the seller's own
+    LH43BE-H was a third.  Reducing them is the same rule, measured over the
+    whole catalogue -- 1,586 keys, one new group, and that group is three
+    spellings of one record whose specs are byte-identical.
     """
 
-    for code in (
-        "LH43BEHHLGFXKR", "LH50BEHHLGFXKR", "LH85BEHHLGFXKR",
-        "LH55WMBWBGCXKR", "LH65QBREBGCXKR", "KQ43QND90AFXKR",
+    aliases = _aliases()
+    for code, core in (
+        ("LH43BEDHLGFXKR", "43BED"), ("LH43BEDH", "43BED"), ("LH43BED-H", "43BED"),
+        ("LH43BEHHLGFXKR", "43BEH"), ("LH43BEHH", "43BEH"), ("LH43BE-H", "43BEH"),
+        ("LH50BEDHLBFXKR", "50BED"), ("LH50BEDHLGFXKR", "50BED"),
+        ("LH55WMBWBGCXKR", "55WMBW"), ("LH55WMBW", "55WMBW"),
+        ("LH65QBREBGCXKR", "65QBRE"), ("LH65QBRE", "65QBRE"),
     ):
+        assert canonical_model_identity(code, aliases=aliases) == core, code
+
+
+def test_a_family_whose_structure_this_cannot_read_keeps_its_own_code() -> None:
+    """``[A-Z]{0,3}`` bounds the prefix and the core must be size-led.
+
+    KQ/UN codes do not state a size first, so nothing here derives a core for
+    them -- which is what keeps this from becoming a rule about product
+    families it was never measured against.
+    """
+
+    for code in ("KQ43QND90AFXKR", "UN43N5000AFXKR", "KQ42SF90AEXKR"):
         identity = canonical_model_identity(code, aliases=_aliases())
-        # Either an operator alias speaks for it, or it keeps its own code --
-        # never a core derived by the display rule.
-        assert identity in {normalize_model(code), "LH43BEDH"}, (code, identity)
+        assert identity == normalize_model(code), (code, identity)
 
 
-def test_the_43_inch_equivalence_is_untouched() -> None:
+def test_the_43_inch_line_is_two_identities_not_one() -> None:
+    """BE43H-H and BE43D-H are different models and must stay different.
+
+    Six MODEL_ALIASES rows once said otherwise -- an operator judgement about
+    specifications, read here as identity.  An alias may respell a model; it
+    may not restate it.
+    """
+
     aliases = _aliases()
 
-    for code in ("LH43BEHHLGFXKR", "43BEH", "43BED", "43BEDH", "LH43BEDH"):
-        assert canonical_model_identity(code, aliases=aliases) == "LH43BEDH"
-    # And it still does not reach the other sizes.
-    assert canonical_model_identity("LH50BEHHLGFXKR", aliases=aliases) != "LH43BEDH"
-    assert canonical_model_identity("LH85BEHHLGFXKR", aliases=aliases) != "LH43BEDH"
+    beh = {canonical_model_identity(c, aliases=aliases)
+           for c in ("LH43BEHHLGFXKR", "LH43BEHH", "LH43BEH", "LH43BE-H", "43BEH")}
+    bed = {canonical_model_identity(c, aliases=aliases)
+           for c in ("LH43BEDHLGFXKR", "LH43BEDH", "LH43BED-H", "43BEDH", "43BED")}
+
+    assert beh == {"43BEH"}
+    assert bed == {"43BED"}
+    # And neither reaches another size.
+    for size in ("50", "55", "65", "85"):
+        assert canonical_model_identity(f"LH{size}BEHHLGFXKR", aliases=aliases) == (
+            f"{size}BEH"
+        )
+        assert canonical_model_identity(f"LH{size}BEHHLGFXKR", aliases=aliases) not in (
+            beh | bed
+        )
