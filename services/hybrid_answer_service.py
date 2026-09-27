@@ -128,6 +128,38 @@ class HybridAnswerService:
                 "reason": getattr(knowledge, "unavailable_reason", None),
             }
         }
+        # When the customer named a model other than the one they are reading,
+        # the evidence below belongs to that model and the prompt has to say
+        # so. Without it the identity block reports a model key under
+        # ``listing_id`` and the answer can present another product's
+        # specification as this listing's -- which is the failure the target
+        # resolution exists to prevent, reintroduced one layer later.
+        targets = tuple(getattr(knowledge, "resolved_pk_targets", ()) or ())
+        listing_model = getattr(knowledge, "listing_model", None)
+        reason = getattr(knowledge, "target_resolution_reason", None)
+        if targets and (len(targets) > 1 or targets[0] != listing_model):
+            context["product_identity"].update({
+                "listing_model": listing_model,
+                "answer_target_models": list(targets),
+                "usage": (
+                    "고객이 현재 판매 페이지의 상품(listing_model)이 아니라"
+                    " 다른 모델(answer_target_models)을 직접 지목했습니다."
+                    " 아래 사양 근거는 지목된 모델의 것입니다. 지목된 모델에"
+                    " 대해 답하고, listing_model 의 사양을 대신 사용하지"
+                    " 마세요. 주문·배송·설치일은 이 고객의 실제 주문 기준"
+                    " 그대로이며, 지목된 모델 때문에 바뀌지 않습니다."
+                ),
+            })
+        elif reason == "UNRESOLVED_EXPLICIT_MODEL":
+            context["product_identity"].update({
+                "listing_model": listing_model,
+                "answer_target_models": [],
+                "usage": (
+                    "고객이 지목한 모델은 검증된 사양 정보가 없는 모델입니다."
+                    " 현재 판매 페이지 상품(listing_model)의 사양으로 대신"
+                    " 답하지 마세요. 해당 모델은 확인이 필요하다고 안내하세요."
+                ),
+            })
         # How much of the record the prompt can carry.
         #
         # The whole record used to go in, and the prompt budget cleaned up

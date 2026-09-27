@@ -692,6 +692,40 @@ class AnswerService:
             ],
         }
 
+    # The Product Knowledge metadata an already-completed lookup produced.
+    # Named explicitly so carrying it can never carry anything else.
+    _PRODUCT_KNOWLEDGE_METADATA = (
+        "product_knowledge",
+        "product_knowledge_target",
+    )
+
+    @classmethod
+    def _carry_product_knowledge(
+        cls, source: AnswerRequest, target: AnswerRequest,
+    ) -> None:
+        """Keep the Product Knowledge already looked up on a rebuilt request.
+
+        The order lookup rebuilds the request from the refreshed inquiry, and a
+        rebuilt request starts with empty metadata. Market identity, semantic
+        routing, the analysis and the plan are all re-attached there; the
+        Product Knowledge was not. So an inquiry that carried an order reached
+        the provider with no verified specification and no product identity at
+        all -- the lookup had run, and its result was dropped between the
+        lookup and the prompt. A compound "이 모델 무게는 몇 kg이고 제 주문
+        배송은 언제 와요?" is exactly that shape: it is the inquiry most likely
+        to need both, and it was the one guaranteed to get neither.
+
+        Carried, never recomputed. This is the same result the provider gate
+        downstream judges, so a second lookup could only create a way for the
+        two to disagree about what the model was shown. Named keys rather than
+        a wholesale metadata copy, so the order, DPS and plan state the rebuild
+        just refreshed stays the rebuild's.
+        """
+
+        for key in cls._PRODUCT_KNOWLEDGE_METADATA:
+            if key in source.metadata and key not in target.metadata:
+                target.metadata[key] = source.metadata[key]
+
     @staticmethod
     def _attach_semantic_routing(
         request: AnswerRequest,
@@ -1870,6 +1904,24 @@ class AnswerService:
                 include_all_catalog_fields=product_evidence_requested,
             )
             request.metadata["product_knowledge"] = product_knowledge
+            # Which product that evidence is about. Recorded separately from
+            # the listing because they can differ: a customer reading one
+            # listing may ask about another model by name, and the lookup
+            # follows the question. Diagnostic only -- the order, delivery and
+            # DPS identity of this inquiry stays the listing's throughout, and
+            # nothing here touches it.
+            request.metadata["product_knowledge_target"] = {
+                "listing_model": product_knowledge.listing_model,
+                "explicit_inquiry_models": list(
+                    product_knowledge.inquiry_target_models
+                ),
+                "resolved_pk_targets": list(
+                    product_knowledge.resolved_pk_targets
+                ),
+                "target_resolution_reason": (
+                    product_knowledge.target_resolution_reason
+                ),
+            }
             self.logs.record_inquiry(
                 inquiry_id,
                 "PROCESSING_PLAN_STARTED",
@@ -2195,11 +2247,18 @@ class AnswerService:
                         deterministic_analysis=deterministic_analysis,
                     )
                     inquiry = refreshed
+                    previous_request = request
                     request = answer_request_from_inquiry(inquiry)
                     self._attach_market_identity(request, inquiry)
                     self._attach_semantic_routing(
                         request, routing_semantic, semantic_routing,
                     )
+                    # The lookup happened before the order call and does not
+                    # depend on it. Carrying it is what puts the product's
+                    # verified specification, and the identity block that says
+                    # which product it belongs to, into the prompt of an
+                    # inquiry that also asks about its order.
+                    self._carry_product_knowledge(previous_request, request)
                     request.metadata["phase9_analysis"] = analysis_data
                     request.metadata["processing_plan"] = plan.to_dict()
                     decision_details.update(

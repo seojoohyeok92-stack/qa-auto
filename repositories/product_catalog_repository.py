@@ -216,6 +216,67 @@ _WORD_SPLIT = re.compile(r"[^0-9A-Za-z]+")
 # otherwise satisfy the letters-and-digits shape above.
 _MEASUREMENT_SUFFIX = ("CM", "MM", "KG", "INCH", "HZ", "W", "K")
 
+# The same scan, run over a customer's sentence instead of a listing title.
+# A hyphen stays inside the token here: "LH43BE-H" is one model code written
+# the way the box writes it, and splitting on the hyphen left "LH43BE", which
+# is not a model and resolves to nothing. Titles keep the stricter split above
+# because there a hyphen is punctuation as often as notation.  Hangul remains
+# a separator either way, so a Korean particle ends a token and "32DM501은"
+# still reads as "32DM501".
+_INQUIRY_WORD_SPLIT = re.compile(r"[^0-9A-Za-z-]+")
+
+
+def _is_measurement(token: str) -> bool:
+    """Is this whole token a measurement rather than a model code?
+
+    Stricter than "ends in a unit", which is all the title scan can afford to
+    ask. "4K" and "180HZ" are measurements because everything in front of the
+    unit is a number. "S32CM703UK" and "LH55WMBW" end in K and W and are
+    models: the part in front is not a number, and nothing about it is a
+    quantity. Ending alone discarded five model codes per thousand inquiries
+    -- every Samsung code written with the retail suffix the customer reads
+    off the box.
+    """
+
+    return any(
+        token.endswith(unit) and token[: -len(unit)].isdigit()
+        for unit in _MEASUREMENT_SUFFIX
+    )
+
+
+# An email address or a link is not a sentence, and nothing inside one names a
+# product. Customers send both constantly -- "gksdms156@naver.com", a
+# naver.me share link -- and their local parts and path segments have exactly
+# the letters-and-digits shape a model code has. Removed before the scan runs,
+# because a token lifted out of an address is not a model the customer named.
+_ADDRESS_RUN = re.compile(
+    r"\S*@\S*|https?://\S*|\bwww\.\S*", re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class StatedModels:
+    """The models a piece of free text names outright.
+
+    ``resolved`` holds the tokens the catalogue settled on exactly one record
+    for. ``unresolved`` holds the rest: text shaped like a model code that this
+    catalogue does not know. They are kept apart because they mean opposite
+    things -- one names something to answer about, the other names something
+    that cannot be answered about at all.
+    """
+
+    tokens: tuple[str, ...] = ()
+    # (as written, catalog key, canonical identity)
+    resolved: tuple[tuple[str, str, str], ...] = ()
+    unresolved: tuple[str, ...] = ()
+
+    @property
+    def identities(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(identity for _, _, identity in self.resolved))
+
+    def __bool__(self) -> bool:
+        return bool(self.tokens)
+
 
 @dataclass(frozen=True)
 class CatalogMatch:
@@ -413,6 +474,67 @@ class ProductCatalogRepository:
                 (key, dict(catalog[key])) for key in ordered if key in catalog
             ),
         )
+
+    @staticmethod
+    def _inquiry_model_tokens(text: object) -> list[str]:
+        """Model-code-shaped words in a customer's sentence, as written.
+
+        Same structural test the title scan uses, over the hyphen-preserving
+        split, and ordered rather than a set so a comparison keeps the order
+        the customer asked in.
+        """
+
+        found: list[str] = []
+        sentence = _ADDRESS_RUN.sub(" ", str(text or ""))
+        for word in _INQUIRY_WORD_SPLIT.split(sentence):
+            word = word.strip("-")
+            if not word:
+                continue
+            token = normalize_model(word)
+            if len(token) < MIN_IDENTIFYING_LENGTH:
+                continue
+            if _is_measurement(token):
+                continue
+            if _MODEL_TOKEN.fullmatch(token) and word.upper() not in found:
+                found.append(word.upper())
+        return found
+
+    def models_stated_in(self, text: object) -> StatedModels:
+        """Which catalogued models this text names for itself.
+
+        Identification is the existing one: each token goes through ``match``
+        and only ``EXACT``/``UNIQUE_MATCH`` counts, so a short form ("43BEH"),
+        an alias and a full code resolve exactly as they do everywhere else.
+        Nothing here decides what a model code means -- it only asks.
+        """
+
+        tokens = self._inquiry_model_tokens(text)
+        if not tokens:
+            return StatedModels()
+        try:
+            aliases = self.catalog()["aliases"]
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return StatedModels(tuple(tokens), (), tuple(tokens))
+        resolved: list[tuple[str, str, str]] = []
+        unresolved: list[str] = []
+        for token in tokens:
+            match = self.match(model_code=token)
+            if not match.model_key:
+                # The same lookup from the other side. A code is often written
+                # with a suffix the catalogue does not carry -- "S32CM703UK"
+                # for S32CM703, "LS32DM501E" for the full key -- and the
+                # whole-key-inside-the-text path already handles exactly that.
+                # Passing the single token as the text keeps it as tight as
+                # the exact lookup: the key has to sit inside this one word.
+                match = self.match(product_name=token)
+            if match.model_key and match.status in {EXACT, UNIQUE_MATCH}:
+                identity = canonical_model_identity(
+                    match.model_key, aliases=aliases,
+                ) or match.model_key
+                resolved.append((token, match.model_key, identity))
+            else:
+                unresolved.append(token)
+        return StatedModels(tuple(tokens), tuple(resolved), tuple(unresolved))
 
     @staticmethod
     def _model_tokens(text: object) -> set[str]:

@@ -30,6 +30,7 @@ from typing import Any, Iterable, Sequence
 
 from repositories.product_catalog_repository import (
     ProductCatalogRepository,
+    StatedModels,
     canonical_model_identity,
     normalize_model,
 )
@@ -338,6 +339,64 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
     (("출시", "연식", "언제 나온"), ("release_month", "manufacture_date"),
      ("accessory_release_month",)),
 )
+
+
+# How the target of a Product Knowledge lookup was decided.
+#
+# LISTING_FALLBACK          the inquiry named no model; the listing is the subject
+# INQUIRY_EXPLICIT_MODEL    the inquiry named one model and the catalogue knows it
+# MULTI_MODEL_COMPARISON    the inquiry named more than one; each is kept whole
+# UNRESOLVED_EXPLICIT_MODEL the inquiry named a model this catalogue does not
+#                           know. Nothing is reported: the listing's record is
+#                           not an answer about a model the customer did not ask
+#                           about, and substituting it is the failure this
+#                           resolution exists to prevent.
+LISTING_FALLBACK = "LISTING_FALLBACK"
+INQUIRY_EXPLICIT_MODEL = "INQUIRY_EXPLICIT_MODEL"
+MULTI_MODEL_COMPARISON = "MULTI_MODEL_COMPARISON"
+UNRESOLVED_EXPLICIT_MODEL = "UNRESOLVED_EXPLICIT_MODEL"
+
+# "이 제품이랑 43BEF 차이가 뭐예요?" names one model and points at another.
+# Deixis, not a product: the phrase means whichever listing the customer is
+# writing from, so it adds the listing as a second target and never elects a
+# particular model.
+_REFERS_TO_THIS_LISTING = re.compile(
+    r"이\s*(제품|상품|모델|기종)|현재\s*(제품|상품|모델)|본\s*(제품|상품)"
+    r"|지금\s*보고\s*있는"
+)
+
+
+@dataclass(frozen=True)
+class InquiryTarget:
+    """One product a lookup should be run for."""
+
+    model_code: str
+    identity: str | None
+    # The listing id travels only with the listing's own target. A listing's
+    # non-model evidence -- its listing_facts, its policy_facts -- is keyed by
+    # product id and describes *that* listing, so carrying the id onto another
+    # model's lookup would readmit exactly the evidence being excluded.
+    product_id: str
+    is_listing: bool
+
+
+@dataclass(frozen=True)
+class TargetResolution:
+    targets: tuple[InquiryTarget, ...]
+    reason: str
+    listing_model: str | None
+    listing_identity: str | None
+    stated: StatedModels
+
+    @property
+    def inquiry_target_models(self) -> tuple[str, ...]:
+        return tuple(self.stated.tokens)
+
+    @property
+    def resolved_pk_targets(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(
+            target.identity or target.model_code for target in self.targets
+        ))
 
 
 @dataclass(frozen=True)
@@ -674,6 +733,14 @@ class ProductKnowledgeResult:
     # nothing here elects one, so they never become verified facts.
     identity_status: str = "NOT_FOUND"
     candidate_models: tuple[dict[str, Any], ...] = dataclass_field(default=())
+    # Which product this evidence is about, kept apart from which product the
+    # customer is writing *from*. A customer reading one listing may ask about
+    # another model by name, and answering that question from the listing's
+    # record answers a question nobody asked.
+    listing_model: str | None = None
+    inquiry_target_models: tuple[str, ...] = dataclass_field(default=())
+    resolved_pk_targets: tuple[str, ...] = dataclass_field(default=())
+    target_resolution_reason: str = LISTING_FALLBACK
 
     @property
     def has_safe_facts(self) -> bool:
@@ -1418,18 +1485,207 @@ class ProductKnowledgeService:
             ))
             listing_fields = None
 
-        def _catalog() -> ProductKnowledgeResult:
+        # Which product the customer is asking about, which is not always the
+        # one they are writing from. Resolved from the customer's words only:
+        # ``combined`` is the question and its sub-questions, never the listing
+        # title, so a title can never nominate itself as an explicit target.
+        resolution = self._resolve_inquiry_targets(
+            combined, listing_model=model_code, listing_id=key,
+        )
+
+        def _catalog(target: InquiryTarget) -> ProductKnowledgeResult:
             return self._catalog_facts_for_inquiry(
-                product_id=key,
-                product_name=product_name,
-                option_name=option_name,
-                model_code=model_code,
+                product_id=target.product_id,
+                # A listing title identifies its own listing. For any other
+                # target it is noise that can only pull the lookup back toward
+                # the model the customer did not ask about.
+                product_name=product_name if target.is_listing else "",
+                option_name=option_name if target.is_listing else "",
+                model_code=target.model_code,
                 fields=catalog_fields,
                 topics=topics,
                 combined=combined,
             )
 
-        return _catalog()
+        if not resolution.targets:
+            # The customer named a model and it is not one this catalogue
+            # holds. The listing's record is not a substitute for it.
+            return self._with_targets(
+                ProductKnowledgeResult(
+                    product_id=key or None, listing_id=None, matched=False,
+                    requested_fields=catalog_fields, topics=topics,
+                    unavailable_reason="INQUIRY_MODEL_NOT_IN_CATALOG",
+                    identity_status="NOT_FOUND",
+                ),
+                resolution,
+            )
+
+        results = [_catalog(target) for target in resolution.targets]
+        merged = (
+            results[0] if len(results) == 1
+            else self._merge_target_results(
+                results, product_id=key, fields=catalog_fields, topics=topics,
+            )
+        )
+        return self._with_targets(merged, resolution)
+
+    def _resolve_inquiry_targets(
+        self, text: str, *, listing_model: object, listing_id: str,
+    ) -> TargetResolution:
+        """Which product(s) this inquiry is about.
+
+        The listing is the subject until the customer names something else.
+        When they do, the named model becomes the subject -- all of it, so a
+        comparison keeps every model it compares, and none of it when the name
+        is not one the catalogue knows.
+
+        Identification is entirely the catalogue's existing one. Nothing here
+        compares a model code to a literal or knows what any product line is
+        called; a model is whatever ``models_stated_in`` resolves, which is the
+        same ``match`` the listing path has always used.
+        """
+
+        try:
+            aliases = self.catalog_repository.catalog().get("aliases")
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            aliases = None
+        listing_code = str(listing_model or "").strip()
+        listing_norm = normalize_model(listing_code)
+        listing_identity = (
+            canonical_model_identity(listing_code, aliases=aliases)
+            if listing_code else None
+        )
+        listing_target = InquiryTarget(
+            model_code=listing_code, identity=listing_identity,
+            product_id=listing_id, is_listing=True,
+        )
+        stated = self.catalog_repository.models_stated_in(text)
+
+        def _listing_only(reason: str) -> TargetResolution:
+            return TargetResolution(
+                (listing_target,), reason, listing_code or None,
+                listing_identity, stated,
+            )
+
+        if not stated.tokens:
+            return _listing_only(LISTING_FALLBACK)
+        # Quoting the listing's own code is not naming a different product.
+        # Customers quote it in full ("LS32DM501EKXKR"), in part ("LS32DM501E")
+        # and by pasting the whole title, which drops family fragments like
+        # "LH43B" into the text. Each of those is the listing referring to
+        # itself, so none of them makes the inquiry unanswerable -- and a
+        # listing whose own code the catalogue happens not to hold stays
+        # answerable exactly as it was.
+        def _quotes_the_listing(token: str) -> bool:
+            token_norm = normalize_model(token)
+            return bool(
+                listing_norm and token_norm
+                and (token_norm in listing_norm or listing_norm in token_norm)
+            )
+
+        if [
+            token for token in stated.unresolved
+            if not _quotes_the_listing(token)
+        ]:
+            return TargetResolution(
+                (), UNRESOLVED_EXPLICIT_MODEL, listing_code or None,
+                listing_identity, stated,
+            )
+        if not stated.resolved:
+            return _listing_only(LISTING_FALLBACK)
+        targets: list[InquiryTarget] = []
+        for _token, model_key, identity in stated.resolved:
+            is_listing = bool(
+                normalize_model(model_key) == listing_norm
+                or (listing_identity and identity == listing_identity)
+            )
+            targets.append(InquiryTarget(
+                model_code=model_key, identity=identity,
+                product_id=listing_id if is_listing else "",
+                is_listing=is_listing,
+            ))
+        # "이 제품이랑 43BEF 차이가 뭐예요?" -- one side of the comparison is
+        # named and the other is pointed at. The listing joins as a target of
+        # its own; it does not replace the model that was named.
+        if (
+            _REFERS_TO_THIS_LISTING.search(text)
+            and not any(target.is_listing for target in targets)
+            and (listing_code or listing_id)
+        ):
+            targets.insert(0, listing_target)
+        return TargetResolution(
+            tuple(targets),
+            MULTI_MODEL_COMPARISON if len(targets) > 1 else INQUIRY_EXPLICIT_MODEL,
+            listing_code or None, listing_identity, stated,
+        )
+
+    @staticmethod
+    def _with_targets(
+        result: ProductKnowledgeResult, resolution: TargetResolution,
+    ) -> ProductKnowledgeResult:
+        """Record what the lookup was aimed at, alongside what it found."""
+
+        return replace(
+            result,
+            listing_model=resolution.listing_identity or resolution.listing_model,
+            inquiry_target_models=resolution.inquiry_target_models,
+            resolved_pk_targets=resolution.resolved_pk_targets,
+            target_resolution_reason=resolution.reason,
+        )
+
+    @staticmethod
+    def _merge_target_results(
+        results: Sequence[ProductKnowledgeResult], *,
+        product_id: str, fields: tuple[str, ...], topics: tuple[str, ...],
+    ) -> ProductKnowledgeResult:
+        """One result covering several targets, each keeping its own facts.
+
+        A comparison is answered from both records or it is not answered. The
+        facts stay attributed -- every one carries its own ``model_code`` -- so
+        merging them into one list never merges the models they describe.
+        """
+
+        def _key(fact: ProductFact) -> tuple[Any, ...]:
+            return (fact.model_code, fact.field_key, str(fact.value),
+                    fact.subject, fact.canonical_fact_id)
+
+        safe: dict[tuple[Any, ...], ProductFact] = {}
+        excluded: dict[tuple[Any, ...], ProductFact] = {}
+        for result in results:
+            for fact in result.safe_facts:
+                safe.setdefault(_key(fact), fact)
+            for fact in result.excluded_facts:
+                excluded.setdefault(_key(fact), fact)
+        matched = [result for result in results if result.matched]
+        primary = matched[0] if matched else results[0]
+        statuses = {result.identity_status for result in results}
+        return ProductKnowledgeResult(
+            product_id=product_id or primary.product_id,
+            listing_id=next(
+                (result.listing_id for result in results if result.listing_id),
+                None,
+            ),
+            matched=bool(matched),
+            requested_fields=fields,
+            safe_facts=tuple(safe.values()),
+            excluded_facts=tuple(excluded.values()),
+            unavailable_reason=(
+                None if matched else next(
+                    (result.unavailable_reason for result in results
+                     if result.unavailable_reason), None,
+                )
+            ),
+            topics=topics,
+            collection_status=primary.collection_status,
+            component_subject=any(result.component_subject for result in results),
+            identity_status=(
+                statuses.pop() if len(statuses) == 1 else "MULTI_MODEL_TARGET"
+            ),
+            candidate_models=tuple(
+                candidate for result in results
+                for candidate in result.candidate_models
+            ),
+        )
 
     def _catalog_facts_for_inquiry(
         self,
