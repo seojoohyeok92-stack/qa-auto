@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import UTC, datetime
 from typing import Any, Iterable, Sequence
 
 from repositories.product_catalog_repository import (
+    EXACT,
+    UNIQUE_MATCH,
     ProductCatalogRepository,
     StatedModels,
     canonical_model_identity,
@@ -366,6 +369,24 @@ _REFERS_TO_THIS_LISTING = re.compile(
 )
 
 
+def _settled_identity(model_key: object, repository: Any) -> str | None:
+    """The canonical identity of a model key, in the unit targets are reported in.
+
+    ``listing_model`` and ``resolved_pk_targets`` are read together and compared
+    to each other, so both must be identities. Reporting a catalogue key in one
+    and an identity in the other made an ordinary listing question look like a
+    cross-model one.
+    """
+
+    if not model_key:
+        return None
+    try:
+        aliases = repository.catalog().get("aliases")
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        aliases = None
+    return canonical_model_identity(model_key, aliases=aliases) or str(model_key)
+
+
 @dataclass(frozen=True)
 class InquiryTarget:
     """One product a lookup should be run for."""
@@ -645,6 +666,55 @@ def select_prompt_facts(
             "reason": "DUPLICATE_VALUE",
             "same_value_as": first.field_key,
         })
+
+    # --- 1b. one fact per meaning, across scopes ---------------------------
+    #
+    # A listing states its product's origin and the model record states the same
+    # origin, so 690027174 carried both into the prompt: "한국 (베트남,중국,태국,
+    # 멕시코,헝가리,슬로바키아)" beside "한국 (베트남,중국,헝가리,멕시코,슬로바키아,
+    # 태국)". One fact, two spellings, two entries of evidence, and the model left
+    # to wonder which to use.
+    #
+    # Grouped by canonical model identity, so two models are never collapsed into
+    # each other -- a comparison keeps both sides -- and by the field-aware
+    # canonical value, so this only merges readings that say the same thing.
+    #
+    # The listing's own row represents the group when there is one: it is what
+    # the page the customer is reading states. A cross-model target never has a
+    # listing row among its candidates, so preferring it cannot pull another
+    # listing's evidence into that answer.
+    by_meaning: dict[tuple[str, str, str], ProductFact] = {}
+    semantic: list[ProductFact] = []
+    for fact in deduped:
+        identity = (
+            canonical_model_identity(fact.model_code)
+            or normalize_model(fact.model_code)
+            or str(fact.applies_to_product_id or fact.product_id or "")
+        )
+        key = (identity, str(fact.field_key or ""), _canonical_fact_value(fact))
+        first = by_meaning.get(key)
+        if first is None:
+            by_meaning[key] = fact
+            semantic.append(fact)
+            continue
+        prefers_new = (
+            str(fact.scope) == "LISTING" and str(first.scope) != "LISTING")
+        loser, winner = (first, fact) if prefers_new else (fact, first)
+        if prefers_new:
+            by_meaning[key] = fact
+            semantic[semantic.index(first)] = fact
+        # The dropped copy's origin is not lost: it is recorded against the one
+        # that stays, so a reader can still see both sources agreed.
+        merged.setdefault(winner.canonical_fact_id, []).append(
+            f"{loser.field_key}@{loser.scope}")
+        dropped.append({
+            "field_key": loser.field_key,
+            "model_code": loser.model_code,
+            "reason": "SEMANTIC_DUPLICATE_ACROSS_SCOPE",
+            "kept_instead": winner.canonical_fact_id,
+            "kept_scope": str(winner.scope),
+        })
+    deduped = semantic
 
     # --- 2. one fact per model before the budget is spent ------------------
     reserved: list[ProductFact] = []
@@ -1047,6 +1117,172 @@ def _normalized_fact_value(fact: ProductFact) -> str:
     return compact
 
 
+# What makes two readings of one field the same fact.
+#
+# The conflict resolver compared ``_normalized_fact_value``, which strips
+# whitespace and case and collapses a labelled number. That is the right test for
+# a number and the wrong one for everything else: "삼성 서비스센터 : 1588-3366"
+# and "삼성전자서비스센터 / 1588-3366" are one telephone number written twice,
+# and comparing the strings made them contradict each other, so both were
+# withheld. Measured after the review promotions, 75 of 159 rows died that way.
+#
+# One canonicalizer per field family, each deterministic and each meaning-
+# preserving. Nothing here is fuzzy: a different number, a different company, a
+# different country or a different word is still a conflict.
+_LEGAL_SUFFIXES = ("㈜", "(주)", "주식회사", "(유)", "㈐")
+_PHONE_IN_TEXT = re.compile(r"\d{2,4}-\d{3,4}-\d{3,4}|\b\d{4}-\d{4}\b")
+_PUNCTUATION_ONLY = re.compile(
+    r"[\s·.,()\[\]{}:;/\\|·‧∙・…~〜\-–—!?\"'“”‘’]+"
+)
+_PARENTHESISED = re.compile(r"[（(]([^）)]*)[）)]")
+_DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")
+# Condition words that change what a measurement is of. Two values are never
+# called equivalent when both name a condition and the conditions differ.
+_MEASUREMENT_CONDITIONS = (
+    ("WITH_STAND", ("스탠드포함", "스탠드 포함", "with stand", "포함(가로")),
+    ("WITHOUT_STAND", ("스탠드미포함", "스탠드 미포함", "스탠드제외", "스탠드 제외",
+                       "without stand", "본체만")),
+    ("PACKAGE", ("포장", "package", "박스")),
+)
+_CONTACT_FIELDS = ("as_contact", "as_phone", "as_guide", "contact", "phone",
+                   "seller_as_contact_location")
+_MANUFACTURER_FIELDS = ("manufacturer", "importer", "brand_company")
+_DATE_FIELDS = ("release_ym", "release_date", "release", "manufacture_date")
+_ORIGIN_FIELDS = ("origin_country", "country_of_origin", "origin")
+_PROSE_FIELDS = ("warranty_policy", "as_guide", "policy", "guide", "notice")
+_DIMENSION_FIELDS = ("dimension", "size_mm", "width", "height", "depth")
+
+
+def _fold_punctuation(text: str) -> str:
+    return _PUNCTUATION_ONLY.sub("", unicodedata.normalize("NFKC", text)).lower()
+
+
+def _measurement_condition(text: str) -> str:
+    lowered = text.lower()
+    for name, markers in _MEASUREMENT_CONDITIONS:
+        if any(marker.lower() in lowered for marker in markers):
+            return name
+    return ""
+
+
+def _canonical_contact(text: str) -> str | None:
+    """The set of telephone numbers, which is what a contact actually says.
+
+    One number written three ways is one contact. Two numbers -- the maker's and
+    a bundled stand vendor's -- is a different contact from one, so the sets are
+    compared rather than merged.
+    """
+
+    numbers = sorted(set(_PHONE_IN_TEXT.findall(text)))
+    return "phones:" + "|".join(numbers) if numbers else None
+
+
+def _canonical_company(text: str) -> str:
+    cleaned = unicodedata.normalize("NFKC", text)
+    for suffix in _LEGAL_SUFFIXES:
+        cleaned = cleaned.replace(suffix, "")
+    return "company:" + _fold_punctuation(cleaned)
+
+
+def _canonical_year_month(text: str) -> str | None:
+    """YYYY-MM, so "2024-04", "2024년 4월" and "2024.04" are one date."""
+
+    # Unsigned: "2024-04" must read as two numbers, not as 2024 and minus four.
+    numbers = [int(item) for item in re.findall(r"\d+", text)]
+    years = [item for item in numbers if 1900 <= item <= 2200]
+    if not years:
+        return None
+    year = years[0]
+    months = [item for item in numbers if 1 <= item <= 12 and item != year]
+    return f"date:{year}-{months[0]:02d}" if months else f"date:{year}"
+
+
+def _canonical_origin(text: str) -> str:
+    """Country of record, plus the set of alternate plants with order removed.
+
+    "한국 (베트남, 중국, 태국)" and "한국 (중국, 태국, 베트남)" name the same
+    places. "중국산" and "한국 (베트남, 중국, …)" do not: the country of record
+    differs, and that is kept ordered and compared exactly.
+    """
+
+    normalized = unicodedata.normalize("NFKC", text)
+    match = _PARENTHESISED.search(normalized)
+    alternates: tuple[str, ...] = ()
+    head = normalized
+    if match:
+        alternates = tuple(sorted({
+            _fold_punctuation(part) for part in match.group(1).split(",")
+            if part.strip()
+        }))
+        head = normalized[: match.start()]
+    return "origin:" + _fold_punctuation(head) + "|" + "|".join(alternates)
+
+
+def _canonical_fact_value(fact: ProductFact) -> str:
+    """The field-aware canonical form used to decide whether two rows agree."""
+
+    field = str(fact.field_key or "").lower()
+    text = fact.value if isinstance(fact.value, str) else None
+    if text is None:
+        return _normalized_fact_value(fact)
+    if any(name in field for name in _CONTACT_FIELDS):
+        contact = _canonical_contact(text)
+        if contact:
+            return contact
+    if any(name in field for name in _ORIGIN_FIELDS):
+        return _canonical_origin(text)
+    if any(name in field for name in _DATE_FIELDS):
+        moment = _canonical_year_month(text)
+        if moment:
+            return moment
+    if any(name in field for name in _MANUFACTURER_FIELDS):
+        return _canonical_company(text)
+    if any(name in field for name in _PROSE_FIELDS):
+        # Spacing and punctuation only. "결함" and "결합" are one character apart
+        # and are different words, so folding stops at punctuation.
+        return "prose:" + _fold_punctuation(text)
+    return _normalized_fact_value(fact)
+
+
+def _rounding_representative(
+    group: Sequence[ProductFact],
+) -> ProductFact | None:
+    """The most precise reading, when the group differs only in precision.
+
+    Every value must be the same count of numbers, must round to the same
+    integers, and no two may name different conditions: a with-stand depth and a
+    without-stand depth differ by far more than a rounding step, and refusing an
+    explicit contradiction is what keeps this from merging them anyway.
+    """
+
+    readings = []
+    for fact in group:
+        if not isinstance(fact.value, str):
+            return None
+        numbers = [float(item) for item in _DECIMAL.findall(fact.value)]
+        if len(numbers) < 2:
+            return None
+        readings.append((fact, numbers, _measurement_condition(fact.value)))
+    first = readings[0][1]
+    if any(len(numbers) != len(first) for _f, numbers, _c in readings):
+        return None
+    if any(
+        round(numbers[index]) != round(first[index])
+        for _f, numbers, _c in readings for index in range(len(first))
+    ):
+        return None
+    named = {condition for _f, _n, condition in readings if condition}
+    if len(named) > 1:
+        return None
+
+    def precision(numbers: Sequence[float]) -> int:
+        return sum(
+            len(f"{value:g}".partition(".")[2]) for value in numbers
+        )
+
+    return max(readings, key=lambda entry: precision(entry[1]))[0]
+
+
 def _exact_fact_conflict_key(fact: ProductFact) -> tuple[str, ...]:
     """Identity and field first; timestamps never join different subjects."""
 
@@ -1077,9 +1313,26 @@ def _resolve_exact_fact_conflicts(
     safe: list[ProductFact] = []
     excluded: list[ProductFact] = []
     for group in grouped.values():
-        values = {_normalized_fact_value(item) for item in group}
+        values = {_canonical_fact_value(item) for item in group}
         if len(values) <= 1:
             safe.extend(group)
+            continue
+        # Same measurement, different precision. The precise reading represents
+        # the group and the rounded ones stay as corroboration rather than
+        # cancelling it: two spellings of 716.1 x 517.0 x 193.5 mm are not a
+        # disagreement about the product's size.
+        representative = _rounding_representative(group)
+        if representative is not None:
+            safe.append(representative)
+            for item in group:
+                if item.canonical_fact_id == representative.canonical_fact_id:
+                    continue
+                excluded.append(replace(
+                    item, safe_for_answer=False,
+                    resolution_status="ROUNDING_VARIANT",
+                    exclusion_reason=(
+                        "SUPERSEDED_BY_HIGHER_PRECISION_EQUIVALENT_READING"),
+                ))
             continue
         top_authority = max(_fact_source_authority(item) for item in group)
         authoritative = [
@@ -1087,7 +1340,7 @@ def _resolve_exact_fact_conflicts(
             if _fact_source_authority(item) == top_authority
         ]
         authoritative_values = {
-            _normalized_fact_value(item) for item in authoritative
+            _canonical_fact_value(item) for item in authoritative
         }
         winners: list[ProductFact] = []
         if len(authoritative_values) == 1:
@@ -1097,7 +1350,7 @@ def _resolve_exact_fact_conflicts(
             if all(moment is not None for _item, moment in timed):
                 latest = max(moment for _item, moment in timed if moment is not None)
                 winners = [item for item, moment in timed if moment == latest]
-                if len({_normalized_fact_value(item) for item in winners}) > 1:
+                if len({_canonical_fact_value(item) for item in winners}) > 1:
                     winners = []
         winner_ids = {item.canonical_fact_id for item in winners}
         safe.extend(winners)
@@ -1155,6 +1408,97 @@ PHYSICAL_DIMENSION_FIELDS: frozenset[str] = frozenset({
     "dimensions_without_stand_mm", "width", "screen_height_without_stand",
     "depth_screen", "total_height_with_stand", "stand_depth",
 })
+
+
+# The question side and the data side of the same fact, in one place.
+#
+# ``FIELD_TOPICS`` grew against an ontology the collected records do not use.
+# Measured against the merged file: Product Knowledge holds 506 distinct field
+# names, FIELD_TOPICS aims at 90, 465 stored names have no keyword route at all,
+# and 38 of the names it does aim at exist nowhere in the data. So a question
+# could match a topic, produce a field list, and still name nothing the record
+# contains -- "as는 몇년인가요" matched no topic at all while ``as_phone`` and
+# ``as_guide`` sat on that listing, and "이 제품 베사홀 규격" asked for
+# ``vesa_mm`` while the record stored ``vesa``.
+#
+# Each family names how customers ask and which stored field names answer. The
+# fragments are matched against the vocabulary the loaded file actually has, so
+# a family can never invent a field, and a stored name that gains or loses a
+# suffix keeps working without a code change.
+_ATTRIBUTE_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("ORIGIN",
+     ("제조국", "원산지", "생산지", "생산 국가", "생산국", "어디서 만들",
+      "어디서 생산", "어느 나라", "made in"),
+     ("origin_country", "country_of_origin")),
+    ("AS_WARRANTY",
+     ("as", "a/s", "에이에스", "서비스센터", "서비스 센터", "보증기간",
+      "보증 기간", "무상수리", "무상 수리", "고장", "수리"),
+     ("as_contact", "as_phone", "as_guide", "warranty")),
+    ("MANUFACTURER",
+     ("제조사", "제조원", "만든 회사", "수입사", "수입원", "판매원"),
+     ("manufacturer", "manufacturer_importer")),
+    ("WEIGHT",
+     ("무게", "중량", "kg", "킬로"),
+     ("weight",)),
+    ("DIMENSIONS",
+     ("크기", "사이즈", "치수", "가로", "세로", "폭", "높이", "깊이", "두께"),
+     ("dimension", "width", "height", "depth")),
+    ("VESA",
+     ("베사", "vesa", "벽걸이 규격", "브라켓 규격", "홀 간격", "타공"),
+     ("vesa",)),
+    ("RESOLUTION",
+     ("해상도", "resolution", "4k", "uhd", "qhd", "fhd"),
+     ("resolution",)),
+    ("REFRESH",
+     ("주사율", "리프레시", "hz", "헤르츠"),
+     ("refresh", "refresh_rate")),
+    ("RESPONSE",
+     ("응답속도", "응답 속도", "gtg"),
+     ("response_time",)),
+    ("PANEL",
+     ("패널", "ips", "va패널", "va 패널", "tn패널"),
+     ("panel",)),
+    ("BLUETOOTH",
+     ("블루투스", "bluetooth", "무선 이어폰", "무선이어폰", "무선 헤드폰"),
+     ("bluetooth",)),
+    ("WIRELESS",
+     ("와이파이", "wifi", "wi-fi", "무선 연결", "미러링", "캐스팅"),
+     ("wifi", "wireless", "mirroring", "cast")),
+    ("PORTS",
+     ("hdmi", "usb", "단자", "포트", "c타입", "타입c", "랜", "lan", "이더넷"),
+     ("hdmi", "usb", "port", "ethernet", "lan_")),
+    ("SPEAKER",
+     ("스피커", "사운드", "소리", "음량", "speaker"),
+     ("speaker", "audio")),
+    ("POWER",
+     ("소비전력", "대기전력", "전력", "전압", "전기", "에너지", "소비 전력"),
+     ("power_consumption", "rated_voltage", "energy", "standby")),
+    ("CERTIFICATION",
+     ("인증", "kc", "안전인증", "certification"),
+     ("certification",)),
+    ("DELIVERY_COST",
+     ("배송비", "설치비", "추가 비용", "추가비용", "무료배송", "무료 배송",
+      "반품비", "교환비"),
+     ("additional_cost", "delivery_fee", "return_delivery_fee",
+      "exchange_delivery_fee", "delivery_type")),
+    ("RELEASE",
+     ("출시", "연식", "년형", "제조일", "생산연도", "출시일"),
+     ("release", "manufacture_date")),
+)
+
+
+def _family_fragments(text: str) -> tuple[str, ...]:
+    """Stored-field fragments the families this text asks about point at."""
+
+    fragments: list[str] = []
+    for _family, keywords, targets in _ATTRIBUTE_FAMILIES:
+        present = [keyword for keyword in keywords if keyword in text]
+        if not present:
+            continue
+        if all(_is_excluded_mention(text, keyword) for keyword in present):
+            continue
+        fragments.extend(targets)
+    return tuple(dict.fromkeys(fragments))
 
 
 def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1459,6 +1803,11 @@ class ProductKnowledgeService:
             texts.append(str(question))
         combined = " ".join(texts)
         fields, topics = fields_for_question(combined)
+        # The keyword router names fields from its own vocabulary; the record
+        # uses another. Expanding against the vocabulary the file actually has
+        # is what lets a question reach the row that answers it, and it can
+        # only ever add names the data contains.
+        fields = self._expand_to_stored_fields(combined, fields)
         # Two different questions, answered from two different places.
         #
         # The model catalogue is a fixed, small ontology, so naming its fields
@@ -1528,6 +1877,41 @@ class ProductKnowledgeService:
             )
         )
         return self._with_targets(merged, resolution)
+
+    def _stored_field_names(self) -> frozenset[str]:
+        """Every field name the loaded Product Knowledge actually stores."""
+
+        knowledge = self.catalog_repository.product_knowledge()
+        names: set[str] = set()
+        for section in _PRODUCT_KNOWLEDGE_SECTIONS:
+            for row in knowledge.get(section, ()) or ():
+                if isinstance(row, dict) and row.get("field"):
+                    names.add(str(row["field"]))
+        return frozenset(names)
+
+    def _expand_to_stored_fields(
+        self, text: str, fields: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Add the stored field names this question's families answer from.
+
+        Additive by design. The router's own names are kept because the model
+        catalogue answers to them, and a name that exists in neither place is
+        harmless; what changes is that the names the *record* uses are now in
+        the request too.
+        """
+
+        fragments = _family_fragments(" ".join(str(text or "").lower().split()))
+        if not fragments:
+            return fields
+        stored = self._stored_field_names()
+        # A fragment matches a stored name as a prefix or as an embedded part,
+        # so "weight" reaches weight, package_weight and weight_with_stand
+        # without naming any of them.
+        matched = sorted(
+            name for name in stored
+            if any(fragment in name.lower() for fragment in fragments)
+        )
+        return tuple(dict.fromkeys((*fields, *matched)))
 
     def _resolve_inquiry_targets(
         self, text: str, *, listing_model: object, listing_id: str,
@@ -1625,11 +2009,39 @@ class ProductKnowledgeService:
     ) -> ProductKnowledgeResult:
         """Record what the lookup was aimed at, alongside what it found."""
 
+        # The lookup may have settled an identity the resolution could not.
+        #
+        # For a listing question the resolution's target is read off the title,
+        # and a title can carry a fragment that names no catalogued model:
+        # "삼성 107.9cm(43인치) 4K UHD LH43B 스마트 비즈니스TV" yields "LH43B",
+        # which is not in the catalogue. The lookup then identifies the listing
+        # properly from its own API record -- LH43BEDHLGFXKR -- and reporting the
+        # title fragment instead would label 475 correct facts as another
+        # model's. The lookup wins whenever it settled one and the customer
+        # named nothing else.
+        settled = tuple(
+            item for item in (result.resolved_pk_targets or ()) if str(item).strip()
+        )
+        stated = tuple(
+            item for item in resolution.resolved_pk_targets if str(item).strip()
+        )
+        targets = (
+            settled if (resolution.reason == LISTING_FALLBACK and settled)
+            else (stated or settled)
+        )
         return replace(
             result,
-            listing_model=resolution.listing_identity or resolution.listing_model,
+            listing_model=(
+                result.listing_model
+                if (resolution.reason == LISTING_FALLBACK and result.listing_model)
+                else (
+                    resolution.listing_identity
+                    or resolution.listing_model
+                    or result.listing_model
+                )
+            ),
             inquiry_target_models=resolution.inquiry_target_models,
-            resolved_pk_targets=resolution.resolved_pk_targets,
+            resolved_pk_targets=targets,
             target_resolution_reason=resolution.reason,
         )
 
@@ -1709,7 +2121,13 @@ class ProductKnowledgeService:
             model_code=model_code,
         )
         if not match.record or not match.model_key:
-            exact_model_key = self._integrated_exact_model_for_listing(product_id)
+            # The strict reading first, then the listing's own API-declared
+            # model with its bundle suffix removed. Both describe this listing;
+            # neither reaches for another one.
+            exact_model_key = (
+                self._integrated_exact_model_for_listing(product_id)
+                or self._listing_declared_base_model(product_id)
+            )
             if exact_model_key:
                 integrated, excluded = self._integrated_product_knowledge_facts(
                     product_id=product_id, model_key=exact_model_key,
@@ -1727,6 +2145,15 @@ class ProductKnowledgeService:
                         excluded_facts=tuple(excluded),
                         collection_status="INTEGRATED_PRODUCT_KNOWLEDGE_JSON",
                         identity_status="LISTING_EXACT_API_MODEL",
+                        # The listing's identity, now that it has one. Left
+                        # unset this reported an empty target and the prompt
+                        # announced the listing as a model named "".
+                        listing_model=_settled_identity(
+                            exact_model_key, self.catalog_repository),
+                        resolved_pk_targets=(
+                            _settled_identity(
+                                exact_model_key, self.catalog_repository),
+                        ),
                     )
             integrated, excluded = self._integrated_product_knowledge_facts(
                 product_id=product_id, model_key="", fields=fields,
@@ -1775,6 +2202,15 @@ class ProductKnowledgeService:
             collection_status="CATALOG_JSON",
             component_subject=component_subject,
             identity_status=match.status,
+            # The identity this lookup settled on, which is not always the one
+            # the title suggested: "삼성 UHD BE85D-H …" yields the box name
+            # while the catalogue match is LH85BEDH, and reporting the box name
+            # labelled 66 of this listing's own facts as another model's.
+            listing_model=_settled_identity(
+                match.model_key, self.catalog_repository),
+            resolved_pk_targets=(
+                _settled_identity(match.model_key, self.catalog_repository),
+            ),
         )
 
     def _integrated_exact_model_for_listing(self, product_id: str) -> str | None:
@@ -1817,6 +2253,60 @@ class ProductKnowledgeService:
                     candidates.add(model)
                     break
         return next(iter(candidates)) if len(candidates) == 1 else None
+
+    # A bundle listing writes its model as the set it sells: "MODEL+이동식
+    # 스탠드". The base segment is the product; the rest is what the bundle adds.
+    _BUNDLE_SEPARATORS = ("+", ",", "/")
+
+    def _listing_declared_base_model(self, product_id: str) -> str | None:
+        """The model this listing's own API record says it sells.
+
+        ``_integrated_exact_model_for_listing`` refuses a compound identifier,
+        and for this store most listings are compounds: the monitor is sold with
+        a stand, so the API model name is "LS27FM501EKXKR+이동식 스탠드" and the
+        listing resolved to no model at all. Every ``model_facts`` row is keyed
+        by model, so those listings reached none of their own specification --
+        measured over the inquiries customers sent, 1,076 of 3,419 were on a
+        listing with no resolvable model.
+
+        The base segment is taken only from an API row, which is the listing
+        declaring its own product rather than a page image that may show
+        several. It is accepted only when every such row reduces to the same
+        catalogued model: a listing that declares two is ambiguous, and
+        choosing one of them is how another product's specification would be
+        presented as this one's.
+        """
+
+        key = str(product_id or "").strip()
+        if not key:
+            return None
+        knowledge = self.catalog_repository.product_knowledge()
+        resolved: set[str] = set()
+        for row in knowledge.get("model_facts", ()) or ():
+            if not isinstance(row, dict):
+                continue
+            if (row.get("field") != "model_code"
+                    or row.get("subject") != "MAIN_PRODUCT"
+                    or row.get("scope") != "EXACT_MODEL"):
+                continue
+            declares_this_listing = any(
+                isinstance(provenance, dict)
+                and provenance.get("source_type") == "API"
+                and str(provenance.get("source_product_id") or "") == key
+                for provenance in row.get("provenance", ()) or ()
+            )
+            if not declares_this_listing:
+                continue
+            value = str(row.get("value") or "").strip()
+            for separator in self._BUNDLE_SEPARATORS:
+                if separator in value:
+                    value = value.split(separator)[0].strip()
+            if not value:
+                continue
+            match = self.catalog_repository.match(model_code=value)
+            if match.model_key and match.status in {EXACT, UNIQUE_MATCH}:
+                resolved.add(match.model_key)
+        return next(iter(resolved)) if len(resolved) == 1 else None
 
     def _integrated_product_knowledge_facts(
         self, *, product_id: str, model_key: str, fields: Sequence[str],

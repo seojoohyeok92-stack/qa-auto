@@ -1037,9 +1037,16 @@ def test_relevant_evidence_survives_the_prompt_budget(tmp_path, monkeypatch):
             assert dropped.get("component") in droppable, dropped
             assert dropped.get("chars") and "records" in dropped, dropped
     for dropped in selection["dropped"]:
+        # 세 가지 모두 "중복이거나 예산" 이라는 같은 부류다.
+        # SEMANTIC_DUPLICATE_ACROSS_SCOPE 는 같은 모델의 같은 사실이
+        # model scope 와 listing scope 양쪽에 있을 때 한 번만 넣는 경우이며,
+        # 버려진 쪽의 출처는 남은 쪽에 kept_instead 로 기록된다.
         assert dropped["reason"] in {
             "DUPLICATE_VALUE", "PRODUCT_KNOWLEDGE_BUDGET",
+            "SEMANTIC_DUPLICATE_ACROSS_SCOPE",
         }, dropped
+        if dropped["reason"] == "SEMANTIC_DUPLICATE_ACROSS_SCOPE":
+            assert dropped.get("kept_instead"), dropped
 
 
 def test_the_source_data_is_never_written(tmp_path, monkeypatch):

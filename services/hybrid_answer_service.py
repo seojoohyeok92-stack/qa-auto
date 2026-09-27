@@ -134,7 +134,13 @@ class HybridAnswerService:
         # ``listing_id`` and the answer can present another product's
         # specification as this listing's -- which is the failure the target
         # resolution exists to prevent, reintroduced one layer later.
-        targets = tuple(getattr(knowledge, "resolved_pk_targets", ()) or ())
+        # An empty string is not a model. A listing whose identity was never
+        # settled reports one, and announcing ``answer_target_models: [""]``
+        # tells the model the listing is a product called nothing.
+        targets = tuple(
+            item for item in (getattr(knowledge, "resolved_pk_targets", ()) or ())
+            if str(item).strip()
+        )
         listing_model = getattr(knowledge, "listing_model", None)
         reason = getattr(knowledge, "target_resolution_reason", None)
         if targets and (len(targets) > 1 or targets[0] != listing_model):
