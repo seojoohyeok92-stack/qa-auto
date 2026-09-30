@@ -179,6 +179,111 @@ ATOMIC_QUESTION_INSTRUCTIONS = (
 )
 
 
+_EVIDENCE_KEYS = ("similar_approved_answers", "seller_style_examples")
+
+
+def _reconcile_prompt_attachment(
+    learning_context: dict[str, Any], prompt_input: dict[str, Any],
+) -> None:
+    """Make ``attached_to_prompt`` mean the assembled prompt, not the shortlist.
+
+    Retrieval decides what may travel; ``apply_prompt_budget`` decides what
+    does, and it runs after the context -- and its trace -- have been written.
+    So the flag is recomputed here against the entries the provider actually
+    received, and the context's own evidence lists are brought into line with
+    it so telemetry and the trace tell the same story.
+
+    ``learning_context`` is the dict the caller merged into ``context``, so
+    updating it in place updates both.
+    """
+
+    attached: set[int] = set()
+    for key in _EVIDENCE_KEYS:
+        for item in (prompt_input.get(key) or []):
+            identifier = item.get("learning_example_id")
+            if identifier is not None:
+                attached.add(int(identifier))
+
+    trace = learning_context.get("learning_retrieval")
+    if isinstance(trace, dict):
+        for item in (trace.get("selected") or []):
+            identifier = item.get("learning_id")
+            item["attached_to_prompt"] = (
+                identifier is not None and int(identifier) in attached
+            )
+        trace["attached_learning_ids"] = sorted(attached)
+
+    # The context keeps its own rows; it only loses the ones that were cut.
+    #
+    # ``prompt_context`` deliberately strips fields the model must not read --
+    # ``compatibility`` from both evidence lists, ``answer_style_reference``
+    # from historical cases -- so ``prompt_input`` holds a narrower row than the
+    # context does. Copying those projections back would delete provenance that
+    # ``_apply_learning_grounded_recovery`` and ``_validate_historical_usage``
+    # read after the call, which is why this filters by identity instead.
+    for key in _EVIDENCE_KEYS:
+        rows = learning_context.get(key)
+        if not isinstance(rows, list):
+            continue
+        # What retrieval found is kept beside what the prompt carried, never
+        # instead of it. The two answer different questions -- "was this row
+        # found?" and "did the model see it?" -- and a reader needs both.
+        learning_context.setdefault(f"retrieved_{key}", list(rows))
+        learning_context[key] = [
+            row for row in rows
+            if row.get("learning_example_id") is None
+            or int(row["learning_example_id"]) in attached
+        ]
+
+    surviving_cases = {
+        item.get("historical_case_id")
+        for item in (prompt_input.get("historical_cases") or [])
+        if item.get("historical_case_id") is not None
+    }
+    cases = learning_context.get("historical_cases")
+    if isinstance(cases, list) and "historical_cases" in prompt_input:
+        learning_context["historical_cases"] = [
+            row for row in cases
+            if row.get("historical_case_id") is None
+            or row["historical_case_id"] in surviving_cases
+        ]
+        for row in learning_context["historical_cases"]:
+            row["attached_to_prompt"] = True
+
+    # An atom may only point at evidence the prompt actually carries.
+    #
+    # ``learning_ids`` is read as "the evidence attached for this
+    # sub-question". What retrieval found is kept beside it rather than
+    # conflated with it, so a dropped row stops being cited without the
+    # retrieval record being lost.
+    for key in ("subquestion_evidence", "atomic_questions"):
+        for entry in (learning_context.get(key) or []):
+            if not isinstance(entry, dict):
+                continue
+            found = entry.get("learning_ids")
+            if not isinstance(found, list):
+                continue
+            entry.setdefault("retrieved_learning_ids", list(found))
+            entry["learning_ids"] = [
+                value for value in found
+                if value is not None and int(value) in attached
+            ]
+        # The prompt gets the attached ids and nothing else. The retrieval
+        # record is provenance for the trace, not something the model should
+        # read as evidence it was given -- and these rows are the prompt's own
+        # copies, so writing it here would put it in front of the model.
+        for entry in (prompt_input.get(key) or []):
+            if not isinstance(entry, dict):
+                continue
+            entry.pop("retrieved_learning_ids", None)
+            found = entry.get("learning_ids")
+            if isinstance(found, list):
+                entry["learning_ids"] = [
+                    value for value in found
+                    if value is not None and int(value) in attached
+                ]
+
+
 def _reconcile_product_fact_names(
     raw: dict[str, Any], learning_context: dict[str, Any]
 ) -> dict[str, Any]:
@@ -387,7 +492,6 @@ class DraftGenerationService:
             )
         if retry_feedback:
             prompt_input["prior_attempt_feedback"] = retry_feedback
-        context.update(learning_context)
 
         def _built(extra: dict[str, Any]) -> str:
             return self.prompt_builder.build(
@@ -416,11 +520,29 @@ class DraftGenerationService:
             prompt_input, assembled_report = apply_prompt_budget(
                 prompt_input, measure=lambda value: len(_built(value)),
             )
-            prompt_text = _built(prompt_input)
             self.last_prompt_budget = {
                 **(budget_report or {}),
                 "assembled": assembled_report,
             }
+        # What the provider was handed, not what retrieval chose.
+        #
+        # ``attached_to_prompt`` is written while the context is assembled, and
+        # two separate budgets run after that: the evidence budget above, which
+        # trims whatever the assembled size turns out to be, and the assembled
+        # budget just above, which only runs when the prompt is over. Either can
+        # delete entries, so this runs once here, against whatever
+        # ``prompt_input`` finally holds -- including on requests that never
+        # exceeded the limit.
+        #
+        # It comes before ``context.update`` so the prompt, the learning
+        # context and the context handed to the provider all describe the same
+        # attachment.
+        _reconcile_prompt_attachment(learning_context, prompt_input)
+        # Reconciliation only ever removes citations, so rebuilding here cannot
+        # push the prompt back over the limit -- and the text the provider sees
+        # has to be the reconciled one, not the copy made before it.
+        prompt_text = _built(prompt_input)
+        context.update(learning_context)
         raw = self.provider.generate_json(
             task="DRAFT",
             prompt=prompt_text,

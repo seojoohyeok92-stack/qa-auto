@@ -24,6 +24,7 @@ from services.learning_evidence_policy import (
     quantities_conflict,
 )
 from services.learning_privacy_service import LearningPrivacyService
+from services.product_knowledge_service import attribute_families
 
 
 TOKEN = re.compile(r"[가-힣A-Za-z0-9]{2,}")
@@ -68,6 +69,47 @@ def normalize_learning_question(value: object) -> str:
 # back to pure relevance, which errs toward leaving the existing order alone.
 AUTHORITY_TIE_BAND = 0.01
 
+# How much being about the asked-for property is worth against relevance.
+#
+# Chosen from the measured reorder distribution rather than picked: the
+# promotions that read as improvements sat within 0.20 of the candidate they
+# overtook (0.006 to 0.21), and every one that read as a mistake was 0.25 or
+# more -- a different brand's TV, a third party's cable, a battery accessory.
+# At 0.20 a match can settle a close call and cannot overturn a clear one, and
+# no negative-relevance row can reach a positive one that is clearly better.
+ATTRIBUTE_MATCH_BOOST = 0.20
+
+# The compatibility verdicts that say *which product* a stored answer is about,
+# as opposed to what it covers. Only these may turn a soft rejection into a hard
+# one when the customer asked for a specification, because only these mean the
+# row states another product's property.
+#
+# ``learning_compatibility_service.reject`` emits exactly four reasons. The
+# fourth, PRODUCT_CATEGORY_MISMATCH, is deliberately not here: it fires on a
+# brand or category difference, which is a statement about the kind of thing the
+# row is about rather than about this product's identity, and hardening it
+# removed 400 candidates on a single inquiry. A topic verdict
+# (TOPIC_MISMATCH, TOPIC_PARTIAL_COVERAGE) reaches ``reject_reason`` through a
+# path that never consults identity at all, so it is not here either.
+IDENTITY_REJECT_REASONS: frozenset[str] = frozenset({
+    "MODEL_MISMATCH",
+    "PRODUCT_VARIANT_MISMATCH",
+    "INSUFFICIENT_PRODUCT_IDENTITY",
+})
+
+# Verdicts that establish *which product* a stored answer is about. Anything
+# else leaves identity unestablished, whatever else the verdict says.
+CONFIRMED_IDENTITY = frozenset({"EXACT_MODEL", "EXACT_PRODUCT", "EXACT_NAME"})
+
+# A measured value: a number bound to a unit, or a spec pair like 200x200.
+# Used only to tell "this row states a specification" from "this row discusses
+# one", never to read the value itself.
+_STATED_SPEC_VALUE = re.compile(
+    r"\d+\s*[xX×]\s*\d+"
+    r"|\d+(?:\.\d+)?\s*(?:mm|cm|kg|g\b|w\b|와트|hz|인치|ch\b|채널|개|포트|단자)",
+    re.IGNORECASE,
+)
+
 # How similar a stored question has to be before its answer counts as an answer
 # to this one. See the SEMANTIC_QUESTION_MATCH branch in ``search`` for the
 # measurement behind it.
@@ -93,8 +135,23 @@ def _ranking_key(relevance: float, item: dict[str, Any], priority: int):
     """
 
     support = _band(float(item.get("answer_support") or 0.0))
+    # Being about the asked-for property is worth a bounded amount, not a tier.
+    #
+    # It used to sort above relevance entirely, so any match outranked any
+    # non-match. Measured over 144 candidates that promoted 21 rows, and six of
+    # them scored *below zero* on relevance while overtaking candidates 0.25 to
+    # 0.48 higher -- among them a question about a different brand's 86-inch TV,
+    # promoted onto a resolution question because the customer had typed "4K
+    # UHD" while asking about something else. Relevance is the ranking signal;
+    # this only says where to break a near-tie.
+    #
+    # The score itself is untouched: the boost is applied to the band this
+    # candidate competes in, and nothing downstream reads it.
+    boosted = relevance + (
+        ATTRIBUTE_MATCH_BOOST if item.get("attribute_state") == "MATCH" else 0.0
+    )
     return (
-        _band(relevance), support,
+        _band(boosted), support,
         # Inside the band, an answer that covers nothing the customer asked has
         # no claim on a slot for being well sourced -- without this a verified
         # answer with zero support displaced a tone reference and took an
@@ -473,6 +530,7 @@ class SimilarAnswerService:
         product_id: str | None = None,
         option_name: str | None = None,
         product_fact_sensitive: bool = False,
+        identity_enforced: bool = False,
         limit: int = 8, minimum_relevance: float = 0.24,
         candidate_pool: list[dict[str, Any]] | None = None,
         candidate_diagnostics: dict[str, int] | None = None,
@@ -534,6 +592,21 @@ class SimilarAnswerService:
             ) if value
         ))
         required_action = str(semantic_goal.get("customer_goal") or "").upper()
+        # Which attribute families the customer asked about, named in the
+        # vocabulary Product Knowledge already uses for its field router.
+        #
+        # Read from what GPT ① produced, never re-derived: the atom's own
+        # ``requested_information`` says which property is missing, and the
+        # retrieval queries paraphrase it. ``requested_attribute`` is a shape
+        # label -- SPEC_VALUE, INCLUSION, AMOUNT_OR_COST -- so it says how the
+        # answer should look, not what it is about, and it is not used here.
+        #
+        # Empty means undetermined, and nothing is blocked on an empty set.
+        query_families = attribute_families(" ".join(
+            str(part) for part in (
+                requested_information, atomic_question, *retrieval_queries,
+            ) if part
+        ))
         ranked: list[tuple[float, dict[str, Any]]] = []
         candidates = (
             candidate_pool
@@ -664,10 +737,186 @@ class SimilarAnswerService:
                 "human_verified": human_verified,
                 **compatibility.to_dict(),
             }
+            # ``hard_conflicts_only`` keeps an ineligible row so GPT ② can
+            # read it with its origin labelled. That is right for the questions
+            # it was measured on -- 688218182 asked who installs a wall mount
+            # and what it costs, and the store's own answer to that question was
+            # being deleted for naming a different listing.
+            #
+            # It is wrong for a specification. A stored answer written about
+            # another product is not evidence for this one's VESA size however
+            # well it reads: 43BEH has no VESA fact of its own, and the answer
+            # said "200 x 200mm, M8 23-25mm" on the strength of L247879, a row
+            # from a different listing whose own model code was null. When the
+            # customer asked for a property of *this* product, identity decides
+            # and the leniency does not apply.
+            #
+            # Two conditions, and both are needed.
+            #
+            # ``identity_enforced`` is GPT ①'s own labelling of the atom
+            # (``PRODUCT_FACT_ACTIONS``) and nothing else. It used to be
+            # ``product_fact_sensitive``, which is that OR a keyword guard that
+            # fires on any question naming the product -- so "이 제품 벽걸이로
+            # 설치하려는데 추가 비용이 있나요" counted as a specification
+            # question. Measured over 150 snapshot inquiries the broad trigger
+            # took inquiries with no Learning at all from 10 to 23 and
+            # delivered rows from 834 to 703; three of the twelve that lost
+            # everything were INSTALLATION_METHOD, FORM_FIELD_GUIDANCE and
+            # DELIVERY_DEADLINE_CONFIRMATION -- not product-fact questions by
+            # any reading. ``product_fact_sensitive`` still reaches
+            # ``query_is_product_fact`` below, exactly as it did before, so
+            # compatibility scoring is unchanged.
+            #
+            # And the reason has to be about identity. The rule is "another
+            # product's specification is not this one's", so only a verdict
+            # about *which product* may harden. A topic verdict is a judgement
+            # about what the answer covers, which is GPT ②'s to make with the
+            # row in front of it; hardening those was what removed 400
+            # PRODUCT_CATEGORY_MISMATCH and 384 TOPIC_MISMATCH candidates on a
+            # single inquiry and left nothing above the relevance floor.
+            identity_reject = (
+                identity_enforced
+                and str(compatibility.reject_reason or "") in IDENTITY_REJECT_REASONS
+            )
+            # And: is this row even about the property that was asked for?
+            #
+            # Identity answers "is this the right product". It does not answer
+            # "is this the right attribute", and on 690027174 -- where is this
+            # monitor made -- the rows that survived identity were about review
+            # points, an SK Broadband set-top, 온누리 and a DP cable. None of
+            # them states an origin; none of them is evidence for one.
+            #
+            # Both sides have to be determined before they can disagree. A row
+            # whose subject cannot be named is left to the ranking exactly as
+            # before, because "undetermined" is not "unrelated" -- that is what
+            # ``ATTRIBUTE_UNRESOLVED`` records. Only a stated difference blocks,
+            # and only for a question GPT ① called a product-fact question, so
+            # operational and policy answers are untouched by this.
+            candidate_families = (
+                attribute_families(
+                    f"{item.get('question_original_masked') or ''}"
+                    f" {item.get('final_answer') or ''}")
+                if identity_enforced and query_families else frozenset()
+            )
+            attribute_reject = bool(
+                identity_enforced
+                and query_families
+                and candidate_families
+                and not (query_families & candidate_families)
+            )
+            # A different *kind* of product answering the same property.
+            #
+            # A monitor's "RF 단자가 없어 지상파를 수신할 수 없습니다" is a true
+            # sentence about a monitor and a false one about this television,
+            # which has an RF input and a tuner. It carries no measurement, so
+            # the rule above never sees it, and it names no model, so the
+            # compatibility service reports only PRODUCT_CATEGORY_MISMATCH --
+            # which stays soft on purpose. Measured over 150 snapshot inquiries
+            # that left a TV's port question holding seven monitor answers
+            # denying a port it has, and a speaker question five denying a
+            # speaker it has.
+            #
+            # So when both sides' categories are known and differ, the customer
+            # asked for a property, and the row answers that property about the
+            # other kind of product, it is not evidence here. Everything else is
+            # untouched: a category the service could not determine, a row it
+            # found compatible as policy, the same category with an unclear
+            # model -- all still travel, which is what keeps this from becoming
+            # a category gate. Blocking on category alone was measured and
+            # rejected; this blocks on category *and* subject *and* verdict.
+            current_category = str(
+                getattr(compatibility.current_product, "category", "") or "")
+            candidate_category = str(
+                getattr(compatibility.candidate_product, "category", "") or "")
+            cross_category_fact = bool(
+                identity_enforced
+                and query_families & candidate_families
+                and str(compatibility.reject_reason or "")
+                == "PRODUCT_CATEGORY_MISMATCH"
+                and str(compatibility.product_match or "") == "MISMATCH"
+                and not compatibility.eligible
+                and current_category
+                and candidate_category
+                and current_category != candidate_category
+            )
+            if cross_category_fact:
+                reason = "FACTUAL_IDENTITY_MISMATCH:CROSS_CATEGORY_PRODUCT_MISMATCH"
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                diagnostic.update({
+                    "eligible": False, "similarity": None,
+                    "reject_reason": reason,
+                    "current_category": current_category,
+                    "candidate_category": candidate_category,
+                    "shared_attributes": sorted(
+                        query_families & candidate_families),
+                })
+                if len(compatibility_diagnostics) < 40:
+                    compatibility_diagnostics.append(diagnostic)
+                continue
+            # A specification stated for another listing needs positive identity
+            # evidence before it can stand as this product's.
+            #
+            # The compatibility service reports the first thing that differs,
+            # and in strict mode the category check runs before the model and
+            # product-id checks. So a monitor's answer measured against a TV
+            # comes back PRODUCT_CATEGORY_MISMATCH -- which is deliberately soft
+            # -- and the fact that identity was never established at all is
+            # never said out loud. That is how a 43-inch TV's VESA question
+            # collected ten concrete hole spacings, 100x100 and 200x200, every
+            # one of them another product's.
+            #
+            # Narrow on purpose. It applies only where the customer asked for a
+            # specification, only to a row that states a measured value, and
+            # only when identity is unconfirmed: a row from this listing, or one
+            # whose exact model or product id matches, is untouched, so the same
+            # model sold under a second listing still travels. A row that
+            # discusses the property without stating a figure is left to the
+            # ranking, because it is not evidence anyone can misread as a value.
+            states_value = bool(
+                identity_enforced
+                and _STATED_SPEC_VALUE.search(str(item.get("final_answer") or ""))
+            )
+            unconfirmed_identity = (
+                states_value
+                and str(compatibility.product_match or "") not in CONFIRMED_IDENTITY
+            )
+            if unconfirmed_identity and not identity_reject:
+                reason = "FACTUAL_IDENTITY_MISMATCH:INSUFFICIENT_PRODUCT_IDENTITY"
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                diagnostic.update({
+                    "eligible": False, "similarity": None,
+                    "reject_reason": reason,
+                    "product_match": compatibility.product_match,
+                    "stated_specification": True,
+                })
+                if len(compatibility_diagnostics) < 40:
+                    compatibility_diagnostics.append(diagnostic)
+                continue
+            if attribute_reject:
+                reason = "ATTRIBUTE_MISMATCH"
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                diagnostic.update({
+                    "eligible": False, "similarity": None,
+                    "reject_reason": reason,
+                    "query_attributes": sorted(query_families),
+                    "answer_attributes": sorted(candidate_families),
+                })
+                if len(compatibility_diagnostics) < 40:
+                    compatibility_diagnostics.append(diagnostic)
+                continue
             if not compatibility.eligible and not (
-                hard_conflicts_only and not compatibility.hard_reject
+                hard_conflicts_only
+                and not compatibility.hard_reject
+                and not identity_reject
             ):
                 reason = str(compatibility.reject_reason or "COMPATIBILITY_REJECTED")
+                if identity_reject and not compatibility.hard_reject:
+                    # Say which rule removed it. "This row names another
+                    # product and the customer asked for this product's
+                    # specification" is a different finding from a stated
+                    # contradiction, and an operator reading the trace needs to
+                    # tell them apart.
+                    reason = f"FACTUAL_IDENTITY_MISMATCH:{reason}"
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                 diagnostic.update({
                     "eligible": False,
@@ -833,6 +1082,20 @@ class SimilarAnswerService:
                     "candidate_action": candidate_action or None,
                     "compatible": not candidate_action or candidate_action == required_action,
                 }
+                # Whether this row is about the property that was asked for.
+                #
+                # Only three states, and only one of them removed a row (above):
+                # MATCH is a row whose subject overlaps the question's, MISMATCH
+                # is gone by now, and UNRESOLVED is everything whose subject
+                # could not be named on either side. UNRESOLVED is carried, not
+                # demoted out of existence -- it simply sorts below a row that
+                # is demonstrably on the asked-for property.
+                safe["attribute_state"] = (
+                    "MATCH" if query_families & candidate_families
+                    else "ATTRIBUTE_UNRESOLVED"
+                )
+                safe["query_attributes"] = sorted(query_families)
+                safe["answer_attributes"] = sorted(candidate_families)
                 ranked.append((relevance, safe))
                 diagnostic.update({
                     "eligible": True,
@@ -878,6 +1141,12 @@ class SimilarAnswerService:
             },
             "product": product_name,
             "inquiry_type": inquiry_type,
+            # Whether identity was allowed to remove rows on this sub-question,
+            # separately from whether the row was scored as a fact query. The
+            # two used to be one flag and an operator could not tell which rule
+            # had emptied a list.
+            "identity_enforced": bool(identity_enforced),
+            "product_fact_sensitive": bool(product_fact_sensitive),
             "candidate_count": len(candidates),
             "active_candidates": diagnostics["active_candidates"],
             # Keep diagnostic logs bounded. These are the candidates that

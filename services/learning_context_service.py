@@ -5,7 +5,7 @@ import os
 
 import re
 import uuid
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from answer.evidence_support import coverage_label
 from answer.facts import AnswerFacts
@@ -64,8 +64,22 @@ PROMPT_EXCLUDED_CONTEXT_KEYS: frozenset[str] = frozenset(
         # is no is not evidence. The verdict is still computed and still
         # persisted for the dashboard -- it is only out of the prompt.
         "approved_learning_evidence",
+        # What retrieval found before the budget spoke, kept for the trace and
+        # the dashboard. It is not evidence: the rows in it are the ones the
+        # prompt was not able to carry, so putting them back would hand the
+        # model exactly what the budget removed -- and on a retry, which reuses
+        # the same context, it would do so silently.
+        "retrieved_similar_approved_answers",
+        "retrieved_seller_style_examples",
     }
 )
+
+# The same distinction inside the per-sub-question entries: what was attached
+# stays, what was merely retrieved does not travel.
+_EVIDENCE_MAP_PROMPT_KEYS: frozenset[str] = frozenset(
+    {"subquestion_evidence", "atomic_questions"}
+)
+_EVIDENCE_MAP_PROMPT_DROP: frozenset[str] = frozenset({"retrieved_learning_ids"})
 
 # The seller answer is carried twice per historical case, as
 # answer_style_reference and answer_reference. One copy is enough for the
@@ -140,6 +154,21 @@ def prompt_context(context: dict[str, Any]) -> dict[str, Any]:
                 for item in value
             ]
             continue
+        if key in _EVIDENCE_MAP_PROMPT_KEYS and isinstance(value, list):
+            # Copied, not referenced. These rows used to be shared with the
+            # context, so writing the retrieval record onto the context's copy
+            # wrote it onto the prompt's copy too.
+            projected[key] = [
+                {
+                    field: item[field]
+                    for field in item
+                    if field not in _EVIDENCE_MAP_PROMPT_DROP
+                }
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+            continue
         if key == "semantic_atoms" and isinstance(value, list):
             projected[key] = [
                 {
@@ -172,6 +201,79 @@ _PROMPT_TRIM_ORDER: tuple[str, ...] = (
 # -- generous for a genuinely rich inquiry, and far below anything that could
 # repeat the 655,129 character prompt.
 DRAFT_PROMPT_BUDGET_CHARS = 60_000
+
+
+def _atoms_of(entry: Any) -> tuple[str, ...]:
+    """Which sub-questions this entry was retrieved for.
+
+    ``matched_subquestions`` when the same row answered more than one, and the
+    single ``matched_subquestion`` otherwise. An entry with neither -- a style
+    reference, a historical case -- belongs to no sub-question and is never
+    protected on one's behalf.
+    """
+
+    if not isinstance(entry, Mapping):
+        return ()
+    many = entry.get("matched_subquestions")
+    if isinstance(many, (list, tuple)) and many:
+        return tuple(str(item) for item in many if str(item))
+    one = str(entry.get("matched_subquestion") or "")
+    return (one,) if one else ()
+
+
+def _sole_representatives(entries: "Sequence[Any]") -> set[int]:
+    """Indices that are the last evidence some sub-question still has.
+
+    A compound inquiry asks several things and each gets its own search, but
+    the budget reads the merged list. Without this, the sub-question whose
+    evidence happens to score lowest loses all of it while another keeps four:
+    on a three-part inquiry the installation question ended up with none of the
+    five answers retrieval had found for it, one of them from that very
+    listing, while the wall-mount question kept three.
+    """
+
+    holders: dict[str, list[int]] = {}
+    for index, entry in enumerate(entries):
+        for atom in _atoms_of(entry):
+            holders.setdefault(atom, []).append(index)
+    return {indices[0] for indices in holders.values() if len(indices) == 1}
+
+
+def _least_relevant(entries: "Sequence[Any]") -> int:
+    """Index of the entry the prompt can most afford to lose.
+
+    The weakest ``relevance`` wins, and the later of two equal ones goes first
+    so the order the list arrived in breaks the tie. An entry that carries no
+    relevance -- a style reference, a historical case -- is treated as weaker
+    than any that does, because nothing about it says it answers the question.
+
+    A sub-question's last remaining evidence is spared while anything else can
+    be dropped instead. This only reorders removals: when every survivor is
+    some sub-question's last, the weakest still goes, so the list can still
+    shrink to empty and the budget stays absolute. Nothing is added back -- a
+    row rejected for identity, attribute or duplication never reaches here.
+    """
+
+    protected = _sole_representatives(entries)
+
+    def weakest(candidates: "Sequence[int]") -> int | None:
+        worst_index: int | None = None
+        worst_score: float | None = None
+        for index in candidates:
+            entry = entries[index]
+            score = entry.get("relevance") if isinstance(entry, Mapping) else None
+            try:
+                value = float(score)
+            except (TypeError, ValueError):
+                return index
+            if worst_score is None or value <= worst_score:
+                worst_index, worst_score = index, value
+        return worst_index
+
+    chosen = weakest([i for i in range(len(entries)) if i not in protected])
+    if chosen is None:
+        chosen = weakest(range(len(entries)))
+    return len(entries) - 1 if chosen is None else chosen
 
 
 def apply_prompt_budget(
@@ -212,14 +314,24 @@ def apply_prompt_budget(
             #
             # Dropping the group entire was the only granularity there was, so
             # one character over budget cost every retrieved answer the inquiry
-            # had -- including the one that answered it. These lists arrive
-            # ranked, best first, so the last entry is the one the prompt can
-            # most afford to lose. Shrinking to empty is still possible and is
-            # exactly the old behaviour; it is now the floor rather than the
-            # first step.
+            # had -- including the one that answered it. Shrinking to empty is
+            # still possible and is exactly the old behaviour; it is now the
+            # floor rather than the first step.
+            #
+            # Which entry goes is decided by its relevance, not its position.
+            # ``similar_approved_answers`` is not ranked best-first: it is the
+            # per-atom interleave (``interleave_by_rank``), so a compound
+            # inquiry alternates between its sub-questions and position says
+            # which atom an entry came from, not how well it answers. On
+            # 689033056 that discarded relevance ranks 2, 3, 4 and 5 -- one of
+            # them the store's own answer to the question asked, at 0.5375 --
+            # while keeping rank 6 at 0.3149, purely because rank 6 arrived
+            # earlier in the interleave. Removing the weakest entry keeps the
+            # surviving list in its original order, so the interleave that the
+            # rest of the prompt relies on is preserved.
             kept = list(value)
             while kept and size({**trimmed, key: kept}) > budget:
-                kept.pop()
+                kept.pop(_least_relevant(kept))
             if len(kept) == len(value):
                 continue
             after = size({**trimmed, key: kept})
@@ -288,6 +400,35 @@ def _retrieval_depth(question_count: int) -> int:
 
     del question_count
     return _RETRIEVAL_DEPTH_PER_ATOM
+
+
+def _why_selected(item: Mapping[str, Any]) -> str:
+    """The reason this row survived, read off the row rather than asserted.
+
+    The previous value was a constant naming checks the row had not been put
+    through. What a reader needs is which rule let it through and on what
+    footing, so the compatibility verdict and the support that carried it are
+    reported as they were recorded.
+    """
+
+    compatibility = item.get("compatibility") or {}
+    parts: list[str] = []
+    if compatibility.get("eligible") is True:
+        parts.append("COMPATIBILITY_ELIGIBLE")
+    elif compatibility.get("eligible") is False:
+        # Production retrieval keeps an identity-mismatched row for questions
+        # that are not about a specification, labelled, for GPT ② to judge.
+        parts.append("IDENTITY_UNVERIFIED_LABELLED_FOR_PROVIDER")
+        reason = compatibility.get("reject_reason")
+        if reason:
+            parts.append(str(reason))
+    topic = compatibility.get("topic_match")
+    if topic:
+        parts.append(f"TOPIC_{topic}")
+    support = item.get("answer_support_reason")
+    if support:
+        parts.append(str(support))
+    return "+".join(parts) or "RANKED_BY_RELEVANCE"
 
 
 def interleave_by_rank(
@@ -772,6 +913,19 @@ class LearningContextService:
                     question_guard.sensitive
                     or (atomic is not None and atomic.action in PRODUCT_FACT_ACTIONS)
                 ),
+                # Whether identity may *remove* a row, as opposed to score it
+                # down. Only GPT ①'s own labelling of this atom decides that.
+                #
+                # The keyword guard above is deliberately not part of it. It is
+                # sensitive to any question that names the product, so it reads
+                # an installation-cost question as a specification question, and
+                # a rule that deletes evidence cannot be built on a signal that
+                # broad. Where the guard and GPT ① disagree the row is still
+                # scored strictly -- ``product_fact_sensitive`` is unchanged --
+                # it simply is not deleted.
+                identity_enforced=(
+                    atomic is not None and atomic.action in PRODUCT_FACT_ACTIONS
+                ),
                 # How deep this sub-question's own ranking is read.
                 #
                 # This is a *consideration* depth, not a delivery decision.
@@ -803,11 +957,17 @@ class LearningContextService:
             for key in ("similar_approved_answers", "seller_style_examples"):
                 for item in item_context[key]:
                     item["matched_subquestion"] = question
-                    item["attached_to_prompt"] = True
-                    item["why_selected"] = (
-                        "ACTIVE_VALIDITY_AND_RELEVANCE_THRESHOLD"
-                        "_AND_PRODUCT_TOPIC_COMPATIBILITY"
-                    )
+                    # Both of these used to be written as constants: every row
+                    # claimed to have passed a compatibility check it had never
+                    # been judged against, and every row claimed to be in the
+                    # prompt before anything had assembled one. On 690027174 the
+                    # trace said four rows were attached with
+                    # "..._AND_PRODUCT_TOPIC_COMPATIBILITY" while each of them
+                    # carried eligible=false, and the answer used none of them.
+                    #
+                    # Attachment is decided later, when the prompt is built, so
+                    # it is left unset here rather than asserted.
+                    item["why_selected"] = _why_selected(item)
             trace = dict(item_context.get("learning_retrieval") or {})
             trace["product_fact_sensitive"] = question_guard.sensitive
             subquestion_traces.append(trace)
@@ -891,11 +1051,95 @@ class LearningContextService:
             )
 
         approved = merged("similar_approved_answers")
+        # Which sub-questions each row answered, not just the one it scored
+        # highest for.
+        #
+        # ``interleave_by_rank`` keeps one copy of a row that several atoms
+        # retrieved, so ``matched_subquestion`` -- written per atom before the
+        # merge -- survives only for the atom whose copy won. The prompt budget
+        # then reads that single value and cannot tell that dropping the row
+        # would silence two questions rather than one. The body still appears
+        # once; only its provenance is completed.
+        by_learning: dict[int, list[str]] = {}
+        for item_context in contexts:
+            for item in (item_context.get("similar_approved_answers") or []):
+                identifier = item.get("learning_example_id")
+                atom = str(item.get("matched_subquestion") or "")
+                if identifier is None or not atom:
+                    continue
+                atoms = by_learning.setdefault(int(identifier), [])
+                if atom not in atoms:
+                    atoms.append(atom)
+        for item in approved:
+            identifier = item.get("learning_example_id")
+            if identifier is None:
+                continue
+            atoms = by_learning.get(int(identifier))
+            if atoms:
+                item["matched_subquestions"] = list(atoms)
+        # One body, one slot -- across sub-questions as well as within one.
+        #
+        # Each atom searches separately and each search already drops repeat
+        # copies of the same sentence (``factual_seen``). The union does not:
+        # two different rows holding the same stored answer come back from two
+        # different atoms and both are carried, so the prompt states one fact
+        # twice and GPT ② sees it corroborated by two sources that are one.
+        # Measured over 150 snapshot inquiries this happened 3 times.
+        #
+        # The first copy stays, so the higher-ranked atom keeps its evidence.
+        # The copy that stays inherits what the copies it replaces answered.
+        #
+        # Two different rows can hold the same stored answer, retrieved for two
+        # different sub-questions -- L100 for the first, L200 for the second.
+        # Dropping L200 for its body alone would take the second sub-question's
+        # only provenance with it, and ``_sole_representatives`` would then not
+        # know that sub-question still has evidence, so the budget could trim
+        # the surviving body away and silence it. The body is still written
+        # once; only what it is known to answer is merged.
+        seen_bodies: dict[str, dict[str, Any]] = {}
+        distinct: list[dict[str, Any]] = []
+        for item in approved:
+            body = _normalized_answer(item.get("answer"))
+            kept = seen_bodies.get(body) if body else None
+            if kept is not None:
+                atoms = list(_atoms_of(kept))
+                for atom in _atoms_of(item):
+                    if atom not in atoms:
+                        atoms.append(atom)
+                if atoms:
+                    kept["matched_subquestions"] = atoms
+                # Which rows said the same thing, so a reader can still find
+                # them; the prompt carries one body regardless.
+                merged_ids = list(kept.get("duplicate_learning_ids") or [])
+                identifier = item.get("learning_example_id")
+                if identifier is not None and int(identifier) not in merged_ids:
+                    merged_ids.append(int(identifier))
+                if merged_ids:
+                    kept["duplicate_learning_ids"] = merged_ids
+                continue
+            if body:
+                seen_bodies[body] = item
+            distinct.append(item)
+        approved = distinct
         # Style references are not evidence: they show tone, and one per atom
         # is enough to establish it. This cap stays.
         seller = merged(
             "seller_style_examples", limit=max(0, 4)
         )
+        # A row can be both the answer to this question and an example of how
+        # the store writes, and it was then sent twice -- once as evidence and
+        # once as a style reference. On 690027174 that is why six ids were
+        # reported for four rows. The evidence copy is the one that stays,
+        # because it is the one GPT ② may answer from; the style list loses the
+        # duplicate and keeps whatever else it had.
+        evidence_ids = {
+            int(item["learning_example_id"]) for item in approved
+            if str(item.get("learning_example_id") or "").strip().isdigit()
+        }
+        seller = [
+            item for item in seller
+            if int(item.get("learning_example_id") or -1) not in evidence_ids
+        ]
         context = {
             "similar_approved_answers": approved,
             "seller_style_examples": seller,
@@ -1228,9 +1472,16 @@ class LearningContextService:
         for question in questions:
             historical_ids: list[int] = []
             feedback_signal_ids: list[int] = []
+            # Every sub-question the row answers, not just the one it scored
+            # highest for. When two rows holding the same body are merged, the
+            # survivor inherits the other's sub-question, and reading only
+            # ``matched_subquestion`` here would leave that sub-question with
+            # no evidence in its map -- reported as though nothing had been
+            # found for it. ``_atoms_of`` covers the single-atom case too, so
+            # there is no separate branch.
             approved_for_question = [
                 item for item in approved
-                if item.get("matched_subquestion") == question
+                if question in _atoms_of(item)
             ]
             historical_for_question = [
                 item for item in historical
@@ -1551,10 +1802,18 @@ class LearningContextService:
                 "from those rows. Say that the actual schedule may differ."
             ),
         }
-        selected_ids = [
+        # Reported once per row, not once per list. The two lists are disjoint
+        # now, but counting them separately is what made four rows read as six.
+        selected_ids = sorted({
             int(item["learning_example_id"])
-            for item in (*context["similar_approved_answers"], *context["seller_style_examples"])
-        ]
+            for item in (*context["similar_approved_answers"],
+                         *context["seller_style_examples"])
+        })
+        # Which bodies actually reach the provider. Everything in these two
+        # lists is serialised into the prompt, so this is the real answer rather
+        # than a constant -- and a row the gates removed is not in either list
+        # and is therefore reported as not attached.
+        attached_ids = set(selected_ids)
         retrieval = {
             "query": original_question,
             # Which retrieval contract this run actually used.
@@ -1581,7 +1840,9 @@ class LearningContextService:
                     "answer_support": item.get("answer_support"),
                     "answer_support_reason": item.get("answer_support_reason"),
                     "why_selected": item.get("why_selected"),
-                    "attached_to_prompt": True,
+                    "attached_to_prompt": (
+                        int(item["learning_example_id"]) in attached_ids
+                    ),
                     "answer_supported": None,
                     "compatibility": item.get("compatibility") or {},
                 }

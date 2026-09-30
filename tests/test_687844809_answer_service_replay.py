@@ -289,9 +289,22 @@ def test_687844809_full_answer_service_replay(tmp_path, monkeypatch):
     draft_call = next(call for call in draft_provider.calls if call["task"] == "DRAFT")
     context = draft_call["context"]
     prompt = draft_call["prompt"]
+    # What the prompt actually carried, and what retrieval found for it.
+    #
+    # These differ on this inquiry: the assembled prompt measures 65,761
+    # characters against the 60,000 limit, so the budget drops the whole
+    # evidence list. ``similar_approved_answers`` therefore describes an empty
+    # prompt, and ``retrieved_similar_approved_answers`` keeps the record of
+    # what was found. The context used to show the retrieved rows here because
+    # it was populated before the budget ran and never revisited, which made
+    # the trace claim evidence the model never saw.
     learning_ids = [
         int(item["learning_example_id"])
         for item in context.get("similar_approved_answers", [])
+    ]
+    retrieved_learning_ids = [
+        int(item["learning_example_id"])
+        for item in context.get("retrieved_similar_approved_answers", [])
     ]
     assert len(semantic_provider.calls) == 1
     assert contract["purchase_state"] == "PRE_PURCHASE"
@@ -344,10 +357,18 @@ def test_687844809_full_answer_service_replay(tmp_path, monkeypatch):
     }
     assert counts["learning_build"] >= 1 and counts["hybrid"] >= 1 and counts["draft"] >= 1
     assert captured["hard_conflicts_only"] is True
-    assert learning_ids, {
+    assert retrieved_learning_ids, {
         "learning_context_keys": sorted(captured["learning_context"]),
         "learning_retrieval": captured["learning_context"].get("learning_retrieval"),
     }
+    # And the trace agrees with the prompt rather than with retrieval.
+    selected = (captured["learning_context"].get("learning_retrieval") or {}).get(
+        "selected"
+    ) or []
+    assert {
+        int(item["learning_id"]) for item in selected
+        if item.get("attached_to_prompt")
+    } == set(learning_ids)
     # This mixed product inquiry does not enter the delivery-only Phase9
     # branch at all.  In particular, it cannot take a Phase9 final shortcut.
     assert counts["phase9_evaluated"] == 0 and counts["phase9_taken"] == 0

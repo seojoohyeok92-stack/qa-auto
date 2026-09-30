@@ -323,11 +323,23 @@ def test_a_clearly_better_match_still_wins_across_the_band(database) -> None:
     assert [int(item["id"]) for item in results][0] == seller
 
 
-def _key(relevance: float, support: float, priority: int):
+# Where each thing sits in the ranking key. Named rather than counted: these
+# positions have moved twice, and an assertion here once went on passing while
+# comparing the wrong pair.
+#
+# Being about the asked-for attribute is not one of these positions. It is a
+# bounded addition to the relevance the band is computed from, so it can settle
+# a close call and cannot overturn a clear one.
+_BAND, _SUPPORT, _AUTHORITY_IF_SUPPORTED = 0, 1, 2
+
+
+def _key(relevance: float, support: float, priority: int,
+         attribute_state: str | None = None):
     return _ranking_key(
         relevance,
         {"answer_support": support, "rating": 5,
-         "created_at": "2026-08-01T00:00:00Z"},
+         "created_at": "2026-08-01T00:00:00Z",
+         "attribute_state": attribute_state},
         priority,
     )
 
@@ -343,10 +355,62 @@ def test_authority_gives_no_credit_to_an_answer_that_covers_nothing() -> None:
     unsupported = _key(0.3000, 0.0, priority=8)
     supported = _key(0.3005, 0.14, priority=4)
 
-    assert unsupported[0] == supported[0], "same relevance band"
+    assert unsupported[_BAND] == supported[_BAND], "same relevance band"
     assert supported > unsupported
-    assert unsupported[2] == 0, "no authority credit without support"
-    assert supported[2] == 4
+    assert unsupported[_AUTHORITY_IF_SUPPORTED] == 0, (
+        "no authority credit without support")
+    assert supported[_AUTHORITY_IF_SUPPORTED] == 4
+
+
+def test_the_attribute_boost_is_inert_where_nothing_resolved() -> None:
+    """Every candidate on an operational question carries the same state.
+
+    None of them is a MATCH, so the band, support and authority rules decide
+    exactly as they did before the boost existed.
+    """
+
+    unsupported = _key(0.3000, 0.0, priority=8)
+    supported = _key(0.3005, 0.14, priority=4)
+
+    assert unsupported[_BAND] == supported[_BAND]
+    assert supported > unsupported
+
+
+def test_a_row_about_the_asked_attribute_wins_a_close_call() -> None:
+    """Within the boost, being on the asked-for property decides."""
+
+    on_topic = _key(0.30, 0.10, priority=4, attribute_state="MATCH")
+    off_topic = _key(0.40, 0.10, priority=4,
+                     attribute_state="ATTRIBUTE_UNRESOLVED")
+
+    assert on_topic > off_topic
+
+
+def test_the_attribute_boost_cannot_overturn_a_clear_difference() -> None:
+    """The fix. A match is worth a bounded amount, not an override.
+
+    Ranking the match above relevance entirely promoted six rows that scored
+    below zero over candidates 0.25 to 0.48 higher -- a different brand's TV
+    onto a resolution question, a third party's cable onto a power question.
+    Relevance decides; the boost only breaks near-ties.
+    """
+
+    barely_relevant = _key(-0.28, 0.0, priority=4, attribute_state="MATCH")
+    clearly_better = _key(0.20, 0.10, priority=4,
+                          attribute_state="ATTRIBUTE_UNRESOLVED")
+
+    assert clearly_better > barely_relevant
+
+
+def test_the_boost_is_bounded_by_its_constant() -> None:
+    from services.similar_answer_service import ATTRIBUTE_MATCH_BOOST
+
+    match = _key(0.10, 0.0, priority=4, attribute_state="MATCH")
+    just_inside = _key(0.10 + ATTRIBUTE_MATCH_BOOST - 0.02, 0.0, priority=4)
+    just_outside = _key(0.10 + ATTRIBUTE_MATCH_BOOST + 0.02, 0.0, priority=4)
+
+    assert match > just_inside
+    assert just_outside > match
 
 
 def test_authority_still_decides_an_exact_relevance_tie() -> None:

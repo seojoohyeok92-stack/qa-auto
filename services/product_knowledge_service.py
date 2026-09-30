@@ -128,6 +128,9 @@ SUBJECT_SENSITIVE_FIELDS = frozenset({
 
 BASE_DEVICE_SCOPE = "BASE_DEVICE"
 ACCESSORY_SCOPE = "ACCESSORY"
+# The component scope of a listing's bundled add-on options, as opposed to the
+# device the listing sells. Each such option carries its own ``model_code``.
+BUNDLE_ACCESSORY_SCOPE = "BUNDLE_ACCESSORY"
 
 # These are the integrated JSON's own operational decisions.  Candidate is
 # deliberately not renamed to approved: its stored status travels with every
@@ -546,8 +549,14 @@ class ProductFact:
 # neither can starve the other by arriving first.
 PRODUCT_KNOWLEDGE_PROMPT_BUDGET_CHARS = 24_000
 
-# What the rules footer of ``prompt_block`` costs, whatever the fact list is.
-_PROMPT_BLOCK_OVERHEAD_CHARS = 2_000
+# What the block costs beyond its facts, however long the fact list is: the
+# header, the rules footer, and the two scalar keys the context dict wraps them
+# in. Measured against the rendered block rather than estimated -- 922
+# characters for the complete-record footer, 869 for the partial one, and 75
+# for the wrapper. What grows with the list is charged per fact in ``cost``
+# instead, so this stays a fixed quantity;
+# ``test_prompt_block_overhead_is_measured`` fails if the real block outgrows it.
+_PROMPT_BLOCK_OVERHEAD_CHARS = 1_100
 
 # Two different fields holding the same text are only treated as one fact when
 # the text is long enough for the repeat to be what it looks like: a block of
@@ -716,9 +725,27 @@ def select_prompt_facts(
         })
     deduped = semantic
 
-    # --- 2. one fact per model before the budget is spent ------------------
+    # --- 2. one fact per device model before the budget is spent -----------
+    #
+    # The reservation exists so a comparison keeps both sides.  It used to be
+    # keyed on ``model_code`` alone, and a listing's bundled options each carry
+    # their own -- a wall-mount bracket, four lengths of extension cord, two
+    # soundbars, 폐가전수거요청.  Every one of those took a slot that the budget
+    # was not allowed to refuse, so the cap stopped being a cap: on
+    # 12139453925 eleven ``supplement_product`` rows were admitted after the
+    # budget was already full and the block came out at 29,126 characters
+    # against 24,000.  Measured across the five replayed inquiries the
+    # overshoot was 1,926-5,108 characters and *all* of it was accessory rows.
+    #
+    # An add-on SKU is not a side of a comparison, so it is not reserved. It
+    # still competes on relevance like any other fact, which is what a customer
+    # asking about the bracket needs: ``_fact_relevance`` scores the question's
+    # own words against the value, so the wall-mount row outranks the cords for
+    # a wall-mount question and loses to them for none.
     reserved: list[ProductFact] = []
     for fact in deduped:
+        if fact.component_scope == BUNDLE_ACCESSORY_SCOPE:
+            continue
         if not any(item.model_code == fact.model_code for item in reserved):
             reserved.append(fact)
 
@@ -733,6 +760,11 @@ def select_prompt_facts(
         return (
             len(json.dumps(prompt_fact(fact), ensure_ascii=False, default=str))
             + len(fact.as_prompt_line(merged.get(fact.canonical_fact_id)))
+            # What this fact adds to the JSON list around it: the separator
+            # and the newline its line is joined with. Small per fact and not
+            # small over a list of fifty, so it is charged here rather than
+            # guessed at in the fixed allowance.
+            + 2
         )
 
     # --- 3. fill to the budget, most relevant first ------------------------
@@ -1432,7 +1464,13 @@ _ATTRIBUTE_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = 
      ("origin_country", "country_of_origin")),
     ("AS_WARRANTY",
      ("as", "a/s", "에이에스", "서비스센터", "서비스 센터", "보증기간",
-      "보증 기간", "무상수리", "무상 수리", "고장", "수리"),
+      "보증 기간", "무상수리", "무상 수리", "고장", "수리",
+      # The store answers an after-service question by giving Samsung's number,
+      # and writes the name several ways. "서비스 고객센터" missed the existing
+      # "서비스센터" entry by one word, so those answers resolved to whatever
+      # else their text happened to mention. Bare 고객센터 is deliberately not
+      # here -- it appears in holiday notices and order guidance too.
+      "서비스 고객센터", "as센터", "a/s센터", "as 센터"),
      ("as_contact", "as_phone", "as_guide", "warranty")),
     ("MANUFACTURER",
      ("제조사", "제조원", "만든 회사", "수입사", "수입원", "판매원"),
@@ -1485,6 +1523,75 @@ _ATTRIBUTE_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = 
      ("출시", "연식", "년형", "제조일", "생산연도", "출시일"),
      ("release", "manufacture_date")),
 )
+
+
+# Attribute families the Product Knowledge table does not need, because it
+# stores no field for them, but a Learning answer routinely is about. They are
+# part of the same vocabulary rather than a second one: same shape, same
+# matching, same exclusion handling. Anything a stored field exists for stays
+# in ``_ATTRIBUTE_FAMILIES`` and is not repeated here.
+_OPERATIONAL_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("PACKAGE_CONTENTS",
+     ("구성품", "구성 품", "동봉", "포함되어", "포함되나", "포함인가",
+      "같이 오", "함께 오", "들어있", "들어 있", "별도 구매", "기본 제공",
+      # What ships with what is stated as often in shipping words as in
+      # contents words: "모니터와 스탠드는 함께 배송됩니다" and "브라켓이 함께
+      # 출고되며" are statements about the package, and without these they
+      # resolved to DELIVERY_SCHEDULE alone and were removed from a contents
+      # question as a mismatch. The pairing is deliberate -- bare 배송 or 출고
+      # is a shipping status ("출고 예정입니다") and stays out of this family.
+      "함께 배송", "같이 배송", "함께 출고", "같이 출고", "함께 발송",
+      "같이 발송", "포함인")),
+    ("REMOTE", ("리모컨", "리모콘", "remote")),
+    ("INSTALLATION",
+     ("설치", "기사님", "기사 방문", "방문 설치", "시공", "벽걸이 설치",
+      "스탠드 조립", "조립")),
+    ("DELIVERY_SCHEDULE",
+     ("배송", "출고", "발송", "수령", "도착", "언제 오", "며칠", "소요")),
+    ("RETURN_POLICY",
+     ("반품", "교환", "환불", "취소", "청약철회")),
+    ("COLLECTION", ("폐가전", "수거", "회수", "가져가")),
+    ("BENEFIT",
+     ("리뷰", "적립", "네이버페이", "네페", "포인트", "사은품", "증정",
+      "온누리", "환급", "지원사업",
+      # 690027174's survivors were all about the 삼성전자 감사 페스티벌 rebate
+      # -- how to enter a purchase channel, which model code to type, how to
+      # correct an amount. They are about claiming a benefit, and without these
+      # words they resolved to no family at all and so could not be told apart
+      # from an answer about where the monitor is made.
+      "페스티벌", "이벤트", "혜택", "캐시백", "구매처", "프로모션")),
+)
+
+
+def attribute_families(text: object) -> frozenset[str]:
+    """Which attribute families a piece of text is about.
+
+    The same table the Product Knowledge field router uses, read for its family
+    names instead of its stored-field targets, plus the operational families
+    above. Used on both sides of a comparison -- what the customer asked for,
+    and what a stored answer is about -- so the two are named in one vocabulary.
+
+    Empty means "not determined", never "about nothing": a caller may not read
+    an empty result as a mismatch.
+    """
+
+    body = " ".join(str(text or "").lower().split())
+    if not body:
+        return frozenset()
+    found: list[str] = []
+    for family, keywords, _targets in _ATTRIBUTE_FAMILIES:
+        present = [keyword for keyword in keywords if keyword in body]
+        if present and not all(
+            _is_excluded_mention(body, keyword) for keyword in present
+        ):
+            found.append(family)
+    for family, keywords in _OPERATIONAL_FAMILIES:
+        present = [keyword for keyword in keywords if keyword in body]
+        if present and not all(
+            _is_excluded_mention(body, keyword) for keyword in present
+        ):
+            found.append(family)
+    return frozenset(found)
 
 
 def _family_fragments(text: str) -> tuple[str, ...]:
@@ -2397,7 +2504,8 @@ class ProductKnowledgeService:
                     continue
                 component_scope = (
                     "POLICY" if subject.endswith("_POLICY") else
-                    "BUNDLE_ACCESSORY" if subject.startswith("BUNDLED_") or subject == "ACCESSORY" else
+                    BUNDLE_ACCESSORY_SCOPE
+                    if subject.startswith("BUNDLED_") or subject == "ACCESSORY" else
                     "LISTING" if subject in {"LISTING", "OPTION"} else BASE_DEVICE_SCOPE
                 )
                 provenance = tuple(
