@@ -420,6 +420,226 @@ class InquiryRepository:
             self._attach_marketplace_details([result])
         return result
 
+    # ------------------------------------------------------------------
+    # Source deletion tracking
+    #
+    # Five small writes rather than one generic mechanism, because the
+    # interesting part is not the bookkeeping but *which rows are eligible*:
+    # only inquiries this build collected itself, on the one source type that
+    # production actually synchronises.  Every method below therefore takes
+    # ``source_type`` explicitly and filters on it in SQL, so a caller cannot
+    # widen the feature's reach by passing the wrong ids -- Coupang rows stay
+    # at the migration default no matter who calls.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _id_scope(inquiry_ids: Any) -> tuple[int, ...]:
+        return tuple(
+            dict.fromkeys(
+                int(value) for value in (inquiry_ids or ())
+            )
+        )
+
+    def start_source_deletion_tracking(
+        self, inquiry_ids: Any, *, source_type: str
+    ) -> list[int]:
+        """Put freshly collected inquiries under deletion tracking.
+
+        Called for rows the sync just *inserted*, which is the whole of the
+        "from here on" policy: an inquiry that was already in the table when
+        this feature shipped is never handed to this method, so it keeps
+        ``source_deletion_tracked = 0`` and is never reconciled.
+
+        Idempotent and deliberately narrow -- ``tracked = 0`` in the WHERE
+        clause means re-running a sync cannot reset the streak of a row that
+        is already being watched.
+        """
+
+        scope = self._id_scope(inquiry_ids)
+        if not scope:
+            return []
+        placeholders = ",".join("?" for _ in scope)
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id FROM inquiries
+                WHERE id IN ({placeholders})
+                  AND source_type = ?
+                  AND source_deletion_tracked = 0
+                """,
+                (*scope, str(source_type)),
+            ).fetchall()
+            promoted = [int(row["id"]) for row in rows]
+            if promoted:
+                marks = ",".join("?" for _ in promoted)
+                connection.execute(
+                    f"""
+                    UPDATE inquiries
+                    SET source_deletion_tracked = 1,
+                        source_deleted = 0,
+                        source_missing_streak = 0,
+                        source_deleted_detected_at = NULL
+                    WHERE id IN ({marks})
+                    """,
+                    promoted,
+                )
+        return promoted
+
+    def source_deletion_candidates(
+        self,
+        *,
+        store_code: str,
+        source_type: str,
+        created_on_or_after: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Tracked rows for one (store, source type), for absence comparison.
+
+        ``created_on_or_after`` is a coarse ``YYYY-MM-DD`` prefilter only.
+        ``source_created_at`` is stored with the marketplace's own UTC offset,
+        so a string comparison cannot decide window membership; the caller
+        does that on parsed datetimes. The prefilter is therefore an
+        over-approximation on purpose -- it must never exclude a row the
+        caller would have considered.
+        """
+
+        clauses = [
+            "store_code = ?",
+            "source_type = ?",
+            "source_deletion_tracked = 1",
+        ]
+        parameters: list[Any] = [str(store_code), str(source_type)]
+        if created_on_or_after:
+            clauses.append(
+                "substr(COALESCE(source_created_at, registered_at), 1, 10) >= ?"
+            )
+            parameters.append(str(created_on_or_after))
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, store_code, source_type, source_question_id,
+                       external_inquiry_id, source_created_at, registered_at,
+                       source_deleted, source_missing_streak
+                FROM inquiries
+                WHERE {" AND ".join(clauses)}
+                """,
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def increment_source_missing_streak(
+        self, inquiry_ids: Any, *, source_type: str
+    ) -> dict[int, int]:
+        """Count one authoritative sync in which a tracked row was absent."""
+
+        scope = self._id_scope(inquiry_ids)
+        if not scope:
+            return {}
+        placeholders = ",".join("?" for _ in scope)
+        with self.database.transaction() as connection:
+            connection.execute(
+                f"""
+                UPDATE inquiries
+                SET source_missing_streak = source_missing_streak + 1
+                WHERE id IN ({placeholders})
+                  AND source_type = ?
+                  AND source_deletion_tracked = 1
+                """,
+                (*scope, str(source_type)),
+            )
+            rows = connection.execute(
+                f"""
+                SELECT id, source_missing_streak FROM inquiries
+                WHERE id IN ({placeholders})
+                  AND source_type = ?
+                  AND source_deletion_tracked = 1
+                """,
+                (*scope, str(source_type)),
+            ).fetchall()
+        return {
+            int(row["id"]): int(row["source_missing_streak"]) for row in rows
+        }
+
+    def mark_source_deleted(
+        self, inquiry_ids: Any, *, source_type: str, detected_at: str
+    ) -> list[int]:
+        """Confirm deletion, and report only the rows that actually changed.
+
+        ``source_deleted = 0`` in the WHERE clause is what keeps
+        ``source_deleted_detected_at`` meaning "when we concluded this" --
+        without it every later sync would push the timestamp forward and the
+        transition would be logged again every ten minutes.
+        """
+
+        scope = self._id_scope(inquiry_ids)
+        if not scope:
+            return []
+        placeholders = ",".join("?" for _ in scope)
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id FROM inquiries
+                WHERE id IN ({placeholders})
+                  AND source_type = ?
+                  AND source_deletion_tracked = 1
+                  AND source_deleted = 0
+                """,
+                (*scope, str(source_type)),
+            ).fetchall()
+            changed = [int(row["id"]) for row in rows]
+            if changed:
+                marks = ",".join("?" for _ in changed)
+                connection.execute(
+                    f"""
+                    UPDATE inquiries
+                    SET source_deleted = 1,
+                        source_deleted_detected_at = ?
+                    WHERE id IN ({marks})
+                    """,
+                    (str(detected_at), *changed),
+                )
+        return changed
+
+    def clear_source_deleted(
+        self, inquiry_ids: Any, *, source_type: str
+    ) -> list[int]:
+        """An observed inquiry is not deleted: reset the absence bookkeeping.
+
+        Only the four source-state columns move.  Draft, final answer,
+        approval, Learning provenance and post history are untouched, so an
+        inquiry that disappears and comes back keeps everything that was ever
+        written about it.
+        """
+
+        scope = self._id_scope(inquiry_ids)
+        if not scope:
+            return []
+        placeholders = ",".join("?" for _ in scope)
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id FROM inquiries
+                WHERE id IN ({placeholders})
+                  AND source_type = ?
+                  AND source_deletion_tracked = 1
+                  AND source_deleted = 1
+                """,
+                (*scope, str(source_type)),
+            ).fetchall()
+            restored = [int(row["id"]) for row in rows]
+            connection.execute(
+                f"""
+                UPDATE inquiries
+                SET source_deleted = 0,
+                    source_deleted_detected_at = NULL,
+                    source_missing_streak = 0
+                WHERE id IN ({placeholders})
+                  AND source_type = ?
+                  AND source_deletion_tracked = 1
+                """,
+                (*scope, str(source_type)),
+            )
+        return restored
+
     def list(
         self,
         *,
@@ -1027,12 +1247,24 @@ class InquiryRepository:
                 [day_text] + market_params,
             )
             # STOCK -- what is queued right now.  Market scope, no dates.
+            #
+            # An inquiry the customer deleted at the source is work nobody can
+            # finish: the answer has nowhere to go.  So it leaves the backlog
+            # here while staying in the list, which is the one place the two
+            # requirements differ.  FLOW above is untouched -- a draft written
+            # last Tuesday was still written, whatever happened afterwards.
+            #
+            # The condition reads ``source_deleted`` alone and never
+            # ``source_deletion_tracked``: an untracked historical row is 0 by
+            # migration default, so this feature cannot quietly remove
+            # anything that was being counted before it shipped.
             review_current = scalar(
                 """
                 SELECT COUNT(DISTINCT id) FROM inquiries
                 WHERE approval_status='PENDING'
                   AND post_status NOT IN ('POSTED','POSTING','POST_UNKNOWN')
                   AND workflow_status IN ('REVIEW_PENDING','NEEDS_ATTENTION')
+                  AND COALESCE(source_deleted, 0) = 0
                 """
                 + market_where,
                 list(market_params),
@@ -1046,6 +1278,7 @@ class InquiryRepository:
                     workflow_status IN ('NEEDS_ATTENTION','FAILED')
                     OR post_status IN ('POST_FAILED','POST_UNKNOWN')
                   )
+                  AND COALESCE(source_deleted, 0) = 0
                 """
                 + market_where,
                 list(market_params),

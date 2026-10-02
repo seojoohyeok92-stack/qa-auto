@@ -422,6 +422,23 @@ class AutoPostPipelineService:
             counters["processed_count"] += 1
             try:
                 fresh = self.inquiries.get(inquiry_id) or {}
+                if bool(fresh.get("source_deleted")):
+                    # Stop before the draft, not just before the post: there
+                    # is no point generating an answer for an inquiry the
+                    # marketplace no longer returns.  Reached only if the row
+                    # was marked after the queue query above; the post service
+                    # refuses it too.
+                    counters["skipped_count"] += 1
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "AUTO_POST_SKIPPED_SOURCE_DELETED",
+                        "네이버 원본에서 조회되지 않는 문의이므로 자동등록을 건너뛰었습니다.",
+                        details={
+                            "auto_post_run_id": run_id,
+                            "network_call_count": 0,
+                        },
+                    )
+                    continue
                 if (
                     bool(fresh.get("source_answered"))
                     or str(fresh.get("post_status") or "").upper() == "POSTED"

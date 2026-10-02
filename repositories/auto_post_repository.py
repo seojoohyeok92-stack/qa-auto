@@ -338,6 +338,12 @@ class AutoPostRepository:
         answered would otherwise fill the page and the answered market would
         never be reached.  ``None`` keeps every store, which is what the
         existing callers and tests that pass their own ids expect.
+
+        An inquiry deleted at the source is excluded here as well as at the
+        post service, for the same reason the store scope is: the queue is cut
+        with LIMIT, so an unanswerable row left in it holds a place a real one
+        could have used.  The final refusal still lives in the post service --
+        this only keeps the queue honest.
         """
 
         terminal_errors = tuple(sorted(NON_RETRYABLE_TARGET_ERRORS))
@@ -375,6 +381,7 @@ class AutoPostRepository:
                         WHERE a.inquiry_id=i.id AND a.status='POST_FAILED') AS failed_attempts
                 FROM inquiries i
                 WHERE COALESCE(i.source_answered,0)=0
+                  AND COALESCE(i.source_deleted,0)=0
                   AND i.post_status IN ('NOT_POSTED','POST_FAILED')
                   AND trim(COALESCE(i.store_code,''))<>''
                   AND trim(COALESCE(i.source_type,''))<>''

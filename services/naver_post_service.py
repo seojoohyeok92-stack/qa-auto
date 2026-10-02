@@ -192,6 +192,22 @@ class NaverPostService:
                 "네이버 실제 등록 기능이 잠겨 있습니다.",
             )
         preflight_inquiry = self.inquiries.get(inquiry_id) or {}
+        # The last gate before any network call, and the only one all three
+        # callers share: manual registration, the unattended pipeline and a
+        # retry all arrive here.  An inquiry the marketplace no longer returns
+        # has nowhere to receive an answer, so it is refused with zero
+        # requests sent.
+        #
+        # Reads ``source_deleted`` alone.  A historical row that predates
+        # deletion tracking is 0 by migration default, so nothing that could
+        # be posted before this shipped becomes unpostable now.
+        if bool(preflight_inquiry.get("source_deleted")):
+            return self._blocked(
+                inquiry_id,
+                "SOURCE_DELETED",
+                "네이버 원본에서 더 이상 조회되지 않는 문의여서 답변을 등록할 수 없습니다.",
+                automatic=automatic,
+            )
         if bool(preflight_inquiry.get("source_answered")):
             return self._blocked(
                 inquiry_id,

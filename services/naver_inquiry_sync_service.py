@@ -36,6 +36,74 @@ from services.naver_inquiry_normalizer import InquiryNormalizer
 # would create an Inquiry row and enqueue the entire answer/auto-post pipeline.
 SUPPORTED_INQUIRY_TYPES = ("PRODUCT_INQUIRY",)
 
+# Source-side deletion tracking.
+#
+# Naver's 상품문의 list response carries no status or deleted field -- across
+# every payload this service has ever stored, the normalizer's whitelisted
+# ``status`` key has never once been populated.  Absence from an otherwise
+# complete response is therefore the only observable signal, which makes the
+# question "when is absence trustworthy?" the whole of the design.
+DELETION_TRACKED_INQUIRY_TYPE = "PRODUCT_INQUIRY"
+
+# Three consecutive authoritative syncs.  Measured against the four inquiries
+# that vanished together on the production store: they stayed absent for
+# 20.5h, and the two before them for 86.8h and 136.7h -- hundreds of ten-minute
+# runs each.  Three costs half an hour of latency and removes every
+# single-response flicker from consideration.
+SOURCE_DELETION_STREAK_THRESHOLD = 3
+
+# Keep away from the lower edge of the requested window.  ``fromDate`` filters
+# on the inquiry's own creation time, so a row drifts out of range on its own:
+# two inquiries looked "missing" on the production store until their KST
+# timestamps were converted, at which point both sat 1 and 8 minutes *outside*
+# the window they were last seen in.  A row inside this margin is simply left
+# alone for one more run -- the margin can only ever prevent a mark.
+_SOURCE_DELETION_WINDOW_MARGIN = timedelta(hours=1)
+
+# How far back the coarse SQL prefilter reaches.  ``source_created_at`` keeps
+# the marketplace's own UTC offset, so its date prefix can sit a day either
+# side of the UTC window; two days is slack, and exact membership is decided
+# on parsed datetimes afterwards.
+_SOURCE_DELETION_PREFILTER_SLACK = timedelta(days=2)
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """Parse a stored source timestamp into UTC, or give up.
+
+    Giving up matters: a row whose creation time cannot be read has no
+    provable place in the requested window, and is never a deletion candidate.
+    """
+
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+@dataclass(frozen=True)
+class _SourceObservation:
+    """What one (store, inquiry type) actually returned in one sync.
+
+    Kept per source rather than per run so an id collected for one store can
+    never count as presence for another -- production runs a single Naver
+    store today, and this is the structure that keeps that from mattering.
+    """
+
+    store_code: str
+    inquiry_type: str
+    seen_external_ids: frozenset[str]
+    fetched_count: int
+
 
 @dataclass(frozen=True)
 class NaverInquirySyncResult:
@@ -238,6 +306,134 @@ class NaverInquirySyncService:
         if self.clock() - started_clock > self.settings.max_runtime_seconds:
             raise classified_error("MAX_RUNTIME_EXCEEDED")
 
+    def _reconcile_source_deletions(
+        self,
+        observations: Sequence[_SourceObservation],
+        *,
+        from_datetime: datetime,
+        to_datetime: datetime,
+    ) -> dict[str, int]:
+        """Compare tracked rows against what an authoritative sync returned.
+
+        Only reached when the whole run finished SUCCESS, and only ever looks
+        at rows this build collected itself (``source_deletion_tracked = 1``).
+        Rows that predate the feature are not queried, not counted and not
+        marked: the back catalogue is out of scope by construction, not by a
+        flag that could be flipped later.
+
+        Nothing here writes answer, approval, Learning or post history.  The
+        four source-state columns are the entire blast radius.
+        """
+
+        summary = {
+            "observed_count": 0,
+            "missing_count": 0,
+            "deleted_count": 0,
+            "restored_count": 0,
+        }
+        window_start = from_datetime + _SOURCE_DELETION_WINDOW_MARGIN
+        prefilter = (
+            (from_datetime - _SOURCE_DELETION_PREFILTER_SLACK)
+            .date()
+            .isoformat()
+        )
+        for observation in observations:
+            if observation.inquiry_type != DELETION_TRACKED_INQUIRY_TYPE:
+                continue
+            # An empty response is not evidence that everything is gone.  The
+            # authoritative-run gate already refuses one, and this repeats the
+            # condition at the point the writes happen.
+            if observation.fetched_count <= 0:
+                continue
+            candidates = self.inquiries.source_deletion_candidates(
+                store_code=observation.store_code,
+                source_type=observation.inquiry_type,
+                created_on_or_after=prefilter,
+            )
+            observed: list[int] = []
+            missing: list[int] = []
+            for row in candidates:
+                created = _as_utc(
+                    row.get("source_created_at") or row.get("registered_at")
+                )
+                if created is None:
+                    continue
+                if not window_start <= created <= to_datetime:
+                    continue
+                external = str(
+                    row.get("external_inquiry_id")
+                    or row.get("source_question_id")
+                    or ""
+                )
+                if not external:
+                    continue
+                inquiry_id = int(row["id"])
+                if external in observation.seen_external_ids:
+                    # Only write when there is something to undo, so a steady
+                    # state costs no UPDATE at all.
+                    if (
+                        int(row.get("source_missing_streak") or 0)
+                        or int(row.get("source_deleted") or 0)
+                    ):
+                        observed.append(inquiry_id)
+                else:
+                    missing.append(inquiry_id)
+            summary["observed_count"] += len(observed)
+            summary["missing_count"] += len(missing)
+            if observed:
+                restored = self.inquiries.clear_source_deleted(
+                    observed, source_type=observation.inquiry_type
+                )
+                summary["restored_count"] += len(restored)
+                for inquiry_id in restored:
+                    self.logs.record_inquiry(
+                        inquiry_id,
+                        "SOURCE_DELETION_CLEARED",
+                        "네이버 원본에서 다시 조회되어 미조회 상태를 해제했습니다.",
+                        details={
+                            "store_code": observation.store_code,
+                            "source": observation.inquiry_type,
+                            "network_call_count": 0,
+                        },
+                    )
+            if not missing:
+                continue
+            streaks = self.inquiries.increment_source_missing_streak(
+                missing, source_type=observation.inquiry_type
+            )
+            confirmed = [
+                inquiry_id
+                for inquiry_id, streak in streaks.items()
+                if streak >= SOURCE_DELETION_STREAK_THRESHOLD
+            ]
+            if not confirmed:
+                continue
+            detected_at = datetime.now(UTC).isoformat(timespec="milliseconds")
+            changed = self.inquiries.mark_source_deleted(
+                confirmed,
+                source_type=observation.inquiry_type,
+                detected_at=detected_at,
+            )
+            summary["deleted_count"] += len(changed)
+            # ``mark_source_deleted`` returns only the 0 -> 1 transitions, so
+            # a row already known to be deleted is not logged again on every
+            # ten-minute run.
+            for inquiry_id in changed:
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "SOURCE_DELETION_DETECTED",
+                    "네이버 원본에서 연속 조회되지 않아 미조회 문의로 확정했습니다.",
+                    level="WARNING",
+                    details={
+                        "store_code": observation.store_code,
+                        "source": observation.inquiry_type,
+                        "missing_streak": int(streaks.get(inquiry_id) or 0),
+                        "detected_at": detected_at,
+                        "network_call_count": 0,
+                    },
+                )
+        return summary
+
     def sync_inquiries(
         self,
         *,
@@ -319,6 +515,7 @@ class NaverInquirySyncService:
         seen_keys: set[tuple[str, str, str]] = set()
         acquired_stores: list[str] = []
         lock_skipped_stores: list[str] = []
+        source_observations: list[_SourceObservation] = []
         try:
             for store in targets:
                 try:
@@ -381,6 +578,12 @@ class NaverInquirySyncService:
                     page = 1
                     previous_signature: tuple[str, ...] | None = None
                     source_failed = False
+                    # Per (store, inquiry type), never shared across the run:
+                    # presence for this store must be decided only by what
+                    # this store's own pages returned.
+                    source_seen_ids: set[str] = set()
+                    source_fetched = 0
+                    source_normalization_failed = False
                     while page <= self.settings.max_pages:
                         self._assert_runtime(started_clock)
                         try:
@@ -447,6 +650,7 @@ class NaverInquirySyncService:
                             source_failed = True
                             break
                         fetched += len(contents)
+                        source_fetched += len(contents)
                         id_fields = (
                             ("questionId",)
                             if inquiry_type == "PRODUCT_INQUIRY"
@@ -485,6 +689,7 @@ class NaverInquirySyncService:
                         for payload in contents:
                             if not isinstance(payload, dict):
                                 failed += 1
+                                source_normalization_failed = True
                                 errors.append(
                                     self._safe_error(
                                         classified_error(
@@ -502,10 +707,15 @@ class NaverInquirySyncService:
                                     payload,
                                     store_code=store.code,
                                 )
+                                external_id = str(item["external_inquiry_id"])
+                                # Presence is recorded before the duplicate
+                                # check: an id that appears twice in one
+                                # response was still returned by the API.
+                                source_seen_ids.add(external_id)
                                 key = (
                                     store.code,
                                     inquiry_type,
-                                    str(item["external_inquiry_id"]),
+                                    external_id,
                                 )
                                 if key in seen_keys:
                                     skipped += 1
@@ -514,6 +724,11 @@ class NaverInquirySyncService:
                                 page_items.append(item)
                             except Exception:
                                 failed += 1
+                                # An item that could not be normalized never
+                                # reaches the seen set, so it would read as
+                                # absent.  Disqualify the whole source instead
+                                # of guessing which rows the gap belongs to.
+                                source_normalization_failed = True
                                 errors.append(
                                     self._safe_error(
                                         classified_error(
@@ -524,6 +739,8 @@ class NaverInquirySyncService:
                                         page=page,
                                     )
                                 )
+                        inserted_inquiry_ids: list[int] = []
+
                         def emit_item_event(
                             event_code: str,
                             details: dict[str, Any] | None = None,
@@ -531,6 +748,15 @@ class NaverInquirySyncService:
                             level: str = "INFO",
                             persist: bool = True,
                         ) -> None:
+                            # ``InquirySyncService`` already announces each
+                            # item's upsert outcome here.  Reading "new" off
+                            # that existing contract is how this service knows
+                            # which rows it collected itself, without changing
+                            # the shared sync layer Coupang also writes through.
+                            if event_code == "NAVER_SYNC_ITEM_INSERTED":
+                                new_id = (details or {}).get("inquiry_id")
+                                if new_id is not None:
+                                    inserted_inquiry_ids.append(int(new_id))
                             trace.emit(
                                 event_code,
                                 {
@@ -564,6 +790,19 @@ class NaverInquirySyncService:
                         updated += page_result["updated"]
                         unchanged += page_result["unchanged"]
                         failed += page_result["failed"]
+                        if (
+                            inserted_inquiry_ids
+                            and inquiry_type == DELETION_TRACKED_INQUIRY_TYPE
+                        ):
+                            # Tracking begins the moment an inquiry is first
+                            # inserted, and only then.  An existing row that
+                            # merely reappears in a response is not promoted:
+                            # "from here on" means the rows this build
+                            # collected, not every row the API still returns.
+                            self.inquiries.start_source_deletion_tracking(
+                                inserted_inquiry_ids,
+                                source_type=inquiry_type,
+                            )
                         if page_result["failed"]:
                             errors.append(
                                 self._safe_error(
@@ -612,6 +851,26 @@ class NaverInquirySyncService:
                         source_failed = True
                     if not source_failed:
                         successful_sources += 1
+                        # The authoritative-source gate.  Absence is only
+                        # evidence when this (store, type) fetched every page
+                        # without an API, pagination or DB error, normalized
+                        # every item it received, and received something at
+                        # all.  Anything less and no observation is recorded,
+                        # so no row's streak can move.
+                        if (
+                            not source_normalization_failed
+                            and source_fetched > 0
+                        ):
+                            source_observations.append(
+                                _SourceObservation(
+                                    store_code=store.code,
+                                    inquiry_type=inquiry_type,
+                                    seen_external_ids=frozenset(
+                                        source_seen_ids
+                                    ),
+                                    fetched_count=source_fetched,
+                                )
+                            )
                 if store_had_success:
                     successful_stores.add(store.code)
         except Exception as error:
@@ -640,6 +899,33 @@ class NaverInquirySyncService:
             status = "SKIPPED"
         else:
             status = "SUCCESS"
+        # Deletion reconciliation runs here and nowhere else: after the run's
+        # own verdict is known, and only on a clean one.  A per-source check
+        # alone would let a run that ended PARTIAL_SYNC still write deletion
+        # state for the sources that happened to succeed; requiring SUCCESS
+        # as well is the stricter reading, and the one that fails closed.
+        deletion_summary: dict[str, int] | None = None
+        if status == "SUCCESS" and source_observations:
+            try:
+                deletion_summary = self._reconcile_source_deletions(
+                    source_observations,
+                    from_datetime=from_datetime,
+                    to_datetime=to_datetime,
+                )
+            except Exception as error:
+                # Collection already succeeded and is committed.  A failure in
+                # the bookkeeping that follows must not turn a good sync into
+                # a reported failure, so it is logged and the run stands.
+                deletion_summary = None
+                self.logs.record_system(
+                    "SOURCE_DELETION_RECONCILE_FAILED",
+                    "삭제 상태 동기화 단계에서 오류가 발생했지만 문의 수집은 완료되었습니다.",
+                    level="WARNING",
+                    details={
+                        "sync_id": sync_id,
+                        "exception_type": error.__class__.__name__,
+                    },
+                )
         error_code = (
             errors[0]["error_code"]
             if errors
@@ -661,6 +947,11 @@ class NaverInquirySyncService:
             "skipped_store_count": len(lock_skipped_stores),
             "skipped_stores": lock_skipped_stores,
             "errors": errors,
+            **(
+                {"source_deletion": deletion_summary}
+                if deletion_summary
+                else {}
+            ),
         }
         self.runs.finish(
             sync_id,

@@ -309,6 +309,17 @@ def _dashboard_work_items_from_rows(
                     else str(inquiry.get("answer_status")).upper()
                     == "ANSWERED"
                 ),
+                # Source-side deletion state.  Carried onto the work item so
+                # the list can label a deleted inquiry without re-reading the
+                # row; the list query itself is deliberately unchanged, which
+                # is what keeps a deleted inquiry visible.
+                "source_deletion_tracked": inquiry.get(
+                    "source_deletion_tracked"
+                ),
+                "source_deleted": inquiry.get("source_deleted"),
+                "source_deleted_detected_at": inquiry.get(
+                    "source_deleted_detected_at"
+                ),
                 "workflow_status": inquiry.get("workflow_status"),
                 "approval_status": inquiry.get("approval_status"),
                 "post_status": inquiry.get("post_status"),

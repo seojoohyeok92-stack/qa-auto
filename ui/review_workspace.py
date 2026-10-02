@@ -677,11 +677,18 @@ def _render_list(
             if item.get("source") == "PRODUCT_INQUIRY"
             else "고객문의"
         )
-        # "검토대기" here is the fallback when an inquiry is neither answered
-        # nor auto-processable -- not a queue anyone put it in.  On a market
-        # production only reads, nothing is waiting for review, so the label
-        # says what is actually true of it.
-        if item.get("answered"):
+        # "원본 미조회" comes first, ahead of "답변완료": four of the
+        # inquiries observed disappearing on the production store had already
+        # been answered, and labelling those as merely answered hides the one
+        # fact that changes what staff can still do with them.
+        #
+        # "검토대기" at the end is the fallback when an inquiry is neither
+        # answered nor auto-processable -- not a queue anyone put it in.  On a
+        # market production only reads, nothing is waiting for review, so the
+        # label says what is actually true of it.
+        if _is_source_deleted(item):
+            status = SOURCE_DELETED_LABEL
+        elif item.get("answered"):
             status = "답변완료"
         elif _is_read_only_inquiry(item):
             status = "조회전용"
@@ -1298,6 +1305,29 @@ def _render_gpt_diagnostics(
             )
 
 
+# What the sync can actually prove is that three consecutive complete
+# responses did not contain this inquiry.  Who removed it, and why, is not in
+# any response -- a customer deletion, a seller hide and a marketplace-side
+# removal are indistinguishable here.  So the label states the observation and
+# stops there.
+SOURCE_DELETED_LABEL = "원본 미조회"
+
+
+def _is_source_deleted(inquiry: dict[str, Any]) -> bool:
+    """Whether the marketplace has stopped returning this inquiry.
+
+    Only ever true for an inquiry this build collected and then watched:
+    historical rows carry ``source_deleted = 0`` from the migration and are
+    never reconciled, so they can never acquire this label.
+
+    The inquiry's own content, draft, approval and post history stay readable
+    -- the label says the question is no longer visible at the source, not
+    that the record here is gone.
+    """
+
+    return bool(inquiry.get("source_deleted"))
+
+
 def _is_read_only_inquiry(inquiry: dict[str, Any]) -> bool:
     """Whether this inquiry may only be looked at.
 
@@ -1485,7 +1515,10 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     # waiting to be done.  The write gates below stay as they are; this decides
     # what is drawn.
     read_only = _is_read_only_inquiry(inquiry)
-    if read_only:
+    source_deleted = _is_source_deleted(inquiry)
+    if source_deleted:
+        workspace_status = SOURCE_DELETED_LABEL
+    elif read_only:
         workspace_status = "조회전용"
     elif approval_complete:
         workspace_status = "승인 완료"
@@ -1510,6 +1543,19 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         + f"{escape(workspace_status)}</span></div>",
         unsafe_allow_html=True,
     )
+    if source_deleted:
+        # The timestamp is when Q&A Auto stopped finding the inquiry, not when
+        # it was removed: no response carries that, so the caption does not
+        # claim it.  Labelled "미조회 확인 시점" for the same reason.
+        detected = format_datetime_minute_kst(
+            inquiry.get("source_deleted_detected_at")
+        )
+        st.caption(
+            "네이버 원본에서 더 이상 조회되지 않는 문의입니다. "
+            f"미조회 확인 시점 {detected} · "
+            "기존 답변·승인·Learning 이력은 그대로 보존됩니다. "
+            "답변 등록은 차단됩니다."
+        )
     _show_notice()
     if draft:
         from ui.learning_performance import render_answer_learning_provenance

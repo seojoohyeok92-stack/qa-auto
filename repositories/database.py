@@ -2229,6 +2229,52 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        36,
+        (
+            # Source-side deletion tracking for Naver 상품문의.
+            #
+            # Four columns, and the reason there are four rather than one:
+            # ``source_deleted=0`` alone cannot tell "this row is watched and
+            # the inquiry is still there" from "nobody is watching this row".
+            # Every inquiry that already exists when this migration runs is
+            # the second case, and must stay that way -- the feature watches
+            # inquiries collected from here on, never the back catalogue, so
+            # no historical row is ever compared against the API or marked.
+            #
+            # ``DEFAULT 0`` is what delivers that: the migration itself is the
+            # whole of the "leave the past alone" policy, and it is also why
+            # Coupang rows are unaffected (nothing ever sets their flags).
+            #
+            # These four are Q&A Auto's own sync bookkeeping, not marketplace
+            # fields: they are deliberately absent from SOURCE_OWNED_FIELDS and
+            # SYNC_FIELDS so an ordinary upsert neither reads nor clears them.
+            """
+            ALTER TABLE inquiries
+            ADD COLUMN source_deletion_tracked INTEGER NOT NULL DEFAULT 0
+                CHECK (source_deletion_tracked IN (0, 1))
+            """,
+            """
+            ALTER TABLE inquiries
+            ADD COLUMN source_deleted INTEGER NOT NULL DEFAULT 0
+                CHECK (source_deleted IN (0, 1))
+            """,
+            # When Q&A Auto concluded the inquiry was gone, not when the
+            # customer deleted it: the API never tells us the latter.
+            """
+            ALTER TABLE inquiries ADD COLUMN source_deleted_detected_at TEXT
+            """,
+            """
+            ALTER TABLE inquiries
+            ADD COLUMN source_missing_streak INTEGER NOT NULL DEFAULT 0
+            """,
+            """
+            CREATE INDEX idx_inquiries_source_deletion_tracked
+            ON inquiries(store_code, source_type, source_deletion_tracked)
+            WHERE source_deletion_tracked = 1
+            """,
+        ),
+    ),
 )
 
 
