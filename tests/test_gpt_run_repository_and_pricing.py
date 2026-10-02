@@ -8,6 +8,10 @@ from answer.gpt_pricing import ModelPriceKrw, estimate_cost_krw
 from repositories.database import Database
 from repositories.gpt_provider_run_repository import GptProviderRunRepository
 from repositories.inquiry_repository import InquiryRepository
+from tests.migration_contract import (
+    assert_migration_applied,
+    expected_migration_versions,
+)
 
 
 @pytest.fixture
@@ -58,7 +62,8 @@ def run_values(inquiry_id: int, correlation: str = "corr-1", **extra):
 
 
 def test_migration_v5_creates_run_table(database: Database) -> None:
-    assert database.migration_versions() == list(range(1, 33))
+    assert_migration_applied(database, 5)
+    assert database.migration_versions() == expected_migration_versions()
     with database.connection() as connection:
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE name='gpt_provider_runs'"

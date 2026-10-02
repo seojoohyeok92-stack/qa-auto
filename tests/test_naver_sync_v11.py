@@ -18,6 +18,7 @@ from repositories.log_repository import LogRepository
 from repositories.naver_sync_repository import NaverSyncRepository
 from services.approval_service import ApprovalService
 from services.naver_inquiry_sync_service import NaverInquirySyncService
+from tests.migration_contract import expected_migration_versions
 
 
 def _settings(**overrides) -> NaverSyncSettings:
@@ -514,11 +515,11 @@ def test_v11_migration_preserves_existing_inquiry_and_draft(
             (inquiry_id, "기존 Draft"),
         )
     monkeypatch.setattr(database_module, "MIGRATIONS", all_migrations)
-    # Everything from v11 onward, derived from MIGRATIONS so a new migration
-    # does not turn this into a failure about its own version number instead
-    # of about the inquiry and draft it exists to protect.
+    # Everything from v11 onward.  Derived, so a new migration does not turn
+    # this into a failure about its own version number instead of about the
+    # inquiry and draft it exists to protect.
     assert old_database.initialize() == [
-        version for version, _ in all_migrations[10:]
+        version for version in expected_migration_versions() if version > 10
     ]
     stored = InquiryRepository(old_database).get(inquiry_id)
     assert stored["external_inquiry_id"] == "OLD-1"

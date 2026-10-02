@@ -11,7 +11,7 @@ from answer.models import AnswerResult, AnswerStatus
 from config import NaverSyncSettings, StoreConfig
 from repositories.answer_repository import AnswerRepository
 from repositories.approval_repository import ApprovalRepository
-from repositories.database import MIGRATIONS, Database
+from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository, serialize_json
 from repositories.learning_feedback_repository import LearningFeedbackRepository
 from repositories.learning_repository import LearningRepository
@@ -23,6 +23,10 @@ from services.automatic_draft_service import AutomaticDraftService
 from services.learning_service import LearningService
 from services.naver_inquiry_sync_service import NaverInquirySyncService
 from ui.review_workspace import approval_learning_trace
+from tests.migration_contract import (
+    assert_fresh_schema,
+    expected_migration_versions,
+)
 
 
 def _settings() -> NaverSyncSettings:
@@ -88,11 +92,7 @@ def _sync(database: Database, payload: dict) -> None:
 
 def _database(tmp_path) -> Database:
     database = Database(tmp_path / "posted-truth.db")
-    # A fresh database applies every migration exactly once, in order.  Read
-    # off MIGRATIONS rather than a hardcoded count: the literal drifted behind
-    # the schema and turned every test in this file into a false failure that
-    # said nothing about posted-answer truth.
-    assert database.initialize() == [version for version, _ in MIGRATIONS]
+    assert_fresh_schema(database)
     return database
 
 
@@ -413,9 +413,7 @@ def test_posted_staff_edit_is_not_shown_as_approved_before_explicit_approval(
 def test_posted_answer_migration_is_idempotent(tmp_path) -> None:
     database = _database(tmp_path)
     assert database.initialize() == []
-    assert database.migration_versions() == [
-        version for version, _ in MIGRATIONS
-    ]
+    assert database.migration_versions() == expected_migration_versions()
 
 
 def test_human_verified_naver_learning_survives_sync_and_rebuild(tmp_path) -> None:

@@ -5,6 +5,10 @@ from datetime import UTC, datetime, timedelta
 from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.inquiry_repository import InquiryRepository
+from tests.migration_contract import (
+    assert_migration_applied,
+    assert_schema_ledger_is_complete,
+)
 
 
 def inquiry(database: Database) -> int:
@@ -20,9 +24,8 @@ def inquiry(database: Database) -> int:
 
 def test_migration_v2_is_reentrant_and_creates_lookup_table(tmp_path) -> None:
     database = Database(tmp_path / "migration.db")
-    assert database.initialize() == list(range(1, 33))
-    assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 33))
+    assert_schema_ledger_is_complete(database)
+    assert_migration_applied(database, 2)
     with database.connection() as connection:
         table = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name = ?",

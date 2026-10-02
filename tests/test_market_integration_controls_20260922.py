@@ -17,6 +17,11 @@ from services.learning_feedback_service import LearningFeedbackService
 from services.learning_signal_service import LearningSignalService
 from services.manual_inquiry_sync_service import ManualInquirySyncService
 from ui.market_labels import ALL_MARKETS, shows_market_badge, stores_in_markets
+from tests.migration_contract import (
+    assert_columns_exist,
+    expected_migration_versions,
+    migrations_through,
+)
 
 
 NAVER = "OJE_PLUS"
@@ -35,16 +40,31 @@ def test_platform_migration_inherits_the_previous_effective_state(
 ) -> None:
     import repositories.database as database_module
 
+    # Pinned to 34 by version, not to "the last one": the platform columns
+    # are what this test upgrades across, and a later migration must not
+    # silently become the one being withheld.
     migrations = database_module.MIGRATIONS
-    monkeypatch.setattr(database_module, "MIGRATIONS", migrations[:-1])
+    monkeypatch.setattr(
+        database_module, "MIGRATIONS", migrations_through(34)
+    )
     db = Database(tmp_path / "platform-migration.db")
     db.initialize()
+    assert 34 not in db.migration_versions()
     with db.transaction() as connection:
         connection.execute(
             "UPDATE naver_auto_post_settings SET enabled=1 WHERE id=1"
         )
     monkeypatch.setattr(database_module, "MIGRATIONS", migrations)
-    assert db.initialize() == [34]
+    applied = db.initialize()
+    assert applied[0] == 34
+    assert applied == [
+        version for version in expected_migration_versions()
+        if version >= 34
+    ]
+    assert_columns_exist(
+        db, "naver_auto_post_settings",
+        ("naver_enabled", "coupang_enabled"),
+    )
     assert AutoPostRepository(db).settings()["platform_enabled"] == {
         "NAVER": True, "COUPANG": True,
     }

@@ -20,11 +20,15 @@ from services.approval_service import ApprovalService
 from services.historical_case_service import HistoricalCaseService
 from services.learning_feedback_service import LearningFeedbackService
 from services.learning_signal_service import LearningSignalService
+from tests.migration_contract import (
+    assert_fresh_schema,
+    assert_reinitialize_is_noop,
+)
 
 
 def make_context(tmp_path):
     database = Database(tmp_path / "feedback.db")
-    assert database.initialize() == list(range(1, 33))
+    assert_fresh_schema(database)
     inquiry_id = InquiryRepository(database).upsert_work_item(
         {
             "store_code": "OJE_PLUS",
@@ -568,6 +572,5 @@ def test_feedback_migration_is_idempotent_and_legacy_rows_remain_positive(
             SET metadata_json=json_remove(metadata_json, '$.learning_signal_type')
             """
         )
-    assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 33))
+    assert_reinitialize_is_noop(database)
     assert len(LearningRepository(database).candidates(store_code="OJE_PLUS")) == 1

@@ -13,6 +13,7 @@ from services.auto_post_pipeline_service import AutoPostRunResult
 from services.auto_post_runtime_service import AutoPostRuntimeService
 from services.inquiry_sync_service import InquirySyncService
 from services.naver_auto_post_scheduler import NaverAutoPostScheduler
+from tests.migration_contract import assert_fresh_schema
 
 
 class FakeTimer:
@@ -32,7 +33,7 @@ class FakeTimer:
 
 def make_database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "runtime-v3.db")
-    assert database.initialize()[-1] == 32
+    assert_fresh_schema(database)
     return database
 
 

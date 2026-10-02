@@ -13,6 +13,11 @@ from services.learning_context_service import LearningContextService
 from answer.facts import AnswerFacts
 from answer.hybrid_models import Emotion, IntentResult
 from streamlit.testing.v1 import AppTest
+from tests.migration_contract import (
+    assert_migration_applied,
+    assert_tables_exist,
+    expected_migration_versions,
+)
 
 
 def _database(tmp_path) -> Database:
@@ -272,7 +277,19 @@ def test_auto_reference_can_be_disabled_and_reenabled_without_learning_promotion
 
 def test_migration_20_integrity(tmp_path) -> None:
     database = _database(tmp_path)
-    assert max(database.migration_versions()) == 32
+    # v20 brought the historical-case tables in. What this protects is that
+    # they are still there, and still consistent, with every later
+    # migration applied on top -- not that v20 is the newest one.
+    assert_migration_applied(database, 20)
+    assert_tables_exist(database, (
+        "historical_import_runs",
+        "historical_cases",
+        "historical_case_versions",
+        "gpt_chat_imports",
+    ))
+    assert max(database.migration_versions()) == max(
+        expected_migration_versions()
+    )
     with database.connection() as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

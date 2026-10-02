@@ -84,9 +84,15 @@ def test_slow_dps_draft_does_not_block_unrelated_draft_prewarm(
             return SimpleNamespace(status="CREATED")
 
     scheduler = NaverAutoPostScheduler(database)
+    # Production prewarms within the markets auto-post is enabled for,
+    # and passes that scope through to ``pending_inquiry_ids``. Every
+    # event above belongs to OJE_PLUS, so this is the same scope the
+    # scheduler would compute for them -- not a wider one that would
+    # stop exercising the store filter at all.
     scheduler._prewarm_pending_drafts(
         SimpleNamespace(drafts=Drafts()),
         exclude_inquiry_ids=set(),
+        store_codes=["OJE_PLUS"],
     )
     try:
         assert slow_started.wait(timeout=1)

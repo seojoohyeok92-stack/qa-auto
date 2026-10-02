@@ -13,6 +13,10 @@ from repositories.log_repository import LogRepository
 from repositories.workflow_repository import WorkflowRepository
 from services.approval_service import ApprovalLockedError, ApprovalService
 from workflow.models import StepCode
+from tests.migration_contract import (
+    assert_migration_applied,
+    expected_migration_versions,
+)
 
 
 @pytest.fixture
@@ -57,7 +61,8 @@ def draft(database: Database, inquiry_id: int) -> dict:
 
 
 def test_migration_v3_creates_approval_schema(database: Database) -> None:
-    assert database.migration_versions() == list(range(1, 33))
+    assert_migration_applied(database, 3)
+    assert database.migration_versions() == expected_migration_versions()
     with database.connection() as connection:
         columns = {
             row["name"]

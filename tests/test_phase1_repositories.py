@@ -13,6 +13,7 @@ from repositories.log_repository import (
 )
 from repositories.workflow_repository import WorkflowRepository
 from workflow.models import DEFAULT_STEP_ORDER, StepCode, StepStatus
+from tests.migration_contract import assert_schema_ledger_is_complete
 
 
 @pytest.fixture
@@ -70,9 +71,7 @@ def test_database_schema_initialization(database: Database) -> None:
 
 def test_database_migration_is_not_applied_twice(tmp_path) -> None:
     database = Database(tmp_path / "migration.db")
-    assert database.initialize() == list(range(1, 33))
-    assert database.initialize() == []
-    assert database.migration_versions() == list(range(1, 33))
+    assert_schema_ledger_is_complete(database)
 
 
 def test_same_inquiry_upsert_does_not_duplicate(

@@ -17,6 +17,10 @@ from services.local_auth_service import (
 )
 from services.quality_metrics_service import QualityMetricsService
 from uat.models import UserRole
+from tests.migration_contract import (
+    assert_migration_applied,
+    expected_migration_versions,
+)
 
 
 @pytest.fixture
@@ -54,7 +58,8 @@ def seed_draft(database: Database, *, posted: bool = False) -> tuple[int, int]:
 
 
 def test_migration_v6_creates_operational_tables(database: Database) -> None:
-    assert database.migration_versions() == list(range(1, 33))
+    assert_migration_applied(database, 6)
+    assert database.migration_versions() == expected_migration_versions()
     with database.connection() as connection:
         names = {
             row[0]

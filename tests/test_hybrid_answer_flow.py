@@ -13,6 +13,10 @@ from repositories.workflow_repository import WorkflowRepository
 from services.answer_service import AnswerService
 from services.hybrid_answer_service import HybridAnswerService
 from ui.review_workspace import build_gpt_diagnostics
+from tests.migration_contract import (
+    assert_migration_applied,
+    expected_migration_versions,
+)
 
 
 def request(question: str = "넷플릭스 되나요?") -> AnswerRequest:
@@ -325,7 +329,8 @@ def test_ui_diagnostics_handles_legacy_draft() -> None:
 def test_migration_v4_is_reentrant_and_preserves_metadata(
     database: Database,
 ) -> None:
-    assert database.migration_versions() == list(range(1, 33))
+    assert_migration_applied(database, 4)
+    assert database.migration_versions() == expected_migration_versions()
     assert database.initialize() == []
     with database.connection() as connection:
         columns = {

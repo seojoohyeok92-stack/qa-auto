@@ -9,11 +9,12 @@ from services.naver_auto_post_scheduler import (
     ensure_auto_post_scheduler,
     reset_auto_post_runtime_on_process_start,
 )
+from tests.migration_contract import assert_fresh_schema
 
 
 def make_database(tmp_path: Path, name: str = "dashboard-off.db") -> Database:
     database = Database(tmp_path / name)
-    assert database.initialize()[-1] == 32
+    assert_fresh_schema(database)
     return database
 
 
