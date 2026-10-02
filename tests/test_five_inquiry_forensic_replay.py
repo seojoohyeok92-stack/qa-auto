@@ -1,16 +1,33 @@
-"""Deterministic replays of the five 2026-09-08 production specimens.
+"""Replays of the five 2026-09-08 production specimens' persisted decisions.
 
-The production export deliberately contains the original run's stored outcome,
-not the unavailable GPT①/② payload bodies.  These tests therefore preserve the
-read-only inquiry/source observations and replay them through the *current*
-persisted GPT-first contract.  They are not inquiry-specific runtime rules:
-the only per-case data is the forensic evidence verdict that GPT② would have
-made after reading the candidate bodies.
+What these cases actually pin down is how a *stored* GPT①/② decision is graded:
+which combinations of evidence status and unresolved atoms may auto-post, and
+which stage gets named as the root cause when one may not.  The five specimens
+are where the combinations came from -- inquiries 687992357, 687992384,
+687992413, 687992436 and 687992464, whose original run retrieved Learning rows
+312192/120, 184444/157023/19278 and 223107/66122/169/162 respectively.
+
+They used to be loaded from ``diagnostics/five_inquiry_raw/*.json``, an
+untracked export of the operational database.  Two things were wrong with
+that.  It made the tests pass only on a machine that happened to hold that
+export, so a clean clone ran five silent false failures; and the raw dump
+carries real customer inquiry text and order identifiers, which is why it is
+deliberately not in the repository and must not be copied in.
+
+So the dump is gone and nothing here reads the filesystem.  Note what was
+actually taken from it: a self-check that the loaded file matched the inquiry
+id, and a check that the hardcoded Learning ids appeared among that run's
+``learning_references``.  Neither touched the behaviour under test -- the draft
+below was always built from the parameters, never from the export.  The
+provenance claim about a 2026-09-08 run is not something current production
+code can be regressed against, so it is recorded above as history rather than
+asserted against a synthetic file that would only be agreeing with itself.
+
+The grading assertions are stricter than before in exchange: the exact
+decision, stage and reason tuple, and the operator-facing root message, are
+all pinned now, so a verdict that comes out right for the wrong reason fails.
 """
 from __future__ import annotations
-
-import json
-from pathlib import Path
 
 import pytest
 
@@ -18,15 +35,6 @@ from services.auto_processing_eligibility_service import (
     AutoProcessingEligibilityService,
 )
 from ui.answer_status_presenter import build_decision_trace
-
-
-_RAW_DIR = Path(__file__).parents[1] / "diagnostics" / "five_inquiry_raw"
-
-
-def _raw(inquiry_id: str) -> dict:
-    matching = list(_RAW_DIR.glob(f"inquiry_{inquiry_id}_*.json"))
-    assert len(matching) == 1, inquiry_id
-    return json.loads(matching[0].read_text(encoding="utf-8"))
 
 
 def _replayed_draft(*, evidence: list[dict], unresolved: list[str]) -> dict:
@@ -73,60 +81,78 @@ def _replayed_draft(*, evidence: list[dict], unresolved: list[str]) -> dict:
     }
 
 
+NO_SOURCE = "답변에 필요한 신뢰 가능한 근거가 없습니다."
+UNRESOLVED = "GPT가 제공된 근거만으로 질문을 해결할 수 없다고 판단했습니다."
+NO_FAILURE = "최초 실패 원인이 기록되지 않았습니다."
+WITHHELD = ("GPT_REPORTED_UNRESOLVED", "GPT_WITHHELD_AUTO_POST")
+
+
+# The five specimens reduce to three distinct gradings: 687992357 and
+# 687992436 are the same shape with different atom wording, as are 687992384
+# and 687992464.  All five are kept because the specimens are the record of
+# which shapes production actually produced, and the atom text is what the
+# operator reads.
 @pytest.mark.parametrize(
-    ("inquiry_id", "expected_learning_ids", "evidence", "unresolved", "safe", "root"),
+    (
+        "specimen", "evidence", "unresolved",
+        "safe", "decision", "reasons", "root", "root_message",
+    ),
     [
+        # No usable source at all: the source stage owns the failure, ahead of
+        # the unresolved atoms it caused.
         (
-            "687992357", (312192, 120),
+            "687992357",
             [{"status": "NO_RELIABLE_SOURCE"}],
-            ["기본 구성품", "별도 준비물"], False,
-            ("SOURCE", "SOURCE_MISSING"),
+            ["기본 구성품", "별도 준비물"],
+            False, "REVIEW_REQUIRED", WITHHELD,
+            ("SOURCE", "SOURCE_MISSING"), NO_SOURCE,
         ),
         (
-            "687992384", (184444, 157023, 19278),
-            [{"status": "CANDIDATE"}, {"status": "CANDIDATE"}], [], True,
-            ("", "NONE"),
+            "687992436",
+            [{"status": "NO_RELIABLE_SOURCE"}],
+            ["노트북 연결 사양", "필요 케이블"],
+            False, "REVIEW_REQUIRED", WITHHELD,
+            ("SOURCE", "SOURCE_MISSING"), NO_SOURCE,
+        ),
+        # Every atom answered from candidate evidence: auto-postable, and the
+        # hostile legacy review flags above must not revive a block.
+        (
+            "687992384",
+            [{"status": "CANDIDATE"}, {"status": "CANDIDATE"}],
+            [],
+            True, "SAFE", (),
+            ("", "NONE"), NO_FAILURE,
         ),
         (
-            "687992413", (223107, 66122, 169, 162),
-            # The current invariant is candidate delivery of the general
-            # policy, followed by an explicit unresolved atom for the missing
-            # application procedure.  This is not a retrieval failure.
+            "687992464",
+            [{"status": "CANDIDATE"}, {"status": "CANDIDATE"}],
+            [],
+            True, "SAFE", (),
+            ("", "NONE"), NO_FAILURE,
+        ),
+        # Mixed: the general policy was delivered as a candidate and one atom
+        # stayed open.  That is an evidence-resolution outcome, not a retrieval
+        # failure, so the root cause must be EVIDENCE_UNRESOLVED and not
+        # SOURCE_MISSING -- the distinction this case exists for.
+        (
+            "687992413",
             [{"status": "CANDIDATE"}, {"status": "NO_RELIABLE_SOURCE"}],
-            ["별도 신청 절차"], False,
-            ("GPT_EVIDENCE", "EVIDENCE_UNRESOLVED"),
-        ),
-        (
-            "687992436", (312192, 120),
-            [{"status": "NO_RELIABLE_SOURCE"}],
-            ["노트북 연결 사양", "필요 케이블"], False,
-            ("SOURCE", "SOURCE_MISSING"),
-        ),
-        (
-            "687992464", (312192, 120),
-            [{"status": "CANDIDATE"}, {"status": "CANDIDATE"}], [], True,
-            ("", "NONE"),
+            ["별도 신청 절차"],
+            False, "REVIEW_REQUIRED", WITHHELD,
+            ("GPT_EVIDENCE", "EVIDENCE_UNRESOLVED"), UNRESOLVED,
         ),
     ],
 )
 def test_forensic_specimen_replays_through_single_gpt_first_authority(
-    inquiry_id: str,
-    expected_learning_ids: tuple[int, ...],
+    specimen: str,
     evidence: list[dict],
     unresolved: list[str],
     safe: bool,
+    decision: str,
+    reasons: tuple[str, ...],
     root: tuple[str, str],
+    root_message: str,
 ) -> None:
-    raw = _raw(inquiry_id)
-    inquiry = raw["inquiry"]
-    assert inquiry["naver_inquiry_id"] == inquiry_id
-    observed_ids = {
-        row["learning_example_id"]
-        for row in raw["evidence"]["learning_references"]
-        if row["learning_example_id"] is not None
-    }
-    assert set(expected_learning_ids) <= observed_ids
-
     draft = _replayed_draft(evidence=evidence, unresolved=unresolved)
     verdict = AutoProcessingEligibilityService().evaluate(
         inquiry={"source_answered": False, "post_status": "NOT_POSTED"},
@@ -138,8 +164,14 @@ def test_forensic_specimen_replays_through_single_gpt_first_authority(
         eligibility=verdict, route="GPT_FALLBACK",
     )
 
-    assert verdict.safe is safe, verdict
-    assert (trace.root_stage, trace.root_cause) == root
+    assert verdict.safe is safe, (specimen, verdict)
+    assert verdict.decision == decision, (specimen, verdict)
+    assert verdict.stage == "AUTO_POST_ELIGIBILITY", (specimen, verdict)
+    assert verdict.reasons == reasons, (specimen, verdict)
+    assert verdict.soft_reasons == (), (specimen, verdict)
+    assert (trace.root_stage, trace.root_cause) == root, (specimen, trace)
+    assert trace.root_message == root_message, (specimen, trace)
+
     if safe:
         assert not set(verdict.reasons) & {
             "PROCESSING_PLAN_REQUIRES_REVIEW", "DRAFT_REVIEW_REQUIRED",

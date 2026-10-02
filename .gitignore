@@ -92,5 +92,15 @@ data/서버pc_data/
 
 # Local investigation and preservation artifacts; never runtime sources.
 scratchpad/
-archive/data_cleanup_20260913/
 data/서버pc_data*/
+
+# Temporary review bundles, scratch DBs and regenerated analysis artifacts.
+tmp/
+
+# Compressed server snapshots duplicate the unpacked ignored snapshot folders.
+# The rule above matches the directory only, so the .zip stayed visible.
+data/서버pc_data*.zip
+
+# Archived local cleanup snapshots are not runtime sources. Replaces the
+# former archive/data_cleanup_20260913/ line, which this covers.
+archive/
