@@ -112,7 +112,35 @@ _SEMANTIC_ATOM_PROMPT_DROP: frozenset[str] = frozenset({"retrieval_queries"})
 # restating what the line above it already says. It stays in the context, where
 # ``learning_evidence_policy._qualifying``, the dashboard and the candidate
 # diagnostics read it.
-_LEARNING_ITEM_PROMPT_DROP: frozenset[str] = frozenset({"compatibility"})
+#
+# ``style_only`` goes for a different reason: its name is read as a verdict.
+# It is set once, at write time, as ``source == "SELLER_ANSWER"`` -- it marks
+# an answer a person at the store wrote and posted to the customer directly,
+# which is provenance and nothing else. It is not a judgement about product
+# identity, factual eligibility, attribute relevance or whether the answer
+# may ground a claim; those are decided by ``compatibility``, the identity
+# gates and GPT ②'s reading of the content.
+#
+# Carried into the prompt it stopped being a label. Seller-posted Learning on
+# the target's *own* listing -- same product_id, same model_code, EXACT_MODEL,
+# eligible, attached to the prompt -- has come back from GPT ② refused for
+# being "스타일 참고용", on an inquiry whose question the row answered
+# directly. The model read the field name and declined. Inquiry 690731999 is
+# the recorded instance; the pattern was not specific to it.
+#
+# No counts here on purpose. The share of the corpus that is ``style_only``,
+# and how often such rows are used, both move with every sync, so a number
+# written into this comment is stale by the next one. The reason the field
+# leaves the prompt does not depend on its current size.
+#
+# So the field stays in the database, in the context, in the provenance
+# history and on the dashboard, where it says truthfully where an answer came
+# from. It just no longer travels to the model that was never meant to act on
+# it. ``evidence_authority`` still does, with a legend saying it is origin
+# information and not permission -- see draft_generation_service.
+_LEARNING_ITEM_PROMPT_DROP: frozenset[str] = frozenset(
+    {"compatibility", "style_only"}
+)
 _LEARNING_PROMPT_KEYS: frozenset[str] = frozenset(
     {"similar_approved_answers", "seller_style_examples"}
 )
