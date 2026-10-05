@@ -2278,62 +2278,48 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (
         37,
         (
-            # Migration 35 retired the former wall-mount procedure -- buy the
-            # extra bracket, return only that bracket after installation, then
-            # ask for a partial refund -- and it worked: 20 rows in the live
-            # store carry its note. Two did not, because of the vocabulary its
-            # first condition required.
+            # Migration 35's judgement was wrong, so this undoes it.
             #
-            # It asked for 브라켓 or 벽걸이암 beside the refund wording. One
-            # answer calls the part 벽걸이 자재 and another writes 벽걸암,
-            # dropping the 이. Both then describe exactly the retired
-            # procedure: the engineer judges whether the existing mount can be
-            # reused, the purchased part goes back as a partial return, and the
-            # wall-mount charge is refunded. Neither contains the two words the
-            # condition wanted, so both stayed answerable.
+            # It read "buy the extra wall-mount part, return only that part
+            # once the engineer confirms the existing mount can be reused, and
+            # get that amount refunded" as a retired procedure, and moved 20
+            # rows off the validity axis. That procedure is current policy.
+            # Every one of the 20 states it as a condition the customer may
+            # act on -- 가능합니다, 요청 주실 수 있으시며, 도와드릴 수 있습니다 --
+            # and not one of them reports a refund already issued to one
+            # customer. The distinction migration 35 missed is between a policy
+            # and a past order's outcome; these are the former.
             #
-            # So the two names are what gets added, and nothing else. The fix
-            # widens what the part may be called, not what the procedure may
-            # be, and the condition below says only that.
+            # Scoped to the note migration 35 wrote and nothing else. Keying on
+            # the answer text again would be repeating the mistake with a wider
+            # net: a row retired for some other reason whose answer happens to
+            # mention 브라켓 부분 반품 must stay retired, and the note is what
+            # tells the two apart. It also makes the statement idempotent --
+            # the note it looks for is gone once this has run.
             #
-            # A cost phrase is deliberately not a part name. "벽걸이 비용" or
-            # "벽걸이 추가금액" beside a partial refund would match a sentence
-            # that never mentions returning the part at all, which is a wider
-            # policy than the one migration 35 retired. That no such row
-            # happens to exist today is not a reason to admit the shape.
+            # expired_at goes back to NULL rather than being left behind.
+            # Migration 35 set it with COALESCE, so a row that already carried
+            # one would have kept it; none of the 20 did, every one holds
+            # migration 35's own timestamp. NULL is also what the application
+            # itself writes when a row is re-activated (see
+            # LearningRepository.update_validity).
             #
-            # The refund half of the condition is byte-for-byte migration 35's
-            # and still required, which is what keeps an ordinary wall-mount
-            # answer -- VESA size, whether a bracket ships, who installs it --
-            # answerable.
+            # What the row said to the customer is not touched: final_answer,
+            # metadata_json, active, rating, topics and the rest are left
+            # exactly as they are. Only the validity axis moves.
             #
-            # Written against content rather than the two ids so a database
-            # restored from any point, or a test fixture, is corrected the same
-            # way. Scoped to validity_active=1 so re-running changes nothing
-            # and the rows migration 35 already retired keep their own note.
+            # The ids are deliberately absent. 319144 and 172477 -- the two
+            # rows an earlier version of this migration would have retired --
+            # are valid under the same policy and are simply never selected,
+            # because they carry no retire note.
             """
             UPDATE learning_examples
-            SET validity_active=0,
-                expired_at=COALESCE(
-                    expired_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                ),
-                validity_note='현재 정책과 충돌: 기존 브라켓 사용 시 브라켓 부분 반품/부분 환불 절차는 더 이상 답변 근거로 사용하지 않음',
+            SET validity_active=1,
+                expired_at=NULL,
+                validity_note='정책 재확인: 추가 구매한 설치 부품(브라켓/벽걸이암 등)만 부분 반품하고 해당 금액을 환불하는 조건부 절차는 유효한 답변 근거로 사용함',
                 updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE validity_active=1
-              AND (
-                    COALESCE(final_answer, '') LIKE '%브라켓%'
-                 OR COALESCE(final_answer, '') LIKE '%벽걸이암%'
-                 OR COALESCE(final_answer, '') LIKE '%벽걸암%'
-                 OR REPLACE(COALESCE(final_answer, ''), ' ', '')
-                        LIKE '%벽걸이자재%'
-              )
-              AND (
-                    REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%부분반품%'
-                 OR REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%부분환불%'
-                 OR REPLACE(COALESCE(final_answer, ''), ' ', '') LIKE '%환분가능%'
-                 OR REPLACE(COALESCE(final_answer, ''), ' ', '')
-                        LIKE '%벽걸이암비용은환불가능%'
-              )
+            WHERE validity_active=0
+              AND validity_note='현재 정책과 충돌: 기존 브라켓 사용 시 브라켓 부분 반품/부분 환불 절차는 더 이상 답변 근거로 사용하지 않음'
             """,
         ),
     ),

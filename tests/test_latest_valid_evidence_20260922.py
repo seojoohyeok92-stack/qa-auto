@@ -132,11 +132,29 @@ def test_learning_conflict_without_reliable_time_withholds_both():
     assert conflicts[0]["reason"] == "UNRESOLVED_NO_RELIABLE_TIME"
 
 
-def test_obsolete_bracket_partial_return_learning_is_preserved_but_invalidated(tmp_path: Path):
+def test_bracket_partial_return_learning_is_preserved_across_the_policy_change(
+    tmp_path: Path,
+):
+    """What was sent to the customer survives a policy reversal untouched.
+
+    This was written when migration 35 retired the bracket partial-return
+    procedure, and the contract it protects is still the one that matters: a
+    policy change moves the validity axis and never deletes or rewrites the
+    answer a customer was actually given.
+
+    The verdict at the end has changed, because the policy did. Migration 35
+    retired the row, migration 37 found that judgement wrong and restored it,
+    and both ran over the same stored text -- so ``active`` and
+    ``final_answer`` are asserted exactly as before, and the validity axis is
+    asserted at the end of the whole ledger rather than halfway through it.
+    """
+
     database = Database(tmp_path / "policy-migration.db")
     database.initialize()
     with database.connection() as connection:
-        connection.execute("DELETE FROM schema_migrations WHERE version=35")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN (35, 37)"
+        )
         cursor = connection.execute(
             """
             INSERT INTO learning_examples (
@@ -157,13 +175,16 @@ def test_obsolete_bracket_partial_return_learning_is_preserved_but_invalidated(t
             ),
         )
         learning_id = int(cursor.lastrowid)
-    assert database.initialize() == [35]
+    assert database.initialize() == [35, 37]
     with database.connection() as connection:
         row = connection.execute(
-            "SELECT active, validity_active, validity_note, final_answer "
-            "FROM learning_examples WHERE id=?", (learning_id,),
+            "SELECT active, validity_active, validity_note, expired_at,"
+            " final_answer FROM learning_examples WHERE id=?", (learning_id,),
         ).fetchone()
+    # Unchanged claims: the row was never deleted and its text was never edited.
     assert row["active"] == 1
-    assert row["validity_active"] == 0
     assert "부분 반품" in row["final_answer"]
-    assert "더 이상 답변 근거로 사용하지 않음" in row["validity_note"]
+    # The reversal: 35 retired it, 37 put it back, and it is answerable again.
+    assert row["validity_active"] == 1
+    assert row["expired_at"] is None
+    assert "유효한 답변 근거로 사용함" in row["validity_note"]
