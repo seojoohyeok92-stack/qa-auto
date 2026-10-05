@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 
@@ -14,14 +15,26 @@ from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_repository import LearningRepository
 from repositories.log_repository import LogRepository
-from services.similar_answer_service import SimilarAnswerService, _normalized_answer
+from services.similar_answer_service import (
+    _STATED_SPEC_VALUE,
+    SimilarAnswerService,
+    _normalized_answer,
+)
 from services.historical_case_service import HistoricalCaseService
-from services.historical_learning_quality_service import is_data_unsafe
+from services.historical_learning_quality_service import (
+    DATA_UNSAFE_REASONS,
+    PERIOD_BOUNDARY,
+    PRODUCT_SCOPED_CONCEPTS,
+    SENTENCE_SCOPED_REASONS,
+    is_data_unsafe,
+    split_reusable_answer,
+)
 from repositories.learning_provenance_repository import LearningProvenanceRepository
 from repositories.feedback_signal_provenance_repository import (
     FeedbackSignalProvenanceRepository,
 )
 from services.learning_evidence_policy import (
+    _claim_sentences,
     contamination_reason,
     general_delivery_estimate_claims,
     order_identifier_request_reason,
@@ -702,6 +715,91 @@ class LearningContextService:
             self._embed_cache = EmbeddingClient()
         return self._embed_cache
 
+    def _sentence_scoped_rescue(
+        self, eligibility: Any, candidate: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]] | None:
+        """Keep a row whose *some* sentences are order- or time-scoped.
+
+        ``None`` means nothing changes, and that is the answer for every row
+        except a mixed one: the whole-row verdict stands and the caller
+        behaves exactly as it did before this existed.
+
+        Four conditions have to hold, and three of them are there to keep
+        other gates' populations identical rather than to judge the row.
+
+        * The only data-unsafe findings are the two that are statements about
+          part of the text (``SENTENCE_SCOPED_REASONS``). Inactive, empty and
+          policy-risky are facts about the row and are never reconsidered.
+        * The reusable half names something in the concept table. Without this
+          L211 -- an order date plus "구매처를 네이버로 기재해주신게 맞는지 확인
+          부탁드립니다" -- would come back carrying a sentence that says
+          nothing, and a row whose reusable half is content-free is not a
+          mixed row.
+        * And what it names is a property of the product rather than the
+          handling of this exchange (``PRODUCT_SCOPED_CONCEPTS``), with no
+          period marker left in it. Taking a sentence out does not make its
+          neighbours generic: L197 left "3~5영업일 내로 환불 진행되실 예정입니다"
+          -- one customer's refund -- and L169255 left "현재 품절로..." , which
+          was true the week it was written.
+        * The answer carries no redaction token. ``search`` drops token-bearing
+          rows and 8 of these hold the token inside a withheld sentence, so
+          relaxing them would quietly change which rows that gate removes.
+        * No withheld sentence states a measured value. ``search`` hardens an
+          identity rejection only for a row that states a specification
+          (``_STATED_SPEC_VALUE``), and 6 of these carry the figure in the
+          sentence being withheld -- dropping it would stop the hardening from
+          firing, which is wrong-product leakage by omission.
+
+        Then the reusable half is assessed on its own terms. It has to come
+        back free of data-unsafe findings, because sentences rejoined are not
+        the same string as the sentences apart and the detectors are searches.
+        """
+
+        if not is_data_unsafe(eligibility):
+            return None
+        unsafe_reasons = DATA_UNSAFE_REASONS & set(eligibility.reasons)
+        if not unsafe_reasons <= SENTENCE_SCOPED_REASONS:
+            return None
+        answer = str(candidate.get("final_answer") or "")
+        if contamination_reason(answer) is not None:
+            return None
+        split = split_reusable_answer(_claim_sentences(answer))
+        if not split.mixed:
+            return None
+        if not set(split.reusable_concepts) & PRODUCT_SCOPED_CONCEPTS:
+            return None
+        if PERIOD_BOUNDARY.search(split.reusable_text):
+            return None
+        if any(_STATED_SPEC_VALUE.search(text) for text in split.withheld):
+            return None
+        metadata = candidate.get("metadata_json")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        reduced = self.historical.quality_policy.assess(
+            question=str(candidate.get("question_original_masked") or ""),
+            answer=split.reusable_text,
+            stored_quality=float(candidate.get("quality_score") or 0),
+            policy_risk=str(metadata.get("policy_risk") or "NONE"),
+            active=bool(candidate.get("active")),
+            structured_temporary_valid=(
+                str(candidate.get("validity_type") or "PERMANENT").upper()
+                == "TEMPORARY"
+            ),
+        )
+        if is_data_unsafe(reduced):
+            return None
+        # The row travels with its reusable half as its answer. Everything
+        # downstream -- scoring, duplicate collapse, the prompt -- reads
+        # ``final_answer``, so substituting here is what keeps the withheld
+        # sentence out of all three without a second mechanism.
+        rescued = dict(candidate)
+        rescued["final_answer"] = split.reusable_text
+        rescued["withheld_answer_sentences"] = list(split.withheld)
+        reduced = dataclasses.replace(
+            reduced,
+            reasons=tuple(reduced.reasons) + ("SENTENCE_SCOPED_REUSE",),
+        )
+        return reduced, rescued
+
     def build(
         self,
         facts: AnswerFacts,
@@ -817,6 +915,25 @@ class LearningContextService:
                     "REVIEW_REQUIRED",
                 }
             )
+            # One sentence does not make the whole answer unusable.
+            #
+            # ``ORDER_SPECIFIC`` and ``is_time_bound`` search the whole answer,
+            # so a product fact loses its place because of a shipping line
+            # written beside it. Measured over the 1,919 rows that clear the
+            # repository gate: these two remove 263, and 230 of those have
+            # sentences the detector never fired on. L319062 is the shape --
+            # "터치 기능은 지원하지 않는 제품 입니다" was deleted for "...같은
+            # 날 발송을 진행해드리고 있어" two sentences later.
+            #
+            # So the row is kept and the offending sentences are withheld,
+            # which is the part that makes this safe rather than merely
+            # permissive: what reaches the prompt is the reusable half, so no
+            # customer's order fact becomes evidence either way. The
+            # alternative -- keeping the row whole and labelling it -- would
+            # put the order sentence in front of the model.
+            rescue = self._sentence_scoped_rescue(eligibility, candidate)
+            if rescue is not None:
+                eligibility, candidate = rescue
             semantic_finding_only = (
                 not eligibility.context_eligible
                 and not is_data_unsafe(eligibility)

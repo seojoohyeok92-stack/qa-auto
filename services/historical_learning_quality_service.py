@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
+
+from services.learning_quality_service import APOLOGY
 
 
 WORD = re.compile(r"[가-힣A-Za-z0-9]+")
@@ -422,6 +424,191 @@ def is_data_unsafe(eligibility: "HistoricalEligibility") -> bool:
     """Whether this row must not reach GPT ② whatever it judges."""
 
     return bool(DATA_UNSAFE_REASONS & set(eligibility.reasons))
+
+
+# The one finding above that is a statement about *part of the text* rather
+# than about the row.
+#
+# ``ORDER_SPECIFIC`` is a search over the whole answer, so one sentence decides
+# the verdict for everything beside it. Measured over the 1,919 live rows that
+# clear the repository gate: it removes 91, and 71 of them contain sentences
+# the detector never fired on -- the row is deleted for a sentence it happens
+# to contain. L319062 is the shape: "터치 기능은 지원하지 않는 제품 입니다" and
+# "...같은 날 발송을 진행해드리고 있어" in one answer, removed for the second.
+#
+# ``TEMPORARY_WITHOUT_STRUCTURED_VALIDITY`` is deliberately *not* here, and the
+# measurement is why. Splitting the 172 rows it removes rescued 130 of them and
+# the results were wrong: the store's holiday banner reads "★ [8/3~8/4] 하계
+# 휴가 기간 동안 / 고객센터는 일부만 운영합니다" across a line break, so the
+# window and the claim it qualifies land in different sentences and what
+# survived was a restricted-hours notice with its dates stripped off. Others
+# kept a stale dated claim ("7월 중 접수하신 분들에 대하여 금주 중 발송될
+# 것으로") that no single-sentence test catches. A date and the sentence it
+# bounds are one statement; taking the date away does not make the rest
+# reusable, it makes it wrong.
+#
+# Inactive, empty and policy-risky are not here either, for the plainer reason
+# that they are true of the row and no amount of splitting changes them.
+SENTENCE_SCOPED_REASONS: frozenset[str] = frozenset({
+    "PAST_ORDER_FACT_NOT_REUSABLE",
+})
+
+# What the reusable half has to be *about* before the row is reconsidered.
+#
+# Removing a sentence does not make the sentences around it generic. L197's
+# order sentence came out and left "3~5영업일 내로 환불 진행되실 예정입니다",
+# which is still one customer's refund; L11610's left "주문 시 확인하신
+# 도착일자에 맞춰 배송됩니다" with the clause that scoped it to n배송 products
+# withheld, so a narrow claim read as a universal one. Both are the same
+# mistake: the remaining text was *procedure about this exchange*, not a
+# property of the product.
+#
+# So the reusable half has to name one of these two. Measured over the rows
+# this would otherwise admit: keying on any concept at all admits 51 and
+# includes both leaks above; keying on these two admits 6 and includes neither.
+# The 43 it gives up are mostly INSTALLATION and DELIVERY_STATUS process notes,
+# where telling a standing policy from one order's handling needs more than a
+# concept name -- ``learning_evidence_policy.general_delivery_estimate_claims``
+# already does that job for lead times and is where that work belongs.
+PRODUCT_SCOPED_CONCEPTS: frozenset[str] = frozenset({
+    "PRODUCT_FUNCTION",
+    "PRODUCT_OPTION",
+})
+
+
+# Whether a sentence finishes. Korean declaratives end on 다 or 요, with or
+# without punctuation, and a fragment ends on the connective it was joined by.
+#
+# This is here because withholding one sentence can leave its neighbour
+# dangling. L154689's apology came out of the middle of a chain and left
+# "...수취인과 연락이 되지 않을 경우" with its consequence gone, which then ran
+# straight into the next sentence; the store's holiday banner leaves
+# "★ [8/3~8/4] 하계 휴가 기간 동안" the same way, and a numbered list leaves "1.".
+# None of those states anything.
+#
+# ``learning_quality_service.POLITE`` was tried first and is too narrow for
+# this: it names five endings, and "가능하십니다", "됩니다" and "입니다" are not
+# among them, so it dropped the facts this is meant to keep.
+_COMPLETE_STATEMENT = re.compile(r"(?:다|요)[.!?]?$")
+
+
+def unsafe_sentence_reason(sentence: object) -> str | None:
+    """Which customer- or time-scoped marker this one sentence carries.
+
+    The same three tests ``assess`` runs over a whole answer, asked of a single
+    sentence. Nothing is loosened: a sentence this returns a reason for is
+    exactly a sentence the whole-answer search would have matched.
+
+    ``TIME_BOUND`` stays in here even though a wholly time-bound row is never
+    reconsidered (see ``SENTENCE_SCOPED_REASONS``). A dated sentence sitting
+    inside an order-specific answer is still withheld, which is the strict
+    direction: the split may remove more than the row was blocked for, never
+    less.
+    """
+
+    text = " ".join(str(sentence or "").split())
+    if not text:
+        return None
+    found = ORDER_SPECIFIC.search(text)
+    if found:
+        return "ORDER_SPECIFIC"
+    if ORDER_SPECIFIC_SIGNAL.search(text):
+        return "ORDER_SPECIFIC_SIGNAL"
+    if is_time_bound(text):
+        return "TIME_BOUND"
+    return None
+
+
+@dataclass(frozen=True)
+class ReusableAnswerSplit:
+    """An answer separated into what may be reused and what may not.
+
+    Three buckets, not two. ``withheld`` is the sentences a marker fired on,
+    with their reasons beside them so a trace can say which sentence cost the
+    row what. ``non_claim`` is the sentences that assert nothing -- an apology,
+    or a request for the customer's understanding -- which are dropped rather
+    than withheld because no detector objects to them; they simply are not
+    evidence. ``reusable_text`` is what is left, and ``reusable_concepts`` is
+    ``CONCEPT_PATTERNS`` read over it: the existing table, not a second one.
+    """
+
+    reusable_text: str
+    reusable_concepts: tuple[str, ...]
+    withheld: tuple[str, ...]
+    withheld_reasons: tuple[str, ...]
+    non_claim: tuple[str, ...] = ()
+
+    @property
+    def mixed(self) -> bool:
+        """Something was withheld and something reusable is left behind."""
+
+        return bool(self.withheld and self.reusable_concepts)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reusable_text": self.reusable_text,
+            "reusable_concepts": list(self.reusable_concepts),
+            "withheld": list(self.withheld),
+            "withheld_reasons": list(self.withheld_reasons),
+            "non_claim": list(self.non_claim),
+            "mixed": self.mixed,
+        }
+
+
+def split_reusable_answer(sentences: Sequence[str]) -> ReusableAnswerSplit:
+    """Split already-sentenced text into the reusable half and the withheld one.
+
+    Sentences arrive split rather than being split here: the caller already
+    has ``learning_evidence_policy._claim_sentences``, which strips the company
+    template before splitting, and two sentence splitters that disagree would
+    be two definitions of what a sentence is.
+
+    A fragment is not a claim either. Withholding a sentence can leave its
+    neighbour dangling -- see ``_COMPLETE_STATEMENT`` -- and an unfinished
+    clause states nothing whatever it mentions.
+
+    An apology is not a claim. Withholding the shipping sentence from L319062
+    left "택배사 사정에 따라 변동될 수 있는 점 양해 부탁 드립니다" behind -- the
+    caveat that sentence was qualified by, now standing alone in front of a
+    question about touch input. L160147 was worse: "85인치 제품의 경우 설치가
+    많이 지연되고 있는 점 죄송합니다" names a product option only because 인치
+    is in that pattern, so an apology for a delay was being offered as a
+    product fact. ``APOLOGY`` is the pattern the style scorer already uses for
+    this wording, read here for what it says about the sentence rather than
+    about the writer's tone.
+
+    ``reusable_concepts`` being empty is the other important case. "구매처를
+    네이버로 기재해주신게 맞는지 확인 부탁드립니다" is what remains of L211 once
+    the order date is withheld, and it names nothing in the concept table -- it
+    is a request back to one customer, not a fact anyone else can use. A row
+    whose reusable half says nothing is not a mixed row; it is an
+    order-specific row with a polite sentence attached, and it stays blocked.
+    """
+
+    reusable: list[str] = []
+    withheld: list[str] = []
+    reasons: list[str] = []
+    non_claim: list[str] = []
+    for sentence in sentences:
+        text = " ".join(str(sentence or "").split())
+        if not text:
+            continue
+        reason = unsafe_sentence_reason(text)
+        if reason is not None:
+            withheld.append(text)
+            reasons.append(reason)
+        elif APOLOGY.search(text) or not _COMPLETE_STATEMENT.search(text):
+            non_claim.append(text)
+        else:
+            reusable.append(text)
+    reusable_text = " ".join(reusable).strip()
+    return ReusableAnswerSplit(
+        reusable_text=reusable_text,
+        reusable_concepts=HistoricalLearningQualityService.concepts(reusable_text),
+        withheld=tuple(withheld),
+        withheld_reasons=tuple(dict.fromkeys(reasons)),
+        non_claim=tuple(non_claim),
+    )
 
 
 @dataclass(frozen=True)
