@@ -29,10 +29,13 @@ nothing else.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import pathlib
+import tempfile
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -50,6 +53,17 @@ BATCH_SIZE = 128
 
 # 프로세스 단위 캐시. 파일 경로와 mtime 이 키다.
 _LOADED: dict[tuple, Any] = {}
+
+# Windows refuses to replace a file another handle currently has open, with
+# ``PermissionError``/WinError 5 -- and a reader holds this file open for as
+# long as it takes to parse tens of megabytes, measured at roughly half a
+# second. The move itself stays all-or-nothing, so the only thing a collision
+# costs is this attempt; retrying it briefly is what makes the replace
+# actually land while retrieval is serving. Measured read times are under
+# ~1.1s, so the schedule below outlasts several overlapping readers.
+REPLACE_ATTEMPTS = 8
+REPLACE_BACKOFF_SECONDS = 0.05
+REPLACE_BACKOFF_CEILING_SECONDS = 1.0
 
 
 def _text_for(row: Mapping[str, Any]) -> str:
@@ -104,6 +118,34 @@ class EmbeddingClient:
         self.tokens += int((payload.get("usage") or {}).get("total_tokens") or 0)
         ordered = sorted(payload["data"], key=lambda item: item["index"])
         return [_normalise(item["embedding"]) for item in ordered]
+
+
+def _replace_with_retry(source: str, destination: pathlib.Path) -> None:
+    """Move a finished file into place, waiting out a reader that holds it.
+
+    On Windows an open handle on the destination makes ``os.replace`` fail
+    outright rather than queue, and this destination is read by retrieval
+    whenever an inquiry arrives. The move is all-or-nothing either way, so a
+    refused attempt has changed nothing and can simply be tried again.
+
+    The last failure is raised, never swallowed: a save that could not land
+    has to be visible to whoever asked for it.
+    """
+
+    # At least one attempt, whatever the constant says: a loop that never ran
+    # would return as though the file had been moved, which is the one failure
+    # this whole function exists to rule out.
+    attempts = max(int(REPLACE_ATTEMPTS), 1)
+    delay = REPLACE_BACKOFF_SECONDS
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, REPLACE_BACKOFF_CEILING_SECONDS)
 
 
 class LearningSemanticIndex:
@@ -163,14 +205,54 @@ class LearningSemanticIndex:
             return cls({})
 
     def save(self, path: pathlib.Path | str = DEFAULT_INDEX_PATH) -> pathlib.Path:
+        """Replace the index file atomically, so a reader never sees a torn one.
+
+        Writing into the live path would be a correctness bug rather than a
+        slow path. ``load`` treats a parse failure as an empty index -- which
+        is right when the file is absent, and wrong while it is being
+        written -- so a direct overwrite gives every retrieval that lands in
+        that window no semantic channel at all, with no error anywhere. The
+        window is not small: the file is tens of megabytes and grows with the
+        corpus.
+
+        So the bytes are built first, written to a sibling temporary file, and
+        moved into place by a single ``os.replace``. Before the move the real
+        file is untouched; after it, readers see the whole new file. Nothing
+        ever observes a partial one.
+        """
+
         file = pathlib.Path(path)
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(json.dumps({
+        # Serialised before the temporary file exists: a failure here leaves
+        # nothing behind to clean up and nothing changed on disk.
+        payload = json.dumps({
             "model": self.model,
             "dimensions": EMBEDDING_DIMENSIONS,
             "count": len(self.vectors),
             "vectors": {str(key): value for key, value in self.vectors.items()},
-        }, ensure_ascii=False), encoding="utf-8")
+        }, ensure_ascii=False)
+        # The same directory, because os.replace is only atomic within one
+        # filesystem, and a temp directory is routinely on another volume.
+        descriptor, temporary = tempfile.mkstemp(
+            dir=str(file.parent), prefix=file.name + ".", suffix=".tmp",
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                # Durability has to happen before the move, not after: without
+                # this a crash can leave the new name pointing at a file whose
+                # contents never reached the disk, which is the one outcome
+                # worse than an old index.
+                os.fsync(stream.fileno())
+            _replace_with_retry(temporary, file)
+        except BaseException:  # noqa: BLE001 - re-raised; this only cleans up
+            # The original file is still whole, whether the write or the
+            # replace failed. Dropping the stray temporary must not replace
+            # the exception that explains why.
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
         return file
 
     # --------------------------------------------------------------- 조회
