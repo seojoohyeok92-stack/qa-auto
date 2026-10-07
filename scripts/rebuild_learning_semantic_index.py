@@ -55,32 +55,36 @@ from services.learning_semantic_index import (  # noqa: E402
     DEFAULT_INDEX_PATH, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, API_KEY_ENV,
     EmbeddingClient, LearningSemanticIndex, _text_for,
 )
+from services import learning_index_population  # noqa: E402
 from services import learning_semantic_sync  # noqa: E402
 
 DEFAULT_DB = ROOT / "data" / "oje_automation.db"
 
 
-def eligible_rows(database: Path) -> list[dict[str, Any]]:
-    """Active Learning that has something to embed. Read-only, always."""
-
+def _read_only(database: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(
         "file:%s?mode=ro" % database.resolve().as_posix(), uri=True
     )
     connection.row_factory = sqlite3.Row
+    return connection
+
+
+def eligible_rows(database: Path) -> list[dict[str, Any]]:
+    """Active Learning that has something to embed. Read-only, always.
+
+    The query and the filter come from ``learning_index_population`` so that
+    this CLI and the post-commit hook cover exactly the same rows. They do not
+    share a connection -- this one is deliberately read-only -- but a second
+    definition of the population would be a bug that only shows up when the
+    two disagree, and the symptom would be the hook removing vectors this
+    considers eligible.
+    """
+
+    connection = _read_only(database)
     try:
-        rows = [
-            dict(row) for row in connection.execute(
-                """
-                SELECT id, question_original_masked AS question,
-                       final_answer AS answer
-                FROM learning_examples
-                WHERE active=1
-                """
-            )
-        ]
+        return learning_index_population.eligible_rows(connection)
     finally:
         connection.close()
-    return [row for row in rows if _text_for(row)]
 
 
 def all_row_ids(database: Path) -> set[int]:
@@ -92,12 +96,9 @@ def all_row_ids(database: Path) -> set[int]:
     enough to report honestly.
     """
 
-    connection = sqlite3.connect(
-        "file:%s?mode=ro" % database.resolve().as_posix(), uri=True
-    )
+    connection = _read_only(database)
     try:
-        return {int(row[0]) for row in
-                connection.execute("SELECT id FROM learning_examples")}
+        return learning_index_population.all_row_ids(connection)
     finally:
         connection.close()
 

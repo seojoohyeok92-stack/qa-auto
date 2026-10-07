@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from datetime import UTC, datetime
 from typing import Any
 
@@ -73,6 +75,30 @@ def is_market_applicable(metadata: dict[str, Any], market: str | None) -> bool:
 class LearningRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
+        # Called after a create/modify transaction has committed, if anything
+        # has been wired in. Nothing is by default, so scripts, backfills and
+        # tests behave exactly as before; the service layer attaches the
+        # semantic-index sync. It is invoked OUTSIDE the transaction on
+        # purpose -- it makes a network call, and a save that is already
+        # committed must not be able to fail because of one.
+        self.on_committed: Any = None
+
+    def _notify_committed(self) -> None:
+        """Run the post-commit hook, if any. Never fails the caller.
+
+        The write has happened. A hook that raised here would report a stored
+        Learning as an error, which is the one outcome worse than a stale
+        index -- so its own best-effort contract is backed up here.
+        """
+
+        hook = self.on_committed
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 - the row is already committed
+            logging.getLogger(__name__).warning(
+                "post-commit Learning hook failed", exc_info=True)
 
     @staticmethod
     def _row(row: Any) -> dict[str, Any] | None:
@@ -95,6 +121,7 @@ class LearningRepository:
             row = self._upsert_with_connection(connection, example)
         result = self._row(row)
         assert result is not None
+        self._notify_committed()
         return result
 
     @staticmethod
@@ -292,6 +319,7 @@ class LearningRepository:
                 )
         result = self._row(row)
         assert result is not None
+        self._notify_committed()
         return result
 
     def get_by_source_key(self, source_key: str) -> dict[str, Any] | None:

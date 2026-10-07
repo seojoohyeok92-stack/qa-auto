@@ -26,6 +26,7 @@ from services.learning_compatibility_service import (
     profile_knowledge,
 )
 from services.learning_signal_service import LearningSignalService
+from services.learning_index_sync_hook import SemanticIndexNotifier
 from services.market_policy import non_naver_market
 from answer.learning_signal import OriginKind
 
@@ -66,6 +67,14 @@ class LearningService:
         self.privacy = LearningPrivacyService()
         self.quality = LearningQualityService()
         self.signals = LearningSignalService(database)
+        # A Learning that is stored but not indexed cannot be found by
+        # meaning, which is how 914 approved rows became invisible. Attaching
+        # the sync here rather than at each capture method means every path
+        # that stores a Learning through this service keeps the index current,
+        # including ones added later. It runs after the commit and cannot fail
+        # the save.
+        self.index_notifier = SemanticIndexNotifier(database)
+        self.repository.on_committed = self.index_notifier
 
     def _answer_market(self, inquiry_id: object) -> str | None:
         """The market whose footer this inquiry's stored answers end with.
@@ -736,6 +745,13 @@ class LearningService:
         return saved
 
     def import_existing_seller_answers(self, *, limit: int | None = None) -> dict[str, int]:
+        # A backfill, not a save: one sync per imported row would run hundreds
+        # of full-population passes to reach the state a single rebuild
+        # reaches at the end. The CLI that calls this runs the rebuild itself.
+        with self.index_notifier.suppressed():
+            return self._import_existing_seller_answers(limit=limit)
+
+    def _import_existing_seller_answers(self, *, limit: int | None = None) -> dict[str, int]:
         sql = "SELECT id FROM inquiries WHERE source_answered=1 ORDER BY id"
         params: tuple[Any, ...] = ()
         if limit is not None:
@@ -1107,6 +1123,12 @@ class LearningService:
         return saved
 
     def import_existing_approved(self) -> dict[str, int]:
+        # Same reasoning as import_existing_seller_answers: a batch import
+        # does not sync per row.
+        with self.index_notifier.suppressed():
+            return self._import_existing_approved()
+
+    def _import_existing_approved(self) -> dict[str, int]:
         result = {"scanned": 0, "saved": 0, "excluded": 0}
         with self.database.connection() as connection:
             rows = connection.execute(
