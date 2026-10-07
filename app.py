@@ -25,6 +25,9 @@ from services.naver_auto_post_scheduler import (
     ensure_auto_post_scheduler,
     reset_auto_post_runtime_on_process_start,
 )
+from services.learning_index_repair_scheduler import (
+    ensure_semantic_index_repair_scheduler,
+)
 from dps.cdp_session import ensure_cdp_chrome_on_start
 from dps.keepalive_runtime import ensure_dps_keepalive_runtime
 from services.work_queue_service import (
@@ -1151,6 +1154,11 @@ def main() -> None:
         reset_auto_post_runtime_on_process_start(database)
         ensure_auto_sync_scheduler(database)
         ensure_auto_post_scheduler(database)
+        # Backstop for the semantic index: the post-commit hook keeps it
+        # current, this only repairs what the hook could not -- a failed
+        # embedding, a removal path that does not notify, a suppressed batch
+        # import. First tick is a full interval away, never at startup.
+        ensure_semantic_index_repair_scheduler(database)
         # DPS Chrome (CDP, port 9222): reuse it, or start the recorded DPS
         # profile once. The legacy pywinauto agent is not started.
         ensure_cdp_chrome_on_start()
