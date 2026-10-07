@@ -30,6 +30,7 @@ nothing else.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -78,6 +79,26 @@ def _text_for(row: Mapping[str, Any]) -> str:
     question = " ".join(str(row.get("question") or "").split())
     answer = " ".join(str(row.get("answer") or "").split())
     return ("%s\n%s" % (question[:400], answer[:600])).strip()
+
+
+def fingerprint_for(row: Mapping[str, Any]) -> str:
+    """What a stored vector was built from, as one comparable value.
+
+    An incremental rebuild has to answer "has this row's meaning changed",
+    and ``updated_at`` cannot answer it: every write path bumps it, and two
+    of them -- ``mark_used`` and the provenance record -- bump it every time
+    the row is *retrieved*. Measured on the 26.10.4 snapshot, all 104 rows
+    whose ``updated_at`` had moved past the index build were usage bumps and
+    none was an edit. A column that moves when nothing changed is worse than
+    no column.
+
+    So the question is asked of the only thing that actually decides the
+    vector: the exact text sent to the endpoint, after truncation, hashed.
+    An edit beyond the truncation limit correctly does not count as a change,
+    because it does not reach the embedding either.
+    """
+
+    return hashlib.sha256(_text_for(row).encode("utf-8")).hexdigest()
 
 
 def _normalise(vector: Sequence[float]) -> list[float]:
@@ -152,11 +173,21 @@ class LearningSemanticIndex:
     """Cosine lookup over the approved corpus, loaded from the derived file."""
 
     def __init__(self, vectors: Mapping[int, Sequence[float]] | None = None,
-                 *, model: str = EMBEDDING_MODEL) -> None:
+                 *, model: str = EMBEDDING_MODEL,
+                 fingerprints: Mapping[int, str] | None = None) -> None:
         self.vectors: dict[int, list[float]] = {
             int(key): list(value) for key, value in (vectors or {}).items()
         }
         self.model = model
+        # Learning id -> the text hash its vector was built from. Keyed by id
+        # and never by hash: eight groups of rows in the corpus share an
+        # identical embedded text, and they are different Learning with
+        # different provenance, so a hash-keyed store would have them fight
+        # over one entry. An index written before fingerprints existed simply
+        # has none, which is a fact about the file and not a fault in it.
+        self.fingerprints: dict[int, str] = {
+            int(key): str(value) for key, value in (fingerprints or {}).items()
+        }
 
     # ------------------------------------------------------------- 저장/적재
     @classmethod
@@ -200,7 +231,15 @@ class LearningSemanticIndex:
             vectors = {
                 int(key): value for key, value in (payload.get("vectors") or {}).items()
             }
-            return cls(vectors, model=str(payload.get("model") or EMBEDDING_MODEL))
+            # Absent is the normal state for an index built before fingerprints
+            # existed, so it reads as "no fingerprint metadata" rather than as
+            # a malformed file.
+            fingerprints = {
+                int(key): str(value)
+                for key, value in (payload.get("fingerprints") or {}).items()
+            }
+            return cls(vectors, model=str(payload.get("model") or EMBEDDING_MODEL),
+                       fingerprints=fingerprints)
         except (ValueError, OSError, TypeError):
             return cls({})
 
@@ -225,12 +264,24 @@ class LearningSemanticIndex:
         file.parent.mkdir(parents=True, exist_ok=True)
         # Serialised before the temporary file exists: a failure here leaves
         # nothing behind to clean up and nothing changed on disk.
-        payload = json.dumps({
+        document: dict[str, Any] = {
             "model": self.model,
             "dimensions": EMBEDDING_DIMENSIONS,
             "count": len(self.vectors),
-            "vectors": {str(key): value for key, value in self.vectors.items()},
-        }, ensure_ascii=False)
+        }
+        # Written only when there is something to write, and ahead of the
+        # vectors so a person can read it without scrolling past tens of
+        # megabytes. Omitting it when empty keeps an index with no
+        # fingerprints byte-identical to what every previous version
+        # produced, so adopting this code does not rewrite the file.
+        if self.fingerprints:
+            document["fingerprints"] = {
+                str(key): value for key, value in self.fingerprints.items()
+            }
+        document["vectors"] = {
+            str(key): value for key, value in self.vectors.items()
+        }
+        payload = json.dumps(document, ensure_ascii=False)
         # The same directory, because os.replace is only atomic within one
         # filesystem, and a temp directory is routinely on another volume.
         descriptor, temporary = tempfile.mkstemp(
@@ -290,21 +341,47 @@ class LearningSemanticIndex:
             if row.get("id") is not None and _text_for(row)
         ]
         vectors: dict[int, list[float]] = {}
+        fingerprints: dict[int, str] = {}
         for start in range(0, len(items), batch_size):
             chunk = items[start:start + batch_size]
             embedded = client.embed([text for _identifier, text in chunk])
-            for (identifier, _text), vector in zip(chunk, embedded):
+            # Counted before the pairing, because ``zip`` stops at the shorter
+            # side and would hide the mismatch. A response one vector short
+            # silently left a row unembedded while this still reported the
+            # whole batch as done -- a success that did not match the file.
+            if len(embedded) != len(chunk):
+                raise ValueError(
+                    "embedding returned %d vectors for %d texts"
+                    % (len(embedded), len(chunk)))
+            for (identifier, text), vector in zip(chunk, embedded):
                 vectors[identifier] = vector
+                # Taken from the text that was actually sent, not recomputed
+                # from the row, so the fingerprint cannot drift from what the
+                # vector was built from.
+                fingerprints[identifier] = hashlib.sha256(
+                    text.encode("utf-8")).hexdigest()
             if progress is not None:
                 progress(min(start + batch_size, len(items)), len(items))
-        return cls(vectors, model=client.model)
+        return cls(vectors, model=client.model, fingerprints=fingerprints)
 
     def merge(self, other: "LearningSemanticIndex") -> "LearningSemanticIndex":
         """Fold a partial rebuild into this index."""
 
         merged = dict(self.vectors)
         merged.update(other.vectors)
-        return LearningSemanticIndex(merged, model=self.model)
+        prints = dict(self.fingerprints)
+        # A re-embedded row must not keep the fingerprint of the text it used
+        # to hold, so the incoming side wins -- and a row the other side
+        # embedded without one clears any stale entry rather than inheriting
+        # it, which would mark the new vector fresh against the old text.
+        for identifier in other.vectors:
+            replacement = other.fingerprints.get(identifier)
+            if replacement is None:
+                prints.pop(identifier, None)
+            else:
+                prints[identifier] = replacement
+        return LearningSemanticIndex(merged, model=self.model,
+                                     fingerprints=prints)
 
     def drop(self, identifiers: Iterable[int]) -> "LearningSemanticIndex":
         """Remove rows that are no longer active. The rows themselves stay."""
@@ -313,4 +390,6 @@ class LearningSemanticIndex:
         return LearningSemanticIndex(
             {key: value for key, value in self.vectors.items() if key not in gone},
             model=self.model,
+            fingerprints={key: value for key, value in self.fingerprints.items()
+                          if key not in gone},
         )
