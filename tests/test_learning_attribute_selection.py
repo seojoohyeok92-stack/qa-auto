@@ -26,6 +26,7 @@ import pytest
 
 from services.learning_context_service import PRODUCT_FACT_ACTIONS
 from services.product_knowledge_service import attribute_families
+from services.similar_answer_service import CONFIRMED_IDENTITY
 
 ORIGIN_QUERY = (
     "27인치 모니터의 생산 국가 27인치 모니터의 생산지가 어디인가요?"
@@ -33,10 +34,24 @@ ORIGIN_QUERY = (
 )
 
 
-def _blocked(query_text: str, candidate_text: str, *, action: str) -> bool:
-    """The rule as ``SimilarAnswerService`` applies it."""
+def _blocked(
+    query_text: str,
+    candidate_text: str,
+    *,
+    action: str,
+    product_match: str = "DIFFERENT_LISTING",
+) -> bool:
+    """The rule as ``SimilarAnswerService`` applies it.
+
+    ``product_match`` defaults to a listing whose identity is NOT confirmed,
+    which is the situation every case below was written for. A confirmed
+    identity is exempt -- see ``test_learning_attribute_same_product.py`` for
+    why and for the rows that proves it on.
+    """
 
     if action not in PRODUCT_FACT_ACTIONS:
+        return False
+    if product_match in CONFIRMED_IDENTITY:
         return False
     query = attribute_families(query_text)
     candidate = attribute_families(candidate_text)

@@ -152,7 +152,16 @@ _SEMANTIC_ATOM_PROMPT_DROP: frozenset[str] = frozenset({"retrieval_queries"})
 # it. ``evidence_authority`` still does, with a legend saying it is origin
 # information and not permission -- see draft_generation_service.
 _LEARNING_ITEM_PROMPT_DROP: frozenset[str] = frozenset(
-    {"compatibility", "style_only"}
+    {
+        "compatibility", "style_only",
+        # The attribute rule's own working, carried on the context so a trace
+        # and a replay can audit it. It is a retrieval diagnostic, not evidence:
+        # "query_attributes: [INSTALLATION]" tells the model nothing about the
+        # product and would invite it to reason about our taxonomy instead of
+        # the customer's question. This projection is a deny-list, so leaving
+        # them out here would have put all three in the prompt.
+        "attribute_state", "query_attributes", "answer_attributes",
+    }
 )
 _LEARNING_PROMPT_KEYS: frozenset[str] = frozenset(
     {"similar_approved_answers", "seller_style_examples"}
@@ -1009,6 +1018,14 @@ class LearningContextService:
                     atomic.action if atomic is not None
                     else (semantic_analysis.primary_action if semantic_analysis else None)
                 ),
+                # Both of these are the sub-question TEXT, deliberately. The
+                # atom also carries a ``requested_information`` FIELD and it is
+                # not what is sent: retrieval reads these two plus the retrieval
+                # queries, so passing the field here would change which
+                # attribute families a question produces and therefore which
+                # rows the attribute rule blocks. The note above
+                # ``query_families`` in ``SimilarAnswerService.search`` names
+                # the inquiry that measures the difference.
                 "requested_information": question,
                 "atomic_question": question,
                 "all_atomic_questions": [item.to_dict() for item in semantic_atomic],

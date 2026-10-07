@@ -595,11 +595,25 @@ class SimilarAnswerService:
         # Which attribute families the customer asked about, named in the
         # vocabulary Product Knowledge already uses for its field router.
         #
-        # Read from what GPT ① produced, never re-derived: the atom's own
-        # ``requested_information`` says which property is missing, and the
-        # retrieval queries paraphrase it. ``requested_attribute`` is a shape
-        # label -- SPEC_VALUE, INCLUSION, AMOUNT_OR_COST -- so it says how the
-        # answer should look, not what it is about, and it is not used here.
+        # Read from what GPT ① produced, never re-derived.
+        #
+        # What reaches this line, precisely, because it is not what the names
+        # suggest: ``learning_context_service`` sets BOTH
+        # ``semantic_goal["requested_information"]`` and
+        # ``semantic_goal["atomic_question"]`` to the sub-question TEXT, so the
+        # atom's own ``requested_information`` FIELD is not read here and the
+        # first two parts below are the same string twice. The families
+        # therefore come from the atom text and the retrieval queries alone.
+        # Measured consequence, kept here so nobody has to rediscover it: on
+        # inquiry 2153 the atom text "두 모델 차이가 뭔가요?" yields no family at
+        # all while the atom's ``requested_information`` field would yield
+        # RESOLUTION, which would have hard-blocked that listing's own approved
+        # comparison answer. Feeding the field in is therefore a behaviour
+        # change, not a cleanup, and is deliberately not done.
+        #
+        # ``requested_attribute`` is a shape label -- SPEC_VALUE, INCLUSION,
+        # AMOUNT_OR_COST -- so it says how the answer should look, not what it
+        # is about, and it is not used here.
         #
         # Empty means undetermined, and nothing is blocked on an empty set.
         query_families = attribute_families(" ".join(
@@ -625,6 +639,11 @@ class SimilarAnswerService:
         }
         compatibility_diagnostics: list[dict[str, Any]] = []
         type_mismatch_count = 0
+        # Rows the attribute rule found mismatched and kept anyway because the
+        # row is this product. Not a rejection, so it does not belong in
+        # ``rejection_counts``; counted separately so the carve-out below is
+        # visible in the trace rather than silent.
+        attribute_mismatch_carried = 0
         query_concepts = self._semantic_concepts(query)
         required_context = query_concepts & CONTEXT_ANCHOR_CONCEPTS
         current_product = extract_product_identity(
@@ -790,20 +809,51 @@ class SimilarAnswerService:
             # whose subject cannot be named is left to the ranking exactly as
             # before, because "undetermined" is not "unrelated" -- that is what
             # ``ATTRIBUTE_UNRESOLVED`` records. Only a stated difference blocks,
-            # and only for a question GPT ① called a product-fact question, so
-            # operational and policy answers are untouched by this.
+            # only for a question GPT ① called a product-fact question -- so
+            # operational and policy answers are untouched by this -- and only
+            # where identity is unconfirmed, which the next comment explains.
             candidate_families = (
                 attribute_families(
                     f"{item.get('question_original_masked') or ''}"
                     f" {item.get('final_answer') or ''}")
                 if identity_enforced and query_families else frozenset()
             )
-            attribute_reject = bool(
+            attribute_mismatch = bool(
                 identity_enforced
                 and query_families
                 and candidate_families
                 and not (query_families & candidate_families)
             )
+            # Confirmed identity is the one case where the premise above fails.
+            #
+            # The rule is "another product's answer is not this one's", and it
+            # decides by reading each side's subject off the text. That reading
+            # is incomplete: ``attribute_families`` has no family for an OTT
+            # app, so on inquiry 3070 -- "BID-AT200 셋톱박스 sk브로드벤드에서
+            # 설치한건데 연결해도 ott볼수있는거죠?" -- the question reduced to
+            # INSTALLATION, off "설치한", and this listing's own approved answer
+            # reduced to PORTS, off "RF 단자" and "HDMI 단자". That answer says
+            # in so many words that OTT is not built in and needs a set-top box
+            # with it. The one subject both sides were actually about was
+            # invisible to the comparison, and an EXACT_MODEL row the index
+            # ranked FIRST by meaning was deleted before GPT ② saw it. The same
+            # inquiry kept 319049 -- the same listing's RF-port answer -- so
+            # whatever the block was protecting, it was not identity.
+            #
+            # So when the row is this product (EXACT_MODEL, EXACT_PRODUCT or
+            # EXACT_NAME) there is no other product to protect against, and an
+            # incomplete taxonomy must not delete it. It is carried instead,
+            # labelled ATTRIBUTE_MISMATCH rather than quietly passed off as
+            # UNRESOLVED, and it is carried on the same terms as every other
+            # row: no ATTRIBUTE_MATCH boost, no relevance of its own, so it
+            # still has to out-rank the competition to reach the prompt. An
+            # unconfirmed identity blocks exactly as it did before -- this
+            # narrows nothing about another listing, another model or another
+            # category.
+            identity_confirmed = (
+                str(compatibility.product_match or "") in CONFIRMED_IDENTITY
+            )
+            attribute_reject = attribute_mismatch and not identity_confirmed
             # A different *kind* of product answering the same property.
             #
             # A monitor's "RF 단자가 없어 지상파를 수신할 수 없습니다" is a true
@@ -1084,16 +1134,21 @@ class SimilarAnswerService:
                 }
                 # Whether this row is about the property that was asked for.
                 #
-                # Only three states, and only one of them removed a row (above):
-                # MATCH is a row whose subject overlaps the question's, MISMATCH
-                # is gone by now, and UNRESOLVED is everything whose subject
-                # could not be named on either side. UNRESOLVED is carried, not
-                # demoted out of existence -- it simply sorts below a row that
-                # is demonstrably on the asked-for property.
+                # Three states. MATCH is a row whose subject overlaps the
+                # question's. ATTRIBUTE_MISMATCH is a stated difference that was
+                # kept anyway because the row is this product -- every other
+                # mismatch was removed above. ATTRIBUTE_UNRESOLVED is everything
+                # whose subject could not be named on either side. Neither of
+                # the last two is demoted out of existence; both simply sort
+                # below a row that is demonstrably on the asked-for property,
+                # because only MATCH earns the boost.
                 safe["attribute_state"] = (
                     "MATCH" if query_families & candidate_families
+                    else "ATTRIBUTE_MISMATCH" if attribute_mismatch
                     else "ATTRIBUTE_UNRESOLVED"
                 )
+                if attribute_mismatch:
+                    attribute_mismatch_carried += 1
                 safe["query_attributes"] = sorted(query_families)
                 safe["answer_attributes"] = sorted(candidate_families)
                 ranked.append((relevance, safe))
@@ -1147,6 +1202,11 @@ class SimilarAnswerService:
             # had emptied a list.
             "identity_enforced": bool(identity_enforced),
             "product_fact_sensitive": bool(product_fact_sensitive),
+            # How many rows the attribute rule found mismatched and kept
+            # because they are this product. A number here means the taxonomy
+            # disagreed with the index on a row nobody has to guess the
+            # provenance of; it is not a rejection and not an error.
+            "attribute_mismatch_carried": attribute_mismatch_carried,
             "candidate_count": len(candidates),
             "active_candidates": diagnostics["active_candidates"],
             # Keep diagnostic logs bounded. These are the candidates that
@@ -1210,6 +1270,18 @@ class SimilarAnswerService:
                     else "AUTO"
                 ),
                 "compatibility": item.get("compatibility") or {},
+                # Diagnostics only. These three were decided during ranking and
+                # then dropped here, which is why the attribute rule could not
+                # be audited from a trace: a replay could see which rows were
+                # offered but not what the rule thought they were about, and the
+                # ATTRIBUTE_MATCH boost's effect had to be reconstructed outside
+                # the pipeline. Nothing downstream reads them -- the boost reads
+                # ``attribute_state`` off the ranking item, not off this
+                # projection -- so carrying them changes no order and no
+                # selection.
+                "attribute_state": item.get("attribute_state"),
+                "query_attributes": item.get("query_attributes") or [],
+                "answer_attributes": item.get("answer_attributes") or [],
                 # Which listing this answer came from, said plainly. Identity
                 # mismatch no longer removes a candidate, so the prompt has to
                 # carry the verdict instead -- a candidate the model cannot
