@@ -367,6 +367,95 @@ def test_main_returns_non_zero_when_the_population_is_unexpected(
     assert "FAILED" in capsys.readouterr().out
 
 
+# --- --expect is checked before anything is written -----------------------
+#
+# It used to be checked in ``verify``, which runs after ``classify`` has
+# already applied every change: ``--apply --expect 807`` against a database
+# holding some other number wrote all of them and then reported the count was
+# wrong. The guard is only worth having before the write.
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_a_wrong_expect_writes_nothing(tmp_path: Path, apply: bool) -> None:
+    """The regression. Identical in both modes, and the rows do not move."""
+
+    database = seeded(tmp_path)
+    before = rows(database)
+
+    with pytest.raises(backfill.PopulationMismatch) as raised:
+        backfill.classify(database, apply=apply, expect=807)
+
+    assert raised.value.selected == 3
+    assert raised.value.expected == 807
+    assert rows(database) == before
+    # Still selectable, so a corrected run can do the work.
+    assert backfill.classify(database, apply=False)["selected"] == 3
+
+
+def test_main_with_a_wrong_expect_and_apply_writes_nothing(
+        tmp_path: Path, capsys) -> None:
+    """Through the command line, with ``--apply``, which is the dangerous one."""
+
+    database = seeded(tmp_path)
+    before = rows(database)
+    code = backfill.main([
+        "--database", str(database.path), "--expect", "807", "--apply"])
+    output = capsys.readouterr().out
+
+    assert code == 1
+    assert rows(database) == before
+    assert "writes performed     : 0" in output
+    assert "nothing was written" in output
+    # The classification never ran, so no distribution is reported.
+    assert "RESOLUTION" not in output
+
+
+def test_a_matching_expect_proceeds(tmp_path: Path) -> None:
+    database = seeded(tmp_path)
+    report = backfill.classify(database, apply=True, expect=3)
+    assert report["selected"] == 3
+    assert report["legacy_remaining"] == 0
+
+
+def test_the_guard_runs_before_the_services_are_built(
+        tmp_path: Path, monkeypatch) -> None:
+    """Nothing expensive or write-capable may be constructed first.
+
+    Asserted by making both the repository and the service factory explode: if
+    the population check has moved back after them, this fails with that
+    explosion instead of PopulationMismatch.
+    """
+
+    database = seeded(tmp_path)
+
+    def explode(*_a, **_k):
+        raise AssertionError("built before --expect was checked")
+
+    monkeypatch.setattr(backfill, "build_services", explode)
+    monkeypatch.setattr(backfill, "CoupangProductMappingRepository", explode)
+    monkeypatch.setattr(backfill, "_CapturingRepository", explode)
+
+    with pytest.raises(backfill.PopulationMismatch):
+        backfill.classify(database, apply=True, expect=99)
+
+
+def test_expect_of_zero_is_honoured(tmp_path: Path) -> None:
+    """``--expect 0`` is a real statement, not a missing one."""
+
+    database = seeded(tmp_path)
+    with pytest.raises(backfill.PopulationMismatch) as raised:
+        backfill.classify(database, apply=True, expect=0)
+    assert raised.value.expected == 0
+
+    backfill.classify(database, apply=True)
+    # Now there is nothing left, and the same assertion passes.
+    assert backfill.classify(database, apply=True, expect=0)["selected"] == 0
+
+
+def test_no_expect_still_runs(tmp_path: Path) -> None:
+    database = seeded(tmp_path)
+    assert backfill.classify(database, apply=False, expect=None)["selected"] == 3
+
+
 def test_main_dry_run_returns_zero_and_writes_nothing(
         tmp_path: Path, capsys) -> None:
     database = seeded(tmp_path)

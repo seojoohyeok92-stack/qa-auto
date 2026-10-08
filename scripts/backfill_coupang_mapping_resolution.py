@@ -25,6 +25,11 @@ same 759 rows again and the tool could never report itself finished. With it,
 a second run selects nothing. On the first run the two selectors are the same
 807 rows.
 
+``--expect`` is the operator's statement of what they believe is in the
+database, so it is checked against the selection before the repository is built
+and before any row is touched, in both modes. A mismatch exits 1 having written
+nothing.
+
 What it must not touch, and does not select: every CONFIRMED row, and every row
 carrying AUTO_EXACT, AUTO_ALIAS or MANUAL. ``--apply`` re-counts them before and
 after and refuses to report success if either number moved.
@@ -84,6 +89,25 @@ PROTECTED_WHERE = (
 
 class CoupangApiForbidden(RuntimeError):
     """Raised if anything tries to reach Coupang from this tool."""
+
+
+class PopulationMismatch(RuntimeError):
+    """``--expect`` did not match the rows found, so nothing was done.
+
+    Raised before the repository or the services are built, which is the whole
+    point of it: ``--expect`` is the operator's statement of what they believe
+    is in the database, and a tool that writes 807 rows and then reports the
+    number was wrong has already acted on a belief it could not confirm. The
+    earlier version checked this in ``verify``, after ``classify`` had applied
+    every change.
+    """
+
+    def __init__(self, selected: int, expected: int) -> None:
+        super().__init__(
+            f"selected {selected} legacy rows but --expect said {expected}; "
+            "nothing was written")
+        self.selected = selected
+        self.expected = expected
 
 
 class _RefusingClient:
@@ -245,11 +269,21 @@ class _CapturingRepository(CoupangProductMappingRepository):
         }
 
 
-def classify(database: Database, *, apply: bool) -> dict[str, Any]:
-    """Reclassify every legacy row. Writes only when ``apply`` is true."""
+def classify(
+    database: Database, *, apply: bool, expect: int | None = None,
+) -> dict[str, Any]:
+    """Reclassify every legacy row. Writes only when ``apply`` is true.
+
+    ``expect`` is checked here, against the selection, before anything is
+    built and before any row is touched. It behaves the same in both modes:
+    a mismatch raises and the database is left exactly as it was.
+    """
 
     with database.connection() as connection:
         rows = legacy_rows(connection)
+        # Before the repository exists, let alone a write.
+        if expect is not None and len(rows) != expect:
+            raise PopulationMismatch(len(rows), expect)
         options, products = load_catalog(connection)
         protected_before = protected_fingerprint(connection)
 
@@ -340,6 +374,9 @@ def verify(report: dict[str, Any], *, expect: int | None) -> list[str]:
         problems.append(
             f"accounted {report['total_accounted']} != selected "
             f"{report['selected']}")
+    # Kept for a caller that ran ``classify`` without ``expect`` and only
+    # states the number here. The command line passes it to ``classify``, which
+    # raises before writing, so this is the second line rather than the first.
     if expect is not None and report["selected"] != expect:
         problems.append(f"selected {report['selected']} != expected {expect}")
     if report["unclassifiable"]:
@@ -413,7 +450,16 @@ def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     database = (Database(arguments.database) if arguments.database is not None
                 else Database())
-    report = classify(database, apply=arguments.apply)
+    try:
+        report = classify(
+            database, apply=arguments.apply, expect=arguments.expect)
+    except PopulationMismatch as mismatch:
+        print(f"selected             : {mismatch.selected}")
+        print(f"expected             : {mismatch.expected}")
+        print("writes performed     : 0")
+        print()
+        print(f"FAILED: {mismatch}")
+        return 1
     render(report)
     problems = verify(report, expect=arguments.expect)
     if arguments.report is not None:
