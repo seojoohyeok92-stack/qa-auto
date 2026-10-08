@@ -161,6 +161,28 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
     yield
 
 
+# --- background semantic index sync ----------------------------------------
+#
+# A Learning save hands its index sync to a daemon worker and returns, so the
+# pass can still be running when the test that triggered it ends. Left alone
+# that pass would write an index during an unrelated test, or against a
+# tmp_path pytest has already removed, and either one shows up as a failure
+# somewhere other than its cause.
+#
+# Draining after every test is what keeps a test's own background work inside
+# its own test. It is a no-op for the overwhelming majority that never save a
+# Learning: there is no worker to wait for.
+@pytest.fixture(autouse=True)
+def _drain_semantic_index_workers():
+    yield
+    from services.learning_index_sync_hook import reset_semantic_index_workers
+
+    assert reset_semantic_index_workers(timeout=60.0), (
+        "a background semantic index sync was still running when the test "
+        "ended; it would have run on during the next one"
+    )
+
+
 def pytest_terminal_summary(terminalreporter, *args, **kwargs) -> None:
     """Report egress rather than letting a blocked call pass unnoticed."""
 
