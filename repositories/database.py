@@ -2323,6 +2323,48 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        38,
+        (
+            # Why a mapping ended where it did, as its own two fields.
+            #
+            # ``mapping_status`` has two values, CONFIRMED and NEEDS_REVIEW, so
+            # every unconfirmed outcome looked the same: 805 of the 807 review
+            # rows in the live store read MODEL_EVIDENCE_NOT_EXACT, which says
+            # nothing about whether a human can finish the mapping or whether
+            # there was never any model evidence to work from. The reason was
+            # also being written into ``model_evidence_field`` -- a column that
+            # names *where the evidence came from* -- so "externalVendorSku"
+            # and "MODEL_EVIDENCE_NOT_EXACT" shared one field.
+            #
+            # ``model_evidence_class`` records what the option's text was:
+            # EXACT_MODEL, FAMILY_ONLY, AMBIGUOUS or NO_MODEL_EVIDENCE.
+            # ``resolution`` records what was done about it: AUTO_EXACT,
+            # AUTO_ALIAS, MANUAL_REQUIRED, UNRESOLVED or MANUAL_CONFIRMED.
+            # Two fields rather than one because the same class can resolve
+            # differently -- an EXACT_MODEL inside a bundle listing is still
+            # MANUAL_REQUIRED.
+            #
+            # Added as nullable columns with no CHECK, which keeps this an
+            # ALTER rather than the table rebuild that changing
+            # ``mapping_status``'s CHECK would need. Existing rows read NULL,
+            # meaning "resolved before this was recorded", and are reclassified
+            # when they are next resolved. The vocabulary is enforced in
+            # ``CoupangProductMappingRepository.upsert``.
+            """
+            ALTER TABLE coupang_product_mappings
+            ADD COLUMN model_evidence_class TEXT
+            """,
+            """
+            ALTER TABLE coupang_product_mappings
+            ADD COLUMN resolution TEXT
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_coupang_product_mappings_resolution
+            ON coupang_product_mappings(resolution, model_evidence_class)
+            """,
+        ),
+    ),
 )
 
 

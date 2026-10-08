@@ -169,13 +169,30 @@ def test_d400_options_are_independent_and_account_scoped(tmp_path: Path) -> None
     assert repository.get(account_code=COUPANG_OJE_PLUS, vendor_item_id=12345)["canonical_model"] == "32DM501"
 
 
-def test_bundle_item_keeps_only_base_model_mapping(tmp_path: Path) -> None:
+def test_a_bundle_listing_is_manual_even_with_an_exact_model(tmp_path: Path) -> None:
+    """A bundle sells more than the base model, so the code is not the answer.
+
+    This reverses the earlier decision, which confirmed the base model and kept
+    only that. The reason it changed: ``modelNo`` names the monitor inside a
+    모음전 listing, not what the option actually delivers, so confirming it
+    answered a customer about a product they had not bought. The evidence class
+    still records that the text was exact -- the mapping is manual because of
+    the bundle, not because the code was unreadable.
+    """
+
     mapping_service, _ = service(tmp_path, FakeProductClient(product(
         item(7, model_no="LS32DM501EKXKR", bundle={"bundleType": "AB"}),
     )))
     result = mapping_service.resolve(seller_product_id=10001, vendor_item_id=7)
-    assert result.mapping["canonical_model"] == "32DM501"
     assert result.bundle_detected is True
+    assert result.reason == "BUNDLE_REQUIRES_MANUAL"
+    assert result.model_evidence_class == "EXACT_MODEL"
+    assert result.resolution == "MANUAL_REQUIRED"
+    assert result.mapping["mapping_status"] == NEEDS_REVIEW
+    assert result.mapping["canonical_model"] is None
+    # The code it would have confirmed is kept as a candidate for the operator.
+    assert [entry["canonical_model"]
+            for entry in result.mapping["raw_model_candidates"]] == ["32DM501"]
 
 
 def test_real_attribute_spec_noise_is_not_model_evidence(tmp_path: Path) -> None:

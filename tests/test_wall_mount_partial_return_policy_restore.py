@@ -26,7 +26,7 @@ import json
 import sqlite3
 
 import repositories.database as database_module
-from repositories.database import Database
+from repositories.database import MIGRATIONS, Database
 from tests.migration_contract import (
     assert_migration_applied,
     assert_reinitialize_is_noop,
@@ -184,6 +184,24 @@ def _state(database: Database, row_id: int) -> dict:
     return dict(row)
 
 
+def _migrations_up_to(version: int):
+    """``MIGRATIONS`` up to and including ``version``, and nothing after it.
+
+    ``migrations_through`` stops just *before* its argument, which is the
+    boundary the fixtures need. A test that measures migration 37's own effect
+    needs the other one: 37 applied, and 38 and everything later not applied,
+    so a later migration's schema change cannot be read as 37's.
+
+    Read from the real ledger rather than from ``database_module.MIGRATIONS``,
+    because the caller is holding a monkeypatched one when it asks.
+    """
+
+    target = int(version)
+    assert any(int(value) == target for value, _ in MIGRATIONS), (
+        f"migration {target} is not declared")
+    return tuple(entry for entry in MIGRATIONS if int(entry[0]) <= target)
+
+
 def _at_36(tmp_path, monkeypatch, name="restore.db"):
     """A database on the schema the live server is on, with 37 still pending.
 
@@ -252,7 +270,11 @@ def test_rows_migration_35_retired_are_restored(tmp_path, monkeypatch) -> None:
 
     database, ids, applied, _before = _retired_as_migration_35_left_them(
         tmp_path, monkeypatch)
-    assert applied == [37]
+    # 37 ran. Not "37 was the only thing that ran" -- the fixture restores the
+    # real ledger before upgrading, so every migration written after 37 applies
+    # here too, and pinning the list meant this failed the day 38 was added
+    # without anything about migration 37 having changed.
+    assert 37 in applied
     for key in RESTORED_KEYS:
         state = _state(database, ids[key])
         assert state["validity_active"] == 1, key
@@ -283,7 +305,10 @@ def test_the_whole_ledger_leaves_the_policy_valid(tmp_path, monkeypatch) -> None
             ids[key] = _seed(connection, key, answer)
     monkeypatch.undo()
     applied = database.initialize()
-    assert applied == [35, 36, 37]
+    # The three this case is about ran, in the ledger. Anything written later
+    # runs too, and must not change the outcome asserted below -- which is the
+    # guard this test exists for.
+    assert {35, 36, 37} <= set(applied)
     for key, row_id in ids.items():
         state = _state(database, row_id)
         assert state["validity_active"] == 1, key
@@ -397,7 +422,7 @@ def test_migration_ledger_records_37(tmp_path, monkeypatch) -> None:
 
     database, _ids, applied, _before = _retired_as_migration_35_left_them(
         tmp_path, monkeypatch)
-    assert applied == [37]
+    assert 37 in applied
     assert_migration_applied(database, 35)
     assert_migration_applied(database, 36)
     assert_migration_applied(database, 37)
@@ -420,7 +445,12 @@ def test_migration_37_changes_no_schema(tmp_path, monkeypatch) -> None:
 
     database = _at_36(tmp_path, monkeypatch, "schema.db")
     before = schema(database)
-    monkeypatch.undo()
+    # Only 37, deliberately. Restoring the whole ledger here would upgrade
+    # through every later migration as well, and migration 38 adds two columns
+    # to coupang_product_mappings -- a real schema change that is not 37's and
+    # would be reported as though it were.
+    monkeypatch.setattr(
+        database_module, "MIGRATIONS", _migrations_up_to(37))
     assert database.initialize() == [37]
     assert schema(database) == before
 

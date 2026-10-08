@@ -2,21 +2,45 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from api.coupang_read_client import CoupangReadClient
 from repositories.coupang_product_mapping_repository import (
+    AMBIGUOUS,
+    AUTO_ALIAS,
     AUTO_EXACT,
     CONFIRMED,
+    EXACT_MODEL,
+    FAMILY_ONLY,
     MANUAL,
+    MANUAL_CONFIRMED,
+    MANUAL_REQUIRED,
     NEEDS_REVIEW,
+    NO_MODEL_EVIDENCE,
+    UNRESOLVED,
     CoupangProductMappingRepository,
 )
 from repositories.product_catalog_repository import (
     ProductCatalogRepository,
     canonical_model_identity,
 )
+
+# A token that could be naming a model: letters and digits together, long
+# enough not to be a size or a quantity. "M50D", "D400", "32DM501" qualify;
+# "internal", "sku", "32", "80CM" do not.
+#
+# Deliberately a shape test and not a vocabulary. The families that appear in
+# Coupang option text -- M50D, M50F, D400, G50D -- are listing names the
+# catalog does not hold as models, so a vocabulary built from the catalog
+# would miss exactly the cases this has to catch. Reading the shape instead
+# risks calling an unrelated vendor SKU a family, and that error is the safe
+# direction: FAMILY_ONLY asks a person, which is what an unreadable SKU needs
+# anyway.
+_MODEL_SHAPED_TOKEN = re.compile(r"(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{3,}")
+# Sizes and units, which are model-shaped by the rule above and are not models.
+_SIZE_LIKE = re.compile(r"^\d+(CM|MM|INCH|HZ|W|K|ML|G|KG)?$")
 
 
 @dataclass(frozen=True)
@@ -26,6 +50,8 @@ class CoupangProductMappingResult:
     reason: str | None = None
     matching_item_count: int = 0
     bundle_detected: bool = False
+    model_evidence_class: str | None = None
+    resolution: str | None = None
 
 
 class CoupangProductMappingService:
@@ -71,36 +97,72 @@ class CoupangProductMappingService:
             if isinstance(item, dict) and str(item.get("vendorItemId") or "") == vendor_item
         ]
         if len(matches) != 1:
+            # Zero or several options behind one vendorItemId. Two different
+            # models may be among them, so this is an ambiguity about which
+            # option was asked about, not an absence of evidence.
             mapping = self._save_review(
                 vendor_item_id=vendor_item,
                 data=data,
                 reason="VENDOR_ITEM_NOT_UNIQUE",
+                evidence_class=AMBIGUOUS,
+                resolution=MANUAL_REQUIRED,
             )
             return CoupangProductMappingResult(
                 mapping, reused=False, reason="VENDOR_ITEM_NOT_UNIQUE",
                 matching_item_count=len(matches),
+                model_evidence_class=AMBIGUOUS, resolution=MANUAL_REQUIRED,
             )
 
         item = matches[0]
         candidates = self._exact_candidates(item)
         identities = {entry["canonical_model"] for entry in candidates}
         bundle = item.get("bundleInfo") not in (None, {}, [])
-        if len(identities) != 1:
-            reason = "MODEL_EVIDENCE_CONFLICT" if len(identities) > 1 else "MODEL_EVIDENCE_NOT_EXACT"
+        evidence_class = self._classify(item, identities)
+
+        if len(identities) != 1 or bundle:
+            if len(identities) > 1:
+                reason = "MODEL_EVIDENCE_CONFLICT"
+            elif bundle:
+                # A bundle listing sells more than the base model, so even an
+                # exact modelNo does not say what this option delivers. The
+                # evidence class still records what the text was.
+                reason = "BUNDLE_REQUIRES_MANUAL"
+            elif evidence_class == FAMILY_ONLY:
+                reason = "MODEL_EVIDENCE_FAMILY_ONLY"
+            else:
+                reason = "MODEL_EVIDENCE_NOT_EXACT"
+            # Nothing to finish it from is the only UNRESOLVED case. Everything
+            # else names something a person can act on.
+            resolution = (
+                UNRESOLVED if evidence_class == NO_MODEL_EVIDENCE and not bundle
+                else MANUAL_REQUIRED
+            )
             mapping = self._save_review(
                 vendor_item_id=vendor_item,
                 data=data,
                 item=item,
                 candidates=candidates,
                 reason=reason,
+                evidence_class=evidence_class,
+                resolution=resolution,
             )
             return CoupangProductMappingResult(
                 mapping, reused=False, reason=reason,
                 matching_item_count=1, bundle_detected=bundle,
+                model_evidence_class=evidence_class, resolution=resolution,
             )
 
         canonical = next(iter(identities))
         evidence = candidates[0]
+        # Which route reached the model. An evidence token the notation rules
+        # can read on their own is AUTO_EXACT; one that only an explicit
+        # model-code alias could resolve is AUTO_ALIAS. ``BE50D`` is the second
+        # kind -- notation alone leaves it as ``BE50D`` and only the alias
+        # table knows it is ``50BED`` -- while ``LS32DM501EKXKR`` is the first,
+        # because stripping the vendor prefix and the region suffix is a rule.
+        resolution = AUTO_EXACT if all(
+            not entry["alias_required"] for entry in candidates
+        ) else AUTO_ALIAS
         mapping = self.repository.upsert(
             account_code=self.account_code,
             vendor_item_id=vendor_item,
@@ -108,15 +170,51 @@ class CoupangProductMappingService:
             seller_product_item_id=item.get("sellerProductItemId"),
             product_id=data.get("productId"),
             canonical_model=canonical,
-            mapping_source=AUTO_EXACT,
+            mapping_source=resolution,
             mapping_status=CONFIRMED,
             model_evidence_field=evidence["field"],
             model_evidence_value=evidence["value"],
             raw_model_candidates=candidates,
+            model_evidence_class=EXACT_MODEL,
+            resolution=resolution,
         )
         return CoupangProductMappingResult(
-            mapping, reused=False, matching_item_count=1, bundle_detected=bundle
+            mapping, reused=False, matching_item_count=1, bundle_detected=bundle,
+            model_evidence_class=EXACT_MODEL, resolution=resolution,
         )
+
+    def _classify(
+        self, item: dict[str, Any], identities: set[str]
+    ) -> str:
+        """What the option's text amounts to, before anything is decided."""
+
+        if len(identities) > 1:
+            return AMBIGUOUS
+        if len(identities) == 1:
+            return EXACT_MODEL
+        # No model resolved. Does the text name a family, or nothing at all?
+        for text in self._evidence_texts(item):
+            for token in _MODEL_SHAPED_TOKEN.findall(
+                "".join(ch if ch.isalnum() else " " for ch in text.upper())
+            ):
+                if not _SIZE_LIKE.fullmatch(token):
+                    return FAMILY_ONLY
+        return NO_MODEL_EVIDENCE
+
+    def _evidence_texts(self, item: dict[str, Any]) -> list[str]:
+        """Every field a model or a family could be stated in.
+
+        ``itemName`` is read for classification only and never for identity:
+        an option title may name a family, and naming a family is what
+        FAMILY_ONLY records.
+        """
+
+        return [
+            str(item.get("modelNo") or ""),
+            str(item.get("externalVendorSku") or ""),
+            str(item.get("itemName") or ""),
+            *self._attribute_values(item.get("attributes")),
+        ]
 
     def save_manual_mapping(
         self,
@@ -132,6 +230,13 @@ class CoupangProductMappingService:
         )
         if not canonical or canonical not in self._known_models():
             raise ValueError("canonical_model must be a known exact catalog or Product Knowledge model")
+        # Carry the automatic classification forward. The person resolved the
+        # mapping, but what the option's own text amounted to -- FAMILY_ONLY,
+        # AMBIGUOUS -- is still the reason this needed a person, and dropping
+        # it would lose the only record of that.
+        previous = self.repository.get(
+            account_code=self.account_code, vendor_item_id=vendor_item_id
+        ) or {}
         return self.repository.upsert(
             account_code=self.account_code,
             vendor_item_id=vendor_item_id,
@@ -143,6 +248,8 @@ class CoupangProductMappingService:
             mapping_status=CONFIRMED,
             model_evidence_field="MANUAL",
             model_evidence_value=str(canonical_model),
+            model_evidence_class=previous.get("model_evidence_class"),
+            resolution=MANUAL_CONFIRMED,
         )
 
     def _save_review(
@@ -153,6 +260,8 @@ class CoupangProductMappingService:
         item: dict[str, Any] | None = None,
         candidates: list[dict[str, str]] | None = None,
         reason: str,
+        evidence_class: str,
+        resolution: str,
     ) -> dict[str, Any]:
         return self.repository.upsert(
             account_code=self.account_code,
@@ -163,6 +272,8 @@ class CoupangProductMappingService:
             mapping_status=NEEDS_REVIEW,
             model_evidence_field=reason,
             raw_model_candidates=candidates or [],
+            model_evidence_class=evidence_class,
+            resolution=resolution,
         )
 
     def _aliases(self) -> dict[str, Any]:
@@ -192,10 +303,15 @@ class CoupangProductMappingService:
                 raw = str(value or "").strip()
                 canonical = canonical_model_identity(raw, aliases=aliases)
                 if raw and canonical and canonical in known:
+                    # Would the notation rules alone have reached the same
+                    # model? If not, an explicit alias is what identified it,
+                    # and the mapping is AUTO_ALIAS rather than AUTO_EXACT.
                     found.append({
                         "field": field,
                         "value": raw,
                         "canonical_model": canonical,
+                        "alias_required": canonical_model_identity(
+                            raw, aliases=None) != canonical,
                     })
         return found
 
