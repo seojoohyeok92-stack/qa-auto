@@ -217,6 +217,17 @@ class InquiryProcessingPlanService:
         # performs mechanical plan work (identifier validation, cache state
         # and workflow actions), but it must not independently rediscover
         # whether customer-specific Order/DPS evidence was requested.
+        #
+        # ``need_order_lookup``, not ``need_order``. This assignment overwrites
+        # the analysis and the auto-post gate acts on the result, so what it
+        # reads has to be the requirement
+        # ``InquiryAnalysisService._with_semantic`` names: a question about
+        # identifying the order, or a current schedule. ``need_order`` answers
+        # a different question -- whether this is a current-order workflow at
+        # all, which Phase9 reads -- and it is raised by conversational order
+        # context. Reading it here held two answered inquiries on a missing
+        # order number they never needed (691701421, 691575305). Do not
+        # re-derive either flag; see ``_understanding_contract``.
         understanding = (
             (semantic_routing or {}).get("understanding")
             if isinstance(semantic_routing, dict)
@@ -227,9 +238,13 @@ class InquiryProcessingPlanService:
         if gpt_understanding_usable:
             analysis = dataclasses.replace(
                 analysis,
-                requires_order_lookup=bool(understanding.get("need_order")),
+                requires_order_lookup=bool(
+                    understanding.get("need_order_lookup")
+                ),
                 requires_dps_lookup=bool(understanding.get("need_dps")),
-                requires_order_id=bool(understanding.get("need_order")),
+                requires_order_id=bool(
+                    understanding.get("need_order_lookup")
+                ),
                 purchase_confirmed=(
                     str(understanding.get("purchase_state") or "")
                     == "CURRENT_ORDER"

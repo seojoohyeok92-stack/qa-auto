@@ -248,6 +248,31 @@ class NaverAutoPostScheduler:
             with self._guard:
                 self._draft_futures.pop(int(inquiry_id), None)
 
+    def _candidate_state(self, inquiry_id: int) -> dict[str, Any]:
+        """The inquiry fields the candidate query filters on, for the record.
+
+        Reported, never judged: naming which exclusion applied is the
+        repository's query, and duplicating it here would be a second copy of
+        the rule to keep in step. These are the observable values an operator
+        needs to read it against. A failure to read them must not turn a
+        completed event into a failed run, so it degrades to a note.
+        """
+
+        try:
+            from repositories.inquiry_repository import InquiryRepository
+
+            inquiry = InquiryRepository(self.database).get(inquiry_id) or {}
+        except Exception as error:  # pragma: no cover - diagnostics only
+            return {"candidate_state": f"UNREADABLE: {type(error).__name__}"}
+        return {
+            "store_code": inquiry.get("store_code"),
+            "post_status": inquiry.get("post_status"),
+            "workflow_status": inquiry.get("workflow_status"),
+            "source_answered": inquiry.get("source_answered"),
+            "source_deleted": inquiry.get("source_deleted"),
+            "post_error_code": inquiry.get("post_error_code"),
+        }
+
     def run_once(
         self,
         *,
@@ -389,6 +414,37 @@ class NaverAutoPostScheduler:
                             level="WARNING", details={"event_id": event["id"]},
                         )
                 else:
+                    # An all-zero result means the pipeline's candidate query
+                    # returned nothing for this inquiry, so no stage of it ran
+                    # and no stage recorded why. Completing the event here was
+                    # the one way an auto-post event could end with no account
+                    # of itself: measured on the server backup of 2026-10-12,
+                    # event 1433 (inquiry 10850) was claimed and completed in
+                    # 31ms by a run reporting processed 0 / skipped 0, and the
+                    # inquiry stayed REVIEW_PENDING / NOT_POSTED with no
+                    # decision and no attempt against it. That one had been
+                    # answered at the source, which the sync had recorded eight
+                    # hours earlier -- but the scheduler had not recorded
+                    # anything, so the reason being available was luck.
+                    #
+                    # The event still completes: the queue and its retry rules
+                    # are unchanged, and a row the candidate query excludes is
+                    # not work that is pending. Only the silence is removed.
+                    if not any(int(item.get(key) or 0) for key in values):
+                        self.logs.record_inquiry(
+                            inquiry_id,
+                            "AUTO_POST_NO_CANDIDATE",
+                            "자동등록 대상 조회에서 제외되어 처리 단계에 "
+                            "진입하지 않았습니다.",
+                            level="WARNING",
+                            details={
+                                "auto_post_run_id": run_id,
+                                "event_id": event["id"],
+                                "reason_code": "NO_CANDIDATE",
+                                "network_call_count": 0,
+                                **self._candidate_state(inquiry_id),
+                            },
+                        )
                     self.events.complete(int(event["id"]), owner_id=self.owner_id)
                     self.logs.record_inquiry(
                         inquiry_id,

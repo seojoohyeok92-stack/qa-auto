@@ -58,6 +58,7 @@ from services.gpt_semantic_analyzer_service import (
     GptSemanticAnalyzerService,
 )
 from services.semantic_analysis import (
+    ORDER_IDENTIFICATION,
     SemanticAnalysis,
     is_enabled as semantic_analyzer_enabled,
     route as semantic_route,
@@ -621,6 +622,7 @@ class AnswerService:
                 "offer_product_record": None,
                 "need_learning": None,
                 "need_order": None,
+                "need_order_lookup": None,
                 "need_dps": None,
                 "purchase_state": None,
                 "questions": [],
@@ -635,9 +637,39 @@ class AnswerService:
         need_dps = bool(
             current_order and semantic.requires_delivery_schedule
         )
+        # Whether this inquiry is a current-order workflow at all. Phase9 reads
+        # it to decide whether it may complete one (see
+        # ``_phase9_shortcut_allowed``), which is a question about context.
         need_order = bool(
             current_order and (
                 semantic.requires_order_context or need_dps
+            )
+        )
+        # Whether this inquiry asks us to go and *fetch* that order. A separate
+        # question, and the one the processing plan and the auto-post gate act
+        # on -- they were both reading ``need_order`` for it.
+        #
+        # Measured on the server backup of 2026-10-12: "구매했는데 폐가전수거
+        # 요청을 체크못한거 같아요" (691701421) and "25년 12월 구매 했어요 /
+        # 제품보증기간 및 As수리 가능여부 부탁 드려요!" (691575305) each carry
+        # one atomic question that needs no order -- COLLECTION, and
+        # BENEFIT/REPAIR -- and GPT ① raised ``requires_order_context`` for the
+        # purchase both customers mention. That alone made ``need_order`` true,
+        # ``InquiryProcessingPlanService`` overwrote the analysis with it, and
+        # the auto-post gate held both on REQUIRED_ORDER_ID_MISSING_OR_INVALID
+        # and ORDER_LOOKUP_NOT_TRUSTED with nothing else against them. Both
+        # were then posted by hand, unchanged.
+        #
+        # The rule is the one ``InquiryAnalysisService._with_semantic`` already
+        # applies, and whose own comment says ``requires_order_context`` "is
+        # not authority to fetch their external order": the lookup is earned by
+        # the question being about identifying the order, or by a current
+        # schedule being wanted. ``need_dps`` carries the latter, so the DPS
+        # rule is untouched, and the ``current_order`` guard stands -- a
+        # customer with no order has none to look up.
+        need_order_lookup = bool(
+            current_order and (
+                ORDER_IDENTIFICATION in actions or need_dps
             )
         )
         return {
@@ -679,6 +711,7 @@ class AnswerService:
             # rather than a keyword gate, decides whether it is useful.
             "need_learning": not need_dps,
             "need_order": need_order,
+            "need_order_lookup": need_order_lookup,
             "need_dps": need_dps,
             "purchase_state": semantic.purchase_state,
             "questions": [
