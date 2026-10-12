@@ -321,6 +321,15 @@ def test_B_external_learning_keeps_market_isolation(tmp_path):
     ns_pool = {int(r["id"]) for r in repo.candidates(store_code=COUPANG, market="COUPANG", limit=2000)}
     plus_pool = {int(r["id"]) for r in repo.candidates(store_code="COUPANG_OJE_PLUS", market="COUPANG", limit=2000)}
 
+    # The isolation is one-way. Coupang-origin knowledge never becomes Naver
+    # evidence; Naver-approved knowledge is shared forward, because a Learning
+    # is about a product and the identity gates judge the product. This read
+    # "Naver -> Coupang: 0" until that policy was settled.
+    #
+    # The one carve-out is not here: a GENERAL_DELIVERY_ESTIMATE is the
+    # marketplace's own promise rather than a product fact, so it is restricted
+    # where the estimate is adopted, not by removing the row from the pool.
+    # See test_delivery_estimate_scope_expansion_20260921.py::test_O.
     assert naver in naver_pool and coupang not in naver_pool        # Coupang -> Naver: 0
-    assert naver not in ns_pool and naver not in plus_pool          # Naver -> Coupang: 0
+    assert naver in ns_pool and naver in plus_pool                  # Naver -> Coupang: shared
     assert coupang in ns_pool and coupang in plus_pool              # shared by both accounts

@@ -27,6 +27,44 @@ from services.learning_privacy_service import LearningPrivacyService
 
 
 MARKET_APPLICABILITY_COMMON = "COMMON"
+MARKET_NAVER = "NAVER"
+MARKET_COUPANG = "COUPANG"
+
+#: Which market may read knowledge that came from which, when the row does not
+#: say for itself. Deliberately asymmetric and deliberately written out rather
+#: than left to emerge from a store filter.
+#:
+#: Naver -> Coupang is open. A Learning is knowledge about a product, the
+#: Naver corpus is the one that has been curated for years, and a Coupang
+#: inquiry about the same product deserves it. What has to match is the
+#: product, and the identity gates judge that.
+#:
+#: Coupang -> Naver is closed. Coupang answers are not held to the same
+#: review, so they do not become Naver evidence.
+_SHARED_FORWARD = {(MARKET_NAVER, MARKET_COUPANG)}
+
+
+def origin_market_of(metadata: dict[str, Any]) -> str:
+    """Which marketplace this Learning's knowledge came from.
+
+    Read from the row rather than from the query that found it. Relying on
+    ``store_code`` for this would make the Coupang -> Naver block an accident
+    of where rows happen to be stored: Coupang rows carry no store today, so a
+    store filter lets them past every caller, and only their
+    ``COUPANG_ONLY`` applicability keeps them out of Naver. A Coupang row
+    written without that metadata would leak. This decides it from origin.
+
+    Everything that is not marked Coupang is Naver: the corpus that predates
+    marketplace metadata is Naver-originated, which is a fact about how it was
+    collected and not a guess.
+    """
+
+    if str(metadata.get("origin_market") or "").strip().upper() == MARKET_COUPANG:
+        return MARKET_COUPANG
+    if normalize_market_applicability(
+            metadata.get("market_applicability")) == f"{MARKET_COUPANG}_ONLY":
+        return MARKET_COUPANG
+    return MARKET_NAVER
 
 
 def normalize_market_applicability(value: Any) -> str | None:
@@ -61,15 +99,36 @@ def is_market_applicable(metadata: dict[str, Any], market: str | None) -> bool:
     # all-row view. Runtime callers always provide (or derive) one.
     if not normalized_market:
         return True
-    if applicability is None:
-        # The corpus that predates marketplace metadata is Naver-originated.
-        # Treat it as NAVER_ONLY at runtime: this preserves Naver behavior and
-        # prevents a metadata-free legacy row from leaking into Coupang GPT
-        # context. Explicit COMMON remains the only cross-market policy.
-        applicability = "NAVER_ONLY"
-    if applicability == MARKET_APPLICABILITY_COMMON:
+    # A row that states its own scope is believed, in both directions. This is
+    # how an operator says "this one is Naver's alone" or "this one is for
+    # both", and nothing below may overrule it.
+    if applicability is not None:
+        if applicability == MARKET_APPLICABILITY_COMMON:
+            return True
+        return applicability == f"{normalized_market}_ONLY"
+    # Otherwise the row's origin decides, and the rule is asymmetric.
+    #
+    # It used to read NAVER_ONLY here, so a Naver-approved answer was invisible
+    # to a Coupang inquiry about the same model. Measured on the 26.10.4
+    # snapshot that was total: of 1,939 active rows, 1,174 carried no
+    # applicability and 765 were COUPANG_ONLY, and NOT ONE was COMMON -- the
+    # two corpora never met, and a Coupang inquiry could only ever see
+    # Coupang's own 765.
+    #
+    # Reading it as COMMON instead would have been the opposite mistake. COMMON
+    # is symmetric, and the policy is not: it would have left Coupang knowledge
+    # out of Naver only because today's Coupang rows happen to be marked
+    # COUPANG_ONLY, so one row written without that metadata would leak into
+    # Naver evidence. ``_SHARED_FORWARD`` says the direction instead.
+    #
+    # Market was standing in for identity either way, and it is the weaker
+    # test: it blocked a correct answer about the same model, and would not
+    # have blocked a wrong one about a different model in the same market. The
+    # identity gates are untouched and still remove another model's answer.
+    origin = origin_market_of(metadata)
+    if normalized_market == origin:
         return True
-    return bool(normalized_market) and applicability == f"{normalized_market}_ONLY"
+    return (origin, normalized_market) in _SHARED_FORWARD
 
 
 class LearningRepository:
@@ -511,6 +570,28 @@ class LearningRepository:
         effective_market = str(market or "").strip().upper() or market_from_store_code(
             store_code
         )
+        # A Coupang caller is not scoped by store; the market gate scopes it.
+        #
+        # Market applicability alone did not open the cross-market path,
+        # because this query filters on ``store_code`` first: a Coupang
+        # inquiry arrives as COUPANG_OJE_PLUS while the Naver corpus carries
+        # OJE_PLUS, so every Naver row was excluded before applicability was
+        # ever consulted.
+        #
+        # Admitting only the same seller's Naver store was tried and is not
+        # enough. Measured on the snapshot, all 1,174 Naver rows live under
+        # OJE_PLUS while 7,157 of the 7,408 Coupang inquiries are the OJE_NS
+        # account, so the seller-paired version reached 251 inquiries and left
+        # the other 96% with nothing. The policy is per market, not per seller.
+        #
+        # So for a Coupang caller the store predicate is dropped and
+        # ``is_market_applicable`` is the only thing that decides which
+        # corpora are in scope -- one rule in one place, rather than a store
+        # filter and a market filter that have to agree. A Naver caller keeps
+        # the store predicate exactly as it was, so a Naver inquiry's pool is
+        # unchanged; Coupang rows stay out of it because their origin is
+        # Coupang, which the market gate blocks regardless of store.
+        store_filter = None if effective_market == MARKET_COUPANG else store_code
         # Filtering after deserializing metadata keeps the schema unchanged.
         # Fetch the bounded usable corpus before applying a market-only filter
         # so excluded rows cannot consume all requested candidate slots.
@@ -550,7 +631,7 @@ class LearningRepository:
                          learning_examples.created_at DESC
                 LIMIT ?
                 """,
-                (now, now, store_code, store_code, query_limit),
+                (now, now, store_filter, store_filter, query_limit),
             ).fetchall()
         # Keep the shared Python policy as a second guard if a legacy timestamp
         # cannot be interpreted consistently by SQLite.  Active feedback is

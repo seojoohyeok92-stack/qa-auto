@@ -355,13 +355,28 @@ def test_naver_never_retrieves_a_captured_coupang_answer(database) -> None:
     assert is_market_applicable(saved["metadata_json"], "COUPANG") is True
 
 
-def test_legacy_metadata_free_learning_stays_out_of_coupang(database) -> None:
-    """I: the existing isolation in the other direction is unchanged."""
+def test_a_metadata_free_learning_is_common_to_both_markets(database) -> None:
+    """I: the isolation ran one way only, and that way is now open.
+
+    This asserted ``is_market_applicable({}, "COUPANG") is False``: the Naver
+    corpus, which is every row that predates marketplace metadata, was kept
+    out of Coupang entirely. The policy it encoded has been replaced -- a
+    Learning is knowledge about a product, and identity is what has to match,
+    so a metadata-free row is COMMON.
+
+    The other direction is unchanged and the test above still pins it: a row
+    written as COUPANG_ONLY stays out of Naver.
+    """
 
     from repositories.learning_repository import is_market_applicable
 
     assert is_market_applicable({}, "NAVER") is True
-    assert is_market_applicable({}, "COUPANG") is False
+    assert is_market_applicable({}, "COUPANG") is True
+    # An explicit value still decides, in both directions.
+    assert is_market_applicable(
+        {"market_applicability": "COUPANG_ONLY"}, "NAVER") is False
+    assert is_market_applicable(
+        {"market_applicability": "NAVER_ONLY"}, "COUPANG") is False
 
 
 # --- G. nothing else was opened -------------------------------------------------

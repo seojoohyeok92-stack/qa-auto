@@ -392,7 +392,25 @@ def test_a_coupang_approval_is_coupang_only_learning_shared_by_both_accounts(dat
                    for r in repository.candidates(store_code="OJE_PLUS"))
 
 
-def test_naver_learning_stays_naver(database) -> None:
+def test_a_naver_learning_is_shared_with_coupang(database) -> None:
+    """Reverses the earlier policy, deliberately.
+
+    This used to assert that a metadata-free row "never reaches Coupang".
+    That treated the marketplace as the thing that had to match, and measured
+    on the 26.10.4 snapshot it was absolute: 1,174 active rows carried no
+    applicability and 765 were COUPANG_ONLY, and not one row was COMMON, so a
+    Coupang inquiry could never see a Naver-approved answer about the same
+    model.
+
+    A Learning is knowledge about a product. What must match is the product,
+    and the identity gates judge that; market was standing in for identity and
+    is the weaker test. So a metadata-free row is now COMMON.
+
+    Naver keeps its own pool exactly: these rows were always visible to it,
+    and COUPANG_ONLY still never travels the other way, which the test above
+    pins.
+    """
+
     inquiry_id = naver_inquiry(database)
     service(database).generate_for_inquiry(inquiry_id)
     _approve(database, inquiry_id)
@@ -401,11 +419,38 @@ def test_naver_learning_stays_naver(database) -> None:
     row = next(r for r in repository.candidates(store_code="OJE_PLUS") if r.get("inquiry_id") == inquiry_id)
     assert row["store_code"] == "OJE_PLUS"
     assert "market_applicability" not in row["metadata_json"]
-    # A metadata-free row, even with no store, never reaches Coupang.
+    # Still Naver's own, and now reachable from Coupang as well.
+    assert any(r["id"] == row["id"] for r in repository.candidates(store_code="OJE_PLUS"))
+    assert any(r["id"] == row["id"]
+               for r in repository.candidates(store_code="COUPANG_OJE_PLUS")), (
+        "the same seller's Coupang store must see it")
+    # With no store at all it is reachable from either marketplace.
     with database.transaction() as connection:
         connection.execute("UPDATE learning_examples SET store_code=NULL WHERE id=?", (row["id"],))
-    assert not any(r["id"] == row["id"] for r in repository.candidates(store_code="COUPANG_OJE_NS"))
+    assert any(r["id"] == row["id"] for r in repository.candidates(store_code="COUPANG_OJE_NS"))
     assert any(r["id"] == row["id"] for r in repository.candidates(store_code="OJE_PLUS"))
+
+
+def test_a_naver_store_row_reaches_every_coupang_account(database) -> None:
+    """The bridge is the marketplace, not the seller.
+
+    An earlier version of this paired the seller -- COUPANG_OJE_PLUS inherits
+    OJE_PLUS -- and this test asserted COUPANG_OJE_NS did not. Measured on the
+    snapshot that reached 251 of the 7,408 Coupang inquiries, because all
+    1,174 Naver rows live under OJE_PLUS while 7,157 inquiries are the OJE_NS
+    account. The policy is per market, so both accounts read the same corpus.
+    """
+
+    inquiry_id = naver_inquiry(database)
+    service(database).generate_for_inquiry(inquiry_id)
+    _approve(database, inquiry_id)
+    repository = LearningRepository(database)
+    row = next(r for r in repository.candidates(store_code="OJE_PLUS")
+               if r.get("inquiry_id") == inquiry_id)
+
+    for store in ("COUPANG_OJE_PLUS", "COUPANG_OJE_NS"):
+        assert any(r["id"] == row["id"]
+                   for r in repository.candidates(store_code=store)), store
 
 
 # --- E. answer wording --------------------------------------------------------------------

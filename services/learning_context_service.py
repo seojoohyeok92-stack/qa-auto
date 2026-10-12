@@ -13,7 +13,10 @@ from answer.facts import AnswerFacts
 from answer.hybrid_models import IntentResult
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
-from repositories.learning_repository import LearningRepository
+from repositories.learning_repository import (
+    LearningRepository,
+    market_from_store_code,
+)
 from repositories.log_repository import LogRepository
 from services.similar_answer_service import (
     _STATED_SPEC_VALUE,
@@ -1603,10 +1606,30 @@ class LearningContextService:
             time-bound rows never reach here -- the pool above already removed
             them -- and ``general_delivery_estimate_claims`` keeps only the
             sentences that state a lead time and nothing about one order.
+
+            And only this marketplace. A lead time is the marketplace's own
+            promise rather than a fact about the product, so the identity gate
+            cannot judge it: the product is the same and the promise is not.
+            Naver-approved Learning is otherwise shared with Coupang, and that
+            sharing is right for what the product is -- ports, remote, OTT --
+            but a Naver "2~3일" is not Coupang's commitment, and answering a
+            Coupang customer with it would be a wrong promise rather than a
+            wrong fact.
+
+            Scoped deliberately to this one source. Installation fees, return
+            procedures and the rest of the operational surface are NOT handled
+            here; whether they need the same treatment is a separate question
+            with its own measurement.
             """
 
+            inquiry_market = market_from_store_code(store_code)
             found = []
             for row in rows:
+                # Only a Learning row states its origin market; a historical
+                # case carries none, so those are left exactly as they were.
+                row_market = str(row.get("origin_market") or "").strip().upper()
+                if row_market and inquiry_market and row_market != inquiry_market:
+                    continue
                 origin = row.get("evidence_origin")
                 origin = origin if isinstance(origin, dict) else {}
                 # SAME_PRODUCT, or the one identity the compatibility gate

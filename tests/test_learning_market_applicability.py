@@ -103,9 +103,21 @@ def test_market_applicability_filters_runtime_candidates_and_preserves_legacy_na
     }
 
     assert {"coupang-only", "coupang-common"} <= coupang
+    # An explicit Naver scope is still obeyed: an operator marking one row
+    # Naver's alone keeps it out of Coupang.
     assert "naver-only" not in coupang
-    assert "legacy-naver" not in coupang
+    # A row with no scope is the Naver corpus, and it is shared forward. This
+    # read "not in coupang" until the cross-market policy was settled.
+    #
+    # Worth noting how it used to pass: under the first attempt at that policy
+    # the seller-paired store filter excluded an OJE_PLUS row from a
+    # COUPANG_OJE_NS caller before applicability was ever consulted, so the
+    # assertion held for a reason that had nothing to do with market scope.
+    # The store predicate no longer scopes a Coupang caller, and the market
+    # gate decides alone.
+    assert "legacy-naver" in coupang
     assert {"naver-only", "coupang-common", "legacy-naver"} <= naver
+    # And nothing Coupang-origin travels back.
     assert "coupang-only" not in naver
 
     legacy_row = next(
