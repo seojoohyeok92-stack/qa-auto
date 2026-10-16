@@ -42,6 +42,14 @@ from services.auto_processing_eligibility_service import (
     AutoProcessingEligibilityService,
 )
 from services.inquiry_analysis_service import InquiryAnalysisService
+from services.product_fact_grounding import (
+    fields_covered_by,
+    fields_subsumed_by,
+    measures_of,
+    uncited_product_claims,
+    unsupported_attribute_claims,
+    unsupported_fact_claims,
+)
 from services.product_knowledge_service import (
     ProductKnowledgeResult,
     ProductKnowledgeService,
@@ -832,6 +840,53 @@ class AnswerService:
         if semantic is not None and getattr(semantic, "usable", False):
             return AnswerService._understanding_contract(semantic)
         return None
+
+    @staticmethod
+    def _semantic_field_routing_texts(
+        request: AnswerRequest,
+    ) -> tuple[str, ...]:
+        """GPT ①'s words for the fact the customer is missing.
+
+        Product Knowledge field routing matches the customer's wording as
+        substrings, so a paraphrase reached nothing: 32QN650 stores
+        ``color_bit_depth``, and "10비트 지원하나요?" found it while "색을 몇
+        비트로 표현하나요?" did not. GPT ① has already read the question and
+        named what is wanted -- ``requested_information`` -- and what to go
+        and look for -- ``retrieval_queries``. Those are passed on as extra
+        *field-routing* text only.
+
+        ``requested_attribute`` is deliberately not included: it names the
+        shape of the wanted property (a quantity, a yes/no), not its topic,
+        so it cannot select a field and would only add noise.
+
+        The lookup's identity resolution never sees any of this. With no
+        usable GPT ① this returns nothing and the raw-question routing stands
+        exactly as before.
+        """
+
+        out: list[str] = []
+        semantic = request.metadata.get("_semantic_routing_value")
+        if semantic is not None and getattr(semantic, "usable", False):
+            for atom in getattr(semantic, "atomic_questions", ()) or ():
+                wanted = str(
+                    getattr(atom, "requested_information", "") or "").strip()
+                if wanted:
+                    out.append(wanted)
+                for query in getattr(atom, "retrieval_queries", ()) or ():
+                    text = str(query or "").strip()
+                    if text:
+                        out.append(text)
+        if not out:
+            # The persisted contract, for a request rebuilt from storage. It
+            # carries ``requested_information`` but no retrieval queries.
+            understanding = AnswerService._usable_gpt_understanding(request)
+            for item in (understanding or {}).get("questions") or ():
+                if not isinstance(item, dict):
+                    continue
+                wanted = str(item.get("requested_information") or "").strip()
+                if wanted:
+                    out.append(wanted)
+        return tuple(dict.fromkeys(out))
 
     @classmethod
     def _template_candidate_retrieval_requested(
@@ -1935,6 +1990,8 @@ class AnswerService:
                 product_name=request.product_name,
                 option_name=request.metadata.get("option_name"),
                 include_all_catalog_fields=product_evidence_requested,
+                field_routing_texts=self._semantic_field_routing_texts(
+                    request),
             )
             request.metadata["product_knowledge"] = product_knowledge
             # Which product that evidence is about. Recorded separately from
@@ -3456,6 +3513,8 @@ class AnswerService:
                     ),
                     product_name=request.product_name,
                     option_name=request.metadata.get("option_name"),
+                    field_routing_texts=self._semantic_field_routing_texts(
+                        request),
                 )
             # A verified fact only settles the product-fact requirement when
             # the whole evidence chain actually happened: the fact was safe,
@@ -3526,10 +3585,188 @@ class AnswerService:
                 if isinstance(hybrid_metadata.get("draft"), dict)
                 else {}
             )
+            # Which product facts the prompt actually carried. GPT ②'s report
+            # is checked against this the same way its Learning report is
+            # checked against the delivered ids below -- naming a row is only
+            # evidence if the row was there.
+            #
+            # Measured on S32DM701 with "피벗 지원하나요?": a draft reporting
+            # ``used_product_facts: ["invented_pivot_support"]`` and asserting
+            # pivot support was GENERATED, auto-answerable, and recorded
+            # ``current_fact_verified: true`` with source
+            # ``GPT_SELECTED_PRODUCT_FACT``. The delivered facts said nothing
+            # about pivot; the authority came from the name alone.
+            delivered_product_facts = {
+                str(item)
+                for item in hybrid_metadata.get("product_fact_fields") or ()
+            } | {
+                str(item.field_key) for item in product_knowledge.safe_facts
+            }
+            gpt_used_product_facts = {
+                str(item)
+                for item in gpt_draft_metadata.get("used_product_facts") or ()
+            }
+            # Reported by the draft service, which drops a name the prompt did
+            # not deliver; recomputed here as well so a draft built by an
+            # older path cannot arrive unchecked.
+            unknown_product_facts = {
+                str(item)
+                for item in gpt_draft_metadata.get("unknown_product_facts")
+                or ()
+            } | (gpt_used_product_facts - delivered_product_facts)
+            # And what the cited rows actually say. Checking the name closed
+            # one hole; a correct name with a wrong value is the other. On
+            # S32DM701, "color_bit_depth" cited beside "12비트 색심도를
+            # 지원합니다" was GENERATED and auto-answerable, and so were a
+            # "FreeSync를 지원하지 않습니다" citing FreeSync Premium Pro and a
+            # "USB-C 단자는 지원하지 않습니다" citing USB C타입.
+            # Read from the lookup, not from ``result.metadata``: the
+            # catalogue is recorded there a few lines further down, so reading
+            # it here found an empty list and checked nothing.
+            #
+            # Every notation of a field travels, with its unit. The record can
+            # state one measurement several ways -- S49CG954's refresh rate
+            # arrives as "240Hz", "Max 240" and "240" -- and the unit is
+            # sometimes only in ``unit``, which is what makes 674.9mm
+            # different from 674.9cm.
+            delivered_fact_values: dict[str, list[tuple[Any, str]]] = {}
+            for item in product_knowledge.safe_facts:
+                delivered_fact_values.setdefault(
+                    str(item.field_key), []).append(
+                        (item.value, str(item.unit or "")))
+            # What the customer asked, with GPT ①'s reading of it. One
+            # source for both checks: a list fact needs the asked item
+            # ("애플TV 되나요?") to judge an answer that only says
+            # "지원합니다", and the uncited check reports the asked attribute
+            # first.
+            asked_text = " ".join((
+                str(request.question or ""),
+                *self._semantic_field_routing_texts(request),
+            )).strip()
+            unsupported_fact_values = unsupported_fact_claims(
+                result.answer,
+                {
+                    field: delivered_fact_values[field]
+                    for field in sorted(
+                        gpt_used_product_facts & delivered_product_facts)
+                    if field in delivered_fact_values
+                },
+                asked=asked_text,
+                siblings=tuple(delivered_fact_values),
+            )
+            # A claim with no citation at all. The value check reads the rows
+            # GPT ② reported, so an empty report meant no check ran: asked
+            # "색을 몇 비트로 표현하나요?" with ``color_bit_depth`` in the
+            # prompt, a draft citing nothing and answering "12비트" was
+            # GENERATED and auto-answerable. Evidence of some kind -- a
+            # product fact, an approved Learning, a template -- has to be
+            # named for a product-specific claim; a delivery or policy answer
+            # mentions none of these attributes and is unaffected.
+            answered_definitely = (
+                not gpt_draft_metadata.get("subquestion_results")
+                or any(
+                    str(item.get("status") or "").upper() == "ANSWERABLE"
+                    or item.get("answered")
+                    for item in gpt_draft_metadata.get("subquestion_results")
+                    or () if isinstance(item, dict)
+                )
+            )
+            # A citation covers the attribute it names, and nothing else.
+            # Measured: asked "색을 몇 비트로 표현하나요?" with
+            # ``color_bit_depth`` and ``hdmi_present`` both delivered, a draft
+            # citing only ``hdmi_present`` and answering "HDMI를 지원하며
+            # 색심도는 12비트입니다" was GENERATED and auto-answerable --
+            # because one citation anywhere in the answer switched this check
+            # off for every other attribute. A Learning or template id does
+            # not cover a product attribute either; it is evidence for what
+            # it says, not for this specification.
+            covered_fields = fields_covered_by(
+                gpt_used_product_facts, delivered_fact_values)
+            cited_values = {
+                field: values
+                for field, values in delivered_fact_values.items()
+                if field in covered_fields
+            }
+            # And an attribute whose value a cited fact already states:
+            # citing "USB C타입" states the USB port too. Only in that
+            # direction -- citing "HDMI" does not state "HDMI 2.0".
+            covered_fields |= fields_subsumed_by(
+                cited_values, delivered_fact_values)
+            uncited_claims = (
+                uncited_product_claims(
+                    result.answer,
+                    {
+                        field: values
+                        for field, values in delivered_fact_values.items()
+                        if field not in covered_fields
+                    },
+                    asked=asked_text,
+                    grounded_measures=measures_of(cited_values),
+                )
+                if (gpt_understanding_usable and prompt_included
+                    and answered_definitely)
+                else []
+            )
+            # An attribute nothing delivered. Both checks above start from a
+            # delivered fact, so a specification the catalogue never supplied
+            # had nothing to compare: asked "FreeSync와 G-Sync를
+            # 지원하나요?" on S49CG954, where only ``freesync_spec`` is
+            # delivered, "FreeSync Premium Pro를 지원하며 G-Sync도
+            # 지원합니다" was GENERATED, auto-answerable and verified.
+            #
+            # This does not read an absent field as "unsupported" -- it reads
+            # a definite claim with nothing behind it as staff's to confirm.
+            # Evidence the pipeline did give the model counts: an approved
+            # Learning or a template that speaks to the same attribute keeps
+            # its own path.
+            # Only the evidence *bodies*. Reading every string in the
+            # record also read the sub-question itself, so an attribute the
+            # customer named counted as evidence for the answer about it.
+            evidence_texts = [
+                str(item.get(key) or "")
+                for item in (hybrid_metadata.get("subquestion_evidence") or ())
+                if isinstance(item, dict)
+                for key in ("answer", "answer_reference", "body", "text",
+                            "learning_answer", "seller_answer")
+                if str(item.get(key) or "").strip()
+            ]
+            for item in (hybrid_metadata.get("subquestion_evidence") or ()):
+                if not isinstance(item, dict):
+                    continue
+                for nested in item.get("candidates") or ():
+                    if isinstance(nested, dict):
+                        evidence_texts.extend(
+                            str(nested.get(key) or "")
+                            for key in ("answer", "answer_reference", "body")
+                            if str(nested.get(key) or "").strip()
+                        )
+            evidence_texts.extend(
+                str(item.get("answer") or "")
+                for item in (
+                    request.metadata.get("template_candidates") or ())
+                if isinstance(item, dict)
+            )
+            unsupported_attributes = (
+                unsupported_attribute_claims(
+                    result.answer,
+                    requested_fields=getattr(
+                        product_knowledge, "requested_fields", ()) or (),
+                    delivered_fields=delivered_fact_values,
+                    evidence_texts=evidence_texts,
+                    asked=asked_text,
+                )
+                if (gpt_understanding_usable and prompt_included
+                    and answered_definitely)
+                else []
+            )
             gpt_fact_verified = bool(
                 product_fact_guard.sensitive
                 and gpt_understanding_usable
-                and gpt_draft_metadata.get("used_product_facts")
+                and gpt_used_product_facts & delivered_product_facts
+                and not unknown_product_facts
+                and not unsupported_fact_values
+                and not uncited_claims
+                and not unsupported_attributes
                 and prompt_included
                 and validator_cleared
             )
@@ -3567,7 +3804,13 @@ class AnswerService:
             current_fact_verified = (
                 knowledge_verified or learning_verified or gpt_fact_verified
                 or gpt_learning_verified
-            )
+            # A cited row whose value this answer does not keep is not
+            # evidence for it by any route. ``knowledge_verified`` asks
+            # whether the catalogue covers the question, which it did while
+            # the answer changed the number -- so the whole verdict, not only
+            # the GPT route, is withdrawn.
+            ) and not unsupported_fact_values and not uncited_claims and (
+                not unsupported_attributes)
             guard_metadata = {
                 **product_fact_guard.to_dict(),
                 "current_fact_verified": current_fact_verified,
@@ -3583,14 +3826,28 @@ class AnswerService:
                 # keyword ``sensitive`` flag no longer holds GPT ②'s answer;
                 # what still holds it is a VERIFIED Product Fact contradicting
                 # the Learning (data conflict), or GPT ②'s own unresolved.
+                "used_product_facts_delivered": sorted(
+                    gpt_used_product_facts & delivered_product_facts),
+                "used_product_facts_unknown": sorted(unknown_product_facts),
+                "used_product_facts_unsupported": list(
+                    unsupported_fact_values),
+                "product_claims_without_citation": list(uncited_claims),
+                "product_claims_without_evidence": list(
+                    unsupported_attributes),
                 "auto_post_allowed": (
-                    not product_fact_guard.sensitive
-                    or current_fact_verified
-                    or (
-                        gpt_understanding_usable
-                        and hybrid_metadata.get("answer_pipeline")
-                        == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
-                        and not learning_evidence.get("conflict")
+                    not unknown_product_facts
+                    and not unsupported_fact_values
+                    and not uncited_claims
+                    and not unsupported_attributes
+                    and (
+                        not product_fact_guard.sensitive
+                        or current_fact_verified
+                        or (
+                            gpt_understanding_usable
+                            and hybrid_metadata.get("answer_pipeline")
+                            == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
+                            and not learning_evidence.get("conflict")
+                        )
                     )
                 ),
                 "enforced_by": (
@@ -3623,6 +3880,107 @@ class AnswerService:
                         "safe_count": len(product_knowledge.safe_facts),
                         "excluded_count": len(product_knowledge.excluded_facts),
                         "topics": list(product_knowledge.topics),
+                    },
+                )
+            if unsupported_attributes and not (
+                    unsupported_fact_values or uncited_claims):
+                # The answer settles an attribute nothing gave it. Not a
+                # judgement that the product lacks it -- a judgement that
+                # this answer is not the place to decide.
+                result.status = AnswerStatus.NEEDS_REVIEW
+                result.auto_answerable = False
+                result.needs_review = True
+                result.metadata["requires_manual_review"] = True
+                result.metadata["product_fact_guard_reason"] = (
+                    "PRODUCT_ATTRIBUTE_WITHOUT_EVIDENCE"
+                )
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "PRODUCT_ATTRIBUTE_WITHOUT_EVIDENCE",
+                    "근거가 없는 상품 속성을 단정해 직원 검토로 전환했습니다.",
+                    level="WARNING",
+                    details={
+                        "selected_answer_route": final_route,
+                        "product_claims_without_evidence": list(
+                            unsupported_attributes),
+                        **guard_metadata,
+                    },
+                )
+            if uncited_claims and not unsupported_fact_values:
+                # The answer states something about a delivered attribute and
+                # names nothing as its evidence. Whether it is right is not
+                # decidable here; what is decidable is that nothing was
+                # offered for it.
+                result.status = AnswerStatus.NEEDS_REVIEW
+                result.auto_answerable = False
+                result.needs_review = True
+                result.metadata["requires_manual_review"] = True
+                result.metadata["product_fact_guard_reason"] = (
+                    "PRODUCT_CLAIM_WITHOUT_CITATION"
+                )
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "PRODUCT_CLAIM_WITHOUT_CITATION",
+                    "상품 사양을 단정했으나 근거를 제시하지 않아 "
+                    "직원 검토로 전환했습니다.",
+                    level="WARNING",
+                    details={
+                        "selected_answer_route": final_route,
+                        "product_claims_without_citation": list(
+                            uncited_claims),
+                        **guard_metadata,
+                    },
+                )
+            if unsupported_fact_values:
+                # The cited row's value is not in the answer, or the answer
+                # says the opposite of it. Which of the two is recorded per
+                # fact; either way the catalogue is not evidence for this
+                # body, so it is staff's to send.
+                result.status = AnswerStatus.NEEDS_REVIEW
+                result.auto_answerable = False
+                result.needs_review = True
+                result.metadata["requires_manual_review"] = True
+                result.metadata["product_fact_guard_reason"] = (
+                    "PRODUCT_FACT_VALUE_NOT_PRESERVED"
+                )
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "PRODUCT_FACT_VALUE_NOT_PRESERVED",
+                    "답변이 근거로 든 상품 Fact의 값과 일치하지 않아 "
+                    "직원 검토로 전환했습니다.",
+                    level="WARNING",
+                    details={
+                        "selected_answer_route": final_route,
+                        "unsupported_product_facts": list(
+                            unsupported_fact_values),
+                        **guard_metadata,
+                    },
+                )
+            if unknown_product_facts:
+                # A fact name nothing delivered. The body may be right or
+                # wrong -- that is not decidable here -- but it was reported
+                # as grounded in something that does not exist, so it goes to
+                # staff instead of to the customer.
+                result.status = AnswerStatus.NEEDS_REVIEW
+                result.auto_answerable = False
+                result.needs_review = True
+                result.metadata["requires_manual_review"] = True
+                result.metadata["product_fact_guard_reason"] = (
+                    "GPT_REPORTED_UNDELIVERED_PRODUCT_FACT"
+                )
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "PRODUCT_FACT_NOT_DELIVERED",
+                    "GPT가 전달되지 않은 상품 Fact를 근거로 보고해 "
+                    "직원 검토로 전환했습니다.",
+                    level="WARNING",
+                    details={
+                        "selected_answer_route": final_route,
+                        "unknown_product_facts": sorted(
+                            unknown_product_facts),
+                        "delivered_product_facts": sorted(
+                            delivered_product_facts)[:40],
+                        **guard_metadata,
                     },
                 )
             if (

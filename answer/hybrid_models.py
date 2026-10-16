@@ -55,6 +55,11 @@ class DraftResult:
     evidence_decisions: tuple[dict[str, Any], ...] = ()
     used_template_ids: tuple[str, ...] = ()
     used_product_facts: tuple[str, ...] = ()
+    # Product-fact names the model reported that the prompt never delivered.
+    # Kept apart from ``used_product_facts`` rather than dropped: the
+    # publishing gate has to see that it happened, because a name nothing
+    # delivered is not evidence and must not read as any.
+    unknown_product_facts: tuple[str, ...] = ()
     used_learning_ids: tuple[int, ...] = ()
     used_historical_ids: tuple[int, ...] = ()
     ignored_evidence: tuple[dict[str, Any], ...] = ()
@@ -75,6 +80,7 @@ class DraftResult:
             "learning_usage", "historical_usage", "feedback_signal_usage",
             "subquestion_results", "evidence_decisions",
             "used_template_ids", "used_product_facts",
+            "unknown_product_facts",
             "used_learning_ids", "used_historical_ids", "ignored_evidence",
             "unresolved",
         ):

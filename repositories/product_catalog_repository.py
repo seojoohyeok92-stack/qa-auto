@@ -151,6 +151,7 @@ def canonical_model_identity(
     raw_model: object,
     *,
     aliases: Mapping[object, object] | None = None,
+    _alias_table: Mapping[str, str] | None = None,
 ) -> str | None:
     """Return a safe canonical Samsung display-model identity, if stated.
 
@@ -166,6 +167,10 @@ def canonical_model_identity(
     Explicit model-code aliases still participate first.  Manual aliases that
     are listing descriptions deliberately do not: resolving ``M50D 32`` to a
     colour variant would be an unsupported product inference.
+
+    ``_alias_table`` is the already-built alias table, for a caller that
+    canonicalises many codes against one catalogue; it is the same table
+    :func:`_model_code_aliases` returns and changes no result.
     """
 
     text = str(raw_model or "").strip()
@@ -175,7 +180,9 @@ def canonical_model_identity(
     if not normalized or not _MODEL_TOKEN.fullmatch(normalized):
         return None
 
-    mapped = _model_code_aliases(aliases).get(normalized, normalized)
+    table = _alias_table if _alias_table is not None else _model_code_aliases(
+        aliases)
+    mapped = table.get(normalized, normalized)
     # Samsung display codes in this catalog state LS or LH before the core,
     # state S before it, or state the core directly.  Families whose internal
     # structure this does not recognise (KQ/UN/etc.) retain their recorded
@@ -291,6 +298,59 @@ class CatalogMatch:
     candidates: tuple[tuple[str, dict[str, Any]], ...] = ()
 
 
+
+# A record that names a package in words: the one in the catalogue is
+# "삼성 M5 M50D 80cm 캠핑TV ... 접이식 휴대용 패키지", whose ``model`` field says
+# S32DM501. It is that model *plus* accessories, so it may be answered with
+# the model's own facts but must never state them for the model: its spec can
+# describe what the package adds. Measured over the catalogue: this matches 1
+# of 1,598 records, and "+" is deliberately not a marker -- XL2586X+,
+# XL2546X+ and XL2566X+ are model names, not bundles.
+_BUNDLE_NAMED = re.compile(r"패키지|세트|번들|증정|사은품|포함")
+
+
+def _base_model_index(
+    catalog: Mapping[str, Any], aliases: Mapping[object, object] | None,
+) -> dict[str, Any]:
+    """Group the records that describe one base model.
+
+    The grouping evidence is the record's own ``model`` field, which is the
+    catalogue stating which model it describes: ``LS32DM501EKXKR`` says
+    ``S32DM501`` and ``LF27T450FZKXKR`` says ``F27T450``. Nothing is guessed
+    from a suffix -- a record whose stated model (or, absent one, whose key)
+    canonicalises to nothing is in no group, which is why EDGE 27CH3,
+    EDGE 27CH3 화이트 and XL2586X+ stay on their own.
+
+    Measured over the catalogue of 2026-10-13: 1,598 records, 1,405 base
+    identities, 13 identities holding more than one record (32 records).
+    """
+
+    table = _model_code_aliases(aliases)
+    by_key: dict[str, str] = {}
+    groups: dict[str, list[str]] = {}
+    donors: dict[str, bool] = {}
+    for key, record in catalog.items():
+        if not isinstance(record, dict):
+            continue
+        name = str(key)
+        stated = str(record.get("model") or "").strip()
+        identity = (
+            canonical_model_identity(stated, _alias_table=table)
+            or canonical_model_identity(name, _alias_table=table)
+        )
+        if not identity:
+            continue
+        by_key[name] = identity
+        groups.setdefault(identity, []).append(name)
+        donors[name] = not bool(
+            _BUNDLE_NAMED.search(name) or _BUNDLE_NAMED.search(stated))
+    return {
+        "identity_of_key": by_key,
+        "keys_of_identity": {k: tuple(v) for k, v in groups.items()},
+        "may_donate": donors,
+    }
+
+
 @lru_cache(maxsize=4)
 def _load_catalog(path_text: str, mtime_ns: int, size: int) -> dict[str, Any]:
     del mtime_ns, size
@@ -313,6 +373,10 @@ def _load_catalog(path_text: str, mtime_ns: int, size: int) -> dict[str, Any]:
             normalize_model(key): str(key) for key in catalog
             if normalize_model(key)
         },
+        # Which records describe one base model. Built once per load: the
+        # index canonicalises every record, and rebuilding the alias table
+        # for each would cost what one ``facts_for_inquiry`` used to.
+        "base_models": _base_model_index(catalog, aliases),
     }
 
 
@@ -334,6 +398,51 @@ class ProductCatalogRepository:
         """
         return dict(self.catalog().get("product_knowledge") or {})
 
+
+    def base_model_identity(self, model_key: object) -> str | None:
+        """The canonical base model this record describes, by the record.
+
+        Distinct from the match: :meth:`match` decides *which record* the
+        customer is writing from, and keeps its literal-key precedence. This
+        says which model that record is about. For ``LS32DM501EKXKR`` the two
+        differ -- the record is its own catalogue key and the model is
+        ``32DM501`` -- and conflating them is what made the same model answer
+        differently depending on how the code was spelled.
+        """
+
+        key = str(model_key or "").strip()
+        if not key:
+            return None
+        index = self.catalog().get("base_models") or {}
+        return (index.get("identity_of_key") or {}).get(key)
+
+    def base_model_records(
+        self, model_key: object,
+    ) -> tuple[tuple[str, dict[str, Any]], ...]:
+        """The other records describing the same base model.
+
+        Excludes the record itself and any record that names a package: a
+        bundle listing may be answered from its model's facts, never read as
+        a source of them.
+        """
+
+        key = str(model_key or "").strip()
+        identity = self.base_model_identity(key)
+        if not identity:
+            return ()
+        loaded = self.catalog()
+        index = loaded.get("base_models") or {}
+        catalog = loaded["catalog"]
+        may_donate = index.get("may_donate") or {}
+        out: list[tuple[str, dict[str, Any]]] = []
+        for other in (index.get("keys_of_identity") or {}).get(identity, ()):
+            if other == key or not may_donate.get(other, False):
+                continue
+            record = catalog.get(other)
+            if isinstance(record, dict):
+                out.append((other, record))
+        return tuple(out)
+
     def match(
         self, *, product_name: object = "", option_name: object = "",
         model_code: object = None,
@@ -345,6 +454,31 @@ class ProductCatalogRepository:
         catalog: dict[str, Any] = loaded["catalog"]
         aliases: dict[str, Any] = loaded["aliases"]
         normalized_catalog: dict[str, str] = loaded["normalized_catalog"]
+        # A key this catalogue literally holds is that key, before anything
+        # normalises it.
+        #
+        # ``normalized_catalog`` is keyed by ``normalize_model``, which drops
+        # Korean text and punctuation, so two keys can normalise to one form
+        # and the dict keeps whichever was built last. Measured on the catalog
+        # of 2026-09-27, four forms collide across eight keys:
+        #
+        #   EDGE27CH3 <- "EDGE 27CH3", "EDGE 27CH3 화이트"
+        #   EDGE24144 <- "EDGE 24 커브드144 게이밍 블랙", "... 화이트"
+        #   XL2586X   <- "XL2586X+", "XL2586X"
+        #   XL2546X   <- "XL2546X+", "XL2546X"
+        #
+        # Asking for "EDGE 27CH3" therefore returned the 화이트 record, and the
+        # two are different panels -- 165Hz/1ms/5.56kg against 144Hz/4ms/7.2kg
+        # -- so a question about one was answered with the other's
+        # specification. The black listing was likewise answered "화이트".
+        #
+        # Only the literal lookup moves. Everything that is not a key of this
+        # catalogue -- a short code, a truncated code, an alias, a title
+        # fragment -- reaches the same steps in the same order as before, so
+        # LS32DM501EKXKR / S32DM501 / 32DM501 resolve exactly as they did.
+        literal = str(model_code or "").strip()
+        if literal and literal in catalog and isinstance(catalog[literal], dict):
+            return CatalogMatch(literal, dict(catalog[literal]), status=EXACT)
         explicit = normalize_model(model_code)
         if explicit in normalized_catalog:
             key = normalized_catalog[explicit]

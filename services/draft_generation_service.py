@@ -312,14 +312,7 @@ def _reconcile_product_fact_names(
     an invented fact path.
     """
 
-    delivered = {
-        str(item.get("field_key"))
-        for item in (
-            ((learning_context or {}).get("product_catalog") or {}).get("facts")
-            or []
-        )
-        if isinstance(item, dict) and item.get("field_key")
-    }
+    delivered = _delivered_product_fact_keys(learning_context)
     if not delivered:
         return raw
     used_facts = raw.get("used_facts")
@@ -336,6 +329,65 @@ def _reconcile_product_fact_names(
     existing = list(existing) if isinstance(existing, list) else []
     copied["used_product_facts"] = list(dict.fromkeys(
         [*existing, *(str(item) for item in misplaced)]
+    ))
+    return copied
+
+
+
+def _delivered_product_fact_keys(learning_context: dict[str, Any]) -> set[str]:
+    """The field keys this prompt actually carried, as the model saw them."""
+
+    return {
+        str(item.get("field_key"))
+        for item in (
+            ((learning_context or {}).get("product_catalog") or {}).get("facts")
+            or []
+        )
+        if isinstance(item, dict) and item.get("field_key")
+    }
+
+
+def _validate_used_product_facts(
+    raw: dict[str, Any], learning_context: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep only the product facts the prompt actually delivered.
+
+    ``used_product_facts`` is the model's report of which rows it answered
+    from, and downstream it carries real authority: a non-empty list made the
+    claim "verified" and let the answer post itself. Nothing checked that the
+    names existed.
+
+    Measured end to end on S32DM701 with "피벗 지원하나요?", a question the
+    delivered facts do not answer: a draft that reported
+    ``used_product_facts: ["invented_pivot_support"]`` and asserted pivot
+    support passed the validator, was marked GENERATED and auto-answerable,
+    and recorded ``current_fact_verified: true`` with source
+    ``GPT_SELECTED_PRODUCT_FACT`` -- authority created by naming a field that
+    does not exist.
+
+    So the delivered set decides. A name it does not contain is moved to
+    ``unknown_product_facts``, where the publishing gate reads it and fails
+    closed; what stays in ``used_product_facts`` is only what the model was
+    given. The draft body is not touched here -- it is still the model's
+    answer, judged by the validator; what changes is that an invented name
+    can no longer be mistaken for evidence.
+    """
+
+    used = raw.get("used_product_facts")
+    if not isinstance(used, list) or not used:
+        return raw
+    delivered = _delivered_product_fact_keys(learning_context)
+    names = [str(item) for item in used if str(item).strip()]
+    known = [name for name in names if name in delivered]
+    unknown = [name for name in names if name not in delivered]
+    if not unknown:
+        return raw
+    copied = dict(raw)
+    copied["used_product_facts"] = list(dict.fromkeys(known))
+    existing = raw.get("unknown_product_facts")
+    existing = list(existing) if isinstance(existing, list) else []
+    copied["unknown_product_facts"] = list(dict.fromkeys(
+        [*(str(item) for item in existing), *unknown]
     ))
     return copied
 
@@ -549,6 +601,10 @@ class DraftGenerationService:
             context=self.prompt_builder.safe_payload(context),
         )
         raw = _reconcile_product_fact_names(raw, learning_context)
+        # After the reconciliation, because that moves a delivered name into
+        # ``used_product_facts``; what is left to check is whether every name
+        # there was delivered at all.
+        raw = _validate_used_product_facts(raw, learning_context)
         raw = self._apply_learning_grounded_recovery(
             raw, learning_context
         )
@@ -1176,6 +1232,11 @@ class DraftGenerationService:
             used_product_facts=tuple(
                 str(item)
                 for item in (raw.get("used_product_facts") or [])
+                if str(item or "").strip()
+            ),
+            unknown_product_facts=tuple(
+                str(item)
+                for item in (raw.get("unknown_product_facts") or [])
                 if str(item or "").strip()
             ),
             used_learning_ids=_int_ids(raw.get("used_learning_ids")),

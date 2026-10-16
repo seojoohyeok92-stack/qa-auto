@@ -37,6 +37,20 @@ from repositories.product_catalog_repository import (
     canonical_model_identity,
     normalize_model,
 )
+from services.spec_attributes import (
+    ENUM_FIELD_KEYS,
+    MEASUREMENT_FIELD_KEYS,
+    NESTED_FIELD_KEYS,
+    POSITIONAL_FIELD_KEYS,
+    PRESENCE_TOKENS,
+    SECTION_FIELD_KEYS,
+    facts_from_enumeration_spec,
+    facts_from_positional_spec,
+    facts_from_section_spec,
+    facts_from_spec,
+    fields_for_spec_question,
+    names_a_specification,
+)
 
 
 VERIFIED = "VERIFIED"
@@ -141,6 +155,16 @@ _RUNTIME_PRODUCT_KNOWLEDGE_STATUSES = frozenset({
 _PRODUCT_KNOWLEDGE_SECTIONS = (
     "model_facts", "listing_facts", "bundle_accessory_facts", "policy_facts",
 )
+# A later review pass wrote its own list of model facts beside the first one.
+# It is not enabled wholesale: measured on the catalog of 2026-09-27 it holds
+# 3,172 distinct (model, field, value) rows of which 3,157 already appear in
+# ``model_facts``, so reading it as a section would duplicate almost all of it.
+# The 15 that do not appear are all ``dimensions_product`` for a model that has
+# no ``dimensions_product`` row at all -- gaps, with no conflicting value
+# anywhere -- and only those are read. See ``_runtime_fact_sections``.
+_GAP_FILL_SECTION = "v5_runtime_eligible_model_facts"
+# Sections whose rows are scoped to one model rather than to a listing.
+_MODEL_SCOPED_SECTIONS = frozenset({"model_facts", _GAP_FILL_SECTION})
 _PRODUCT_KNOWLEDGE_PROMPT_LIMIT = 120
 
 # Rows that exist so the collector can join its own tables, not because a
@@ -372,6 +396,31 @@ _REFERS_TO_THIS_LISTING = re.compile(
 )
 
 
+# Field names that are the same reading written twice, one name per source:
+# the catalogue spec calls the typical brightness ``brightness_typical_cd_m2``
+# and the collected knowledge calls it ``brightness_typical``. Deliberately
+# not derived from ``also_fields`` -- that says which fields a question should
+# request together, and it lists ``brightness_peak`` beside the typical
+# precisely because they are *different* conditions of the same attribute.
+# Conditions never merge; only names do.
+_SAME_READING_NAMES: tuple[frozenset[str], ...] = (
+    frozenset({"brightness_typical", "brightness", "brightness_typical_cd_m2"}),
+    frozenset({"refresh_rate", "refresh_rate_spec"}),
+    frozenset({"contrast_ratio", "contrast_spec"}),
+)
+
+
+def _covered_fields(field_keys: Iterable[str]) -> set[str]:
+    """These field keys plus the other names for the same reading."""
+
+    names = {str(key) for key in field_keys}
+    covered = set(names)
+    for family in _SAME_READING_NAMES:
+        if family & names:
+            covered |= set(family)
+    return covered
+
+
 def _settled_identity(model_key: object, repository: Any) -> str | None:
     """The canonical identity of a model key, in the unit targets are reported in.
 
@@ -493,6 +542,14 @@ class ProductFact:
             f"  also_reported_as: {', '.join(sorted(set(also_reported_as)))}\n"
             if also_reported_as else ""
         )
+        # Deliberately unchanged, and not because the gap is not real: an
+        # integrated row can store a bare number ("weight_with_stand": "15.6")
+        # with its unit in ``unit``, which this line does not render. Adding a
+        # ``unit:`` line cost one line per fact, and the 24,000-character
+        # prompt budget then dropped facts that used to reach the model --
+        # measured: "설치비가 추가로 드나요?" lost ``additional_cost``. Carrying
+        # the unit for those rows belongs with whatever writes them, not here.
+        # Facts this service extracts from the spec keep the unit in the value.
         return (
             f"- field: {self.field_key}\n"
             f"{others}"
@@ -757,20 +814,40 @@ def select_prompt_facts(
         return value
 
     def cost(fact: "ProductFact") -> int:
+        # The rendered line is measured as it is *spent*, which is inside a
+        # JSON string: a newline there is two characters, not one, and so is
+        # every quote and backslash the value happens to carry. Charging the
+        # unescaped length undercounted by about one character per fact,
+        # which is nothing on a short record and 203 characters over the cap
+        # on LH50BEFH once 2-c made the enumeration tokens readable.
+        line = fact.as_prompt_line(merged.get(fact.canonical_fact_id))
         return (
             len(json.dumps(prompt_fact(fact), ensure_ascii=False, default=str))
-            + len(fact.as_prompt_line(merged.get(fact.canonical_fact_id)))
-            # What this fact adds to the JSON list around it: the separator
-            # and the newline its line is joined with. Small per fact and not
-            # small over a list of fifty, so it is charged here rather than
-            # guessed at in the fixed allowance.
-            + 2
+            # json.dumps wraps the string in quotes; the body is what is paid.
+            + len(json.dumps(line, ensure_ascii=False)) - 2
+            # What this fact adds to the structure around it: the separator in
+            # the JSON list, and the newline its line is joined with, which is
+            # itself escaped. Small per fact and not small over a list of
+            # fifty, so it is charged here rather than guessed at in the
+            # fixed allowance.
+            + 2 + 2
         )
 
     # --- 3. fill to the budget, most relevant first ------------------------
+    #
+    # The reservation is a priority, not an exemption. It used to be read the
+    # second way: a reserved fact was admitted even once the budget was full,
+    # so a reserved fact late in the relevance order was charged after the
+    # cheaper facts before it had already spent the budget, and the block came
+    # out over. Measured on LH50BEFH once 2-c made the enumeration tokens
+    # readable: 24,203 characters against 24,000. Spending the reserved facts
+    # first keeps the guarantee -- every device model still keeps its best
+    # fact -- and makes the cap a cap again, because what gets trimmed is the
+    # tail rather than nothing.
+    order = reserved + [fact for fact in deduped if fact not in reserved]
     kept: list[ProductFact] = []
     spent = _PROMPT_BLOCK_OVERHEAD_CHARS
-    for fact in deduped:
+    for fact in order:
         price = cost(fact)
         if spent + price > budget_chars and fact not in reserved:
             dropped.append({
@@ -1426,6 +1503,34 @@ def _resolve_exact_fact_conflicts(
 # model without it, while "벽걸이 브라켓 규격은?" -- the same question -- got it.
 # Which field answers a question is the judgement that moved to GPT ②; these two
 # were still being decided by wording.
+# Deliberately the set it has always been, and deliberately *not* every field
+# ``services.spec_attributes`` can supply.
+#
+# Adding the registry's fields here was tried and withdrawn, and the mechanism
+# is now measured. On LH50BEDHLGFXKR with "설치비가 추가로 드나요?" and a
+# whole-record offer, growing this set from 16 names to 89 moved:
+#
+#     requested_fields    48 -> 119
+#     safe_facts         133 -> 173
+#     dropped_for_budget  59 ->  94
+#     additional_cost kept  True -> False
+#
+# The 24,000-character budget fits about forty facts either way, so asking for
+# 119 fields does not deliver more evidence -- it changes which forty survive,
+# and ``additional_cost``, the one field that answers that question, fell below
+# the line. (An earlier probe reported ``dropped_for_budget`` at 0 and was
+# measuring the targeted path, where no whole-record request is made.)
+#
+# So this set stays as the small core, and a recovered field is asked for by
+# the question that needs it: ``fields_for_question`` resolves wording to field
+# names through ``services.spec_attributes``, and ``_catalog_facts`` supplies
+# whatever ``fields`` asks for. Audited whole-corpus afterwards, every
+# assertion the source makes is returned when its own question is asked.
+# "VESA HDR 1000", "DisplayHDR 1000": a certification whose own text names the
+# tier. Used only to corroborate a brightness reading whose condition the spec
+# lost -- never on its own (see ``_peak_brightness_relabel``).
+_HDR_TIER = re.compile(r"^(?:VESA\s+)?(?:Display)?HDR\s*(\d{3,4})$", re.I)
+
 CATALOG_BACKED_FIELDS: frozenset[str] = frozenset({
     "screen_size", "resolution", "refresh_rate", "speaker_present",
     "brand", "model_name", "color",
@@ -1650,17 +1755,16 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
                 fields.extend(accessory_fields)
             continue
         fields.extend(accessory_fields)
-    # The JSON catalog has literal RF and stand-spacing descriptions even
-    # though the retired Product Facts ontology did not model them.
-    if any(word in text for word in ("rf", "coax", "antenna", "\ub3d9\ucd95", "\uc548\ud14c\ub098")):
-        fields.append("rf_terminal")
-        topics.append("rf")
-    if any(word in text for word in ("stand spacing", "leg spacing", "stand gap", "\ub2e4\ub9ac \uac04\uaca9", "\uc2a4\ud0e0\ub4dc \uac04\uaca9", "\ubc1b\uce68\ub300 \uac04\uaca9")):
-        fields.append("stand_spacing")
-        topics.append("stand_spacing")
-    if any(word in text for word in ("lan", "ethernet", "\uc720\uc120\ub79c")):
-        fields.append("ethernet_present")
-        topics.append("ethernet")
+    # The JSON catalog states attributes the retired Product Facts ontology
+    # did not model. Which wording asks for them is decided in exactly one
+    # place -- ``services.spec_attributes`` -- because this list and the supply
+    # list in ``_catalog_facts`` used to be written separately and drifted:
+    # the supply side knew "\ub2e4\ub9ac \uc0ac\uc774" and this side did not, so
+    # "\ub2e4\ub9ac \uc0ac\uc774 \uac04\uaca9\uc774 80cm \uc774\ud558\uc778\uac00\uc694?" never asked for ``stand_spacing``
+    # while "\ub2e4\ub9ac \uac04\uaca9\uc774 \uc5bc\ub9c8\uc778\uac00\uc694?" did. Both sides now read the registry.
+    spec_fields, spec_topics = fields_for_spec_question(text)
+    fields.extend(spec_fields)
+    topics.extend(spec_topics)
     return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(topics))
 
 
@@ -1881,6 +1985,7 @@ class ProductKnowledgeService:
         product_name: object = "",
         option_name: object = "",
         include_all_catalog_fields: bool = False,
+        field_routing_texts: Sequence[object] = (),
     ) -> ProductKnowledgeResult:
         """Verified facts this inquiry may be answered from.
 
@@ -1902,6 +2007,13 @@ class ProductKnowledgeService:
            superseded, foreign model) is never revived from the catalogue.
         6. When the listing store knows the product, its safety verdict stands;
            the catalogue is consulted only when it does not know it.
+
+        ``field_routing_texts`` is additional wording for *field* selection
+        only -- GPT ①'s ``requested_information`` and ``retrieval_queries``,
+        which name the fact the customer is missing in words the customer did
+        not have to use. It never reaches identity resolution: which product
+        this inquiry is about is decided from the customer's own sentence, so
+        a model code inside a semantic query can never retarget the lookup.
         """
 
         key = str(product_id or "").strip()
@@ -1909,12 +2021,26 @@ class ProductKnowledgeService:
         if str(question or "").strip():
             texts.append(str(question))
         combined = " ".join(texts)
-        fields, topics = fields_for_question(combined)
+        # Two texts, deliberately not one. ``combined`` is the customer's
+        # words and decides identity; ``routing_text`` adds the semantic
+        # expansion and decides fields.
+        #
+        # Measured: 32QN650 stores ``color_bit_depth 10bit (8bit + FRC)``, and
+        # "10비트 지원하나요?" reached it while "색을 몇 비트로 표현하나요?"
+        # -- the same question -- reached nothing, because the router matches
+        # substrings of the customer's own wording. S32DM701 answered
+        # "C타입 단자 있나요?" and not "C 단자 있나요?" for the same reason.
+        routing_text = " ".join((
+            combined,
+            *(str(item) for item in (field_routing_texts or ())
+              if str(item).strip()),
+        )).strip()
+        fields, topics = fields_for_question(routing_text)
         # The keyword router names fields from its own vocabulary; the record
         # uses another. Expanding against the vocabulary the file actually has
         # is what lets a question reach the row that answers it, and it can
         # only ever add names the data contains.
-        fields = self._expand_to_stored_fields(combined, fields)
+        fields = self._expand_to_stored_fields(routing_text, fields)
         # Two different questions, answered from two different places.
         #
         # The model catalogue is a fixed, small ontology, so naming its fields
@@ -2020,6 +2146,44 @@ class ProductKnowledgeService:
         )
         return tuple(dict.fromkeys((*fields, *matched)))
 
+    def _stated_models_without_spec_words(self, text: str) -> StatedModels:
+        """The models this text names, with specification words removed.
+
+        "DCI-P3" and "HDR10" are letters and digits with a hyphen, which is
+        also the shape of a model code, so the catalogue's token scan reads
+        them as a named model. It then finds no such model, and the inquiry
+        fails closed with no product evidence at all. Measured: "dci-p3
+        색영역" and "hdr10" returned nothing, while "dci p3" and "hdr 10" --
+        the same questions -- returned the fact, because only the hyphenated
+        spellings satisfy the shape.
+
+        The catalogue is asked first and still decides. A token it resolves is
+        a model, whatever else it describes, and is untouched here. Only a
+        token the catalogue does *not* know and that the specification
+        registry is named by is dropped -- three words today (DCI-P3, HDR10,
+        HDR10+), no model code among them. Every other unknown code still
+        fails closed, which is what this gate is for: a model the catalogue
+        has never heard of must not be answered from the listing's record.
+
+        Done in one place so the gate and the diagnostic agree. Reporting
+        ``explicit_inquiry_models: ["DCI-P3"]`` in the trace would tell an
+        operator the customer named a model when they named a colour space.
+        """
+
+        stated = self.catalog_repository.models_stated_in(text)
+        dropped = tuple(
+            token for token in stated.unresolved
+            if names_a_specification(token)
+        )
+        if not dropped:
+            return stated
+        return replace(
+            stated,
+            tokens=tuple(t for t in stated.tokens if t not in dropped),
+            unresolved=tuple(
+                t for t in stated.unresolved if t not in dropped),
+        )
+
     def _resolve_inquiry_targets(
         self, text: str, *, listing_model: object, listing_id: str,
     ) -> TargetResolution:
@@ -2050,7 +2214,7 @@ class ProductKnowledgeService:
             model_code=listing_code, identity=listing_identity,
             product_id=listing_id, is_listing=True,
         )
-        stated = self.catalog_repository.models_stated_in(text)
+        stated = self._stated_models_without_spec_words(text)
 
         def _listing_only(reason: str) -> TargetResolution:
             return TargetResolution(
@@ -2274,11 +2438,55 @@ class ProductKnowledgeService:
                     collection_status="INTEGRATED_PRODUCT_KNOWLEDGE_JSON",
                     identity_status="LISTING_EXACT",
                 )
-            # AMBIGUOUS carries the models the listing could have meant. They
-            # travel as candidates and never as facts: which of two 85-inch
-            # panels a title means is not something this lookup can settle, and
-            # electing one would put another model's specification into an
-            # answer about this one.
+            # AMBIGUOUS, but every candidate is the same base model: the
+            # listing is undecided and the model is not. Model-level
+            # specification is answered from the shared base identity, with
+            # the same rules as everywhere else -- a field the candidates
+            # state differently is withheld, and nothing listing-, option- or
+            # bundle-scoped is pooled, because which listing this is remains
+            # unresolved.
+            shared = self._one_base_model_for_candidates(match)
+            if shared is not None:
+                identity, candidates = shared
+                integrated, excluded = (
+                    self._integrated_product_knowledge_facts(
+                        product_id=product_id, model_key=identity,
+                        fields=fields,
+                        include_all=bool(
+                            fields
+                            and set(CATALOG_BACKED_FIELDS).issubset(fields)),
+                        base_identity=identity,
+                    )
+                )
+                pooled, pool_conflicts = self._canonical_base_model_facts(
+                    product_id=product_id or identity, model_key=identity,
+                    base_identity=identity, fields=fields,
+                    already_stated=(), integrated=integrated,
+                    records=candidates,
+                )
+                excluded.extend(pool_conflicts)
+                if pooled or integrated:
+                    return ProductKnowledgeResult(
+                        product_id=product_id or identity,
+                        listing_id=(
+                            f"listing_{product_id}" if product_id else identity
+                        ),
+                        matched=True, requested_fields=fields, topics=topics,
+                        safe_facts=tuple([*pooled, *integrated]),
+                        excluded_facts=tuple(excluded),
+                        collection_status="CATALOG_JSON",
+                        identity_status="AMBIGUOUS_SAME_BASE_MODEL",
+                        listing_model=identity,
+                        resolved_pk_targets=(identity,),
+                        candidate_models=tuple(
+                            _candidate_summary(key, record)
+                            for key, record in match.candidates
+                        ),
+                    )
+            # Candidates that are not one model. They travel as candidates and
+            # never as facts: which of two 85-inch panels a title means is not
+            # something this lookup can settle, and electing one would put
+            # another model's specification into an answer about this one.
             return ProductKnowledgeResult(
                 product_id=product_id or None, listing_id=None, matched=False,
                 requested_fields=fields, topics=topics,
@@ -2290,14 +2498,57 @@ class ProductKnowledgeService:
                 ),
             )
         component_subject = asks_about_a_bundled_component(combined)
-        facts = [] if component_subject else self._catalog_facts(
+        # Naming a component withholds the listing's *identity* -- that is what
+        # the gate above is for, and why "셋톱박스도 삼성인가요?" is not
+        # answered from the listing's brand. It was withholding every
+        # catalogue fact, including measurements the spec states about this
+        # model's own body.
+        #
+        # Measured on LH43BEFHLGFXKR: "스탠드 간격이 얼마인가요?" names a
+        # component, so the catalogue supplied nothing, while
+        # "다리 간격이 얼마인가요?" -- the same question about the same
+        # millimetres -- supplied the fact. A stand's leg spacing is a
+        # dimension of the product, not a claim about who made a bundled
+        # accessory, so the registry's measurements survive the gate and
+        # nothing else does.
+        catalog_scope = (
+            tuple(field for field in fields
+                  if field in MEASUREMENT_FIELD_KEYS
+                  or field in NESTED_FIELD_KEYS)
+            if component_subject else fields
+        )
+        facts = self._catalog_facts(
             product_id=product_id or match.model_key,
-            model_key=match.model_key, record=match.record, fields=fields,
+            model_key=match.model_key, record=match.record,
+            fields=catalog_scope,
+        ) if catalog_scope else []
+        # Which model that record is about, as the record itself states it.
+        # ``LF27T450FZKXKR`` is its own catalogue key and describes
+        # ``F27T450``, so the stored Product Knowledge filed under F27T450 --
+        # and the specification its sibling record states -- are this model's
+        # evidence. Falling back to the key keeps every record whose stated
+        # model canonicalises to nothing exactly as it was.
+        base_identity = (
+            self.catalog_repository.base_model_identity(match.model_key)
+            or _settled_identity(match.model_key, self.catalog_repository)
         )
         integrated, excluded = self._integrated_product_knowledge_facts(
             product_id=product_id, model_key=match.model_key, fields=fields,
             include_all=bool(fields and set(CATALOG_BACKED_FIELDS).issubset(fields)),
+            base_identity=str(base_identity) if base_identity else None,
         )
+        facts = self._peak_brightness_relabel(facts, integrated, match.record)
+        pooled, pool_conflicts = (
+            self._canonical_base_model_facts(
+                product_id=product_id or match.model_key,
+                model_key=match.model_key, base_identity=str(base_identity),
+                fields=catalog_scope,
+                already_stated={item.field_key for item in facts},
+                integrated=integrated,
+            ) if catalog_scope else ([], [])
+        )
+        facts.extend(pooled)
+        excluded.extend(pool_conflicts)
         facts.extend(integrated)
         return ProductKnowledgeResult(
             product_id=product_id or match.model_key,
@@ -2313,12 +2564,107 @@ class ProductKnowledgeService:
             # the title suggested: "삼성 UHD BE85D-H …" yields the box name
             # while the catalogue match is LH85BEDH, and reporting the box name
             # labelled 66 of this listing's own facts as another model's.
-            listing_model=_settled_identity(
-                match.model_key, self.catalog_repository),
+            listing_model=str(base_identity) if base_identity else None,
             resolved_pk_targets=(
-                _settled_identity(match.model_key, self.catalog_repository),
+                (str(base_identity),) if base_identity else ()
             ),
         )
+
+    def _one_base_model_for_candidates(
+        self, match: Any,
+    ) -> tuple[str, tuple[tuple[str, dict[str, Any]], ...]] | None:
+        """The base model every candidate describes, when they all agree.
+
+        An AMBIGUOUS match means the title could be any of several catalogue
+        records, and electing one would put a listing's own choices -- its
+        colour, its bundle -- onto another listing. That is why it fails
+        closed. But "which listing" and "which model" are different
+        questions: the title
+        "삼성 오디세이 OLED G9 S49CG954E 123.8cm(49인치)" narrows to
+        ``G9 S49CG954E`` and ``S49CG954``, and both records say they describe
+        the same base model, so the *model's* specification is not in doubt
+        even while the listing is.
+
+        Returns the identity and the candidate records when every candidate
+        resolves to one base model, and ``None`` otherwise -- a single
+        candidate with a different base identity keeps the existing
+        fail-closed behaviour.
+        """
+
+        candidates = tuple(
+            (str(key), record) for key, record in (match.candidates or ())
+            if isinstance(record, dict)
+        )
+        if len(candidates) < 2:
+            return None
+        identities = {
+            self.catalog_repository.base_model_identity(key)
+            for key, _record in candidates
+        }
+        if len(identities) != 1:
+            return None
+        identity = identities.pop()
+        if not identity:
+            return None
+        return str(identity), candidates
+
+    @staticmethod
+    def _peak_brightness_relabel(
+        facts: list[ProductFact],
+        integrated: list[ProductFact],
+        record: dict[str, Any],
+    ) -> list[ProductFact]:
+        """Keep a brightness reading's condition when the spec lost it.
+
+        A spec's bare "<N>cd" token says a brightness and not which one. For
+        almost every model that is the typical reading: 1,462 records yield
+        such a token and 23 identities carry an API-sourced
+        ``brightness_typical``; the two sides overlap on 12, 11 agree, and
+        nothing here touches them.
+
+        One does not. S49CG954's spec says 1,000cd where the API says 450, and
+        the same spec carries "VESA HDR 1000" -- the certification whose tier
+        number is that value. So the token is the HDR peak, and answering
+        "밝기 몇 니트인가요?" with it reported a peak as the ordinary
+        brightness. It is moved to ``brightness_peak`` rather than dropped,
+        because it is a real reading of this product under a stated condition.
+
+        The discriminator is the stored fact, not the certification: the tier
+        number alone equals the spec's token on 99 models, and only this one
+        of them is contradicted by what the API collected. Only a disagreement with what the
+        API collected makes the condition questionable, and only then does the
+        certification settle which condition it is. When nothing corroborates
+        it, the value is withheld rather than relabelled on a guess.
+        """
+
+        typical = next(
+            (item for item in facts
+             if item.field_key == "brightness_typical_cd_m2"), None)
+        if typical is None:
+            return facts
+        stored = next(
+            (item for item in integrated
+             if item.field_key in {"brightness_typical", "brightness"}), None)
+        if stored is None:
+            return facts
+        digits = re.compile(r"\d+")
+        mine = "".join(digits.findall(str(typical.value)))
+        theirs = "".join(digits.findall(str(stored.value)))
+        if not mine or not theirs or mine == theirs:
+            return facts
+
+        tiers = {
+            found.group(1) for token in
+            re.split(r"\s*[/,，]\s*", str(record.get("spec") or ""))
+            if (found := _HDR_TIER.match(token.strip()))
+        }
+        remaining = [item for item in facts if item is not typical]
+        if mine in tiers:
+            remaining.append(replace(
+                typical, field_key="brightness_peak",
+                canonical_fact_id=f"{typical.canonical_fact_id}:peak",
+            ))
+        return remaining
 
     def _integrated_exact_model_for_listing(self, product_id: str) -> str | None:
         """Return one exact MAIN_PRODUCT model proven by this listing's API.
@@ -2415,9 +2761,55 @@ class ProductKnowledgeService:
                 resolved.add(match.model_key)
         return next(iter(resolved)) if len(resolved) == 1 else None
 
+    def _runtime_fact_sections(
+        self, knowledge: dict[str, Any],
+    ) -> tuple[tuple[str, list[dict[str, Any]]], ...]:
+        """The fact lists this runtime reads, in order, with the gap fill.
+
+        ``_PRODUCT_KNOWLEDGE_SECTIONS`` unchanged, then the rows of the later
+        review pass that state a (model, field) the first pass has no row for
+        at all. A row whose (model, field) already exists is skipped whatever
+        its value says: picking between two stored values is a review decision
+        and is not made here, so this can only ever add a fact where there was
+        none -- it cannot overrule one.
+
+        Cached per catalogue load. The filter walks both lists, and the
+        dashboard calls this service on every script pass.
+        """
+
+        marker = tuple(
+            len(knowledge.get(name) or ())
+            for name in (*_PRODUCT_KNOWLEDGE_SECTIONS, _GAP_FILL_SECTION)
+        )
+        cached = getattr(self, "_fact_sections_cache", None)
+        if cached is not None and cached[0] == marker:
+            return cached[1]
+
+        sections: list[tuple[str, list[dict[str, Any]]]] = []
+        for name in _PRODUCT_KNOWLEDGE_SECTIONS:
+            rows = knowledge.get(name, ())
+            if isinstance(rows, list):
+                sections.append((name, rows))
+        known = {
+            (normalize_model(row.get("model_code")), str(row.get("field") or ""))
+            for row in (knowledge.get("model_facts") or ())
+            if isinstance(row, dict)
+        }
+        gap_rows = [
+            row for row in (knowledge.get(_GAP_FILL_SECTION) or ())
+            if isinstance(row, dict)
+            and (normalize_model(row.get("model_code")),
+                 str(row.get("field") or "")) not in known
+        ]
+        if gap_rows:
+            sections.append((_GAP_FILL_SECTION, gap_rows))
+        settled = tuple(sections)
+        self._fact_sections_cache = (marker, settled)
+        return settled
+
     def _integrated_product_knowledge_facts(
         self, *, product_id: str, model_key: str, fields: Sequence[str],
-        include_all: bool,
+        include_all: bool, base_identity: str | None = None,
     ) -> tuple[list[ProductFact], list[ProductFact]]:
         """Read candidate evidence from the same catalog JSON.
 
@@ -2425,6 +2817,13 @@ class ProductKnowledgeService:
         question or choose which fact answers it; the GPT prompt receives the
         retained evidence and makes that judgement.  The fixed cap is solely a
         technical prompt-size bound.
+
+        ``base_identity`` is the model the matched record says it describes.
+        ``LF27T450FZKXKR`` is a catalogue key of its own whose ``model`` field
+        says ``F27T450``, and the collected knowledge is filed under F27T450,
+        so without it the key matched no row and the listing answered with
+        nothing. It is only ever an additional identity to accept; no row that
+        matched before stops matching.
         """
         knowledge = self.catalog_repository.product_knowledge()
         if not knowledge:
@@ -2436,6 +2835,7 @@ class ProductKnowledgeService:
             model_key,
             aliases=aliases,
         )
+        base_canonical = str(base_identity or "").strip() or None
         withheld = {
             (normalize_model(item.get("model_code")), str(item.get("field") or ""))
             for item in knowledge.get("v7_final_decisions", ())
@@ -2445,10 +2845,7 @@ class ProductKnowledgeService:
         safe: list[ProductFact] = []
         excluded: list[ProductFact] = []
         requested = {str(item) for item in fields}
-        for section in _PRODUCT_KNOWLEDGE_SECTIONS:
-            rows = knowledge.get(section, ())
-            if not isinstance(rows, list):
-                continue
+        for section, rows in self._runtime_fact_sections(knowledge):
             for index, row in enumerate(rows):
                 if not isinstance(row, dict):
                     continue
@@ -2463,7 +2860,7 @@ class ProductKnowledgeService:
                 applies = str(
                     row.get("applies_to_product_id") or row.get("product_id") or ""
                 )
-                model_scoped = section == "model_facts"
+                model_scoped = section in _MODEL_SCOPED_SECTIONS
                 identity_matches = (
                     bool(
                         model_norm
@@ -2472,6 +2869,10 @@ class ProductKnowledgeService:
                             or (
                                 canonical_model is not None
                                 and row_canonical == canonical_model
+                            )
+                            or (
+                                base_canonical is not None
+                                and row_canonical == base_canonical
                             )
                         )
                     )
@@ -2535,12 +2936,171 @@ class ProductKnowledgeService:
         excluded.extend(conflict_excluded)
         return resolved[:_PRODUCT_KNOWLEDGE_PROMPT_LIMIT], excluded
 
+    # Fields that belong to the *listing*, not to the model, and so are never
+    # read from another record of the same base model. A colour is chosen per
+    # option (EDGE 24 블랙 and 화이트 are one listing each), a name identifies
+    # the listing, and the release month differs between the sources that
+    # describe one panel ("2024년 04월" against "24년형 / 화이트"). The six
+    # legacy presence fields are excluded for a different reason: their value
+    # is the matched spec text itself, so importing one would quote another
+    # record's whole specification as this model's fact. Port presence still
+    # travels, through the 2-b fields that carry a token instead of a blob.
+    #: What comes in the box is chosen per listing in the same way, so the
+    #: two cable fields 2-c reads join them: "HDMI 케이블" and "DP 케이블"
+    #: are what *this* listing ships, and a sibling listing of the same panel
+    #: ships a different set.
+    _LISTING_SCOPED_FIELDS = frozenset({
+        "color", "color_options", "front_color", "front_color_spec",
+        "rear_color", "stand_color", "stand_color_spec", "accessory_color",
+        "model_name", "release_ym_spec", "brand",
+        "hdmi_cable_included_spec", "hdmi_cable_included",
+        "dp_cable_included",
+    })
+
+    #: What may be pooled across the records of one base model: the model's
+    #: own specification, as the three readers settle it.
+    #:
+    #: The six presence fields are in it. They were excluded while their value
+    #: was the whole spec string -- importing one would have quoted another
+    #: record's entire specification -- and that reason is gone now the value
+    #: is the matched token ("HDMI", "USB", "Wi-Fi"). Whether a panel has a
+    #: USB port is a fact about the model, so F27T450 and LF27T450FZKXKR,
+    #: which are one model, must answer "USB 포트 있나요?" the same way;
+    #: measured over every same-base group, that was the one remaining
+    #: disparity.
+    #: 2-c's fields are in it for the same reason: whether the stand tilts,
+    #: what the panel is and whether the screen is flat are facts about the
+    #: model, not about the listing that sells it.
+    _POOLABLE_FIELDS = (
+        (MEASUREMENT_FIELD_KEYS | NESTED_FIELD_KEYS | POSITIONAL_FIELD_KEYS
+         | SECTION_FIELD_KEYS | ENUM_FIELD_KEYS | frozenset(PRESENCE_TOKENS))
+        - _LISTING_SCOPED_FIELDS
+    )
+
+    def _canonical_base_model_facts(
+        self, *, product_id: str, model_key: str, base_identity: str,
+        fields: Sequence[str], already_stated: Iterable[str],
+        integrated: Sequence[ProductFact] = (),
+        records: Sequence[tuple[str, dict[str, Any]]] | None = None,
+    ) -> tuple[list[ProductFact], list[ProductFact]]:
+        """Model-level facts the other records of this base model state.
+
+        The catalogue holds several records for one model -- ``S32DM501`` and
+        ``LS32DM501EKXKR``, ``F27T450`` and ``LF27T450FZKXKR`` -- and each was
+        read in isolation, so the same model answered differently depending on
+        which spelling the customer wrote. Measured: ``S32DM501`` returned
+        ``display_width_mm 698.4`` and ``LS32DM501EKXKR`` returned nothing;
+        ``F27T450`` returned ``hdmi_port_count_spec 2개`` and
+        ``elevation_range_spec 130mm`` and ``LF27T450FZKXKR`` returned neither.
+
+        Three rules keep this from becoming a merge of different products:
+
+        * The record the match resolved stays authoritative. Only a field it
+          does not state is filled from elsewhere, so the literal-key
+          precedence that keeps EDGE 27CH3 and EDGE 27CH3 화이트 apart is
+          untouched, and a record's own value is never replaced.
+        * Only the model's own specification is pooled -- not colour, name,
+          release month or anything else the listing chooses.
+        * Two records stating different values for a field the resolved record
+          lacks settle nothing. Neither value is offered; the disagreement is
+          reported as an excluded fact instead.
+        """
+
+        donors = (
+            tuple(records) if records is not None
+            else self.catalog_repository.base_model_records(model_key)
+        )
+        if not donors:
+            return [], []
+        requested = set(fields) & self._POOLABLE_FIELDS
+        if not requested:
+            return [], []
+        # A field the collected Product Knowledge already answers is not a
+        # gap. Pooling it again produced the same measurement twice in two
+        # notations -- ``weight_with_stand`` as "15.6kg" from a sibling's spec
+        # beside "15.6" from the API row, and ``brightness_typical_cd_m2``
+        # "450cd" beside ``brightness_typical`` "450". The registry already
+        # says which names are the same attribute, so that is what decides.
+        stated = {str(name) for name in already_stated} | _covered_fields(
+            item.field_key for item in integrated)
+        gathered: dict[str, list[tuple[str, Any, str | None, str]]] = {}
+        for donor_key, donor in donors:
+            # Read exactly as the donor's own lookup would read it, including
+            # the brightness condition: S49CG954's record states 1,000cd,
+            # which the relabel settles as the HDR peak because the collected
+            # knowledge says the typical is 450. Reading the raw value here
+            # instead would have pooled a peak as an ordinary brightness.
+            donor_facts = self._peak_brightness_relabel(
+                self._catalog_facts(
+                    product_id=product_id, model_key=donor_key, record=donor,
+                    fields=tuple(requested | {"brightness_typical_cd_m2"}),
+                ),
+                list(integrated), donor,
+            )
+            for item in donor_facts:
+                if item.field_key not in requested or item.field_key in stated:
+                    continue
+                gathered.setdefault(item.field_key, []).append(
+                    (donor_key, item.value, item.unit, item.raw_value))
+
+        facts: list[ProductFact] = []
+        conflicts: list[ProductFact] = []
+        for field_key, rows in gathered.items():
+            distinct = {str(value) for _k, value, _u, _s in rows}
+            donor_key, value, unit, source = rows[0]
+            provenance = (
+                {
+                    "source": "CANONICAL_BASE_MODEL_RECORD",
+                    "base_model_identity": base_identity,
+                    "stated_by_record": donor_key,
+                    "resolved_record": model_key,
+                },
+            )
+            fact = ProductFact(
+                product_id=product_id, listing_id=model_key,
+                # Attributed to the model this lookup resolved, because that
+                # is whose fact it is: the donor record describes the same
+                # base model. Which record stated it is in the provenance.
+                model_code=model_key,
+                field_key=field_key, value=value, raw_value=source,
+                unit=unit or _unit_for(field_key), scope="MODEL_CATALOG",
+                scope_key=model_key, component_scope=BASE_DEVICE_SCOPE,
+                volatility="STATIC_PRODUCT_FACT",
+                verification_status="CATALOG_JSON",
+                resolution_status="CATALOG_JSON", lifecycle_status=ACTIVE,
+                canonical_fact_id=f"catalog:{base_identity}:{field_key}",
+                value_id=None, provenance=provenance, safe_for_answer=True,
+            )
+            if len(distinct) > 1:
+                conflicts.append(replace(
+                    fact, safe_for_answer=False,
+                    value="/".join(sorted(distinct)),
+                    exclusion_reason="CANONICAL_BASE_MODEL_CONFLICT",
+                    provenance=(
+                        {
+                            "source": "CANONICAL_BASE_MODEL_RECORD",
+                            "base_model_identity": base_identity,
+                            "stated_by_record": [key for key, *_ in rows],
+                            "values": sorted(distinct),
+                            "resolved_record": model_key,
+                        },
+                    ),
+                ))
+                continue
+            facts.append(fact)
+        return facts, conflicts
+
     @staticmethod
-    def _catalog_facts(
-        *, product_id: str, model_key: str, record: dict[str, Any],
-        fields: Sequence[str],
-    ) -> list[ProductFact]:
-        """Expose literal JSON values only; absent fields remain UNKNOWN."""
+    def _record_values(
+        record: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, str | None], dict[str, str]]:
+        """``(values, units, source tokens)`` for one catalogue record.
+
+        Split out of :meth:`_catalog_facts` so the same reading can be run
+        over another record of the same base model. It reads a record and
+        nothing else: which record to read is decided before it is called.
+        """
+
         direct = {
             "screen_size": record.get("size_inch"),
             "resolution": record.get("resolution"),
@@ -2553,18 +3113,100 @@ class ProductKnowledgeService:
             "color": record.get("color"),
         }
         spec = str(record.get("spec") or "")
-        token_fields = {
-            "hdmi_present": ("HDMI",), "usb_present": ("USB",),
-            "ethernet_present": ("LAN", "랜", "ETHERNET"),
-            "rf_terminal": ("RF", "동축", "안테나"),
-            "bluetooth_present": ("BLUETOOTH", "블루투스"),
-            "wifi_present": ("WI-FI", "WIFI", "와이파이", "무선랜"),
-            "stand_spacing": ("스탠드 간격", "다리 간격", "다리 사이", "받침대 간격"),
-        }
+        # Presence and measurement are different claims and are read
+        # differently. A presence field asks whether the product has the thing
+        # at all, and the spec naming it is the whole of the evidence, so the
+        # matched text travels. A measurement field asks for a number, and the
+        # only acceptable value is that label's own.
+        #
+        # They used to share this loop, which assigned the entire spec string
+        # to every matched field. ``stand_spacing`` is a measurement, so a
+        # question about 80cm was handed 250 characters of unrelated
+        # specification -- the value was in there, and the fact could not
+        # answer the question. ``facts_from_spec`` returns nothing when it
+        # cannot read a value, and the blob is never substituted for one.
         upper_spec = spec.upper()
-        for field_key, tokens in token_fields.items():
-            if any(token.upper() in upper_spec for token in tokens):
-                direct[field_key] = spec
+        spec_units: dict[str, str | None] = {}
+        spec_sources: dict[str, str] = {}
+        # The value is the words that made the assertion, not the record.
+        #
+        # This used to assign the whole spec string: a presence field says
+        # "the spec mentions HDMI", and the matched text was taken to be the
+        # evidence, so the evidence was the entire specification. Measured
+        # over the catalogue, that put the spec into 1,528 ``hdmi_present``
+        # values, 400 ``usb_present``, 141 bluetooth, 140 Wi-Fi, 79 Ethernet
+        # and 22 RF -- and with it everything else the spec happens to say.
+        # 99 of those hdmi_present values carried "출시가: 500,000원" and 23
+        # carried the business-registration notice: listing and promotion
+        # text that 2-b withholds on purpose, reaching the prompt through a
+        # field about a port. Asked "출시가가 얼마였나요?", the pipeline
+        # answered 500,000원 from it and the validator passed.
+        #
+        # So the value is now the matched token as the spec writes it, and
+        # the full spec is kept only as ``raw_value`` -- audit and
+        # provenance, never the prompt (see ``as_prompt_line`` and
+        # ``as_prompt_fact``, which render ``value``).
+        for field_key, tokens in PRESENCE_TOKENS.items():
+            matched: list[str] = []
+            for token in tokens:
+                found = upper_spec.find(token.upper())
+                if found >= 0:
+                    matched.append(spec[found:found + len(token)])
+            if matched:
+                direct[field_key] = ", ".join(dict.fromkeys(matched))
+                spec_sources[field_key] = spec
+        for field_key, (value, unit) in facts_from_spec(spec).items():
+            direct[field_key] = value
+            spec_units[field_key] = unit
+        # Last, and only where nothing better said it. Precedence is
+        # column > explicit ``label: value`` > token recognised by its shape,
+        # because that is the order of how much the source committed to. The
+        # columns already populate screen_size/resolution/refresh_rate/weight
+        # for 93-99% of the positional models, so without this ordering almost
+        # every one of them would carry two facts for the same measurement.
+        settled = {key for key, value in direct.items() if not _is_empty(value)}
+        for field_key, (value, unit, token) in facts_from_positional_spec(
+                spec, already_supplied=settled).items():
+            direct[field_key] = value
+            spec_units[field_key] = unit
+            spec_sources[field_key] = token
+        # Last of all, what only a "[색상영역] / [게임특화] / [단자정보]"
+        # heading makes readable. A bare "92%" or "FreeSync Premium" has no
+        # shape the positional reader can anchor on and no top-level label,
+        # so before this every one of the catalogue's 10,362 section tokens
+        # was read by nothing. The heading travels with the value as its
+        # provenance, and the same precedence applies: nothing here
+        # overwrites a column, a label or a shape-recognised token.
+        settled = {key for key, value in direct.items() if not _is_empty(value)}
+        for field_key, (value, unit, token) in facts_from_section_spec(
+                spec, already_supplied=settled).items():
+            direct[field_key] = value
+            spec_units[field_key] = unit
+            spec_sources[field_key] = token
+        # Last of all, the words that describe themselves by vocabulary and
+        # by nothing else: "틸트(상하) / 평면 / IPS / 헤드폰 아웃 / LED 조명".
+        # Measured over the catalogue, 11,578 such tokens on 1,569 models sat
+        # in the unsectioned head of the spec with no label, no shape and no
+        # heading, so all three readers above passed over every one of them.
+        # The same precedence holds: nothing here overwrites a column, a
+        # label, a shape-recognised token or a section-context token.
+        settled = {key for key, value in direct.items() if not _is_empty(value)}
+        for field_key, (value, unit, token) in facts_from_enumeration_spec(
+                spec, already_supplied=settled).items():
+            direct[field_key] = value
+            spec_units[field_key] = unit
+            spec_sources[field_key] = token
+        return direct, spec_units, spec_sources
+
+    @staticmethod
+    def _catalog_facts(
+        *, product_id: str, model_key: str, record: dict[str, Any],
+        fields: Sequence[str],
+    ) -> list[ProductFact]:
+        """Expose literal JSON values only; absent fields remain UNKNOWN."""
+
+        direct, spec_units, spec_sources = (
+            ProductKnowledgeService._record_values(record))
         requested = set(fields)
         # Generic catalog weight is deliberately not used for explicit
         # stand-included/excluded questions because its scope is not encoded.
@@ -2585,8 +3227,12 @@ class ProductKnowledgeService:
                 continue
             result.append(ProductFact(
                 product_id=product_id, listing_id=model_key, model_code=model_key,
-                field_key=field_key, value=value, raw_value=value,
-                unit=_unit_for(field_key), scope="MODEL_CATALOG",
+                field_key=field_key, value=value,
+                # The token the value was read from, so a shape-recognised
+                # fact can be traced back to the text that produced it.
+                raw_value=spec_sources.get(field_key, value),
+                unit=spec_units.get(field_key) or _unit_for(field_key),
+                scope="MODEL_CATALOG",
                 scope_key=model_key, component_scope=BASE_DEVICE_SCOPE,
                 volatility="STATIC_PRODUCT_FACT", verification_status="CATALOG_JSON",
                 resolution_status="CATALOG_JSON", lifecycle_status=ACTIVE,
