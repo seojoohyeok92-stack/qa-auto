@@ -360,7 +360,21 @@ class CoupangPostService:
             marketplace_seller_answer,
         )
 
-        if marketplace_seller_answer(inquiry).strip():
+        try:
+            seller_answer = marketplace_seller_answer(inquiry)
+        except ValueError:
+            # The payload could not be read, so whether Coupang already holds
+            # a reply is unknown -- and "cannot check" must never read as
+            # "there is none" on the way to a write. 25 of the Coupang
+            # inquiries in the 26.10.12 snapshot carry an empty ``raw_json``,
+            # and with registration open a click on one of those raised out
+            # of here instead of refusing.
+            return (
+                "SOURCE_PAYLOAD_UNREADABLE",
+                "쿠팡 원본 payload를 읽을 수 없어 기존 판매자 답변 여부를 "
+                "확인할 수 없습니다.",
+            )
+        if seller_answer.strip():
             return ("SELLER_ANSWER_EXISTS", "이미 판매자 답변이 있는 문의입니다.")
         draft = (
             self.answers.active_for_inquiry(inquiry_id)

@@ -202,8 +202,10 @@ def test_readiness_separates_a_ready_answer_from_a_closed_market(
     report = service(database).readiness(inquiry_id)
 
     assert report["answer_ready"] is True
-    assert report["post_enabled"] is False
-    assert report["post_disabled_reason"] == "MANUAL_POST_DISABLED"
+    # Phase 3-B opened the manual permission, so the report now says both
+    # halves are true. What it must keep doing is reporting them separately.
+    assert report["post_enabled"] is True
+    assert report["post_disabled_reason"] is None
     assert report["external_id"] == EXTERNAL_ID
     assert report["account_code"] == ACCOUNT
     assert report["vendor_id"] == FakeAccount.vendor_id
@@ -239,14 +241,16 @@ def test_readiness_reports_a_missing_draft_rather_than_readiness(
     report = service(database).readiness(inquiry_id)
     assert report["answer_ready"] is False
     assert report["error_code"] == "LOCAL_STATE_MISSING"
-    assert report["post_enabled"] is False
+    # The permission being open changes nothing about an answer that is not.
+    assert report["post_enabled"] is True
 
 
-def test_readiness_cannot_authorise_a_post(database) -> None:
-    """The permission is reported there and applied in ``post``.
+def test_readiness_still_decides_nothing_about_sending(database) -> None:
+    """Reporting a ready answer is not a confirmation to send one.
 
-    Asserted through ``post`` itself: a readiness call that said the answer
-    was ready changes nothing about what ``post`` does.
+    The permission is open now, so the thing that still has to be true is
+    the operator's explicit confirmation -- which ``readiness`` cannot give
+    and does not imply.
     """
 
     inquiry_id = seed(database)
@@ -255,10 +259,9 @@ def test_readiness_cannot_authorise_a_post(database) -> None:
     built = service(database, client)
 
     assert built.readiness(inquiry_id)["answer_ready"] is True
-    result = built.post(inquiry_id, actor="관리자", confirmed=True)
+    result = built.post(inquiry_id, actor="관리자", confirmed=False)
 
-    assert result.status == "BLOCKED"
-    assert result.error_code == "MANUAL_POST_DISABLED"
+    assert result.error_code == "CONFIRMATION_REQUIRED"
     assert result.network_call_count == 0
     assert client.calls == []
 
@@ -310,9 +313,9 @@ def test_coupang_dps_stays_closed() -> None:
     assert is_store_dps_enabled(COUPANG_STORE) is False
 
 
-def test_manual_post_permission_stays_off() -> None:
-    assert COUPANG not in MANUAL_POST_MARKETS
-    assert is_store_manual_post_enabled(COUPANG_STORE) is False
+def test_manual_post_permission_is_open_to_a_person_only() -> None:
+    assert COUPANG in MANUAL_POST_MARKETS
+    assert is_store_manual_post_enabled(COUPANG_STORE) is True
 
 
 def test_automatic_post_permission_stays_off() -> None:
@@ -320,8 +323,13 @@ def test_automatic_post_permission_stays_off() -> None:
     assert is_store_automatic_post_enabled(COUPANG_STORE) is False
 
 
-def test_no_coupang_request_is_made_anywhere_in_this_step(database) -> None:
-    """Every entry point, one client, zero calls."""
+def test_only_a_confirmed_post_reaches_the_client(database) -> None:
+    """Reading what would happen never sends; an unconfirmed click never does.
+
+    ``post`` with a confirmation does reach the client now, which is the
+    whole point of Phase 3-B -- and it reaches a double here, so nothing
+    leaves the process.
+    """
 
     inquiry_id = seed(database)
     draft_for(database, inquiry_id, edited=STAFF_ANSWER)
@@ -330,10 +338,11 @@ def test_no_coupang_request_is_made_anywhere_in_this_step(database) -> None:
 
     built.readiness(inquiry_id)
     built.preflight(inquiry_id)
-    built.post(inquiry_id, actor="관리자", confirmed=True)
     built.post(inquiry_id, actor="관리자", confirmed=False)
+    assert client.calls == [], "a read or an unconfirmed click sent something"
 
-    assert client.calls == []
+    built.post(inquiry_id, actor="관리자", confirmed=True)
+    assert len(client.calls) == 1
 
 
 # --- 10. an answered inquiry is never posted over ------------------------
@@ -370,21 +379,15 @@ def test_a_stored_seller_comment_is_refused_even_if_the_flag_lags(
 # --- 11-14. success, failure and retry, through the real service --------
 
 @pytest.fixture
-def posting_opened(monkeypatch):
-    """Open the manual permission for the engine tests only.
+def posting_opened():
+    """Kept as a name, now that the permission is open in the policy itself.
 
-    The policy itself is asserted closed above. This exercises the code that
-    runs once a later phase opens it, against a double, so the engine is
-    verified without the permission being relaxed anywhere real.
+    The engine tests below used to need it monkeypatched. They now run
+    against the real permission, which is what Phase 3-B decided, and still
+    against a double so nothing leaves the process.
     """
 
-    import services.market_policy as policy
-    import services.coupang_post_service as post_service
-
-    monkeypatch.setattr(
-        policy, "MANUAL_POST_MARKETS", frozenset({"NAVER", COUPANG}))
-    monkeypatch.setattr(
-        post_service, "is_store_manual_post_enabled", lambda _s: True)
+    assert is_store_manual_post_enabled(COUPANG_STORE) is True
     return True
 
 

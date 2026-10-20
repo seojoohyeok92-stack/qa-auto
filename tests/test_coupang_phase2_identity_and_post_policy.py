@@ -268,13 +268,28 @@ def test_coupang_has_no_dps(mapping) -> None:
 
 # --- 13-15. Coupang has no write path, Naver keeps its own ----------------
 
-def test_coupang_posting_is_closed_in_production_policy() -> None:
-    """Asserted against the policy itself, not against a double."""
+def test_only_a_person_may_register_a_coupang_answer() -> None:
+    """Asserted against the policy itself, not against a double.
 
-    assert COUPANG not in MANUAL_POST_MARKETS
+    Phase 3-B opened the manual permission on an explicit decision. The
+    unattended one is a separate decision and was not taken: the queue must
+    not register replies nobody looked at.
+    """
+
+    assert COUPANG in MANUAL_POST_MARKETS
     assert COUPANG not in AUTOMATIC_POST_MARKETS
-    assert is_store_manual_post_enabled(COUPANG_STORE) is False
+    assert is_store_manual_post_enabled(COUPANG_STORE) is True
     assert is_store_automatic_post_enabled(COUPANG_STORE) is False
+
+
+def test_coupang_registration_is_still_not_unattended() -> None:
+    """The queue's own scope, which this decision did not widen."""
+
+    from repositories.auto_post_repository import AutoPostRepository  # noqa: F401
+    from services.market_policy import post_enabled_store_codes
+
+    assert post_enabled_store_codes(
+        [NAVER_STORE, COUPANG_STORE]) == [NAVER_STORE]
 
 
 def test_naver_posting_is_unchanged() -> None:
@@ -290,20 +305,54 @@ def test_coupang_is_still_collected_and_answered() -> None:
     assert is_store_answer_generation_enabled(COUPANG_STORE) is True
 
 
-def test_the_manual_post_panel_refuses_coupang_before_any_network_call(
+def test_the_manual_post_panel_still_refuses_before_any_network_call(
     monkeypatch,
 ) -> None:
-    """The preflight stops at the policy, before a client is built."""
+    """The permission is open; every other precondition still has to hold.
+
+    This inquiry has no draft, so the resolution refuses on local state --
+    and refuses before a client is built, which is what keeps a panel from
+    sending anything while it works out whether it may.
+    """
+
+    from services.coupang_post_service import CoupangPostService
+
+    service = CoupangPostService.__new__(CoupangPostService)
+    readable = inquiry_row(post_status=None, source_answered=False)
+    readable["raw_json"] = {
+        "inquiryId": "160959847", "vendorItemId": VENDOR_ITEM,
+        "commentDtoList": [],
+    }
+    service.inquiries = SimpleNamespace(get=lambda _id: readable)
+    service.answers = SimpleNamespace(
+        active_for_inquiry=lambda _id: None,
+        latest_for_inquiry=lambda _id: None)
+
+    blocked = service._resolve(1, retry_requested=False)
+    assert isinstance(blocked, tuple), "preflight let a Coupang post through"
+    assert blocked[0] == "LOCAL_STATE_MISSING"
+
+
+def test_an_unreadable_payload_refuses_rather_than_raising() -> None:
+    """25 Coupang inquiries in the snapshot carry an empty ``raw_json``.
+
+    Whether Coupang already holds a reply cannot be read from those, and not
+    being able to check must not read as there being nothing to check.
+    """
 
     from services.coupang_post_service import CoupangPostService
 
     service = CoupangPostService.__new__(CoupangPostService)
     service.inquiries = SimpleNamespace(
-        get=lambda _id: inquiry_row(post_status=None, source_answered=False))
+        get=lambda _id: inquiry_row(
+            post_status=None, source_answered=False, raw_json={}))
+    service.answers = SimpleNamespace(
+        active_for_inquiry=lambda _id: None,
+        latest_for_inquiry=lambda _id: None)
 
     blocked = service._resolve(1, retry_requested=False)
-    assert isinstance(blocked, tuple), "preflight let a Coupang post through"
-    assert blocked[0] == "MANUAL_POST_DISABLED"
+    assert isinstance(blocked, tuple)
+    assert blocked[0] == "SOURCE_PAYLOAD_UNREADABLE"
 
 
 # --- 10/12. identity helpers keep other products out ----------------------

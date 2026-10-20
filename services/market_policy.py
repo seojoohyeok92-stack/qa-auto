@@ -54,14 +54,19 @@ POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # so adding a market there would open automatic posting and re-open answer
 # editing on inquiries the marketplace has already answered.  This opens the
 # button and nothing else.
-# Coupang is deliberately absent. Registering a reply at Coupang -- by hand
-# or unattended -- stays closed until it is re-opened by an explicit
-# decision, so the one place that decides it is this set rather than a flag
-# in the panel or a double in a test. Collection, answer generation, storage
-# and the dashboard are unaffected: they are governed by
-# ANSWER_GENERATION_MARKETS and by POST_MARKETS' read-only rule, neither of
-# which changes here.
-MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER})
+# Coupang is here on an explicit decision, for a person's click only.  The
+# readiness check that Phase 3-A added reported what a registration would do
+# before anything could do it -- which inquiry, which seller account, which
+# stored text -- and the two WING ids that ``replyBy`` needs are configured,
+# so a reply now addresses a real target or fails closed naming what is
+# missing.  Unattended posting is a separate decision and is not taken here:
+# ``AUTOMATIC_POST_MARKETS`` below still names Naver alone.
+#
+# Everything that refuses a registration keeps refusing it. This set is only
+# the permission; ``CoupangPostService._resolve`` still requires a draft, a
+# technical validation, an external id, a configured account, an inquiry the
+# marketplace has not answered, and an explicit retry after a failure.
+MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 # Which markets the unattended pipeline may register an answer at.  This is
 # the auto-post queue's own scope, split out of ``POST_MARKETS`` because that
 # set had four consumers and only one of them was the queue: the other three
@@ -69,6 +74,10 @@ MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # path.  Adding a market there would have re-opened answer editing on
 # inquiries the marketplace has already answered, which is a different
 # decision from letting the pipeline post.
+#
+# Coupang is absent on purpose while manual registration is open above: a
+# person deciding one reply at a time is what is being verified, and the
+# queue must not start registering replies nobody looked at.
 AUTOMATIC_POST_MARKETS: frozenset[str] = frozenset({NAVER})
 KAKAO_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 

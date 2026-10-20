@@ -26,16 +26,17 @@ def test_naver_still_points_at_the_registration_step() -> None:
 @pytest.mark.parametrize(
     "inquiry", [COUPANG_NS, COUPANG_PLUS], ids=["ns", "plus"]
 )
-def test_coupang_says_registration_is_closed(inquiry) -> None:
-    """Coupang registration is closed, and the notice says so plainly.
+def test_coupang_now_points_at_its_own_registration_step(inquiry) -> None:
+    """Phase 3-B opened manual registration, so the notice points at it.
 
-    An approved answer is still approved; what the operator must not be told
-    is to go and register it when the policy will refuse.
+    The notice reads the permission rather than naming a market, which is
+    why opening it needed no change here: what the operator is told and what
+    the button beside them does come from the same place.
     """
 
     notice = _approval_next_step_notice(inquiry)
     assert notice == (
-        "승인 완료했습니다. 현재 쿠팡 답변 등록은 비활성화되어 있습니다."
+        "승인 완료했습니다. 아래에서 쿠팡 답변 등록을 별도로 진행할 수 있습니다."
     )
 
 

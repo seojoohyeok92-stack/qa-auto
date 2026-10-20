@@ -221,10 +221,10 @@ def test_coupang_is_answered_but_never_looked_up_or_posted(store) -> None:
     # that keeps an answered Coupang inquiry from being edited.
     assert market_policy.is_store_dps_enabled(store) is False
     assert market_policy.is_store_post_enabled(store) is False
-    # Registering the reply at Coupang is closed too, by hand and unattended
-    # alike, until it is re-opened by an explicit decision. Generating the
-    # answer and showing it for review are unaffected.
-    assert market_policy.is_store_manual_post_enabled(store) is False
+    # A person may now register the reply; the unattended pipeline may not.
+    # Phase 3-B opened the first on an explicit decision and left the second
+    # closed, so one answer at a time is reviewed before it goes out.
+    assert market_policy.is_store_manual_post_enabled(store) is True
     assert market_policy.is_store_automatic_post_enabled(store) is False
 
 
