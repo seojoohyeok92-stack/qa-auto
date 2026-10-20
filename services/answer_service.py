@@ -65,8 +65,10 @@ from answer.providers.provider_factory import create_gpt_provider
 from services.gpt_semantic_analyzer_service import (
     GptSemanticAnalyzerService,
 )
+from services.learning_context_service import PRODUCT_FACT_ACTIONS
 from services.semantic_analysis import (
     ORDER_IDENTIFICATION,
+    REPAIR,
     SemanticAnalysis,
     is_enabled as semantic_analyzer_enabled,
     route as semantic_route,
@@ -158,6 +160,28 @@ EXACT_TEMPLATE_MATCH_KINDS = frozenset({
 })
 
 
+#: Which questions may not be answered until this Coupang option's mapping is
+#: confirmed.
+#:
+#: ``PRODUCT_FACT_ACTIONS`` is the shared definition of "the answer is a
+#: property of one identified product", and Naver Learning identity
+#: enforcement reads that set to decide which stored answers a question may
+#: reuse.  So REPAIR is added *here* rather than there: widening the shared
+#: constant would change what a Naver inquiry may be answered from, which
+#: this gate has no business doing.
+#:
+#: REPAIR belongs in this one because a fault diagnosis is a statement about
+#: one device.  Replayed inquiry 10847 -- "업데이트후 화면에 shaks 로고만
+#: 나오고 진행이 안되는데요", mapping UNRESOLVED -- was labelled REPAIR and
+#: so was answered, on a listing whose name had already put a brand token
+#: where a model code belongs.  Its model-bound facts were withheld, but a
+#: repair procedure written for a different model is the pipeline's to
+#: refuse, not GPT ②'s to decline.
+COUPANG_IDENTITY_REQUIRED_ACTIONS: frozenset[str] = frozenset(
+    {*PRODUCT_FACT_ACTIONS, REPAIR}
+)
+
+
 def _non_naver_market(store_code: object) -> str | None:
     """The request's market when it is not Naver, else None.
 
@@ -228,7 +252,32 @@ def coupang_confirmed_model(
         "model_code": str(catalog_key or canonical),
         "account_code": account,
         "vendor_item_id": vendor_item,
+        "resolution": str(mapping.get("resolution") or "").strip().upper(),
     }
+
+
+def coupang_mapping_resolution(
+    database: Database, inquiry: dict[str, Any]
+) -> str:
+    """How far this Coupang option's mapping got, for the refusal message.
+
+    Returns the stored resolution -- MANUAL_REQUIRED, UNRESOLVED and the
+    rest -- or an empty string when no mapping row exists at all.
+    """
+
+    if market_of(inquiry.get("store_code")) != COUPANG:
+        return ""
+    raw = _dict_value(inquiry.get("raw_json"))
+    metadata = _dict_value(inquiry.get("source_metadata_json"))
+    account = str(
+        metadata.get("account_code")
+        or account_of_store(inquiry.get("store_code")) or "").strip()
+    vendor_item = str(raw.get("vendorItemId") or "").strip()
+    if not account or not vendor_item:
+        return ""
+    row = CoupangProductMappingRepository(database).get(
+        account_code=account, vendor_item_id=vendor_item)
+    return str((row or {}).get("resolution") or "").strip().upper()
 
 
 def _template_may_answer(metadata: dict[str, Any]) -> bool:
@@ -1486,6 +1535,133 @@ class AnswerService:
             request.metadata["model_code"] = mapped["model_code"]
             request.metadata["canonical_model"] = mapped["canonical_model"]
             request.metadata["model_identity_source"] = "COUPANG_CONFIRMED_MAPPING"
+            request.metadata["mapping_resolution"] = mapped.get("resolution") or ""
+            return
+        # No confirmed mapping. Which resolution it stopped at is recorded so
+        # the gate below can say why a model-specific question was refused,
+        # instead of the inquiry quietly getting an answer built from a model
+        # nobody confirmed.
+        request.metadata["mapping_resolution"] = coupang_mapping_resolution(
+            self.database, inquiry)
+
+    @staticmethod
+    def _identity_dependent_actions(request: AnswerRequest) -> tuple[str, ...]:
+        """Which of GPT ①'s atoms ask for a property of one named product.
+
+        ``COUPANG_IDENTITY_REQUIRED_ACTIONS`` is the shared
+        ``PRODUCT_FACT_ACTIONS`` plus REPAIR -- the existing definition of
+        "a property of one identified product", extended for this gate only
+        so the shared one keeps deciding Naver Learning identity exactly as
+        it did.
+
+        Read from the understanding, never from Product Knowledge. The gate
+        used to require ``inquiry_target_models``, which is Product
+        Knowledge's answer to "which model is this" -- the very thing an
+        unconfirmed mapping leaves empty. Replaying three real model-specific
+        Coupang inquiries (10838, 10315, 10847) found the gate passing all
+        three for that reason: the condition could only hold once the
+        identity it was protecting already existed.
+
+        No understanding means no actions and no block, which is the
+        behaviour that shipped before this gate -- a gate must not start
+        refusing inquiries because GPT ① was unavailable.
+        """
+
+        understanding = request.metadata.get("gpt_understanding")
+        understanding = understanding if isinstance(understanding, dict) else {}
+        questions = understanding.get("questions")
+        questions = questions if isinstance(questions, list) else []
+        found: list[str] = []
+        for item in questions:
+            action = str((item or {}).get("action") or "").strip().upper()                 if isinstance(item, dict) else ""
+            if (action in COUPANG_IDENTITY_REQUIRED_ACTIONS
+                    and action not in found):
+                found.append(action)
+        return tuple(found)
+
+    @staticmethod
+    def _withhold_unconfirmed_model_facts(
+        request: AnswerRequest, product_knowledge: Any,
+    ) -> Any:
+        """Model-bound Product Knowledge needs a confirmed mapping first.
+
+        Separate from the refusal below on purpose. Whether this question
+        needs an identity and whether Product Knowledge inferred one are
+        different questions, and answering the first with the second is what
+        let a brand token become a model. A general or seller question on an
+        unconfirmed listing keeps its answer; what it does not keep is six
+        facts about a model nobody confirmed.
+        """
+
+        if _non_naver_market(request.store_code) is None:
+            return product_knowledge
+        if request.metadata.get("model_identity_source"):
+            return product_knowledge
+        withhold = getattr(product_knowledge, "without_model_bound_facts", None)
+        if withhold is None:
+            return product_knowledge
+        withheld = withhold()
+        # Recorded from what was actually taken out, not from whether a new
+        # object came back: a record saying facts were withheld when none
+        # were is a trace that lies about the pipeline.
+        fields = sorted({
+            str(getattr(fact, "field_key", ""))
+            for fact in getattr(withheld, "excluded_facts", ())
+            if getattr(fact, "exclusion_reason", "")
+            == "UNCONFIRMED_MARKET_MAPPING"
+        })
+        if fields:
+            request.metadata["model_bound_facts_withheld"] = {
+                "reason": "UNCONFIRMED_MARKET_MAPPING",
+                "mapping_resolution": (
+                    str(request.metadata.get("mapping_resolution") or "")
+                    or "NONE"),
+                "withheld_fields": fields,
+            }
+        return withheld
+
+    @staticmethod
+    def _require_confirmed_identity_for_model_question(
+        request: AnswerRequest, product_knowledge: Any = None,
+    ) -> None:
+        """Refuse a model-specific question that has no confirmed model.
+
+        Only the question that actually turns on which model this is. A
+        seller policy, a delivery rule or a general product question does not
+        name a model and is answered as before: gating those would withhold
+        answers the mapping has no bearing on.
+
+        ``product_knowledge`` is accepted and unused; it is no longer what
+        decides, and the parameter stays so existing callers are unchanged.
+        """
+
+        del product_knowledge
+        if _non_naver_market(request.store_code) is None:
+            return
+        if request.metadata.get("model_identity_source"):
+            return
+        targets = AnswerService._identity_dependent_actions(request)
+        if not targets:
+            return
+        # Why it was refused stays on the request so the trace and the
+        # dashboard can show the mapping state, not just the policy name.
+        request.metadata["blocked_mapping_resolution"] = (
+            str(request.metadata.get("mapping_resolution") or "") or "NONE")
+        request.metadata["blocked_identity_actions"] = list(targets)
+        blocked = AutoAnswerProhibitedError(
+            "이 문의는 특정 모델의 정보를 필요로 하는데 상품·옵션 매핑이 "
+            "아직 확정되지 않아 직원 확인이 필요합니다.",
+            policy_reason="COUPANG_MODEL_MAPPING_UNCONFIRMED",
+        )
+        # A block leaves no draft, so the request is the only thing holding
+        # the diagnosis and it goes out of scope with the exception. Carried
+        # on the error itself, which the policy-blocked handler records.
+        blocked.policy_details = {
+            "blocked_mapping_resolution": request.metadata[
+                "blocked_mapping_resolution"],
+            "blocked_identity_actions": list(targets),
+        }
+        raise blocked
 
     def _block_foreign_market_wording(
         self, inquiry_id: int, request: AnswerRequest, result: AnswerResult,
@@ -1983,9 +2159,15 @@ class AnswerService:
                 product_id=self._product_knowledge_listing_id(request),
                 questions=split_subquestions(request.question),
                 question=request.question,
+                # A Coupang listing title is not an identity. Deriving a
+                # model code from it would key the Naver catalogue off another
+                # marketplace's wording, so outside Naver the confirmed
+                # mapping is the only identity that counts.
                 model_code=(
                     request.metadata.get("model_code")
-                    or extract_model_code(request.product_name)
+                    if _non_naver_market(request.store_code) is not None
+                    else (request.metadata.get("model_code")
+                          or extract_model_code(request.product_name))
                 ),
                 product_name=request.product_name,
                 option_name=request.metadata.get("option_name"),
@@ -1993,7 +2175,13 @@ class AnswerService:
                 field_routing_texts=self._semantic_field_routing_texts(
                     request),
             )
+            # Order matters: the facts a guessed identity produced are
+            # withheld whatever the question is, and only then is the
+            # question asked whether it needed an identity at all.
+            product_knowledge = self._withhold_unconfirmed_model_facts(
+                request, product_knowledge)
             request.metadata["product_knowledge"] = product_knowledge
+            self._require_confirmed_identity_for_model_question(request)
             # Which product that evidence is about. Recorded separately from
             # the listing because they can differ: a customer reading one
             # listing may ask about another model by name, and the lookup
@@ -3516,6 +3704,12 @@ class AnswerService:
                     field_routing_texts=self._semantic_field_routing_texts(
                         request),
                 )
+                # The fallback rebuilds the record, so it rebuilds the
+                # guessed identity with it and has to withhold the same
+                # facts. Reached only when the generation path did not set
+                # one; the primary call is withheld where it is made.
+                product_knowledge = self._withhold_unconfirmed_model_facts(
+                    request, product_knowledge)
             # A verified fact only settles the product-fact requirement when
             # the whole evidence chain actually happened: the fact was safe,
             # it reached the provider prompt, and the validator cleared the
@@ -4169,6 +4363,33 @@ class AnswerService:
                 result.metadata["eligibility_trace_error"] = (
                     error.__class__.__name__
                 )
+            # Which market identity this answer was built on.  Phase 2-A put
+            # it on the request so "the trace and the dashboard can show the
+            # mapping state", and the request is discarded when generation
+            # ends: replaying 14 real Coupang inquiries found the model had
+            # reached Product Knowledge (identity_status EXACT on 9 of them)
+            # while 0 of the 542 drafts in the 26.10.12 snapshot contained
+            # ``model_identity_source``, ``mapping_resolution`` or
+            # ``canonical_model``.  Recorded whenever the inquiry is on a
+            # market that has an identity to record, including the empty
+            # ``mapping_resolution`` the 232 backfilled CONFIRMED rows carry
+            # -- absent and "confirmed before the column existed" are
+            # different facts.
+            if request.metadata.get("market"):
+                result.metadata["market_identity"] = {
+                    key: request.metadata.get(key)
+                    for key in (
+                        "market", "model_identity_source", "model_code",
+                        "canonical_model", "mapping_resolution",
+                    )
+                }
+            # Facts a guessed identity produced and the pipeline withheld.
+            # Recorded for the same reason as the identity above: the replay
+            # could see the withholding only as a drop from 6 safe facts to
+            # 0, which reads like a record that had nothing in it.
+            withheld = request.metadata.get("model_bound_facts_withheld")
+            if isinstance(withheld, dict) and withheld:
+                result.metadata["model_bound_facts_withheld"] = dict(withheld)
             result.metadata["production_decision_trace"] = {
                 "eligibility": trace_verdict.decision,
                 "blocking_reason_codes": list(trace_verdict.reasons),
@@ -4622,6 +4843,7 @@ class AnswerService:
                                 "policy_blocked": True,
                                 "policy_reason": error.policy_reason
                                 or "AUTO_ANSWER_PROHIBITED",
+                                **(getattr(error, "policy_details", None) or {}),
                             },
                         )
                     else:

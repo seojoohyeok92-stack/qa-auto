@@ -7,6 +7,7 @@ from typing import Any
 
 from answer.learning_conflict import LearningConflictError
 from answer.answer_format import format_final_answer
+from answer.cross_market_knowledge import answers_cross_markets_safely
 from repositories.database import Database
 from repositories.inquiry_repository import (
     InquiryRepository,
@@ -129,6 +130,50 @@ def is_market_applicable(metadata: dict[str, Any], market: str | None) -> bool:
     if normalized_market == origin:
         return True
     return (origin, normalized_market) in _SHARED_FORWARD
+
+
+def is_market_knowledge_shareable(
+    item: dict[str, Any], market: str | None
+) -> bool:
+    """Whether this row may answer ``market``, by origin *and* by content.
+
+    ``is_market_applicable`` asks the first question and is unchanged: it
+    decides from where the row came, which is a statement about corpora. This
+    adds the second, which it has no way to ask because it never sees the
+    answer -- whether the claim routes the customer through a different
+    marketplace's own channel.
+
+    The order matters. A row the origin rule refuses is refused; a row that
+    states its own applicability is believed, exactly as before, because that
+    is an operator's explicit decision. Only a row that says nothing is read,
+    and that is every legacy row -- all 1,066 of the Naver rows in the
+    26.10.12 Coupang pool, of which this withholds 141.
+    """
+
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if not is_market_applicable(metadata, market):
+        return False
+    if normalize_market_applicability(
+            metadata.get("market_applicability")) is not None:
+        return True
+    # Reading the claim means stripping the template frame off three fields,
+    # and this runs over a pool of up to 2,000 rows. Everything that can
+    # decide without the text decides first: a same-market read is every row
+    # of a Naver pool and the 765 Coupang rows of a Coupang one.
+    origin = origin_market_of(metadata)
+    normalized = str(market or "").strip().upper()
+    if not normalized or origin == normalized:
+        return True
+    return answers_cross_markets_safely(
+        origin_market=origin,
+        market=market,
+        answers=(
+            item.get("final_answer"),
+            item.get("seller_answer"),
+            item.get("edited_answer"),
+        ),
+    )
 
 
 class LearningRepository:
@@ -642,11 +687,7 @@ class LearningRepository:
             for row in rows
             if (item := self._row(row)) is not None
             and is_learning_usable(item)
-            and is_market_applicable(
-                item.get("metadata_json")
-                if isinstance(item.get("metadata_json"), dict) else {},
-                effective_market,
-            )
+            and is_market_knowledge_shareable(item, effective_market)
         ]
         inquiry_ids = sorted({
             int(item["inquiry_id"])

@@ -1413,6 +1413,58 @@ def _seller_answer_learning_approval(inquiry: dict[str, Any]) -> bool:
     return bool(_source_seller_answer(inquiry))
 
 
+def _read_only_notice(inquiry: dict[str, Any]) -> str:
+    """What a look-only inquiry may and may not have done to it.
+
+    Read-only is about writing an answer, never about the Learning decision:
+    ``_seller_answer_learning_approval`` says so, and on a Coupang inquiry the
+    승인 control sits further down this same screen.  Listing 승인 among the
+    things that are not run contradicted that button directly, so where the
+    approval is offered the notice names which 승인 it means instead.
+    """
+
+    market = store_display_name(inquiry.get("store_code"))
+    opening = f"{market} 문의는 현재 조회 전용입니다. 답변 생성·수정·"
+    if not _seller_answer_learning_approval(inquiry):
+        return (
+            opening + "승인·등록은 실행하지 않고, 마켓에서 조회한 문의와 "
+            "판매자 답변만 표시합니다."
+        )
+    return (
+        opening + f"{market} 등록은 실행하지 않고, 마켓에서 조회한 문의와 "
+        "판매자 답변만 표시합니다. 아래 승인은 마켓 등록이 아니라 이 판매자 "
+        "답변을 Human Verified Positive Learning으로 사용할지에 대한 "
+        "승인입니다."
+    )
+
+
+def _posted_answer_approved_notice(inquiry: dict[str, Any]) -> str:
+    """What was just approved, and what the approval did not do.
+
+    Both are market facts.  Hardcoding Naver reported "네이버 실제 등록 답변을
+    Positive Learning으로 승인했습니다. 네이버 재등록은 수행하지 않았습니다."
+    after approving a Coupang seller reply -- naming a market the inquiry was
+    not from, and a re-registration that could not have happened on a market
+    this system has never posted to.  The Learning row was already correct
+    (``origin_market`` COUPANG, ``COUPANG_ONLY``, no store); only this
+    sentence disagreed with it.
+    """
+
+    market = store_display_name(inquiry.get("store_code"))
+    approved = _source_answer_view(inquiry) or NAVER_POSTED_VIEW
+    if approved == NAVER_POSTED_VIEW:
+        return (
+            f"{approved}을 Positive Learning으로 승인했습니다. "
+            f"{market} 재등록은 수행하지 않았습니다."
+        )
+    # Nothing was ever registered here by this system, so "재등록" would
+    # describe a step that does not exist on this market.
+    return (
+        f"{approved}을 Positive Learning으로 승인했습니다. "
+        f"{market}에 답변을 등록하지 않았습니다."
+    )
+
+
 def _approval_next_step_notice(inquiry: dict[str, Any]) -> str:
     """What an approver can do next, which depends on the marketplace.
 
@@ -1605,11 +1657,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
     lookup_unsupported = _order_lookup_unsupported(inquiry, inquiry_analysis)
     if read_only:
         generate = reset = save = False
-        st.info(
-            f"{store_display_name(inquiry.get('store_code'))} 문의는 현재 "
-            "조회 전용입니다. 답변 생성·수정·승인·등록은 실행하지 않고, "
-            "마켓에서 조회한 문의와 판매자 답변만 표시합니다."
-        )
+        st.info(_read_only_notice(inquiry))
     else:
         if not inquiry_analysis.requires_order_lookup:
             st.info(
@@ -3243,9 +3291,7 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
             )
             st.session_state[pending_answer_view_key] = "Final Answer"
             st.session_state["approval_ui_notice"] = (
-                "success",
-                "네이버 실제 등록 답변을 Positive Learning으로 승인했습니다. "
-                "네이버 재등록은 수행하지 않았습니다.",
+                "success", _posted_answer_approved_notice(inquiry),
             )
             st.rerun()
         if approve and draft and not source_answered:

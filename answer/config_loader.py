@@ -249,13 +249,35 @@ def _require_keys(
         )
 
 
+#: The wrapper parsed from one state of ``answer_policy.json``, keyed by the
+#: file's path, mtime and size -- the same cache key the catalogue read uses.
+#: Re-reading per call is what it did before, and that was free while callers
+#: were per-answer.  ``extract_answer_body`` is now also asked about every row
+#: in a retrieval pool, where it cost 0.49 ms each and up to 2.9 s per pool,
+#: nearly all of it re-parsing one unchanged file.  An edit to the file still
+#: takes effect without a restart, because a new mtime or size is a new key.
+_WRAPPER_CACHE: dict[tuple[str, int, int], AnswerWrapperTemplate] = {}
+
+
 def load_answer_wrapper(
     data_root: str | Path | None = None,
 ) -> AnswerWrapperTemplate:
     """Load the shared answer wrapper verbatim from the Template repository."""
 
     root = Path(data_root or DEFAULT_DATA_ROOT).resolve()
-    policy = _read_json(root / "configs" / "answer_policy.json", dict)
+    path = root / "configs" / "answer_policy.json"
+    cache_key: tuple[str, int, int] | None = None
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        # Let the read below raise the configured error, as it always has.
+        cache_key = None
+    if cache_key is not None:
+        cached = _WRAPPER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    policy = _read_json(path, dict)
     value = policy.get("wrapper")
     if not isinstance(value, dict):
         raise AnswerConfigError(
@@ -284,7 +306,7 @@ def load_answer_wrapper(
         for key, text in market_footers.items()
     ):
         raise AnswerConfigError("공통 Wrapper market_footers가 올바르지 않습니다.")
-    return AnswerWrapperTemplate(
+    wrapper = AnswerWrapperTemplate(
         header=header,
         footer=footer,
         legacy_headers=tuple(legacy_headers),
@@ -293,6 +315,9 @@ def load_answer_wrapper(
             (key.strip().upper(), text) for key, text in market_footers.items()
         ),
     )
+    if cache_key is not None:
+        _WRAPPER_CACHE[cache_key] = wrapper
+    return wrapper
 
 
 @lru_cache(maxsize=8)

@@ -90,7 +90,9 @@ def test_post_markets_is_now_only_the_read_only_rule() -> None:
     assert is_store_post_enabled(NAVER_STORE) is True
     assert is_store_post_enabled(COUPANG_NS) is False
     assert is_store_post_enabled(COUPANG_PLUS) is False
-    assert is_store_automatic_post_enabled(COUPANG_NS) is True
+    # Registering at Coupang is closed until an explicit decision
+    # re-opens it; the read-only rule above is a separate question.
+    assert is_store_automatic_post_enabled(COUPANG_NS) is False
 
 
 def test_both_answerable_markets_are_notified() -> None:
@@ -100,11 +102,11 @@ def test_both_answerable_markets_are_notified() -> None:
 
 
 def test_the_queue_scope_is_the_markets_it_may_post_to() -> None:
-    """Both answerable markets are in scope now, and a blank code never is."""
+    """Only a market the queue may post to is in scope, blanks never are."""
 
     assert post_enabled_store_codes(
         [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
-    ) == [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
+    ) == [NAVER_STORE]
     assert post_enabled_store_codes(["", None, "   "]) == []
 
 
@@ -131,7 +133,7 @@ def test_the_auto_post_queue_is_scoped_by_market_not_unscoped(tmp_path) -> None:
     # The scope is still applied in SQL; it now admits both answerable
     # markets, and an empty scope still selects nothing at all.
     assert {row["store_code"] for row in scoped} == {
-        NAVER_STORE, COUPANG_NS, COUPANG_PLUS
+        NAVER_STORE
     }
     assert repository.candidates(max_retries=3, store_codes=[]) == []
 

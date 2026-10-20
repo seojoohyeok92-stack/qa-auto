@@ -633,6 +633,15 @@ _VERIFICATION_RANK = (
 # Identity scopes, narrowest first.
 _SCOPE_RANK = ("EXACT_MODEL", "PRODUCT_LISTING", "MODEL_CATALOG")
 
+#: The scopes whose facts are a property of one named model, and therefore
+#: only usable once that model is the right one.  Both carry the model in
+#: ``scope_key``; ``PRODUCT_LISTING`` is the listing's own record and names no
+#: model, so it is not one of these.
+MODEL_BOUND_SCOPES = frozenset({"EXACT_MODEL", "MODEL_CATALOG"})
+
+#: Why a model-bound fact was withheld although the record was found.
+UNCONFIRMED_MARKET_MAPPING = "UNCONFIRMED_MARKET_MAPPING"
+
 _WORD = re.compile(r"[0-9A-Za-z\uac00-\ud7a3]+")
 
 
@@ -920,6 +929,50 @@ class ProductKnowledgeResult:
     inquiry_target_models: tuple[str, ...] = dataclass_field(default=())
     resolved_pk_targets: tuple[str, ...] = dataclass_field(default=())
     target_resolution_reason: str = LISTING_FALLBACK
+
+    def without_model_bound_facts(
+        self, reason: str = UNCONFIRMED_MARKET_MAPPING
+    ) -> "ProductKnowledgeResult":
+        """The same record with every model-bound fact withheld.
+
+        ``facts_for_inquiry`` has a second way to reach an identity: asked for
+        the whole catalogue record (``include_all_catalog_fields``), it reads
+        one out of the listing's own name.  On a Coupang listing called
+        "샥스 SHAKS G1 / 일반 01" that produced ``identity_status`` EXACT with
+        ``model_code`` "샥스" -- a brand token standing in for a model -- and
+        six MODEL_CATALOG facts, on an inquiry whose option mapping is
+        UNRESOLVED.  The model-code gate in the answer service could not see
+        it, because the name never passed through ``extract_model_code``.
+
+        A guess is not an identity, so the facts that depend on one are moved
+        into ``excluded_facts`` with a reason rather than dropped: the screen
+        and the trace already read that channel, so the withholding is
+        visible instead of looking like a record that had nothing in it. What
+        the listing says about itself is not model-bound and stays.
+        """
+
+        withheld = tuple(
+            replace(fact, safe_for_answer=False,
+                    exclusion_reason=reason)
+            for fact in self.safe_facts
+            if fact.scope in MODEL_BOUND_SCOPES
+        )
+        if not withheld:
+            return self
+        kept = tuple(
+            fact for fact in self.safe_facts
+            if fact.scope not in MODEL_BOUND_SCOPES
+        )
+        return replace(
+            self,
+            safe_facts=kept,
+            excluded_facts=(*self.excluded_facts, *withheld),
+            # Nothing elected a model here, so no reader downstream may take
+            # one from this record.
+            listing_model=None,
+            inquiry_target_models=(),
+            resolved_pk_targets=(),
+        )
 
     @property
     def has_safe_facts(self) -> bool:
@@ -1627,15 +1680,6 @@ _ATTRIBUTE_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = 
     ("RELEASE",
      ("출시", "연식", "년형", "제조일", "생산연도", "출시일"),
      ("release", "manufacture_date")),
-)
-
-
-# Attribute families the Product Knowledge table does not need, because it
-# stores no field for them, but a Learning answer routinely is about. They are
-# part of the same vocabulary rather than a second one: same shape, same
-# matching, same exclusion handling. Anything a stored field exists for stays
-# in ``_ATTRIBUTE_FAMILIES`` and is not repeated here.
-_OPERATIONAL_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("PACKAGE_CONTENTS",
      ("구성품", "구성 품", "동봉", "포함되어", "포함되나", "포함인가",
       "같이 오", "함께 오", "들어있", "들어 있", "별도 구매", "기본 제공",
@@ -1646,7 +1690,33 @@ _OPERATIONAL_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
       # question as a mismatch. The pairing is deliberate -- bare 배송 or 출고
       # is a shipping status ("출고 예정입니다") and stays out of this family.
       "함께 배송", "같이 배송", "함께 출고", "같이 출고", "함께 발송",
-      "같이 발송", "포함인")),
+      "같이 발송", "포함인"),
+     # It was in ``_OPERATIONAL_FAMILIES``, on the premise that Product
+     # Knowledge "stores no field for them". The records do: 20 distinct
+     # inclusion names, among them ``remote_control_included`` (29 models),
+     # ``battery_included`` and ``battery_count`` (9 each), ``stand_included``
+     # and the cable fields. Ask-only meant ``_family_fragments`` offered
+     # nothing, so no contents question could reach any of them.
+     #
+     # Inquiry 10603 is what that cost: "기본 구성품에 리모컨이 포함되어
+     # 있나요? 포함된다면 건전지도" against a record holding
+     # ``remote_control_included`` 있음, ``battery_included`` 있음 and
+     # ``battery_count`` 2, all EXACT_MODEL. ``FIELD_TOPICS`` keys the
+     # inclusion phrasings literally -- "리모컨 포함" -- and Korean put the
+     # subject particle in the middle of it, so that route missed too; the
+     # spec vocabulary then asked for ``remote_present``, which this record
+     # does not have. Neither battery field was asked for at all, and both
+     # were dropped for the prompt budget.
+     ("_included", "battery", "stand_count", "remote_control")),
+)
+
+
+# Attribute families the Product Knowledge table does not need, because it
+# stores no field for them, but a Learning answer routinely is about. They are
+# part of the same vocabulary rather than a second one: same shape, same
+# matching, same exclusion handling. Anything a stored field exists for stays
+# in ``_ATTRIBUTE_FAMILIES`` and is not repeated here.
+_OPERATIONAL_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("REMOTE", ("리모컨", "리모콘", "remote")),
     ("INSTALLATION",
      ("설치", "기사님", "기사 방문", "방문 설치", "시공", "벽걸이 설치",

@@ -40,10 +40,10 @@ MARKET_DISPLAY_NAMES: dict[str, str] = {
     "GMARKET": "G마켓",
 }
 
-# Phase 2-1: Coupang answers may be generated, reviewed and approved by a
-# person.  Nothing generates them unasked, nothing looks up a Coupang order or
-# DPS schedule, nothing posts them and nothing notifies about them -- each of
-# those opens later by its own explicit decision.
+# Phase 2-A: Coupang inquiries are collected, answered and stored, and the
+# answer is shown for review.  Nothing looks up a Coupang order or DPS
+# schedule, and nothing registers a reply at Coupang -- automatic posting and
+# manual posting are both closed and re-open only by an explicit decision.
 ANSWER_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 AUTOMATIC_GENERATION_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 DPS_MARKETS: frozenset[str] = frozenset({NAVER})
@@ -54,7 +54,14 @@ POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # so adding a market there would open automatic posting and re-open answer
 # editing on inquiries the marketplace has already answered.  This opens the
 # button and nothing else.
-MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
+# Coupang is deliberately absent. Registering a reply at Coupang -- by hand
+# or unattended -- stays closed until it is re-opened by an explicit
+# decision, so the one place that decides it is this set rather than a flag
+# in the panel or a double in a test. Collection, answer generation, storage
+# and the dashboard are unaffected: they are governed by
+# ANSWER_GENERATION_MARKETS and by POST_MARKETS' read-only rule, neither of
+# which changes here.
+MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER})
 # Which markets the unattended pipeline may register an answer at.  This is
 # the auto-post queue's own scope, split out of ``POST_MARKETS`` because that
 # set had four consumers and only one of them was the queue: the other three
@@ -62,7 +69,7 @@ MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 # path.  Adding a market there would have re-opened answer editing on
 # inquiries the marketplace has already answered, which is a different
 # decision from letting the pipeline post.
-AUTOMATIC_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
+AUTOMATIC_POST_MARKETS: frozenset[str] = frozenset({NAVER})
 KAKAO_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 
 # Wording that names one marketplace's own procedure.  An answer for another

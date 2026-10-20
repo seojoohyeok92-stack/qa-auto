@@ -151,6 +151,26 @@ class OneItemSync(CoupangInquirySyncService):
         return result
 
 
+@pytest.fixture
+def coupang_posting_opened(monkeypatch):
+    """Open Coupang posting for one test.
+
+    Production policy keeps Coupang closed -- see ``market_policy`` -- so
+    the posting machinery would otherwise have no test at all. Opening it
+    here, explicitly and per test, keeps the mechanism covered while leaving
+    the shipped default where the decision put it: off.
+    """
+
+    opened = frozenset(market_policy.AUTOMATIC_POST_MARKETS | {
+        market_policy.COUPANG})
+    monkeypatch.setattr(market_policy, "AUTOMATIC_POST_MARKETS", opened)
+    monkeypatch.setattr(
+        market_policy, "MANUAL_POST_MARKETS",
+        frozenset(market_policy.MANUAL_POST_MARKETS | {
+            market_policy.COUPANG}))
+    return opened
+
+
 def enable_auto_processing(database: Database) -> None:
     AutoPostRepository(database).save_settings(
         enabled=True, interval_minutes=10, max_retries=1,
@@ -234,10 +254,13 @@ def test_a_failed_announcement_never_fails_the_collection(
 
 # --- the gates the pipeline reads ----------------------------------------------
 
-def test_coupang_is_admitted_to_generation_and_posting_only() -> None:
+def test_coupang_is_admitted_to_generation_but_not_to_posting() -> None:
     for store in ("COUPANG_OJE_NS", "COUPANG_OJE_PLUS"):
         assert market_policy.is_store_automatic_generation_enabled(store) is True
-        assert market_policy.is_store_automatic_post_enabled(store) is True
+        # Posting at Coupang -- unattended or by hand -- is closed until it
+        # is re-opened by an explicit decision.
+        assert market_policy.is_store_automatic_post_enabled(store) is False
+        assert market_policy.is_store_manual_post_enabled(store) is False
         # DPS stays closed, and so does the read-only rule for answered rows.
         assert market_policy.is_store_dps_enabled(store) is False
         assert market_policy.is_store_post_enabled(store) is False
@@ -332,7 +355,7 @@ def test_only_naver_is_confirmed_by_re_reading_it(database) -> None:
 
 # --- I/J. idempotency is the existing post state --------------------------------
 
-def test_an_already_posted_inquiry_is_not_posted_again(database) -> None:
+def test_an_already_posted_inquiry_is_not_posted_again(coupang_posting_opened, database) -> None:
     """The Coupang post service refuses on the state the manual path uses."""
 
     inquiry_id = coupang_inquiry(database, inquiry_id="17000051")
@@ -458,7 +481,7 @@ def run(database: Database, poster, confirmation=None, *, run_id="RUN-1",
     ).run_pending(run_id=run_id, owner_id="OWNER-1", max_retries=1)
 
 
-def test_a_coupang_inquiry_with_a_safe_draft_is_posted_once(database) -> None:
+def test_a_coupang_inquiry_with_a_safe_draft_is_posted_once(coupang_posting_opened, database) -> None:
     inquiry_id = coupang_inquiry(database, inquiry_id="17000060")
     make_draft(database, inquiry_id)
     poster, confirmation = RecordingPoster(), RecordingConfirmation()
@@ -490,7 +513,7 @@ def test_m_the_same_naver_fixture_still_posts_the_naver_way(database) -> None:
     assert confirmation.calls == [inquiry_id]
 
 
-def test_both_markets_in_one_run_each_get_their_own_shape(database) -> None:
+def test_both_markets_in_one_run_each_get_their_own_shape(coupang_posting_opened, database) -> None:
     coupang_id = coupang_inquiry(database, inquiry_id="17000061")
     naver_id = naver_inquiry(database, external_id="N-2")
     for inquiry_id in (coupang_id, naver_id):
@@ -506,7 +529,7 @@ def test_both_markets_in_one_run_each_get_their_own_shape(database) -> None:
     assert confirmation.calls == [naver_id]
 
 
-def test_b_a_draft_held_for_review_is_never_posted(database, monkeypatch) -> None:
+def test_b_a_draft_held_for_review_is_never_posted(coupang_posting_opened, database, monkeypatch) -> None:
     """Held for staff, and the hold is told to the Coupang room only."""
 
     import kakao_notify
@@ -538,7 +561,7 @@ def test_b_a_draft_held_for_review_is_never_posted(database, monkeypatch) -> Non
     ) == kakao_notify.recipient_for_market("COUPANG")
 
 
-def test_a_dps_dependent_draft_is_held_and_never_posted(database) -> None:
+def test_a_dps_dependent_draft_is_held_and_never_posted(coupang_posting_opened, database) -> None:
     """DPS stays off for Coupang: the hold happens before any post."""
 
     inquiry_id = coupang_inquiry(database, inquiry_id="17000063")
@@ -562,7 +585,7 @@ def test_a_dps_dependent_draft_is_held_and_never_posted(database) -> None:
     assert lookups == []
 
 
-def test_j_running_the_pipeline_twice_posts_at_most_once(database) -> None:
+def test_j_running_the_pipeline_twice_posts_at_most_once(coupang_posting_opened, database) -> None:
     """The real Coupang service, so the second run meets the real state."""
 
     inquiry_id = coupang_inquiry(database, inquiry_id="17000064")
@@ -603,7 +626,7 @@ def test_an_answered_coupang_inquiry_never_reaches_the_poster(database) -> None:
 
 # --- K/L. two accounts, each answering as itself --------------------------------
 
-def test_k_each_account_replies_as_itself(database) -> None:
+def test_k_each_account_replies_as_itself(coupang_posting_opened, database) -> None:
     """One run, both accounts: the reply carries its own vendor and WING id."""
 
     ns = coupang_inquiry(database, account="OJE_NS", inquiry_id="17000070")
@@ -626,7 +649,7 @@ def test_k_each_account_replies_as_itself(database) -> None:
     assert all(url.endswith("/replies") for url in urls)
 
 
-def test_l_the_signing_credentials_come_from_the_resolved_account(
+def test_l_the_signing_credentials_come_from_the_resolved_account(coupang_posting_opened,
     database, monkeypatch,
 ) -> None:
     """With no injected client, each account signs with its own key."""
@@ -682,7 +705,7 @@ def test_an_unconfigured_account_is_held_rather_than_posted(database) -> None:
 
 # --- the validator is still the last line ---------------------------------------
 
-def test_an_answer_that_fails_the_validator_is_never_posted(database) -> None:
+def test_an_answer_that_fails_the_validator_is_never_posted(coupang_posting_opened, database) -> None:
     """A phone number in the body blocks the post, as it does for Naver."""
 
     inquiry_id = coupang_inquiry(database, inquiry_id="17000074")

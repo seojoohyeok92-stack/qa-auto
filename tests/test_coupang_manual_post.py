@@ -22,6 +22,27 @@ from repositories.answer_repository import AnswerRepository
 from repositories.approval_repository import ApprovalRepository
 from repositories.database import Database
 from repositories.inquiry_repository import InquiryRepository
+
+
+@pytest.fixture(autouse=True)
+def coupang_posting_opened(monkeypatch):
+    """Open Coupang registration for this file only.
+
+    Every test here is about the registration mechanism -- signing, the
+    endpoint, retries, what is recorded -- so all of them need the step to be
+    open. Production policy keeps Coupang closed until an explicit decision
+    re-opens it, and opening it per test keeps that default intact while the
+    machinery stays covered.
+    """
+
+    monkeypatch.setattr(
+        market_policy, "MANUAL_POST_MARKETS",
+        frozenset(market_policy.MANUAL_POST_MARKETS | {
+            market_policy.COUPANG}))
+    monkeypatch.setattr(
+        market_policy, "AUTOMATIC_POST_MARKETS",
+        frozenset(market_policy.AUTOMATIC_POST_MARKETS | {
+            market_policy.COUPANG}))
 from repositories.naver_post_repository import NaverPostRepository
 from repositories.workflow_repository import WorkflowRepository
 from services import market_policy

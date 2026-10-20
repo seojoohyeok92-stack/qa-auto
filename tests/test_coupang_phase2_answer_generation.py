@@ -213,16 +213,19 @@ def test_naver_keeps_every_action() -> None:
 
 
 @pytest.mark.parametrize("store", ["COUPANG_OJE_NS", "COUPANG_OJE_PLUS"])
-def test_coupang_is_answered_automatically_but_never_looked_up(store) -> None:
+def test_coupang_is_answered_but_never_looked_up_or_posted(store) -> None:
     assert market_policy.is_store_answer_generation_enabled(store) is True
     assert market_policy.is_store_automatic_generation_enabled(store) is True
-    assert market_policy.is_store_manual_post_enabled(store) is True
-    assert market_policy.is_store_automatic_post_enabled(store) is True
     assert market_policy.is_kakao_market_enabled("COUPANG") is True
     # Order and delivery lookups stay closed, and so does the read-only rule
     # that keeps an answered Coupang inquiry from being edited.
     assert market_policy.is_store_dps_enabled(store) is False
     assert market_policy.is_store_post_enabled(store) is False
+    # Registering the reply at Coupang is closed too, by hand and unattended
+    # alike, until it is re-opened by an explicit decision. Generating the
+    # answer and showing it for review are unaffected.
+    assert market_policy.is_store_manual_post_enabled(store) is False
+    assert market_policy.is_store_automatic_post_enabled(store) is False
 
 
 # --- B. the unattended path now starts it too ---------------------------------------
@@ -260,7 +263,14 @@ def test_automatic_generation_still_skips_an_answered_coupang_inquiry(
     assert draft_count(database) == 0
 
 
-def test_auto_post_candidates_now_include_both_coupang_accounts(database) -> None:
+def test_the_auto_post_queue_does_not_select_coupang(database) -> None:
+    """Collected and answered, but not queued for registration.
+
+    The queue is ordered by arrival and limited, so a market it may not post
+    to must be filtered before the query rather than after: otherwise Coupang
+    rows would fill the page and starve the market that can be posted.
+    """
+
     coupang_inquiry(database, account="OJE_NS", inquiry_id="1")
     coupang_inquiry(database, account="OJE_PLUS", inquiry_id="2")
     naver_inquiry(database)
@@ -269,9 +279,7 @@ def test_auto_post_candidates_now_include_both_coupang_accounts(database) -> Non
         max_retries=3,
         store_codes=market_policy.post_enabled_store_codes(repository.distinct_store_codes()),
     )
-    assert {row["store_code"] for row in rows} == {
-        "OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"
-    }
+    assert {row["store_code"] for row in rows} == {"OJE_PLUS"}
 
 
 def test_an_explicit_generate_creates_a_draft(database) -> None:

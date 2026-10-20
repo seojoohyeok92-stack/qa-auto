@@ -34,6 +34,7 @@ from services.auto_processing_eligibility_service import (
     AutoProcessingEligibility,
     AutoProcessingEligibilityService,
 )
+from services.market_policy import is_store_automatic_post_enabled
 
 
 # The reason vocabulary is shared with the KakaoTalk notifier so the
@@ -256,13 +257,37 @@ def build_decision_trace(
     safe = eligibility.safe if eligibility is not None else (
         str(persisted_decision.get("eligibility") or "").upper() == "SAFE"
     )
-    auto_post = (
-        "SUCCESS" if post_status == "POSTED" or inquiry.get("source_answered")
-        else "FAILED" if post_status == "POST_FAILED"
-        else str(persisted_decision.get("auto_post") or "")
-        if persisted_decision.get("auto_post") in {"SUCCESS", "BLOCKED", "FAILED"}
-        else "BLOCKED" if not safe else "NOT_ATTEMPTED"
+    # ``source_answered`` means the marketplace holds a reply.  On a market
+    # this system may post to, that reply is its own work and reads as a
+    # successful auto-post.  On a market it may not, the reply was written by
+    # a person in the seller console and nothing here registered anything --
+    # so the same field reported a post that never happened.  It did, for 11
+    # of the 16 Coupang drafts on the 26.10.12 snapshot, every one of them
+    # ``post_status`` NOT_POSTED and ``posted`` 0.
+    #
+    # ``post_status`` is this system's own column and still decides on its
+    # own: the three Coupang drafts that really were posted keep SUCCESS.
+    # An inquiry naming no store at all is legacy Naver, the default every
+    # other market-aware call site keeps.
+    store_code = inquiry.get("store_code")
+    auto_post_market = (
+        True if not str(store_code or "").strip()
+        else is_store_automatic_post_enabled(store_code)
     )
+    if post_status == "POSTED" or (
+        auto_post_market and inquiry.get("source_answered")
+    ):
+        auto_post = "SUCCESS"
+    elif post_status == "POST_FAILED":
+        auto_post = "FAILED"
+    elif not auto_post_market:
+        # Neither success nor a pending attempt is true here, and "BLOCKED"
+        # would name a safety decision that was never reached.
+        auto_post = "NOT_SUPPORTED"
+    elif persisted_decision.get("auto_post") in {"SUCCESS", "BLOCKED", "FAILED"}:
+        auto_post = str(persisted_decision.get("auto_post") or "")
+    else:
+        auto_post = "BLOCKED" if not safe else "NOT_ATTEMPTED"
     hard_reasons = eligibility_reasons - {
         "GPT_REPORTED_UNRESOLVED", "GPT_WITHHELD_AUTO_POST",
         # A successfully posted inquiry evaluates as idempotently blocked on

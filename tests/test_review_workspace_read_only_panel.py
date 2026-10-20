@@ -248,8 +248,11 @@ def test_an_unanswered_coupang_inquiry_opens_generation_and_review(database) -> 
         assert label in buttons, label
     assert not buttons["GPT 새 답변 생성"].disabled
     assert not buttons["임시 저장"].disabled
-    # Manual registration is open now, and names this inquiry's own market.
-    assert not buttons["쿠팡 답변 등록"].disabled
+    # Generation and review stay open; registering the answer at Coupang
+    # does not, so the button is shown and disabled rather than hidden --
+    # an absent button reads as a missing feature, a disabled one as a
+    # closed step.
+    assert buttons["쿠팡 답변 등록"].disabled
     assert "네이버 답변 등록" not in buttons
     assert "확정 운영 템플릿 사용" in _labels(app.checkbox)
     assert list(app.segmented_control[0].options) == ["Program Answer", "직원 수정본", "Final Answer"]

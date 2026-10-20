@@ -158,6 +158,26 @@ def add_draft(database: Database, inquiry_id: int, answer: str = ANSWER) -> int:
         return int(cursor.lastrowid)
 
 
+@pytest.fixture
+def coupang_posting_opened(monkeypatch):
+    """Open Coupang posting for one test.
+
+    These tests are about where a notification goes once an answer has been
+    registered, so they need a registration to exist. Production policy keeps
+    Coupang posting closed, and opening it here per test keeps that default
+    where the decision put it.
+    """
+
+    monkeypatch.setattr(
+        market_policy, "MANUAL_POST_MARKETS",
+        frozenset(market_policy.MANUAL_POST_MARKETS | {
+            market_policy.COUPANG}))
+    monkeypatch.setattr(
+        market_policy, "AUTOMATIC_POST_MARKETS",
+        frozenset(market_policy.AUTOMATIC_POST_MARKETS | {
+            market_policy.COUPANG}))
+
+
 def post(database: Database, inquiry_id: int, transport: RecordingTransport):
     from api.coupang_post_client import CoupangPostClient
 
@@ -173,7 +193,7 @@ def post(database: Database, inquiry_id: int, transport: RecordingTransport):
 # --- A / B. both accounts, one room ---------------------------------------------
 
 @pytest.mark.parametrize("account", ["OJE_NS", "OJE_PLUS"])
-def test_a_registered_coupang_answer_notifies_the_coupang_room(
+def test_a_registered_coupang_answer_notifies_the_coupang_room(coupang_posting_opened,
     database, outbox, account,
 ) -> None:
     inquiry_id = coupang_inquiry(database, account=account, inquiry_id="17000010")
@@ -191,7 +211,7 @@ def test_a_registered_coupang_answer_notifies_the_coupang_room(
     assert ANSWER in sent[0]["message"]
 
 
-def test_both_accounts_share_one_room_rather_than_splitting(database, outbox) -> None:
+def test_both_accounts_share_one_room_rather_than_splitting(coupang_posting_opened, database, outbox) -> None:
     for account, inquiry in (("OJE_NS", "17000011"), ("OJE_PLUS", "17000012")):
         inquiry_id = coupang_inquiry(database, account=account, inquiry_id=inquiry)
         add_draft(database, inquiry_id)
@@ -204,7 +224,7 @@ def test_both_accounts_share_one_room_rather_than_splitting(database, outbox) ->
 
 # --- C. a failed registration --------------------------------------------------
 
-def test_a_failed_coupang_post_sends_no_notification(database, outbox) -> None:
+def test_a_failed_coupang_post_sends_no_notification(coupang_posting_opened, database, outbox) -> None:
     """The Naver post service notifies only on success; this matches it.
 
     A failure is recorded on the attempt and shown on the screen the operator
@@ -330,7 +350,7 @@ def test_the_room_is_configurable_without_code_changes(outbox, monkeypatch) -> N
 
 # --- one notification per registration -----------------------------------------
 
-def test_a_repeated_registration_does_not_duplicate_the_notification(
+def test_a_repeated_registration_does_not_duplicate_the_notification(coupang_posting_opened,
     database, outbox,
 ) -> None:
     inquiry_id = coupang_inquiry(database, inquiry_id="17000014")
@@ -345,7 +365,7 @@ def test_a_repeated_registration_does_not_duplicate_the_notification(
 
 # --- G / H. nothing else was opened ---------------------------------------------
 
-def test_kakao_opened_a_room_and_nothing_else() -> None:
+def test_kakao_opened_a_room_and_nothing_else(coupang_posting_opened, ) -> None:
     """Every later opening is its own gate; the room is not one of them."""
 
     for store in ("COUPANG_OJE_NS", "COUPANG_OJE_PLUS"):
@@ -359,7 +379,7 @@ def test_kakao_opened_a_room_and_nothing_else() -> None:
 # --- the product name the dashboard already shows --------------------------------
 
 @pytest.mark.parametrize("account", ["OJE_NS", "OJE_PLUS"])
-def test_a_registration_notification_names_the_product(
+def test_a_registration_notification_names_the_product(coupang_posting_opened,
     database, outbox, account,
 ) -> None:
     """A/C: the name is the dashboard's, for either seller account.
@@ -381,7 +401,7 @@ def test_a_registration_notification_names_the_product(
     assert "상품명: -" not in message
 
 
-def test_the_notified_name_is_the_one_the_screen_reads(database, outbox) -> None:
+def test_the_notified_name_is_the_one_the_screen_reads(coupang_posting_opened, database, outbox) -> None:
     """Same repository call, so the two can never disagree."""
 
     seed_catalog(database)
@@ -395,7 +415,7 @@ def test_the_notified_name_is_the_one_the_screen_reads(database, outbox) -> None
     assert f"상품명: {displayed['product_name']}" in events(outbox)[0]["message"]
 
 
-def test_an_inquiry_with_no_catalogued_name_keeps_the_dash(database, outbox) -> None:
+def test_an_inquiry_with_no_catalogued_name_keeps_the_dash(coupang_posting_opened, database, outbox) -> None:
     """B: nothing is invented from the model, the option or the product id."""
 
     inquiry_id = coupang_inquiry(database, inquiry_id="17000022")
@@ -410,7 +430,7 @@ def test_an_inquiry_with_no_catalogued_name_keeps_the_dash(database, outbox) -> 
     assert VENDOR_ITEM not in message
 
 
-def test_another_inquiry_never_lends_its_product_name(database, outbox) -> None:
+def test_another_inquiry_never_lends_its_product_name(coupang_posting_opened, database, outbox) -> None:
     """The enrichment is keyed on the source id, so it must match this row."""
 
     seed_catalog(database)
@@ -426,7 +446,7 @@ def test_another_inquiry_never_lends_its_product_name(database, outbox) -> None:
     assert "상품명: -" in events(outbox)[1]["message"]
 
 
-def test_a_missing_catalogue_never_blocks_the_registration(database, outbox) -> None:
+def test_a_missing_catalogue_never_blocks_the_registration(coupang_posting_opened, database, outbox) -> None:
     """A display name is a display name; it cannot fail a confirmed post."""
 
     from services.coupang_post_service import CoupangPostService as Service
