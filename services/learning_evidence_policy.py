@@ -554,9 +554,62 @@ def usable_as_factual_evidence(item: Mapping[str, Any] | Any) -> bool:
 
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
+#: The letter runs that still mean a measurement when they follow a number.
+#: Anything else glued to a number is part of a name, not a quantity.
+_UNIT_SUFFIX = re.compile(
+    "(?:mm|cm|m|inch|in|ft|kg|g|w|v|a|hz|khz|ms|sec|s|k|nit|p)",
+    re.IGNORECASE,
+)
+_TRAILING_LETTERS = re.compile(r"[A-Za-z]+")
+#: Characters that join digits into one identifier: a phone number, an order
+#: number, a date, a masked number.
+_IDENTIFIER_JOINERS = frozenset({"-", ".", "/", "*"})
+#: No product specification is this many digits; an order number is.
+_IDENTIFIER_DIGITS = 7
+
+
+def _is_identifier_number(text: str, match: "re.Match[str]") -> bool:
+    """Whether this number names something rather than measuring it.
+
+    Reading every digit run as a claim is what turned a service-centre phone
+    number into a conflicting specification: an A/S referral whose only
+    numbers were 1588-3366 was reported as contradicting
+    ``pivot_spec = -92 ~ +92``, because the two sets of numbers shared
+    nothing. The answer said nothing about pivot at all.
+
+    What separates the two is the company a number keeps, not its size.
+    1588-3366 is one hyphen-joined identifier; -92 ~ +92 is two signed
+    measurements. LS27HG400 glues digits to letters; 120mm glues them to a
+    unit. So the neighbours decide, and a bare measurement is untouched.
+    """
+
+    before = text[:match.start()]
+    after = text[match.end():]
+    # Part of a longer joined run: a phone number, a date, a masked number.
+    if before[-1:] in _IDENTIFIER_JOINERS and before[-2:-1].isdigit():
+        return True
+    if after[:1] == "*" or before[-1:] == "*":
+        # A masked number: "2026****0811" is one order number.
+        return True
+    if after[:1] in _IDENTIFIER_JOINERS and after[1:2].isdigit():
+        return True
+    # Preceded by an ASCII letter: a model code. Korean is not excluded --
+    # "약 3개" and "총 2채널" are measurements their own language marks.
+    if before[-1:].isascii() and before[-1:].isalpha():
+        return True
+    # Followed by ASCII letters that are not a unit: also a model code.
+    # The letters glued to the number have to be *exactly* a unit. "120mm"
+    # and "6.5kg" are measurements; the "EKXKR" of LS27HG400EKXKR is not.
+    letters = _TRAILING_LETTERS.match(after)
+    if letters is not None and not _UNIT_SUFFIX.fullmatch(letters.group()):
+        return True
+    if len(match.group().split(".")[0]) >= _IDENTIFIER_DIGITS:
+        return True
+    return False
+
 
 def quantities(value: object) -> frozenset[float]:
-    """Every number stated in ``value``.
+    """Every number ``value`` states as a measurement.
 
     Admitting measurements as definite (see ``is_hedged``) means the conflict
     checks have to be able to see a measurement disagree. Polarity cannot:
@@ -568,10 +621,17 @@ def quantities(value: object) -> frozenset[float]:
     getting that wrong in either direction is worse than the small cost of
     treating an incidental number as a claim. Disagreement here only ever
     routes an inquiry to a person.
+
+    What is not admitted is a number that names something --
+    ``_is_identifier_number`` says which -- because a phone number sharing no
+    digits with a specification is not a disagreement about the product.
     """
 
+    text = _text(value)
     return frozenset(
-        float(match.group()) for match in _NUMBER.finditer(_text(value))
+        float(match.group())
+        for match in _NUMBER.finditer(text)
+        if not _is_identifier_number(text, match)
     )
 
 
@@ -644,6 +704,43 @@ def _fact_quantity_text(value: object) -> str:
     return str(value or "")
 
 
+def _fields_the_text_is_about(text: str) -> tuple[frozenset[str], tuple[str, ...]]:
+    """Which stored fields this text actually discusses.
+
+    Reuses the routing Product Knowledge already uses to turn a question into
+    field keys, plus the attribute families' own fragments -- the two
+    vocabularies between them cover both spellings of a field ("speaker" is
+    reached by a family fragment, "speaker_present" by the topic table).
+
+    Imported here rather than at module scope: the catalogue repository is a
+    heavy import that this module otherwise never needs.
+    """
+
+    from services.product_knowledge_service import (
+        _family_fragments, fields_for_question,
+    )
+
+    body = _text(text)
+    if not body:
+        return frozenset(), ()
+    routed, _topics = fields_for_question(body)
+    fragments = tuple(
+        part for part in _family_fragments(body.lower()) if part
+    )
+    return frozenset(routed), fragments
+
+
+def _is_about_field(
+    field_key: str, routed: frozenset[str], fragments: tuple[str, ...]
+) -> bool:
+    key = str(field_key or "").lower()
+    if not key:
+        return False
+    if field_key in routed:
+        return True
+    return any(part in key for part in fragments)
+
+
 def fact_conflicts(
     items: Iterable[Mapping[str, Any]],
     safe_facts: Iterable[Any],
@@ -675,8 +772,19 @@ def fact_conflicts(
         allowed = None
         if callable(scope_for):
             allowed = scope_for(item.get("matched_subquestion"))
+        # Which attributes this answer is about. ``scope_for`` narrows by what
+        # the *sub-question* asked, which is not the same thing: a stored
+        # answer matched to "피벗 기능이 가능한가요?" may be an A/S referral
+        # that mentions no attribute at all, and comparing its sentence
+        # polarity with ``speaker = 없음`` then made an unrelated affirmative
+        # sentence contradict a verified absence. An answer can only
+        # contradict a fact it talks about.
+        routed, fragments = _fields_the_text_is_about(item.get("answer"))
         for fact in facts:
-            if allowed is not None and getattr(fact, "field_key", "") not in allowed:
+            field_key = getattr(fact, "field_key", "")
+            if allowed is not None and field_key not in allowed:
+                continue
+            if not _is_about_field(field_key, routed, fragments):
                 continue
             value = getattr(fact, "value", None)
             polarity = value_polarity(value)
@@ -748,7 +856,26 @@ def evaluate(
     # fits this product and this time is GPT ②'s reading -- marking the
     # sub-question CONFLICT here decided it for the model.
     against_facts = fact_conflicts(approved, safe_facts, scope_for=scope_for)
-    if against_facts:
+    # A conflict belongs to the sub-question it was found under, and each one
+    # already records which. Refusing the whole inquiry discarded the Learning
+    # of every other atom with it: on "피벗? 높낮이? 각도? 스피커?" one
+    # disputed pivot answer removed all 17 candidates, including the four
+    # about speakers. The disputed atoms lose their Learning; the independent
+    # ones keep theirs, and the conflict still travels on the decision so the
+    # caller marks those sub-questions CONFLICT exactly as before.
+    disputed_subquestions = {
+        str(conflict.get("subquestion") or "") for conflict in against_facts
+    }
+    disputed_ids = {
+        conflict.get("learning_id") for conflict in against_facts
+    }
+    remaining = [
+        item for item in approved
+        if str(item.get("matched_subquestion") or "")
+        not in disputed_subquestions
+        and item.get("learning_example_id") not in disputed_ids
+    ] if against_facts else list(approved)
+    if against_facts and not remaining:
         return LearningEvidenceDecision(
             False,
             "PRODUCT_FACT_VS_LEARNING_CONFLICT",
@@ -756,9 +883,15 @@ def evaluate(
             conflicts=against_facts,
         )
 
-    usable = _qualifying(approved)
+    usable = _qualifying(remaining)
     if not usable:
-        return LearningEvidenceDecision(False, "NO_QUALIFYING_APPROVED_LEARNING")
+        return LearningEvidenceDecision(
+            False,
+            "PRODUCT_FACT_VS_LEARNING_CONFLICT" if against_facts
+            else "NO_QUALIFYING_APPROVED_LEARNING",
+            conflict=bool(against_facts),
+            conflicts=against_facts,
+        )
 
     supported = _supported_subquestions(context)
     covered = tuple(
@@ -767,10 +900,18 @@ def evaluate(
         if str(item.get("matched_subquestion") or "") in supported
     )
     if not covered:
-        return LearningEvidenceDecision(False, "LEARNING_NOT_MAPPED_TO_EVIDENCE")
+        return LearningEvidenceDecision(
+            False,
+            "PRODUCT_FACT_VS_LEARNING_CONFLICT" if against_facts
+            else "LEARNING_NOT_MAPPED_TO_EVIDENCE",
+            conflict=bool(against_facts),
+            conflicts=against_facts,
+        )
     return LearningEvidenceDecision(
         True,
         "APPROVED_LEARNING_SUPPORTED",
+        conflict=bool(against_facts),
+        conflicts=against_facts,
         learning_ids=tuple(
             int(item["learning_example_id"])
             for item in usable
