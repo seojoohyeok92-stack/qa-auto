@@ -224,6 +224,63 @@ class CoupangPostService:
             "network_call_count": 0,
         }
 
+    def readiness(self, inquiry_id: int) -> dict[str, Any]:
+        """What registration would need, and whether this market may do it.
+
+        Reporting only.  It writes nothing, sends nothing and authorizes
+        nothing: the market permission is reported rather than applied, so a
+        screen can say "everything else is ready, registration is closed"
+        instead of saying only that it is closed and leaving the operator
+        unable to see whether the answer itself would have passed.
+
+        ``post`` applies the permission itself and is not reachable from
+        here, which is the whole reason this is a separate method rather
+        than a flag on ``preflight``.
+        """
+
+        inquiry_id = int(inquiry_id)
+        inquiry = self.inquiries.get(inquiry_id)
+        store_code = str((inquiry or {}).get("store_code") or "")
+        post_enabled = is_store_manual_post_enabled(store_code)
+        resolved = self._resolve(
+            inquiry_id, retry_requested=True, apply_market_policy=False,
+        )
+        report: dict[str, Any] = {
+            "inquiry_id": inquiry_id,
+            "market": market_of(store_code),
+            "post_enabled": bool(post_enabled),
+            "post_disabled_reason": (
+                None if post_enabled else "MANUAL_POST_DISABLED"),
+            "endpoint_kind": ENDPOINT_KIND,
+            "method": "POST",
+            "network_call": False,
+            "network_call_count": 0,
+        }
+        if isinstance(resolved, tuple):
+            code, message = resolved
+            report.update({
+                "answer_ready": False, "error_code": code,
+                "reasons": [message],
+            })
+            return report
+        report.update({
+            "answer_ready": True,
+            "error_code": None,
+            "reasons": [],
+            "account_code": resolved["account"].account_code,
+            "vendor_id": resolved["account"].vendor_id,
+            "external_id": resolved["external_id"],
+            "path": resolved["path"],
+            # Which stored field would be sent. On the manual path a staff
+            # edit outranks the program answer, so this is what makes the
+            # operator's own text visibly the thing that would go out.
+            "answer_field": resolved["answer_field"],
+            "answer_chars": len(resolved["post_answer"]),
+            "answer_hash": resolved["answer_hash"],
+            "reply_by_configured": True,
+        })
+        return report
+
     # -- the one public entry point ---------------------------------------
 
     def post(
@@ -264,13 +321,19 @@ class CoupangPostService:
     # -- internals ---------------------------------------------------------
 
     def _resolve(
-        self, inquiry_id: int, *, retry_requested: bool
+        self, inquiry_id: int, *, retry_requested: bool,
+        apply_market_policy: bool = True,
     ) -> tuple[str, str] | dict[str, Any]:
         """Every check that runs before anything is sent.
 
         Returns ``(code, message)`` for the first refusal, otherwise the
         resolved target.  One definition, so the panel's preflight and the
         registration itself can never disagree.
+
+        ``apply_market_policy`` is false only for ``readiness``, which
+        reports the market permission instead of stopping at it.  Every
+        caller that can send leaves it true, and ``readiness`` returns data
+        with no way to reach ``_send``.
         """
 
         inquiry = self.inquiries.get(inquiry_id)
@@ -279,7 +342,7 @@ class CoupangPostService:
         store_code = str(inquiry.get("store_code") or "")
         if market_of(store_code) != COUPANG:
             return ("NOT_COUPANG", "쿠팡 문의가 아닙니다.")
-        if not is_store_manual_post_enabled(store_code):
+        if apply_market_policy and not is_store_manual_post_enabled(store_code):
             return ("MANUAL_POST_DISABLED", "수동 등록이 비활성화된 매장입니다.")
         if bool(inquiry.get("source_answered")):
             return ("ALREADY_ANSWERED", "쿠팡에 이미 답변이 등록된 문의입니다.")

@@ -1365,6 +1365,15 @@ def _order_lookup_unsupported(
     )
 
 
+#: Which stored field a manual registration would send, in the operator's
+#: words. ``posting_answer(manual=True)`` prefers a staff edit over the
+#: program answer, and the readiness panel names which one that is.
+POST_ANSWER_FIELD_LABELS: dict[str, str] = {
+    "edited_answer": "직원 수정본",
+    "original_answer": "Program Answer",
+    "final_answer": "Final Answer",
+}
+
 NAVER_POSTED_VIEW = "네이버 실제 등록 답변"
 COUPANG_SELLER_VIEW = "쿠팡 실제 판매자 답변"
 
@@ -1777,6 +1786,14 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
         if registration_start:
             st.session_state[f"naver_post_flow_start_{inquiry_id}"] = True
             st.rerun()
+        if post_market_read_only and draft:
+            # A disabled button says registration is closed and nothing about
+            # whether the answer would have gone out. The readiness report
+            # reads the same checks the registration itself runs, writes
+            # nothing and calls nothing, so an operator can see the answer is
+            # ready and the market is not -- which is the state Coupang is
+            # actually in.
+            _render_post_readiness(database, inquiry, market=post_market_name)
         top_actions[4].markdown(
             '<div class="workspace-lock-note">승인은 Final Answer만 생성합니다.'
             f" <b>승인과 {post_market_name} 등록은 별도 작업입니다.</b></div>",
@@ -4345,6 +4362,62 @@ def _render_auto_post_review(
                 hide_index=True,
                 width="stretch",
             )
+
+
+def _render_post_readiness(
+    database: Database, inquiry: dict[str, Any], *, market: str
+) -> None:
+    """Whether this answer is ready to register, on a market that may not.
+
+    Read-only throughout: ``readiness`` reports the registration checks
+    without applying the market permission and without sending anything, so
+    the panel cannot become a way to post. The permission itself is applied
+    by ``post``, which this never calls.
+    """
+
+    try:
+        report = CoupangPostService(database).readiness(int(inquiry["id"]))
+    except Exception as error:  # noqa: BLE001 - a panel never breaks a screen
+        st.caption(f"{market} 등록 준비 상태를 확인하지 못했습니다: "
+                   f"{error.__class__.__name__}")
+        return
+    with st.expander(f"{market} 등록 준비 상태 (등록은 실행하지 않음)",
+                     expanded=False):
+        if report.get("answer_ready"):
+            st.success(
+                "답변은 등록 가능한 상태입니다. "
+                f"{market} 실제 등록은 아직 비활성화되어 있습니다."
+            )
+        else:
+            st.warning(
+                "등록 준비 미완료 · "
+                + ", ".join(str(r) for r in report.get("reasons") or [])
+            )
+        st.caption(
+            "등록 대상: "
+            + " · ".join(
+                part for part in (
+                    f"문의 {report.get('external_id')}"
+                    if report.get("external_id") else "",
+                    f"계정 {report.get('account_code')}"
+                    if report.get("account_code") else "",
+                    f"vendor {report.get('vendor_id')}"
+                    if report.get("vendor_id") else "",
+                    # Which stored text would be sent, so a staff edit is
+                    # visibly the thing that would go out.
+                    f"본문 {POST_ANSWER_FIELD_LABELS.get(str(report.get('answer_field')), report.get('answer_field'))}"
+                    if report.get("answer_field") else "",
+                ) if part
+            ) or "확인된 등록 대상이 없습니다."
+        )
+        st.json({
+            key: report.get(key)
+            for key in (
+                "market", "post_enabled", "post_disabled_reason",
+                "answer_ready", "error_code", "method", "endpoint_kind",
+                "path", "answer_field", "answer_chars", "network_call_count",
+            )
+        })
 
 
 def _render_naver_post_prepare(
