@@ -318,9 +318,17 @@ def test_manual_post_permission_is_open_to_a_person_only() -> None:
     assert is_store_manual_post_enabled(COUPANG_STORE) is True
 
 
-def test_automatic_post_permission_stays_off() -> None:
-    assert COUPANG not in AUTOMATIC_POST_MARKETS
-    assert is_store_automatic_post_enabled(COUPANG_STORE) is False
+def test_automatic_post_permission_is_open_and_switch_gated() -> None:
+    """The permission is open; the operator's switch is what runs it.
+
+    ``naver_auto_post_settings.coupang_enabled`` is persisted off on the
+    production row, so the scheduler claims no Coupang event until an
+    operator turns it on. The policy below is only what makes that switch
+    meaningful.
+    """
+
+    assert COUPANG in AUTOMATIC_POST_MARKETS
+    assert is_store_automatic_post_enabled(COUPANG_STORE) is True
 
 
 def test_only_a_confirmed_post_reaches_the_client(database) -> None:

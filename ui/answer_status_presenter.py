@@ -34,7 +34,7 @@ from services.auto_processing_eligibility_service import (
     AutoProcessingEligibility,
     AutoProcessingEligibilityService,
 )
-from services.market_policy import is_store_automatic_post_enabled
+from services.market_policy import is_store_post_enabled
 
 
 # The reason vocabulary is shared with the KakaoTalk notifier so the
@@ -257,33 +257,43 @@ def build_decision_trace(
     safe = eligibility.safe if eligibility is not None else (
         str(persisted_decision.get("eligibility") or "").upper() == "SAFE"
     )
-    # ``source_answered`` means the marketplace holds a reply.  On a market
-    # this system may post to, that reply is its own work and reads as a
-    # successful auto-post.  On a market it may not, the reply was written by
-    # a person in the seller console and nothing here registered anything --
-    # so the same field reported a post that never happened.  It did, for 11
-    # of the 16 Coupang drafts on the 26.10.12 snapshot, every one of them
-    # ``post_status`` NOT_POSTED and ``posted`` 0.
+    # ``source_answered`` means the marketplace holds a reply, and whose
+    # reply that is differs by market.
     #
-    # ``post_status`` is this system's own column and still decides on its
-    # own: the three Coupang drafts that really were posted keep SUCCESS.
-    # An inquiry naming no store at all is legacy Naver, the default every
-    # other market-aware call site keeps.
+    # On Naver it is coupled to this system's own posting, which is what
+    # ``POST_MARKETS`` names: an answered Naver inquiry is treated as final
+    # by the answer path and the screens, so reading it as a successful
+    # auto-post is reading this system's own state.
+    #
+    # On Coupang it is marketplace truth, set by the inquiry sync when it
+    # observes a reply -- ``CoupangPostService`` says so where it records a
+    # success: "source_answered stays marketplace truth". A person answering
+    # in Wing therefore sets it, and reporting that as an auto-post success
+    # reports a post that never happened. It did, for 11 of the 16 Coupang
+    # drafts on the 26.10.12 snapshot, every one ``post_status`` NOT_POSTED
+    # and ``posted`` 0.
+    #
+    # So the question asked here is not whether the market may be posted to
+    # -- both may now -- but whether its answered state is this system's.
+    # ``post_status`` is this system's own column either way and still
+    # decides on its own, so a Coupang inquiry the pipeline really did post
+    # reads SUCCESS. An inquiry naming no store at all is legacy Naver, the
+    # default every other market-aware call site keeps.
     store_code = inquiry.get("store_code")
-    auto_post_market = (
+    answered_state_is_ours = (
         True if not str(store_code or "").strip()
-        else is_store_automatic_post_enabled(store_code)
+        else is_store_post_enabled(store_code)
     )
-    if post_status == "POSTED" or (
-        auto_post_market and inquiry.get("source_answered")
-    ):
+    marketplace_answered = bool(inquiry.get("source_answered"))
+    if post_status == "POSTED" or (answered_state_is_ours and marketplace_answered):
         auto_post = "SUCCESS"
     elif post_status == "POST_FAILED":
         auto_post = "FAILED"
-    elif not auto_post_market:
-        # Neither success nor a pending attempt is true here, and "BLOCKED"
-        # would name a safety decision that was never reached.
-        auto_post = "NOT_SUPPORTED"
+    elif marketplace_answered:
+        # Someone answered at the marketplace and it was not this system.
+        # Neither a success nor a pending attempt, and "BLOCKED" would name a
+        # safety decision that was never reached.
+        auto_post = "ANSWERED_AT_MARKETPLACE"
     elif persisted_decision.get("auto_post") in {"SUCCESS", "BLOCKED", "FAILED"}:
         auto_post = str(persisted_decision.get("auto_post") or "")
     else:

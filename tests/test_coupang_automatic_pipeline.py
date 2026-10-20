@@ -254,19 +254,19 @@ def test_a_failed_announcement_never_fails_the_collection(
 
 # --- the gates the pipeline reads ----------------------------------------------
 
-def test_coupang_is_admitted_to_generation_but_not_to_the_queue() -> None:
+def test_coupang_is_admitted_to_generation_and_to_the_queue() -> None:
     for store in ("COUPANG_OJE_NS", "COUPANG_OJE_PLUS"):
         assert market_policy.is_store_automatic_generation_enabled(store) is True
-        # Registering unattended stays closed. Phase 3-B opened the manual
-        # permission only, so the queue must not select a Coupang store
-        # however ready its answers are.
-        assert market_policy.is_store_automatic_post_enabled(store) is False
+        # Registering is open both ways now, by explicit decision. What did
+        # not move with it: DPS, and the read-only rule that keeps an
+        # inquiry Coupang already answered from being edited.
+        assert market_policy.is_store_automatic_post_enabled(store) is True
         assert market_policy.is_store_manual_post_enabled(store) is True
-        # DPS stays closed, and so does the read-only rule for answered rows.
         assert market_policy.is_store_dps_enabled(store) is False
         assert market_policy.is_store_post_enabled(store) is False
     assert market_policy.post_enabled_store_codes(
-        ["OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"]) == ["OJE_PLUS"]
+        ["OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"]) == [
+            "OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"]
 
 
 def test_the_read_only_rule_for_answered_coupang_is_unchanged() -> None:

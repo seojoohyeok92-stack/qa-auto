@@ -268,28 +268,32 @@ def test_coupang_has_no_dps(mapping) -> None:
 
 # --- 13-15. Coupang has no write path, Naver keeps its own ----------------
 
-def test_only_a_person_may_register_a_coupang_answer() -> None:
+def test_coupang_may_now_be_registered_by_hand_and_unattended() -> None:
     """Asserted against the policy itself, not against a double.
 
-    Phase 3-B opened the manual permission on an explicit decision. The
-    unattended one is a separate decision and was not taken: the queue must
-    not register replies nobody looked at.
+    Both permissions were opened by explicit decision, the unattended one
+    after a real reply was registered by hand and confirmed at Coupang. The
+    permission is not the switch: ``coupang_enabled`` in the auto-post
+    settings decides whether the scheduler acts on it.
     """
 
     assert COUPANG in MANUAL_POST_MARKETS
-    assert COUPANG not in AUTOMATIC_POST_MARKETS
+    assert COUPANG in AUTOMATIC_POST_MARKETS
     assert is_store_manual_post_enabled(COUPANG_STORE) is True
-    assert is_store_automatic_post_enabled(COUPANG_STORE) is False
+    assert is_store_automatic_post_enabled(COUPANG_STORE) is True
 
 
-def test_coupang_registration_is_still_not_unattended() -> None:
-    """The queue's own scope, which this decision did not widen."""
+def test_the_read_only_rule_did_not_move_with_the_post_permission() -> None:
+    """``POST_MARKETS`` is a different question and stayed Naver's.
 
-    from repositories.auto_post_repository import AutoPostRepository  # noqa: F401
-    from services.market_policy import post_enabled_store_codes
+    Opening registration must not re-open editing on an inquiry Coupang has
+    already answered, which is what that set decides.
+    """
 
-    assert post_enabled_store_codes(
-        [NAVER_STORE, COUPANG_STORE]) == [NAVER_STORE]
+    from services.market_policy import POST_MARKETS, is_store_post_enabled
+
+    assert POST_MARKETS == frozenset({NAVER})
+    assert is_store_post_enabled(COUPANG_STORE) is False
 
 
 def test_naver_posting_is_unchanged() -> None:

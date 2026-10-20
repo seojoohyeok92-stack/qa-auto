@@ -21,6 +21,9 @@ registered; it never meant the Learning decision was unavailable.
 which on Coupang means a person replied in Wing.  On the 26.10.12 server
 snapshot that reported a successful auto-post for 11 of the 16 Coupang
 drafts, every one of them ``post_status`` NOT_POSTED and ``posted`` 0.
+Registering at Coupang has since been opened, which does not change this:
+the trace asks whose answered state it is, not whether the market may be
+posted to.
 
 And one thing that is working as intended rather than broken: a Coupang
 order/delivery question gets no draft at all, so its order step is SKIPPED
@@ -259,6 +262,14 @@ def _draft() -> dict:
 
 
 def test_a_seller_reply_in_wing_is_not_a_successful_auto_post() -> None:
+    """Still true now that Coupang may be posted to.
+
+    The question is not whether the market may be posted to -- it may --
+    but whether its answered state is this system's. On Coupang
+    ``source_answered`` is marketplace truth set by the sync, so a person
+    answering in Wing sets it and nothing here registered anything.
+    """
+
     trace = build_decision_trace(
         inquiry={
             "id": 1, "store_code": COUPANG_STORE,
@@ -266,7 +277,7 @@ def test_a_seller_reply_in_wing_is_not_a_successful_auto_post() -> None:
         },
         draft=_draft(),
     )
-    assert trace.auto_post == "NOT_SUPPORTED"
+    assert trace.auto_post == "ANSWERED_AT_MARKETPLACE"
 
 
 def test_a_coupang_inquiry_this_system_did_post_keeps_success() -> None:

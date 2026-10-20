@@ -504,7 +504,14 @@ def test_both_product_knowledge_lookups_are_withheld() -> None:
     assert source.count("_withhold_unconfirmed_model_facts(") >= 3
 
 
-def test_coupang_still_has_no_post_or_dps_path() -> None:
-    assert is_store_manual_post_enabled(COUPANG_STORE) is False
-    assert is_store_automatic_post_enabled(COUPANG_STORE) is False
+def test_coupang_still_has_no_dps_path() -> None:
+    """Registering is open now; order and schedule lookups are not.
+
+    The identity gate above exists because an unconfirmed mapping must not
+    answer a model question -- and that matters more, not less, once the
+    answer can be registered without a person reading it.
+    """
+
+    assert is_store_manual_post_enabled(COUPANG_STORE) is True
+    assert is_store_automatic_post_enabled(COUPANG_STORE) is True
     assert is_store_dps_enabled(COUPANG_STORE) is False

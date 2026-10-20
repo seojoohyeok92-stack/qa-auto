@@ -75,10 +75,15 @@ MANUAL_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 # inquiries the marketplace has already answered, which is a different
 # decision from letting the pipeline post.
 #
-# Coupang is absent on purpose while manual registration is open above: a
-# person deciding one reply at a time is what is being verified, and the
-# queue must not start registering replies nobody looked at.
-AUTOMATIC_POST_MARKETS: frozenset[str] = frozenset({NAVER})
+# Coupang joined on an explicit decision, after one real reply was registered
+# by hand and confirmed at Coupang (WING inquiry 162411906).  This is the
+# permission only: whether the unattended pipeline runs at all is the
+# operator's own switch, and every eligibility condition it already applies
+# -- 직원 확인 필요, unconfirmed identity, a failed validator, a failed
+# generation, an inquiry the marketplace answered, a duplicate or in-flight
+# post -- continues to hold a Coupang answer back exactly as it holds a Naver
+# one.  Nothing here is a bypass for them.
+AUTOMATIC_POST_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 KAKAO_MARKETS: frozenset[str] = frozenset({NAVER, COUPANG})
 
 # Wording that names one marketplace's own procedure.  An answer for another

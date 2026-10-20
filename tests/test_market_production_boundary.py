@@ -90,9 +90,10 @@ def test_post_markets_is_now_only_the_read_only_rule() -> None:
     assert is_store_post_enabled(NAVER_STORE) is True
     assert is_store_post_enabled(COUPANG_NS) is False
     assert is_store_post_enabled(COUPANG_PLUS) is False
-    # Registering at Coupang is closed until an explicit decision
-    # re-opens it; the read-only rule above is a separate question.
-    assert is_store_automatic_post_enabled(COUPANG_NS) is False
+    # Registering at Coupang is open now, by hand and unattended alike; the
+    # read-only rule above is a separate question and did not move with it,
+    # so an inquiry Coupang has already answered is still not editable.
+    assert is_store_automatic_post_enabled(COUPANG_NS) is True
 
 
 def test_both_answerable_markets_are_notified() -> None:
@@ -102,11 +103,17 @@ def test_both_answerable_markets_are_notified() -> None:
 
 
 def test_the_queue_scope_is_the_markets_it_may_post_to() -> None:
-    """Only a market the queue may post to is in scope, blanks never are."""
+    """Only a market the queue may post to is in scope, blanks never are.
+
+    Both answerable markets are in it now. The scope is the permission, not
+    the operator's switch: ``naver_auto_post_settings.coupang_enabled`` is
+    what decides whether the scheduler claims those rows, and it is off on
+    the production row until an operator turns it on.
+    """
 
     assert post_enabled_store_codes(
         [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
-    ) == [NAVER_STORE]
+    ) == [NAVER_STORE, COUPANG_NS, COUPANG_PLUS]
     assert post_enabled_store_codes(["", None, "   "]) == []
 
 
@@ -133,7 +140,7 @@ def test_the_auto_post_queue_is_scoped_by_market_not_unscoped(tmp_path) -> None:
     # The scope is still applied in SQL; it now admits both answerable
     # markets, and an empty scope still selects nothing at all.
     assert {row["store_code"] for row in scoped} == {
-        NAVER_STORE
+        NAVER_STORE, COUPANG_NS, COUPANG_PLUS
     }
     assert repository.candidates(max_retries=3, store_codes=[]) == []
 

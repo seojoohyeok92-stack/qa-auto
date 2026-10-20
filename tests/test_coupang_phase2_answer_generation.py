@@ -221,11 +221,11 @@ def test_coupang_is_answered_but_never_looked_up_or_posted(store) -> None:
     # that keeps an answered Coupang inquiry from being edited.
     assert market_policy.is_store_dps_enabled(store) is False
     assert market_policy.is_store_post_enabled(store) is False
-    # A person may now register the reply; the unattended pipeline may not.
-    # Phase 3-B opened the first on an explicit decision and left the second
-    # closed, so one answer at a time is reviewed before it goes out.
+    # Registering the reply is open both ways now, by explicit decision. The
+    # read-only rule above is unchanged, and the operator's own
+    # ``coupang_enabled`` switch still decides whether the queue runs.
     assert market_policy.is_store_manual_post_enabled(store) is True
-    assert market_policy.is_store_automatic_post_enabled(store) is False
+    assert market_policy.is_store_automatic_post_enabled(store) is True
 
 
 # --- B. the unattended path now starts it too ---------------------------------------
@@ -263,12 +263,16 @@ def test_automatic_generation_still_skips_an_answered_coupang_inquiry(
     assert draft_count(database) == 0
 
 
-def test_the_auto_post_queue_does_not_select_coupang(database) -> None:
-    """Collected and answered, but not queued for registration.
+def test_the_auto_post_queue_now_selects_both_markets(database) -> None:
+    """Both answerable markets are queued, and the scope is still in SQL.
 
-    The queue is ordered by arrival and limited, so a market it may not post
-    to must be filtered before the query rather than after: otherwise Coupang
-    rows would fill the page and starve the market that can be posted.
+    The queue is ordered by arrival and limited, so the market scope has to
+    be applied before the query rather than after. What changed is which
+    markets it admits; that it is applied there did not.
+
+    Whether the scheduler then acts on a Coupang row is the operator's
+    ``coupang_enabled`` switch, which the scheduler reads separately -- see
+    ``test_the_operator_switch_decides_whether_coupang_is_claimed``.
     """
 
     coupang_inquiry(database, account="OJE_NS", inquiry_id="1")
@@ -279,7 +283,43 @@ def test_the_auto_post_queue_does_not_select_coupang(database) -> None:
         max_retries=3,
         store_codes=market_policy.post_enabled_store_codes(repository.distinct_store_codes()),
     )
-    assert {row["store_code"] for row in rows} == {"OJE_PLUS"}
+    assert {row["store_code"] for row in rows} == {
+        "OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"}
+    assert repository.candidates(max_retries=3, store_codes=[]) == []
+
+
+def test_the_operator_switch_decides_whether_coupang_is_claimed(
+    database,
+) -> None:
+    """The permission makes the switch meaningful; the switch decides.
+
+    The scheduler builds its scope from ``platform_enabled``, so a market
+    whose switch is off contributes no store code however open the policy
+    is. The production row has ``coupang_enabled`` persisted off.
+    """
+
+    repository = AutoPostRepository(database)
+    settings = repository.settings()
+    assert set(settings["platform_enabled"]) == {"NAVER", "COUPANG"}
+    # A fresh row has auto-processing off, so Naver is turned on first:
+    # otherwise both switches are off and the Coupang one proves nothing.
+    repository.save_platform_enabled("NAVER", True)
+
+    repository.save_platform_enabled("COUPANG", False)
+    off = repository.settings()
+    scope = market_policy.post_enabled_store_codes([
+        code for code in ("OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS")
+        if off["platform_enabled"].get(market_policy.market_of(code), False)
+    ])
+    assert scope == ["OJE_PLUS"], "the switch did not keep Coupang out"
+
+    repository.save_platform_enabled("COUPANG", True)
+    on = repository.settings()
+    scope = market_policy.post_enabled_store_codes([
+        code for code in ("OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS")
+        if on["platform_enabled"].get(market_policy.market_of(code), False)
+    ])
+    assert scope == ["OJE_PLUS", "COUPANG_OJE_NS", "COUPANG_OJE_PLUS"]
 
 
 def test_an_explicit_generate_creates_a_draft(database) -> None:
