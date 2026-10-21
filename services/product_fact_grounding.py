@@ -240,6 +240,15 @@ _WORD_IN_PATTERN = re.compile(r"[가-힣]{2,}|[A-Za-z][A-Za-z0-9.\-]{2,}")
 _PATTERN_IGNORED = frozenset({
     "mini", "micro", "else", "none", "true", "false", "spec",
 })
+#: Words for *having* a thing rather than for the thing had.
+#:
+#: A section rule spells its match out in full, so the words read back out of
+#: one include its bare verb: ``^(OTT지원)$`` yields "OTT" and "지원" alike.
+#: A bare verb names no attribute -- it is in every support sentence about
+#: every attribute -- so it cannot be what makes a sentence about one.
+_GENERIC_SUBJECTS = frozenset({
+    "지원", "가능", "사용", "불가", "자체", "기능", "제공", "해당", "support",
+})
 
 
 def _rule_words() -> dict[str, tuple[str, ...]]:
@@ -344,10 +353,26 @@ def _subject_terms(field_key: str) -> tuple[str, ...]:
     Wider than :func:`_question_terms`: it adds the words the section rules
     recognise, which is what lets a delivered value be found in a sentence
     that uses the catalogue's wording rather than the customer's.
+
+    Those rule words carry the bare verb of having the thing, and a verb is
+    not a subject. ``ott_support_spec`` was called "지원" among other things,
+    which made "미러링 기능을 지원합니다" a sentence about OTT: the answer to
+    692741190 then read as contradicting ``ott_support_spec = 미지원`` while
+    its own OTT sentence agreed with it, because polarity settles on the
+    first sentence it finds and the mirroring one came first. The same
+    pairing is in 692590688, which was not withheld and auto-posted.
+
+    Only the rule-derived words are filtered. :func:`_question_terms` is
+    curated per attribute and holds none of these; of the 164 fields this
+    module can recognise, two carry such a word, and neither is left without
+    a term that names it, so nothing becomes unrecognisable by this.
     """
 
-    return tuple(dict.fromkeys(
-        (*_question_terms(field_key), *_RULE_WORDS.get(field_key, ()))))
+    return tuple(dict.fromkeys((
+        *_question_terms(field_key),
+        *(word for word in _RULE_WORDS.get(field_key, ())
+          if word.lower() not in _GENERIC_SUBJECTS),
+    )))
 
 
 def _negated_subject(value: str) -> str:
