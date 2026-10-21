@@ -106,6 +106,19 @@ _MEASURE = re.compile(
     + r")(?![0-9A-Za-z])|(?![0-9A-Za-z]))",
     re.IGNORECASE,
 )
+_NUMBER = r"\d+(?:,\d{3})*(?:\.\d+)?"
+#: A measurement, its tolerance in brackets, then the unit both share.
+#: "105.0 (±5.0) mm", "105.0(±5.0)mm", "-3°(±2°)" -- the unit after the
+#: bracket belongs to the number before it.
+_TOLERANCE_UNIT = re.compile(
+    r"(?P<lead>" + _NUMBER + r")\s*"
+    r"\(\s*(?:±|\+/-|\+-|\+/‑)\s*(?P<tolerance>" + _NUMBER + r")\s*"
+    r"(?:" + "|".join(re.escape(token) for token in _UNIT_TOKENS) + r")?\s*\)"
+    r"\s*(?P<unit>"
+    + "|".join(re.escape(token) for token in _UNIT_TOKENS)
+    + r")(?![0-9A-Za-z])",
+    re.IGNORECASE,
+)
 _POLARITY_VALUES = frozenset({
     "있음", "없음", "지원", "미지원", "가능", "불가", "불가능", "y", "n",
     "o", "x", "yes", "no", "true", "false", "해당", "해당없음", "포함",
@@ -179,18 +192,50 @@ def _unit_class(unit: object) -> str:
     return token
 
 
+def _tolerance_units(body: str) -> dict[int, str]:
+    """Where a parenthesised tolerance stands between a number and its unit.
+
+    "105.0(±5.0)mm" is one millimetre measurement with its tolerance, and
+    writing the tolerance in between does not leave 105.0 unitless -- but
+    the measurement pattern reads a unit only where it touches the number,
+    so that is exactly what happened: the stated height was found as a bare
+    "105.0" and an answer carrying it did not count as stating "105.0mm".
+    Measured on 162413382, where the record holds "105.0 (±5.0) mm" and the
+    draft wrote "105.0(±5.0)mm".
+
+    The unit is given to the tolerance's number as well, which is what makes
+    a *wrong* tolerance still fail: "105.0(±10.0)mm" then states 10.0 as a
+    length the value does not have, and the conflict check reports it.
+
+    Returns the offset of each such number against the unit it belongs to.
+    """
+
+    found: dict[int, str] = {}
+    for match in _TOLERANCE_UNIT.finditer(body):
+        unit = _unit_class(match.group("unit"))
+        if not unit:
+            continue
+        found[match.start("lead")] = unit
+        found[match.start("tolerance")] = unit
+    return found
+
+
 def _measures(text: object) -> list[tuple[str, str]]:
     """``(number, unit class)`` for each measurement stated in the text.
 
     The unit is the one written against the number; "" when there is none,
-    which is a number whose unit the text left open.
+    which is a number whose unit the text left open -- except where a
+    tolerance stands between the two, which :func:`_tolerance_units` reads.
     """
 
     body = str(text or "")
+    tolerances = _tolerance_units(body)
     found: list[tuple[str, str]] = []
     for match in _MEASURE.finditer(body):
         number = match.group("number").replace(",", "")
         unit = _unit_class(match.group("unit"))
+        if not unit:
+            unit = tolerances.get(match.start("number"), "")
         # "2개월" is a duration, not two of something: 개 is a counter and
         # 개월 is the word for a month. Read as the counter, a delivery
         # sentence looked like a statement about an HDMI port count.
@@ -1295,6 +1340,20 @@ def _stem(field_key: str) -> str:
     return stem
 
 
+def _declared_same_as(field_key: str) -> frozenset[str]:
+    """The field names the registry states are this same attribute.
+
+    Curated per pair in :attr:`SpecAttribute.same_as`; nothing here is
+    derived from a name.
+    """
+
+    return frozenset(
+        str(name) for item in SPEC_ATTRIBUTES
+        if item.field_key == str(field_key)
+        for name in getattr(item, "same_as", ())
+    )
+
+
 def same_attribute(field_a: str, field_b: str) -> bool:
     """Whether two field keys name the same attribute.
 
@@ -1312,9 +1371,22 @@ def same_attribute(field_a: str, field_b: str) -> bool:
     ``ott_support_spec`` cover ``ott_apps_spec`` and ``color`` cover
     ``rear_color``. Having a port, having two of them and having revision 2.1
     are three claims.
+
+    The spelling rule misses one real case, so the registry states that case
+    per pair in ``same_as``. The catalogue's spec text and the collected
+    knowledge name the stand's movement differently -- ``tilt_range_spec``
+    against ``tilt``, ``elevation_range_spec`` against ``height_adjust`` --
+    and ``_stem`` cannot join them without stripping ``_range``, which would
+    also join attributes that are not the same. ``same_as`` is read in both
+    directions and is not ``also_fields``: that relation is a routing one and
+    declares two of the pairings named above.
     """
 
     if str(field_a) == str(field_b):
+        return True
+    if str(field_b) in _declared_same_as(field_a):
+        return True
+    if str(field_a) in _declared_same_as(field_b):
         return True
     return bool(_stem(field_a)) and _stem(field_a) == _stem(field_b)
 

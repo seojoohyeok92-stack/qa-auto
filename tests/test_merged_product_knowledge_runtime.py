@@ -25,6 +25,7 @@ from repositories.product_catalog_repository import (
     canonical_model_identity,
 )
 from services.product_knowledge_service import (
+    _RUNTIME_PRODUCT_KNOWLEDGE_STATUSES,
     ProductKnowledgeService,
     select_prompt_facts,
 )
@@ -158,7 +159,14 @@ def test_every_merged_row_carries_its_source_image():
     for row in merged:
         assert row["scope"] in {"EXACT_MODEL", "ACCESSORY"}, row["field"]
         assert row["scope_status"] == "RESOLVED"
-        assert row["operational_status"] == "CANDIDATE_NOT_APPROVED"
+        # Runtime-eligible, not any one status. This read
+        # ``== CANDIDATE_NOT_APPROVED`` while nothing had been reviewed yet;
+        # the 26.10.21 review approved 102 of these 1,113 rows, which moves
+        # the status and is the point of reviewing them. What this test is
+        # about is that a merged row is image-backed and reachable, so that
+        # is what it asserts.
+        assert row["operational_status"] in _RUNTIME_PRODUCT_KNOWLEDGE_STATUSES, (
+            row["field"], row["operational_status"])
         assert isinstance(row["value"], str) and row["value"].strip()
         assert row["provenance"], row["field"]
         for entry in row["provenance"]:

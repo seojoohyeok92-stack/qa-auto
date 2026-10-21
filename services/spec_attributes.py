@@ -65,6 +65,15 @@ class SpecAttribute:
     #: ``color_options`` depending on the row -- and a question about it has to
     #: ask for all of them or the one the record happens to use is missed.
     also_fields: tuple[str, ...] = dataclass_field(default_factory=tuple)
+    #: Field names that are this *same* attribute under another stored
+    #: spelling, so a citation of one covers a claim about the other.
+    #:
+    #: Deliberately not :attr:`also_fields`, which is a routing relation and
+    #: is wider on purpose: it declares ``color -> rear_color`` and
+    #: ``ott_support_spec -> ott_apps_spec``, two of the pairings
+    #: ``same_attribute`` was narrowed to reject. Identity has to be stated
+    #: per pair and read from the records, never inferred from a name.
+    same_as: tuple[str, ...] = dataclass_field(default_factory=tuple)
     #: Wording that takes this attribute *out* of the question. "스탠드 색상"
     #: contains "색상", and answering it with the body colour would be the
     #: wrong subject -- the component has its own field.
@@ -143,6 +152,14 @@ SPEC_ATTRIBUTES: tuple[SpecAttribute, ...] = (
         spec_labels=("틸트(앞뒤)", "틸트(상하)", "틸트"),
         continues=("앞", "뒤", "위", "아래"),
         question_terms=("틸트", "앞뒤 각도", "상하 각도"),
+        # The same range under the other store's spelling. The catalogue's
+        # spec text is the only place ``tilt_range_spec`` is written and the
+        # collected knowledge is the only place ``tilt`` is: measured over
+        # the record, 21 models hold ``tilt`` and none holds both, so they
+        # are two vocabularies for one attribute rather than two attributes.
+        # On LS27HG400EKXKR the catalogue says "-3 ~ +25" and the vision
+        # reader "-3°(±2°) ~ 25°(±2°)" -- one range, two notations.
+        same_as=("tilt",),
     ),
     SpecAttribute(
         "swivel_range_spec", MEASUREMENT,
@@ -160,6 +177,12 @@ SPEC_ATTRIBUTES: tuple[SpecAttribute, ...] = (
         spec_labels=("엘리베이션(높낮이)", "엘리베이션"),
         question_terms=("엘리베이션", "높낮이", "높이 조절", "높이조절"),
         unit="mm",
+        # As with the tilt pair: the catalogue's spec text writes
+        # ``elevation_range_spec`` and the collected knowledge writes
+        # ``height_adjust``, 17 models hold the latter and none holds both,
+        # the question wording of the two is identical, and both are a
+        # millimetre range of the same stand movement.
+        same_as=("height_adjust",),
     ),
     SpecAttribute(
         "measurement_tolerance", MEASUREMENT,
@@ -944,6 +967,106 @@ SPEC_ATTRIBUTES: tuple[SpecAttribute, ...] = (
         spec_labels=("내장 스피커", "스피커"),
         question_terms=(), supply_only=True,
         also_fields=("speaker",),
+    ),
+    # -- attributes the collected knowledge names and the registry did not --
+    #
+    # Eighteen fields reached a reviewer's approval while this module knew no
+    # word for any of them, so ``_polarity_findings`` had nothing to compare
+    # and would have failed closed on a correct answer -- the shape
+    # ``speaker = 없음`` hit in the 26.10.21 pilot. Each label below is the
+    # one the stored evidence already uses, read off the provenance rather
+    # than invented: "USB 포트 잠금 있음", "HDMI-CEC 있음", "모바일 무선 연결
+    # Mobile to TV, Sound Mirroring". ``question_terms`` stays empty, so no
+    # question routes to them from wording; this is only about recognising
+    # the attribute in an answer.
+    SpecAttribute(
+        "business_tv_app", PRESENCE,
+        spec_labels=("Business TV App",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "contrast_enhancer", PRESENCE,
+        spec_labels=("명암비 강화 기술", "Contrast Enhancer"),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "core_sync", PRESENCE,
+        spec_labels=("Core Sync",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "factory_calibration_report", PRESENCE,
+        spec_labels=("Factory 캘리브레이션 레포트",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "factory_tuning", PRESENCE,
+        spec_labels=("Factory 튜닝",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "hdmi_cec", PRESENCE,
+        spec_labels=("HDMI-CEC",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "hdr10_plus", PRESENCE,
+        spec_labels=("HDR10+",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "mobile_wireless", PRESENCE,
+        spec_labels=("모바일 무선 연결",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "pantone_validated", PRESENCE,
+        spec_labels=("Pantone Validated",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "remote_control_setting", PRESENCE,
+        spec_labels=("리모컨 반응 속도 조정",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "smartthings_hub", PRESENCE,
+        spec_labels=("SmartThings 허브",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "tco_certified", PRESENCE,
+        spec_labels=("TCO Certified",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "tv_plus", PRESENCE,
+        spec_labels=("TV Plus",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "ul_glare_free", PRESENCE,
+        spec_labels=("UL Glare Free",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "usb_c_to_a_gender_cable_included", PRESENCE,
+        spec_labels=("USB Type-C to Type-A 젠더 케이블",),
+        question_terms=(), supply_only=True,
+    ),
+    SpecAttribute(
+        "usb_port_lock", PRESENCE,
+        spec_labels=("USB 포트 잠금",),
+        question_terms=(), supply_only=True,
+    ),
+    # One attribute under two stored names, both with the same evidence
+    # label. ``_stem`` does not strip ``_support``, so the shorter spelling
+    # is linked here rather than by widening the suffix list.
+    SpecAttribute(
+        "vxt_player_support", PRESENCE,
+        spec_labels=("VXT Player Support", "VXT Player"),
+        question_terms=(), supply_only=True,
+        also_fields=("vxt_player",),
     ),
 )
 
