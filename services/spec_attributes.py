@@ -924,11 +924,26 @@ SPEC_ATTRIBUTES: tuple[SpecAttribute, ...] = (
         "bluetooth_present", PRESENCE,
         spec_labels=("BLUETOOTH", "블루투스"),
         question_terms=(), supply_only=True,
+        also_fields=("bluetooth",),
     ),
     SpecAttribute(
         "wifi_present", PRESENCE,
         spec_labels=("WI-FI", "WIFI", "와이파이", "무선랜"),
         question_terms=(), supply_only=True,
+        also_fields=("wifi",),
+    ),
+    # The section spec's ``스피커`` token already maps here, and the stored
+    # Product Knowledge writes the same attribute as ``speaker`` -- 64 rows,
+    # "없음" / "있음" / "2.0채널". Without a label of its own, nothing could
+    # say what that attribute is called, so an answer stating the absence the
+    # record states could not be checked against it. Measured on the 1,593
+    # spec blobs: no legacy spec label is "스피커" or "내장 스피커", so this
+    # entry adds no fact on the spec side.
+    SpecAttribute(
+        "speaker_present", PRESENCE,
+        spec_labels=("내장 스피커", "스피커"),
+        question_terms=(), supply_only=True,
+        also_fields=("speaker",),
     ),
 )
 

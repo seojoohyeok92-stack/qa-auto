@@ -286,11 +286,15 @@ def test_no_attribute_loses_every_name_it_has(unfiltered) -> None:
         }))
         after = {
             field for field in fields if not grounding._subject_terms(field)}
+        # Which fields the filter actually narrows: everything the three
+        # sources offer, against what survives. ``_catalogue_labels`` joined
+        # those sources later; the filter applies to it too.
         narrowed = {
             field for field in fields
             if set(grounding._subject_terms(field)) != set(
-                grounding._question_terms(field)) | set(
-                    grounding._RULE_WORDS.get(field, ()))
+                grounding._question_terms(field))
+            | set(grounding._catalogue_labels(field))
+            | set(grounding._RULE_WORDS.get(field, ()))
         }
 
     assert after == before, sorted(after - before)

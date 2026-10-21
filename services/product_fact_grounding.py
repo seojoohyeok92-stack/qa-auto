@@ -347,12 +347,57 @@ def _question_terms(field_key: str) -> tuple[str, ...]:
     ))
 
 
+def _catalogue_labels(field_key: str) -> tuple[str, ...]:
+    """What the catalogue's own specification calls this attribute.
+
+    The registry keeps two wording lists per attribute and they answer two
+    different questions. ``question_terms`` is how a customer asks for it,
+    and is deliberately empty for a ``supply_only`` attribute: the question
+    side must not route to one from wording alone. ``spec_labels`` is what
+    the specification calls it, which is the question the answer side asks --
+    what is this attribute named in a sentence.
+
+    Reading only the first left three attributes with no name at all.
+    ``wifi_present``, ``bluetooth_present`` and ``stand_type_spec`` are all
+    ``supply_only``, so ``_polarity_findings`` had no term to compare and
+    reported ``VALUE_CANNOT_BE_VERIFIED`` for every answer that stated one.
+
+    Same three branches as :func:`_question_terms`, for the same reasons: the
+    attribute's own labels, then those of an attribute that names this field
+    in ``also_fields`` or ``nested`` -- which is how the stored ``speaker``,
+    ``wifi`` and ``bluetooth`` reach the registry's ``*_present`` spelling --
+    then the same stem, which is what links ``stand_type`` to
+    ``stand_type_spec``.
+    """
+
+    own = [
+        term for item in SPEC_ATTRIBUTES if item.field_key == field_key
+        for term in item.spec_labels
+    ]
+    if own:
+        return tuple(dict.fromkeys(own))
+    borrowed = [
+        term for item in SPEC_ATTRIBUTES
+        if field_key in item.also_fields or field_key in {
+            nested for _label, nested in item.nested}
+        for term in item.spec_labels
+    ]
+    if borrowed:
+        return tuple(dict.fromkeys(borrowed))
+    stem = _stem(field_key)
+    return tuple(dict.fromkeys(
+        term for item in SPEC_ATTRIBUTES
+        if stem and _stem(item.field_key) == stem
+        for term in item.spec_labels))
+
+
 def _subject_terms(field_key: str) -> tuple[str, ...]:
     """What this attribute is called, in a question or in the catalogue.
 
-    Wider than :func:`_question_terms`: it adds the words the section rules
-    recognise, which is what lets a delivered value be found in a sentence
-    that uses the catalogue's wording rather than the customer's.
+    Wider than :func:`_question_terms`: it adds the catalogue's own labels
+    and the words the section rules recognise, which is what lets a delivered
+    value be found in a sentence that uses the catalogue's wording rather
+    than the customer's.
 
     Those rule words carry the bare verb of having the thing, and a verb is
     not a subject. ``ott_support_spec`` was called "지원" among other things,
@@ -362,7 +407,7 @@ def _subject_terms(field_key: str) -> tuple[str, ...]:
     first sentence it finds and the mirroring one came first. The same
     pairing is in 692590688, which was not withheld and auto-posted.
 
-    Only the rule-derived words are filtered. :func:`_question_terms` is
+    The filter applies to both derived lists. :func:`_question_terms` is
     curated per attribute and holds none of these; of the 164 fields this
     module can recognise, two carry such a word, and neither is left without
     a term that names it, so nothing becomes unrecognisable by this.
@@ -370,6 +415,8 @@ def _subject_terms(field_key: str) -> tuple[str, ...]:
 
     return tuple(dict.fromkeys((
         *_question_terms(field_key),
+        *(word for word in _catalogue_labels(field_key)
+          if word.lower() not in _GENERIC_SUBJECTS),
         *(word for word in _RULE_WORDS.get(field_key, ())
           if word.lower() not in _GENERIC_SUBJECTS),
     )))
