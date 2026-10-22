@@ -15,7 +15,7 @@ from repositories.workflow_repository import WorkflowRepository
 from services.inquiry_analysis_service import InquiryAnalysisService
 from services.semantic_analysis import (
     SemanticAnalysis,
-    delivery_schedule_needs_review,
+    delivery_schedule_hold_applies,
 )
 from answer.inquiry_analysis import AnswerStrategy, InquiryAnalysis
 from repositories.answer_repository import AnswerRepository
@@ -268,7 +268,7 @@ class InquiryProcessingPlanService:
         # the fact in the immutable plan so the post-persistence worker reads
         # the same decision rather than reclassifying wording later.
         workflow_block_reasons: tuple[str, ...] = ()
-        if delivery_schedule_needs_review(
+        if delivery_schedule_hold_applies(
             semantic_analysis,
             order_id_validated=(order_id_status == "VALID"),
         ):

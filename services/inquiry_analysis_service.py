@@ -30,7 +30,7 @@ from services.semantic_analysis import (
     NOTIFICATION_POLICY,
     ORDER_IDENTIFICATION,
     SemanticAnalysis,
-    delivery_schedule_needs_review,
+    delivery_schedule_hold_applies,
     purchase_confirmed as semantic_purchase_confirmed,
 )
 
@@ -44,6 +44,12 @@ PRE_PURCHASE_DELIVERY_REVIEW_SOURCE = "PRE_PURCHASE_DELIVERY_GUIDANCE"
 # Distinct from the keyword subtype above so an operator can tell which stage
 # made the call.
 DELIVERY_SCHEDULE_REVIEW_SOURCE = "DELIVERY_SCHEDULE_UNCONFIRMED_PURCHASE"
+# The keyword tier's fail-closed finding on a current-schedule question whose
+# wording carries no affirmative order evidence. Named so the semantic layer
+# can tell it apart from a finding about the customer's situation: it is a
+# statement about what the *wording* established, and the understanding is the
+# stage that can settle it.
+UNCONFIRMED_DELIVERY_OUTCOME_SOURCE = "UNCONFIRMED_DELIVERY_OUTCOME"
 
 # Intents that already mean "this customer's current schedule". The semantic
 # layer agrees with all of them, so it has nothing to add by relabelling.
@@ -1031,6 +1037,40 @@ class InquiryAnalysisService:
                     "INSTALLATION_DATE"
                     if INSTALLATION_SCHEDULE in actions else "DELIVERY_STATUS"
                 )
+            # The keyword tier fails closed on this shape and hands back
+            # GENERAL_GUIDANCE with a review hold: "제 상품 설치예정일이
+            # 언제인가요?" is a current-schedule question, and the wording
+            # alone does not prove the order exists, so it refuses to demand
+            # an order number. The premise of that refusal is precisely what
+            # the understanding has now supplied -- GPT ① read this as a
+            # current order -- and with the premise settled the conclusion
+            # goes with it. "주문했는데 언제 배송되나요?" already reaches
+            # ORDER_ID_REQUEST through the same tier; the two differ only in
+            # whether the purchase is stated in so many words.
+            #
+            # Asking for the missing order number asserts no order fact and
+            # is the only step that can advance this inquiry. Order and DPS
+            # requirements above are untouched, so nothing is published from
+            # an unconfirmed schedule either way.
+            if UNCONFIRMED_DELIVERY_OUTCOME_SOURCE in sources and (
+                semantic_purchase_confirmed(
+                    semantic,
+                    order_id_validated=deterministic.order_id_validated,
+                )
+            ):
+                sources = [
+                    source for source in sources
+                    if source != UNCONFIRMED_DELIVERY_OUTCOME_SOURCE
+                ]
+                if not sources:
+                    manual = False
+                if not deterministic.order_id_validated:
+                    inquiry_type = InquiryType.ORDER_INFO_REQUIRED
+                    strategy = AnswerStrategy.REQUEST_ORDER_ID
+                reasons.append(
+                    "semantic 이해가 현재 주문을 확인해 주문번호 요청으로 "
+                    "전환했습니다."
+                )
         elif is_context_or_policy:
             # Event/review context plus "when" or "order number" is not a
             # current delivery schedule solely because broad keywords match.
@@ -1051,7 +1091,7 @@ class InquiryAnalysisService:
                 OrderIdStatus.AMBIGUOUS, OrderIdStatus.CANDIDATE_FOUND,
             }
         )
-        if delivery_schedule_needs_review(
+        if delivery_schedule_hold_applies(
             semantic, order_id_validated=order_evidence_on_record,
         ):
             # Both confirmed policies, as one rule: the customer is asking when
@@ -1120,7 +1160,7 @@ class InquiryAnalysisService:
         # just recomputed that premise from GPT ①'s own decomposition. When the
         # premise is gone the conclusion has to go with it, and it was only
         # being dropped in the one branch that noticed
-        # (``delivery_schedule_needs_review``).
+        # (``delivery_schedule_hold_applies``).
         #
         # It matters because this strategy does not merely change wording: in
         # ``HybridAnswerService`` it replaces the draft with a rule answer and
@@ -1620,7 +1660,7 @@ class InquiryAnalysisService:
                 # fallback path. A delivery outcome without affirmative
                 # current-order evidence is ambiguous, not a request for an
                 # order number: fail closed without Order/DPS access.
-                subtype = "UNCONFIRMED_DELIVERY_OUTCOME"
+                subtype = UNCONFIRMED_DELIVERY_OUTCOME_SOURCE
                 requires_order = False
                 requires_dps = False
                 strategy = AnswerStrategy.GENERAL_GUIDANCE

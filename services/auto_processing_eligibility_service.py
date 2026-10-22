@@ -133,6 +133,24 @@ GENERAL_DELIVERY_ESTIMATE_SOURCE = "GENERAL_DELIVERY_ESTIMATE"
 GENERAL_ESTIMATE_EXACT_SCHEDULE = "GENERAL_ESTIMATE_EXACT_SCHEDULE"
 GENERAL_ESTIMATE_NOT_HEDGED = "GENERAL_ESTIMATE_NOT_HEDGED"
 GENERAL_ESTIMATE_CURRENT_STATE = "GENERAL_ESTIMATE_CURRENT_STATE"
+
+# A schedule that can only come from a DPS lookup. Publishing those unattended
+# is a separate decision from publishing a general lead time, and it has not
+# been taken: the lookup runs, the date reaches the draft, and staff send it.
+# Held whatever the lookup's own outcome was, so a successful lookup and a
+# failed one take the same path here.
+#
+# Scoped to the stores where DPS exists. Elsewhere ``requires_dps_lookup``
+# describes a requirement that cannot run at all, and those inquiries are
+# already held by the disabled/untrusted reasons below -- adding this one
+# would only restate it under a name that points at the wrong stage.
+DPS_SCHEDULE_AUTO_POST_NOT_ENABLED = "DPS_SCHEDULE_AUTO_POST_NOT_ENABLED"
+
+# The plan and the analysis it was built from disagree about whether a DPS
+# lookup is required. One of the two is wrong and this stage cannot tell
+# which, so the inquiry goes to a person rather than being published under
+# whichever reading happens to be read first downstream.
+DPS_REQUIREMENT_INCONSISTENT = "DPS_REQUIREMENT_INCONSISTENT"
 _HELD_DELIVERY_STATUSES = frozenset({"NEEDS_DPS", "DELIVERY_SCHEDULE_REVIEW"})
 _EXACT_SCHEDULE_CLAIM = re.compile(
     r"\d{1,2}\s*월\s*\d{1,2}\s*일|(?<![\d.])\d{1,2}\s*/\s*\d{1,2}(?!\d)"
@@ -241,6 +259,66 @@ _NO_SOURCE_STATUS = "NO_RELIABLE_SOURCE"
 # names out rather than reusing ``HISTORICAL_AUTO_POSTABLE_ROUTES`` is what
 # keeps that distinction; ``tests/test_p2b_legacy_route_compatibility.py`` pins
 # both sets against the values they held before they were split.
+# "얼마나 걸리나요" 를 묻는 배송·설치 항목. GPT ①'s own action and
+# requested_attribute, so the scope is read from the understanding rather than
+# guessed from wording.
+#
+# Deliberately not every delivery/installation question. "배송비는 얼마인가요"
+# (AMOUNT_OR_COST) and "벽걸이 설치 가능한가요" (EXISTENCE_OR_CAPABILITY) share
+# these actions and are answered from fixed policy and from the catalogue; the
+# gate below would hold them for a missing Learning row they never needed.
+# What a lead time cannot be answered from is nothing at all -- it is a fact
+# about this product's logistics, and no sentence about it is safe to publish
+# unattended without a source.
+_LEAD_TIME_ACTIONS = frozenset({
+    "DELIVERY_POLICY", "DELIVERY_STATUS", "DELIVERY_DEADLINE_CONFIRMATION",
+    "SCHEDULE_REQUEST", "SCHEDULE_CHANGE",
+    "INSTALLATION_METHOD", "INSTALLATION_SCHEDULE",
+})
+_LEAD_TIME_ATTRIBUTE = "TIMING"
+# ``requested_attribute`` is additive: an older or terser understanding reports
+# UNKNOWN, and ``parse()`` stores UNKNOWN for anything it does not recognise.
+# Measured: the same question, with the attribute omitted, left the scope empty
+# and auto-posted with NO_RELIABLE_SOURCE behind it.
+#
+# So an unreported attribute falls back to the wording predicate the analysis
+# stage has always used for this exact judgement
+# (``_asks_about_delivery_timing`` -- 언제 / 며칠 / 얼마나 / 기간 / 소요 /
+# 예정일 ...). Only for UNKNOWN: an attribute GPT ① did state is believed, so
+# "배송비는 얼마인가요" (AMOUNT_OR_COST) and "벽걸이 설치 가능한가요"
+# (EXISTENCE_OR_CAPABILITY) stay outside the scope whatever their wording.
+_UNREPORTED_ATTRIBUTES = frozenset({"", "UNKNOWN"})
+
+
+def _lead_time_subquestions(metadata: Mapping[str, Any]) -> frozenset[str]:
+    """The sub-questions GPT ① read as asking how long delivery/installation takes."""
+
+    from services.inquiry_analysis_service import _asks_about_delivery_timing
+
+    routing = metadata.get("semantic_routing")
+    routing = routing if isinstance(routing, Mapping) else {}
+    understanding = routing.get("understanding")
+    understanding = understanding if isinstance(understanding, Mapping) else {}
+    questions = understanding.get("questions")
+    questions = questions if isinstance(questions, (list, tuple)) else ()
+    found: set[str] = set()
+    for item in questions:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("action") or "").strip().upper() not in _LEAD_TIME_ACTIONS:
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        attribute = str(item.get("requested_attribute") or "").strip().upper()
+        if attribute == _LEAD_TIME_ATTRIBUTE or (
+            attribute in _UNREPORTED_ATTRIBUTES
+            and _asks_about_delivery_timing(text)
+        ):
+            found.add(text)
+    return frozenset(found)
+
+
 _EVIDENCE_EXEMPT_ROUTES = frozenset({
     "ORDER_ID_REQUEST",
     "DELIVERY_WITH_INSTALLATION_DATE",
@@ -459,9 +537,23 @@ def _evidence_insufficient(
     an atom it marked NO_RELIABLE_SOURCE has nothing behind it, and an answer
     containing one cannot publish itself.
 
+    Scoped to the lead-time atoms (see ``_LEAD_TIME_ACTIONS``), because that is
+    where the measured failure is and where "nothing behind it" is decisive.
+    Measured: "설치까지 보통 며칠 걸리나요?" retrieved nothing
+    (NO_RELIABLE_SOURCE), GPT ② reported the atom answered anyway, the reply
+    said only "확인 후 안내드리겠습니다", the validator passed it, and
+    eligibility returned SAFE with no reasons. GPT ②'s own
+    ``unresolved``/``can_auto_post`` report is the gate that should have caught
+    it, and does whenever the model follows the instruction to leave an
+    unsupported atom unresolved -- it is a self-report, and the source verdict
+    retrieval recorded is the independent one. A deferral is held too: not
+    naming a period makes the sentence harmless, not the question answered.
+
     Deterministic routes are exempt because their answer predates retrieval --
     a template that settles the inquiry never needed a Learning row, and its
-    empty ``subquestion_evidence`` is silence rather than absence.
+    empty ``subquestion_evidence`` is silence rather than absence. The
+    order-number request and the DPS-date route are among them, so neither this
+    gate nor the lead-time scope changes what those replies do.
     """
 
     if str(route or "").strip().upper() in _EVIDENCE_EXEMPT_ROUTES:
@@ -469,15 +561,27 @@ def _evidence_insufficient(
     metadata = metadata or {}
     hybrid = metadata.get("hybrid")
     hybrid = hybrid if isinstance(hybrid, Mapping) else {}
-    entries = hybrid.get("subquestion_evidence") or ()
-    if not entries:
-        # Nothing recorded at all -- a draft from before this stage existed, or
-        # a route that never built a context. Untouched, as every other gate
-        # here treats an absent record.
+    if not hybrid.get("answer_pipeline"):
+        # A draft from before this stage existed. Untouched, as every other
+        # gate here treats an absent record.
         return False
-    for item in entries:
-        if not isinstance(item, Mapping):
-            continue
+    lead_time = _lead_time_subquestions(metadata)
+    if not lead_time:
+        return False
+    entries = hybrid.get("subquestion_evidence")
+    rows = {
+        str(item.get("subquestion") or "").strip(): item
+        for item in (entries if isinstance(entries, (list, tuple)) else ())
+        if isinstance(item, Mapping)
+    }
+    for text in lead_time:
+        item = rows.get(text)
+        if item is None:
+            # Retrieval recorded a verdict for the other atoms and none for
+            # this one, or recorded nothing at all. Either way no source was
+            # established for a lead time, which is the same finding as
+            # NO_RELIABLE_SOURCE and was reached a different way.
+            return True
         if str(item.get("status") or "").upper() == _NO_SOURCE_STATUS:
             return True
     return False
@@ -957,6 +1061,21 @@ class AutoProcessingEligibilityService:
         if dps_required and not bool(plan.get("valid_dps_snapshot_available")):
             reasons.append("DPS_SNAPSHOT_NOT_VALIDATED")
 
+        # Read from the plan rather than from ``dps_required`` above, which is
+        # the *execution* requirement and is deliberately relaxed for the
+        # order-number request and the general-estimate fallback. The question
+        # here is different: does answering this inquiry depend on a lookup of
+        # this customer's order at all. An order-number request is on that
+        # path too -- the number is being collected so the lookup can run --
+        # and this stage does not publish any step of it.
+        plan_requires_dps = bool(plan.get("requires_dps_lookup"))
+        analysis_requires_dps = bool(analysis.get("requires_dps_lookup"))
+        if is_store_dps_enabled(inquiry.get("store_code")):
+            if plan_requires_dps or analysis_requires_dps:
+                reasons.append(DPS_SCHEDULE_AUTO_POST_NOT_ENABLED)
+            if plan_requires_dps != analysis_requires_dps:
+                reasons.append(DPS_REQUIREMENT_INCONSISTENT)
+
         # The answer addresses a different request than the one that was made.
         #
         # "고장난 기존 tv 수거 요청드려요" was auto-posted with A/S guidance:
@@ -1011,6 +1130,17 @@ class AutoProcessingEligibilityService:
         #
         # ``can_auto_post`` is tri-state on the draft: absent means the provider
         # never learned the field, and only an explicit false withholds.
+        # Retrieval's own verdict, beside GPT ②'s self-report below. The two
+        # are different findings: one is what was found, the other is what the
+        # model says it did with it, and only the first is independent of the
+        # answer being judged.
+        # A DPS schedule is not answered from a retrieved source, and the
+        # policy above already holds every inquiry that needs the lookup.
+        # Adding this reason there would name the wrong stage.
+        if not plan_requires_dps and _evidence_insufficient(
+            metadata, route=normalized_route
+        ):
+            reasons.append(EVIDENCE_NOT_SUFFICIENT)
         if gpt_draft.get("unresolved"):
             reasons.append(GPT_REPORTED_UNRESOLVED)
         if gpt_draft.get("can_auto_post") is False:

@@ -435,6 +435,49 @@ def delivery_schedule_needs_review(
     )
 
 
+# The actions the schedule hold is *about*. Retrieval has applied exactly this
+# restriction per sub-question since the hold existed
+# (``learning_context_service._atomic_delivery_schedule_review``); the stages
+# that can actually stop a publish did not, and that is the gap.
+DELIVERY_SCHEDULE_ATOM_ACTIONS: frozenset[str] = (
+    PRE_PURCHASE_DELIVERY_ACTIONS | CURRENT_ORDER_DELIVERY_ACTIONS
+)
+
+
+def delivery_schedule_hold_applies(
+    semantic: SemanticAnalysis | None, *, order_id_validated: bool = False,
+) -> bool:
+    """Whether the schedule hold belongs to a question this inquiry asked.
+
+    ``delivery_schedule_needs_review`` answers the inquiry-level half: a
+    delivery outcome was asked about and no order is known to exist. It cannot
+    answer the other half, because it never looks at *which* questions were
+    asked -- and ``asks_delivery_schedule`` is one boolean over the whole
+    message. "설치까지 얼마나 걸리나요?" is read as INSTALLATION_METHOD with
+    that boolean set, and was held as a delivery question, with the delivery
+    reason recorded, although no delivery question was asked.
+
+    So the hold is additionally required to have something to hold: an atomic
+    question whose own action is a delivery or order-schedule action, or --
+    when the understanding carried no decomposition -- such an action on the
+    inquiry itself. A reading with neither keeps every other hold it had; only
+    this one stops applying.
+    """
+
+    if not delivery_schedule_needs_review(
+        semantic, order_id_validated=order_id_validated
+    ):
+        return False
+    atoms = tuple(getattr(semantic, "atomic_questions", ()) or ())
+    if atoms:
+        return any(
+            str(getattr(atom, "action", "") or "").upper()
+            in DELIVERY_SCHEDULE_ATOM_ACTIONS
+            for atom in atoms
+        )
+    return bool(semantic.actions & DELIVERY_SCHEDULE_ATOM_ACTIONS)
+
+
 def is_pre_purchase_delivery(semantic: SemanticAnalysis | None) -> bool:
     """Whether this is a delivery question from a customer who has not ordered.
 

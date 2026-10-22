@@ -49,8 +49,7 @@ from services.learning_compatibility_service import (
 )
 from services.product_fact_guard import classify_product_fact
 from services.semantic_analysis import (
-    CURRENT_ORDER_DELIVERY_ACTIONS,
-    PRE_PURCHASE_DELIVERY_ACTIONS,
+    DELIVERY_SCHEDULE_ATOM_ACTIONS,
     SemanticAnalysis,
     TIMING_ATTRIBUTE,
     delivery_schedule_needs_review,
@@ -571,11 +570,7 @@ def _atomic_delivery_schedule_review(
         return False
     if atomic is None:
         return True
-    action = str(atomic.action).upper()
-    return bool(
-        action in PRE_PURCHASE_DELIVERY_ACTIONS
-        or action in CURRENT_ORDER_DELIVERY_ACTIONS
-    )
+    return str(atomic.action).upper() in DELIVERY_SCHEDULE_ATOM_ACTIONS
 
 
 def _schedule_scoped(
@@ -591,11 +586,7 @@ def _schedule_scoped(
     if _atomic_delivery_schedule_review(semantic_analysis, atomic):
         return True
     if atomic is not None:
-        action = str(atomic.action).upper()
-        return bool(
-            action in PRE_PURCHASE_DELIVERY_ACTIONS
-            or action in CURRENT_ORDER_DELIVERY_ACTIONS
-        )
+        return str(atomic.action).upper() in DELIVERY_SCHEDULE_ATOM_ACTIONS
     return bool(semantic_analysis.asks_delivery_schedule)
 
 

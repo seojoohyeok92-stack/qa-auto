@@ -419,12 +419,18 @@ def test_gs02_body_order_number_reaches_order_lookup_and_dps(database):
         "inquiry_id": inquiry_id,
         "validated_order_number": number,
     }]
+    # 조회는 그대로 돈다. 배송·설치 1단계 정책이 바꾼 것은 등록뿐이다 --
+    # DPS 가 알려준 이 고객의 일정을 무인으로 내보내는 것은 일반 배송기간을
+    # 내보내는 것과 다른 결정이고, 아직 열리지 않았다. 초안에는 날짜가 그대로
+    # 들어오고 직원이 보낸다(수동 경로는 manual_confirmed 로 이 게이트를
+    # 건너뛴다).
     assert dps.calls == 1
-    assert outcome.succeeded_count == 1
-    assert client.calls == 1
     assert draft["metadata_json"]["selected_answer_route"] == (
         "DELIVERY_WITH_INSTALLATION_DATE"
     )
+    assert outcome.succeeded_count == 0
+    assert outcome.skipped_count == 1
+    assert client.calls == 0
 
 
 # GS-03
