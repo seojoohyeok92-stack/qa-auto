@@ -237,6 +237,20 @@ _COVERAGE_HOLD_STATUSES = frozenset({"FAIL", "PARTIAL"})
 # it is the thing this gate exists to stop.
 EVIDENCE_NOT_SUFFICIENT = "EVIDENCE_NOT_SUFFICIENT"
 
+# Two sources the pipeline trusts disagree about the atom being answered, and
+# nothing settled which is right. Already named in ``answer/hold_reasons.py``
+# ("근거 충돌" / "답변 근거가 서로 달라 직원 확인이 필요합니다"), so the
+# dashboard and the customer-facing explanation need nothing new.
+#
+# Measured need. Inquiry 10936 asked the product's weight; a Product Fact and
+# an approved Learning gave different ones, retrieval recorded the atom
+# CONFLICT, and GPT ② answered "제품 본체 무게는 28.4kg입니다" with
+# unresolved=[] and can_auto_post=True. Eligibility returned SAFE with no
+# reasons and the answer was posted. Which of two disagreeing sources is right
+# is not a judgement the model that wrote the answer can make for itself, so
+# this reason is deliberately not resolvable by its self-report.
+EVIDENCE_CONFLICT = "EVIDENCE_CONFLICT"
+
 # Retrieval's own verdict when it found nothing for a sub-question. The other
 # statuses -- NEEDS_DPS, DELIVERY_SCHEDULE_REVIEW, CONFLICT -- already carry
 # their own review paths and are not re-judged here.
@@ -517,6 +531,40 @@ def _compatibility_answer_findings(
 _PERSISTED_WORKFLOW_BLOCKS = frozenset({
     "PRE_PURCHASE_DELIVERY_UNRESOLVED",
 })
+
+
+def _evidence_conflict(
+    metadata: Mapping[str, Any] | None, *, route: str | None,
+) -> bool:
+    """Is an atom this answer had to address left on a standoff?
+
+    Read from the per-sub-question verdict retrieval already recorded, not
+    from the candidate pool: a contradiction between two rows that were never
+    offered for this atom says nothing about it. ``CONFLICT`` is only set for
+    the atom actually in dispute -- see
+    ``HybridAnswerService._apply_learning_evidence_policy``, which marks only
+    the disputed sub-questions, and ``learning_context_service``, whose
+    Learning-vs-Learning branch is reached from
+    ``unresolved_learning_conflicts``: the pairs where
+    ``winner_learning_id is None``. A conflict that higher authority or a
+    newer approval settled has a winner, never reaches that list, and leaves
+    the atom ANSWERABLE/CANDIDATE -- so it is not held here.
+
+    Deterministic routes are exempt for the same reason they are exempt from
+    the sufficiency gate: their answer predates retrieval.
+    """
+
+    if str(route or "").strip().upper() in _EVIDENCE_EXEMPT_ROUTES:
+        return False
+    metadata = metadata or {}
+    hybrid = metadata.get("hybrid")
+    hybrid = hybrid if isinstance(hybrid, Mapping) else {}
+    entries = hybrid.get("subquestion_evidence")
+    return any(
+        str(item.get("status") or "").upper() == "CONFLICT"
+        for item in (entries if isinstance(entries, (list, tuple)) else ())
+        if isinstance(item, Mapping)
+    )
 
 
 def _evidence_insufficient(
@@ -1141,6 +1189,11 @@ class AutoProcessingEligibilityService:
             metadata, route=normalized_route
         ):
             reasons.append(EVIDENCE_NOT_SUFFICIENT)
+        # Checked beside the sufficiency gate and before GPT ②'s own report:
+        # "nothing supports this" and "two trusted sources disagree" are
+        # different findings, and neither is settled by the answer's author.
+        if _evidence_conflict(metadata, route=normalized_route):
+            reasons.append(EVIDENCE_CONFLICT)
         if gpt_draft.get("unresolved"):
             reasons.append(GPT_REPORTED_UNRESOLVED)
         if gpt_draft.get("can_auto_post") is False:

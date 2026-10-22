@@ -1225,6 +1225,22 @@ class HybridAnswerService:
             # ``warnings``/``review_signals`` but persist a PASS technical
             # verdict; true technical failures already reached the branch
             # above with ``passed=False``.
+            # Only the keyword tier's own review requirement is lifted here.
+            #
+            # The condition used to be "GPT ① understood the question", which
+            # lifted every REVIEW_REQUIRED there was -- including findings that
+            # have nothing to do with the keyword classifier. A rule reported
+            # ``VERIFIED_FACT_CONFLICT`` on 44 drafts, meaning two trusted
+            # sources disagreed, and this turned the verdict to PASS while
+            # leaving the rule and the signal in place: the persisted record
+            # then said PASS and carried a review signal at the same time, so
+            # the dashboard showed nothing to look at. A rule that named a
+            # finding keeps its verdict; the signals this branch does lift are
+            # the ones no rule stands behind, and they stay in ``warnings``
+            # where staff still read them.
+            rule_review = any(
+                item.status == "REVIEW_REQUIRED" for item in validation.rules
+            )
             if (
                 bool(
                     getattr(
@@ -1234,6 +1250,7 @@ class HybridAnswerService:
                     )
                 )
                 and validation.status == "REVIEW_REQUIRED"
+                and not rule_review
             ):
                 validation = ValidationResult(
                     passed=True,
@@ -1242,7 +1259,7 @@ class HybridAnswerService:
                     checked_facts=validation.checked_facts,
                     status="PASS",
                     rules=validation.rules,
-                    review_signals=validation.review_signals,
+                    review_signals=(),
                 )
             # Whose verdict holds an answer back.
             #

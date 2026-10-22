@@ -62,6 +62,7 @@ _REASON_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("등록 직전 preflight 실패", ("PREFLIGHT_FAILED",)),
     ("주문번호 요청 답변(자동등록)", ("ORDER_ID_REQUESTED_FROM_CUSTOMER",)),
     ("배송·설치 소요기간 근거 없음", ("EVIDENCE_NOT_SUFFICIENT",)),
+    ("근거 충돌", ("EVIDENCE_CONFLICT",)),
     ("DPS 일정 자동등록 미개시", ("DPS_SCHEDULE_AUTO_POST_NOT_ENABLED",)),
     ("DPS 필요 판정 불일치", ("DPS_REQUIREMENT_INCONSISTENT",)),
 )

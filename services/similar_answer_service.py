@@ -257,6 +257,11 @@ def _has_human_conflict_authority(item: dict[str, Any]) -> bool:
     )
 
 
+# What ``classify_topics`` returns when it recognised no subject in the answer.
+# A pair that shares only this has not been shown to address the same question.
+_UNCLASSIFIED_TOPIC = frozenset({"OTHER"})
+
+
 def _resolve_latest_valid_conflicts(
     ranked: list[tuple[float, dict[str, Any]]],
     *, priority_for: Any,
@@ -296,9 +301,27 @@ def _resolve_latest_valid_conflicts(
                 # Conflict elimination is destructive.  An overlapping broad
                 # multi-topic tag does not prove the two answers address the
                 # same sub-question; require one identical explicit topic.
+                #
+                # ``OTHER`` is not an explicit topic -- it is what
+                # ``classify_topics`` stores when it recognises no subject at
+                # all. So every unclassified answer in one model scope matched
+                # every other one: on inquiry 11196, 26 pairs were "the same
+                # topic", "PC 모니터로 이용 가능하시나 원할하진않습니다" against
+                # "네이버 로그인이 필요합니다" among them, and the polarity
+                # heuristic below -- which is only meaningful for two answers
+                # to the *same* question -- read their wording as flatly
+                # disagreeing. Both sides were then withheld.
+                #
+                # Only ``OTHER`` is excluded. ``GENERAL_POLICY`` and
+                # ``PRODUCT_SPEC`` are the other two members of
+                # ``GENERIC_TOPICS``, and they do name a subject: two answers
+                # that disagree about this model's policy, or about its
+                # specification, are a real conflict and keep their hold.
                 common_topics = (
                     left_topics
-                    if left_topics == right_topics and len(left_topics) == 1
+                    if left_topics == right_topics
+                    and len(left_topics) == 1
+                    and left_topics != _UNCLASSIFIED_TOPIC
                     else frozenset()
                 )
                 if not common_topics or not _learning_answers_conflict(left, right):

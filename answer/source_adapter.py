@@ -35,8 +35,18 @@ _COMPARABLE = re.compile(r"[^0-9A-Za-z가-힣]+")
 # How much of a truncated title must match the body's opening to count as the
 # same question. Long enough that a genuinely different title never matches.
 _TITLE_PREFIX_MATCH = 12
+# The marketplace may prefix its own name: Coupang titles every product
+# inquiry "Coupang 상품문의", and that whole string is the title for every one
+# of them. Without the prefix group the title carried no customer-specific
+# fact yet was kept, so the combined question began with it -- and when GPT ①
+# returned no atomic questions, the fallback splitter made it a sub-question of
+# its own and retrieval searched Learning for "Coupang 상품문의" (inquiries
+# 11229, 11234). Matched case-insensitively; the caller has already stripped
+# whitespace and punctuation, so spacing variants need nothing here.
 _GENERIC_TITLE = re.compile(
-    r"^(?:일반)?(?:상품|제품|설치|배송)(?:관련)?(?:문의|질문)$"
+    r"^(?:coupang|쿠팡|naver|네이버|smartstore|스마트스토어)?"
+    r"(?:일반)?(?:상품|제품|설치|배송)(?:관련)?(?:문의|질문)$",
+    re.IGNORECASE,
 )
 
 # A 16-digit number the customer explicitly labelled as their order number.
