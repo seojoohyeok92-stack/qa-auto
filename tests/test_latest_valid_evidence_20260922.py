@@ -26,8 +26,12 @@ def _product_fact(*, model: str, value: object, source: str = "API", at: str | N
 
 
 def _learning(identifier: int, *, answer: str, verified_at: str | None):
+    # 건별 승인된 행의 실제 모양. 충돌 해결 권한은 ``classify_provenance`` 가
+    # 정하므로 ``human_verified`` 비트만으로는 부족하다 -- 운영 DB 활성 2,074건
+    # 중 그 비트는 1,449건에 있고 건별 승인은 13건뿐이다.
     metadata = {
         "human_verified": True,
+        "answer_provenance": "STAFF_EDITED",
         "product_scope": "MODEL",
         "learning_topics": ["PORT_CONNECTIVITY"],
     }
@@ -39,6 +43,7 @@ def _learning(identifier: int, *, answer: str, verified_at: str | None):
         "question_original_masked": "HDMI 단자는 몇 개인가요?",
         "source_product_id": "p1",
         "model_code": "LH43BEDHLGFXKR",
+        "learning_source": "APPROVED_EDITED",
         "metadata_json": metadata,
         "compatibility": {
             "product_scope": "MODEL",

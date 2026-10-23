@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +20,37 @@ from repositories.learning_manager_query import (
     manager_page_bounds,
     manager_search_sql,
 )
+
+# Whether two stored rows are the *same original answer*, for the
+# re-collection check below.
+#
+# ``source_key`` cannot answer that. It is
+# ``sha256(learning_source|inquiry_id|masked_question|masked_answer)``, so the
+# same answer re-entering under another path, or after a masking rule changed,
+# hashes differently and the upsert misses. Measured on the operational
+# snapshot that produced 8 duplicate pairs out of 2,074 active rows: five from
+# the company's own contact number ceasing to be masked, two from a second
+# capture path, one from a Naver answer also promoted as a historical case.
+#
+# Only mask tokens and contact numbers are neutralised. Ordinary digits are
+# left alone on purpose -- collapsing them would read "2주 소요" and "3주
+# 소요" as one answer and let a correction overwrite what it corrects.
+_MASK_TOKEN = re.compile(r"<masked-[a-z-]+>")
+_CONTACT_NUMBER = re.compile(
+    # Local numbers, and the 8-digit service numbers (1588-3366) the answers
+    # quote. The 4-4 form requires its separator, so a bare 8-digit run -- an
+    # order number the privacy layer already replaces -- is not swept in with
+    # it.
+    r"(?<!\d)(?:0\d{1,2}[-. ]?\d{3,4}[-. ]?\d{4}|\d{4}[-.]\d{4})(?!\d)"
+)
+_COLLAPSE = re.compile(r"\s+")
+
+
+def origin_answer_key(value: object) -> str:
+    text = _MASK_TOKEN.sub("\x00", str(value or ""))
+    text = _CONTACT_NUMBER.sub("\x00", text)
+    return _COLLAPSE.sub(" ", text).strip()
+
 from services.learning_validity_service import (
     is_learning_usable,
     normalize_validity_update,
@@ -259,6 +291,15 @@ class LearningRepository:
             "SELECT * FROM learning_examples WHERE source_key=?",
             (example["source_key"],),
         ).fetchone()
+        # The re-collection check. When no row carries this ``source_key``,
+        # the same original answer may still be stored already under a key
+        # this one cannot match -- see ``origin_answer_key``. Updating that
+        # row keeps one Learning per original answer instead of accumulating a
+        # second copy that ranks, is retrieved and reports usage separately.
+        same_origin = (
+            cls._same_origin_answer(connection, example)
+            if existing is None else None
+        )
         if (
             existing is not None
             and cls._is_human_authority(existing)
@@ -291,6 +332,33 @@ class LearningRepository:
             elif column == "usage_count":
                 value = max(0, int(value or 0))
             values.append(value)
+        if same_origin is not None:
+            if (
+                cls._is_human_authority(same_origin)
+                and not allow_human_authority_update
+            ):
+                # Same guard the ``source_key`` branch applies: an automatic
+                # re-collection must not overwrite what a person verified.
+                return same_origin
+            updates = ", ".join(
+                f"{column}=?" for column in columns if column != "source_key"
+            )
+            connection.execute(
+                f"""
+                UPDATE learning_examples SET
+                    {updates},
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id=?
+                """,
+                [
+                    value for column, value in zip(columns, values)
+                    if column != "source_key"
+                ] + [int(same_origin["id"])],
+            )
+            return connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(same_origin["id"]),),
+            ).fetchone()
         assignments = ", ".join(
             f"{column}=excluded.{column}" for column in columns if column != "source_key"
         )
@@ -308,6 +376,36 @@ class LearningRepository:
             "SELECT * FROM learning_examples WHERE source_key=?",
             (example["source_key"],),
         ).fetchone()
+
+    @staticmethod
+    def _same_origin_answer(connection: Any, example: dict[str, Any]) -> Any:
+        """An active row already holding this inquiry's identical answer.
+
+        Scoped by ``inquiry_id`` and the normalised question, so it can only
+        ever match another capture of the *same* original answer to the *same*
+        original inquiry -- never another inquiry's, and never a different
+        answer to this one. A row without an ``inquiry_id`` (a promoted
+        historical case whose source inquiry was not kept) has nothing to
+        scope by and is left to the ``source_key`` path alone.
+        """
+
+        inquiry_id = example.get("inquiry_id")
+        question = str(example.get("question_normalized") or "")
+        target = origin_answer_key(example.get("final_answer"))
+        if inquiry_id is None or not question or not target:
+            return None
+        rows = connection.execute(
+            """
+            SELECT * FROM learning_examples
+            WHERE active=1 AND inquiry_id=? AND question_normalized=?
+            ORDER BY id
+            """,
+            (int(inquiry_id), question),
+        ).fetchall()
+        for row in rows:
+            if origin_answer_key(row["final_answer"]) == target:
+                return row
+        return None
 
     def upsert_human_verified_atomic(
         self,

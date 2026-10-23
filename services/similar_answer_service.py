@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -16,7 +15,9 @@ from services.learning_compatibility_service import (
 )
 from answer.text_utils import split_subquestions
 from services.learning_evidence_policy import (
+    HUMAN_APPROVED_PROVENANCES,
     LEARNING_AUTHORITY,
+    approval_time as _effective_time,
     classify_provenance,
     contamination_reason,
     estimation_reason,
@@ -176,29 +177,6 @@ def _normalized_answer(value: object) -> str:
     return re.sub(r"\s+", "", str(value or ""))
 
 
-_LEARNING_EFFECTIVE_TIME_KEYS = (
-    "effective_at", "approved_at", "verified_at", "valid_from",
-)
-
-
-def _effective_time(item: dict[str, Any]) -> datetime | None:
-    """A policy-effective/approval time, never usage-mutated ``updated_at``."""
-
-    metadata = item.get("metadata_json")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    for key in _LEARNING_EFFECTIVE_TIME_KEYS:
-        raw = metadata.get(key) if key in metadata else item.get(key)
-        text = str(raw or "").strip()
-        if not text:
-            continue
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-    return None
-
-
 def _learning_scope_key(item: dict[str, Any]) -> tuple[str, str] | None:
     """The exact application target already decided by compatibility."""
 
@@ -248,18 +226,147 @@ def _learning_answers_conflict(left: dict[str, Any], right: dict[str, Any]) -> b
 
 
 def _has_human_conflict_authority(item: dict[str, Any]) -> bool:
-    metadata = item.get("metadata_json")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    source = str(item.get("learning_source") or "").upper()
-    return bool(
-        metadata.get("human_verified") is True
-        or source in {"APPROVED_EDITED", "AUTO_POST_CORRECTED", "MANUAL_CORRECTION"}
-    )
+    """Whether a person approved *this row* through the review path.
+
+    Destructive conflict elimination removes a human-approved answer, so it
+    asks for the strongest provenance the store records, not the
+    ``human_verified`` bit. That bit cannot hold the distinction: of 2,074
+    active rows it is set on 1,449, and only 13 of those were approved one at
+    a time -- 624 are Naver answers marked verified in bulk
+    (SELLER_ANSWER_VERIFIED) and 743 are promoted historical cases
+    (HISTORICAL_PROMOTED). Reading the bit let a bulk-verified row, including
+    ones this system had written and later re-collected from Naver, cancel a
+    row a person actually reviewed.
+
+    ``classify_provenance``/``HUMAN_APPROVED_PROVENANCES`` already draw that
+    line for the evidence policy and the authority ladder; this reads the same
+    one. Rows outside it keep every other path they had -- they are still
+    retrieved, still ranked, still offered as evidence. They just no longer
+    delete each other.
+    """
+
+    return classify_provenance(item) in HUMAN_APPROVED_PROVENANCES
 
 
 # What ``classify_topics`` returns when it recognised no subject in the answer.
 # A pair that shares only this has not been shown to address the same question.
 _UNCLASSIFIED_TOPIC = frozenset({"OTHER"})
+
+
+# A seller saying, in the answer itself, that the previous answer to this same
+# inquiry was wrong. Only that -- an explicit statement about a prior *answer*.
+#
+# "추가답변 드립니다" is not here and must not be: on inquiry 2317 the customer
+# asked about 자동 피벗, the bot answered about 피벗 (which this model does have
+# -- PK records pivot -92°~+92°), and the staff comment added that 자동피벗 is
+# absent. Two different features, two answers that are both true, no
+# retraction. Treating any later comment as superseding would have discarded a
+# correct answer there. Measured on the operational snapshot, these two
+# patterns match 9 of 2,074 active rows, and a bare "정정" adds none.
+_ANSWER_RETRACTION: tuple[re.Pattern[str], ...] = (
+    re.compile(r"잘못된?\s*(?:답변|안내)"),
+    re.compile(r"(?:답변|안내)(?:으)?로\s*혼동"),
+)
+
+
+def _retraction_order(item: dict[str, Any]) -> str:
+    """When this row's answer was recorded, for ordering siblings."""
+
+    return str(item.get("created_at") or "")
+
+
+def _drop_retracted_answers(
+    ranked: list[tuple[float, dict[str, Any]]],
+    *, stored_siblings: list[dict[str, Any]] | None = None,
+) -> tuple[list[tuple[float, dict[str, Any]]], list[dict[str, Any]]]:
+    """Withdraw an answer a later answer to the *same inquiry* retracts.
+
+    One Naver inquiry can carry several seller comments, and each becomes its
+    own Learning row -- nothing recorded that one of them says the earlier one
+    was wrong. On inquiry 2411 the bot answered that the monitor has a 3.5mm
+    jack, the seller replied "챗봇이 잘못된 답변을 드려 정정드립니다. ... 3.5mm
+    오디오 잭이 제공되지 않아", and the withdrawn claim still entered GPT ②'s
+    prompt 8 times.
+
+    Only a sibling from the same ``inquiry_id`` can retract, and only when its
+    own text says so, so the rule cannot fire from a row that merely sounds
+    newer.
+
+    ``stored_siblings`` is why the correction does not have to have cleared
+    the relevance floor. The two share one ``question_normalized``, so they
+    are scored on the same question -- but ``relevance`` adds
+    ``0.6 * answer_support`` before the floor is applied, and that term is
+    computed from each row's *answer*. On inquiry 2536 the query "주문정보
+    자세히 보기에서 배송예정일 확인하나요" scored the withdrawn answer 0.651
+    and left the three-line correction below 0.24, so the pool held the
+    withdrawn claim alone. The caller passes the whole usable corpus it had
+    already read, which is where the correction still is; no extra query, and
+    a partial repository used as a test double is not asked for anything new.
+
+    A withheld row may therefore leave nothing in its place, and that is the
+    intended outcome: an answer the seller has said is wrong is worse than no
+    evidence, which is what manual review is for. Nothing is written -- the row
+    keeps its approval record and every other path, it is withheld from this
+    pool only.
+    """
+
+    retracted: set[int] = set()
+    notes: list[dict[str, Any]] = []
+    in_pool: set[int] = set()
+    by_inquiry: dict[int, list[dict[str, Any]]] = {}
+    for _score, item in ranked:
+        inquiry_id = item.get("inquiry_id")
+        if inquiry_id is None:
+            continue
+        in_pool.add(int(item["id"]))
+        by_inquiry.setdefault(int(inquiry_id), []).append(item)
+    # Siblings the store knows about but the floor kept out of the pool. Only
+    # the inquiries already represented here are consulted, and only rows the
+    # pool does not already carry are added.
+    for row in stored_siblings or []:
+        inquiry_id = row.get("inquiry_id")
+        if inquiry_id is None or int(inquiry_id) not in by_inquiry:
+            continue
+        if int(row["id"]) in in_pool:
+            continue
+        by_inquiry[int(inquiry_id)].append(dict(row))
+
+    for inquiry_id, siblings in by_inquiry.items():
+        if len(siblings) < 2:
+            continue
+        for later in siblings:
+            answer = str(later.get("final_answer") or "")
+            if not any(rule.search(answer) for rule in _ANSWER_RETRACTION):
+                continue
+            later_order = _retraction_order(later)
+            for earlier in siblings:
+                if int(earlier["id"]) == int(later["id"]):
+                    continue
+                # Strictly earlier: a correction cannot withdraw something
+                # recorded after it.
+                if not later_order or _retraction_order(earlier) >= later_order:
+                    continue
+                if int(earlier["id"]) in retracted:
+                    continue
+                # A stored sibling that never entered the pool has nothing to
+                # withdraw; only pool rows are removed.
+                if int(earlier["id"]) not in in_pool:
+                    continue
+                retracted.add(int(earlier["id"]))
+                notes.append({
+                    "inquiry_id": inquiry_id,
+                    "retracted_learning_id": int(earlier["id"]),
+                    "retracted_by_learning_id": int(later["id"]),
+                    "retracted_at": later_order or None,
+                })
+
+    if not retracted:
+        return ranked, notes
+    kept = [
+        (score, item) for score, item in ranked
+        if int(item["id"]) not in retracted
+    ]
+    return kept, notes
 
 
 def _resolve_latest_valid_conflicts(
@@ -1195,6 +1302,11 @@ class SimilarAnswerService:
             ),
             reverse=True,
         )
+        # Before conflict resolution: a claim the seller has already withdrawn
+        # is not a side of a conflict, it is simply not an answer any more.
+        ranked, retracted_learnings = _drop_retracted_answers(
+            ranked, stored_siblings=candidates,
+        )
         ranked, learning_conflicts = _resolve_latest_valid_conflicts(
             ranked, priority_for=self._source_priority,
         )
@@ -1239,6 +1351,7 @@ class SimilarAnswerService:
             "selected_count": len(selected),
             "selected_learning_ids": [int(item["id"]) for item in selected],
             "learning_conflicts": learning_conflicts,
+            "retracted_learnings": retracted_learnings,
             "unresolved_learning_conflicts": [
                 item for item in learning_conflicts
                 if item.get("winner_learning_id") is None

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field as dataclass_field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
 from answer.answer_format import extract_answer_body
@@ -658,6 +659,150 @@ def value_polarity(value: object) -> str:
     return detect_polarity(text)
 
 
+# Where a policy-effective/approval time is recorded. ``updated_at`` is
+# deliberately absent: it moves when a row is used, which is not when a person
+# approved it. Moved here from ``similar_answer_service`` so the conflict
+# resolver and the PK comparison read the same value.
+_APPROVAL_TIME_KEYS = (
+    "effective_at", "approved_at", "verified_at", "valid_from",
+)
+
+# How long a person's approval outranks the catalogue. Confirmed policy: inside
+# the window the approval is the more recent statement about the product;
+# outside it the catalogue is.
+APPROVAL_PRECEDENCE_WINDOW = timedelta(days=90)
+
+LEARNING_WINS = "LEARNING"
+PRODUCT_FACT_WINS = "PRODUCT_FACT"
+
+# A measurement condition printed into the fact's own value ("스탠드포함",
+# "(가로x높이x깊이)"). When the catalogue states one and the stored answer does
+# not repeat it, the two numbers were not necessarily measured the same way, so
+# the condition is not confirmed and no winner may be chosen.
+_CONDITION_MARKER = re.compile(
+    r"스탠드\s*(?:포함|미포함|제외)|받침대\s*(?:포함|미포함)|벽\s*걸이\s*기준"
+    r"|\(\s*가로|W\s*x|포장\s*(?:포함|기준)"
+)
+
+
+def approval_time(item: Mapping[str, Any]) -> datetime | None:
+    """When a person approved this row, or None when nothing records it."""
+
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    for key in _APPROVAL_TIME_KEYS:
+        raw = metadata.get(key) if key in metadata else item.get(key)
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return parsed if parsed.tzinfo is not None else parsed.replace(
+            tzinfo=timezone.utc)
+    return None
+
+
+def _same_exact_model(
+    item: Mapping[str, Any],
+    *,
+    asked_product_id: object,
+    exact_model_for: Any,
+) -> str | None:
+    """The one canonical model both listings are proven to sell, or None.
+
+    ``learning_examples.model_code`` is blank on every row in the 29 conflicts
+    measured on the operational copy, so the model has to come from the listing
+    each side belongs to. ``exact_model_for`` is the catalogue's own
+    ``_integrated_exact_model_for_listing``: an API ``modelName`` provenance
+    for that exact product id, value equal to the model code, no compound
+    identifier. Both sides must resolve through it and agree.
+
+    Deliberately not ``_listing_declared_base_model``. That one splits a
+    compound name ("LS27FM501EKXKR+이동식 스탠드") to give a listing some
+    specification, which is the right trade for reading facts and the wrong one
+    for deleting a person's answer: 6 of the 29 resolve only that way and they
+    stay unresolved. A shared product id is not accepted on its own either --
+    one listing can sell several option models, and the resolver is what proves
+    it sells exactly one.
+    """
+
+    if not callable(exact_model_for):
+        return None
+    asked = str(asked_product_id or "").strip()
+    origin = str(item.get("source_product_id") or "").strip()
+    if not asked or not origin:
+        return None
+    asked_model = str(exact_model_for(asked) or "").strip()
+    origin_model = str(exact_model_for(origin) or "").strip()
+    if not asked_model or asked_model != origin_model:
+        return None
+    return asked_model
+
+
+def fact_conflict_winner(
+    item: Mapping[str, Any],
+    *,
+    fact_value: object,
+    answered_at: datetime | None,
+    asked_product_id: object = None,
+    exact_model_for: Any = None,
+) -> str | None:
+    """Which side a conflict belongs to, or None when nothing may decide it.
+
+    Confirmed policy, and every clause is a condition that must be *read*, not
+    assumed. A winner is returned only when all of them hold:
+
+      동일 canonical 모델   the row names the model it applies to and
+                            compatibility matched that exact model. 29 of the
+                            conflicts measured on the operational copy carry an
+                            empty ``model_code``, so they never get here.
+      동일 측정 조건        the catalogue value does not print a measurement
+                            condition the stored answer leaves out.
+      사람 건별 승인        ``HUMAN_APPROVED_PROVENANCES`` -- the review path,
+                            not the ``human_verified`` bit.
+      승인 시각 확인        ``approval_time`` found one.
+
+    With all four in hand the window decides: inside it the approval is the
+    newer statement and Learning wins, outside it the catalogue does. An
+    unclear approval history leaves the catalogue in front, and anything that
+    fails the first two conditions returns None -- the existing conflict hold.
+    """
+
+    model = str(item.get("model_code") or "").strip()
+    if not model:
+        # The row does not name its model. The listings on both sides may still
+        # prove one, through the catalogue's own EXACT resolver.
+        model = _same_exact_model(
+            item,
+            asked_product_id=asked_product_id,
+            exact_model_for=exact_model_for,
+        ) or ""
+    if not model:
+        return None
+    compatibility = item.get("compatibility")
+    compatibility = compatibility if isinstance(compatibility, Mapping) else {}
+    if str(compatibility.get("product_match") or "").upper() != "EXACT_MODEL":
+        return None
+    fact_text = str(fact_value or "")
+    if _CONDITION_MARKER.search(fact_text) and not _CONDITION_MARKER.search(
+        str(item.get("answer") or "")
+    ):
+        return None
+    if classify_provenance(item) not in HUMAN_APPROVED_PROVENANCES:
+        # Approved, but not one at a time. The catalogue stays in front.
+        return PRODUCT_FACT_WINS
+    approved = approval_time(item)
+    if approved is None or answered_at is None:
+        return PRODUCT_FACT_WINS
+    return (
+        LEARNING_WINS
+        if (answered_at - approved) <= APPROVAL_PRECEDENCE_WINDOW
+        else PRODUCT_FACT_WINS
+    )
+
+
 def _qualifying(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Approved, exact-product, on-point, definite candidates."""
 
@@ -733,12 +878,36 @@ def _fields_the_text_is_about(text: str) -> tuple[frozenset[str], tuple[str, ...
 def _is_about_field(
     field_key: str, routed: frozenset[str], fragments: tuple[str, ...]
 ) -> bool:
+    """Whether the text states something about *this* field, not its family.
+
+    A fragment counts only when it *is* the field, never when it is a substring
+    of a sibling's name. ``_family_fragments`` returns every target of a family
+    the text touched -- it is built for retrieval, which would rather offer one
+    candidate too many than miss the row that answers the question. Reading a
+    fact conflict is the opposite trade, because it deletes a person's answer,
+    and the substring rule crossed attributes inside one family:
+
+      "RF단자가 있어 동축케이블 연결도 가능합니다" yields ('hdmi', 'usb',
+      'port', 'ethernet', 'lan_'), and ``'usb' in 'usb_port_count'`` read that
+      answer as a statement about the USB port count (inquiries 11205, 11207).
+
+      "유선 LAN 포트는 지원하지 않습니다" reached ``hdmi_present`` the same way
+      and, being a negative against an affirmative fact, became a conflict on
+      the polarity path with no number involved at all.
+
+    ``speaker`` and ``hdmi`` are still reached, because for those the fragment
+    and the field are the same word. The topic table keeps its own membership
+    check: it routes a question to the fields that question asked about, which
+    is already the judgement wanted here. Retrieval's own matching is
+    untouched -- this function has only ever been read from ``fact_conflicts``.
+    """
+
     key = str(field_key or "").lower()
     if not key:
         return False
     if field_key in routed:
         return True
-    return any(part in key for part in fragments)
+    return any(part == key for part in fragments)
 
 
 def fact_conflicts(
@@ -794,9 +963,13 @@ def fact_conflicts(
             )
             # A verified count must also be able to contradict an approved
             # answer that states a different count; neither text carries a
-            # polarity, so polarity alone would call them compatible.
-            opposed_quantity = quantities_conflict(
-                item.get("answer"), _fact_quantity_text(value)
+            # polarity, so polarity alone would call them compatible. The
+            # comparison reads the unit, so a number about something else in
+            # the same sentence is not a disagreement -- see
+            # ``_measurements_conflict``.
+            opposed_quantity = _measurements_conflict(
+                item.get("answer"), _fact_quantity_text(value),
+                unit=getattr(fact, "unit", None),
             )
             if not opposed_polarity and not opposed_quantity:
                 continue
@@ -809,6 +982,86 @@ def fact_conflicts(
                 "kind": "PRODUCT_FACT_VS_APPROVED_LEARNING",
             })
     return tuple(found)
+
+
+# A number with the unit written against it. Comparing bare numbers reads any
+# digit in a sentence as a claim about any fact: on inquiry 11207 a Learning
+# answer saying "섬 지역의 경우 설치까지 약 2주" was reported as contradicting
+# ``usb_port_count = 1 x USB-A`` because {2} and {1} do not intersect, and on
+# 11228 "다리사이 간격 747mm" contradicted the product's own
+# ``1110.8 x 643.8 x 76.4 mm``. Reading the unit is what makes two numbers
+# comparable at all.
+_MEASURED_VALUE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(mm|cm|인치|kg|g|w|개|ch|주|일|년|회|%)",
+    re.IGNORECASE,
+)
+# A catalogue value that lists several measurements ("1110.8 x 643.8 x 76.4
+# mm"). Which of the three a loose number in an answer would correspond to is
+# not something this check can know, so a listed value is never compared.
+# "1 x USB-A" is not one of these: the x separates a count from a name.
+_LISTED_MEASUREMENTS = re.compile(r"\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?")
+
+
+def _measured_values(text: object) -> dict[str, set[float]]:
+    """Numbers in this text, grouped by the unit written against them."""
+
+    found: dict[str, set[float]] = {}
+    for number, unit in _MEASURED_VALUE.findall(_text(text)):
+        try:
+            value = float(number)
+        except ValueError:
+            continue
+        found.setdefault(unit.lower(), set()).add(value)
+    return found
+
+
+def _measurements_conflict(
+    answer: object, fact_value: object, *, unit: object = None,
+) -> bool:
+    """Whether the answer states a different value for the *same* measurement.
+
+    Three conditions, each one a false positive measured on the operational
+    copy. All 29 PK↔Learning conflicts recorded there were produced by bare
+    number comparison and not one of them was a real disagreement:
+
+      같은 단위    the answer has to state a number in the unit the catalogue
+                   used -- from the value's own text, or from the fact's
+                   ``unit`` column when the value is a bare number. 7 of the
+                   29 shared no unit at all: "약 2주" against a USB port
+                   count, "43인치" against a product depth.
+      단일 측정값  a listed value is not compared. 22 of the 29 were a product
+                   dimension triple against one loose millimetre figure -- a
+                   stand's leg spacing, a VESA hole pitch.
+      값 불일치    within one unit the sets must not intersect.
+
+    A real count or weight disagreement still lands here: "무게는 30kg" against
+    ``28.4kg`` shares the unit, is a single value, and the numbers differ.
+    """
+
+    if _LISTED_MEASUREMENTS.search(_text(fact_value)):
+        return False
+    # A fact stores its unit in its own column, so the value itself is often a
+    # bare number ("3" with unit "개") or carries a tolerance the unit does not
+    # sit against ("105.0 (±5.0)" with unit "mm"). When the column says the
+    # unit, every number in the value is in that unit -- the value *is* that
+    # measurement. Reading only the value text made a verified count
+    # uncomparable and let a real disagreement through, which
+    # ``test_verified_count_contradicting_learning_is_reported`` and
+    # ``test_a_different_measurement_of_the_same_attribute_still_conflicts``
+    # both pin.
+    unit_text = _text(unit).strip().lower()
+    if unit_text:
+        numbers = quantities(fact_value)
+        fact_measured = {unit_text: set(numbers)} if numbers else {}
+    else:
+        fact_measured = _measured_values(fact_value)
+    answer_measured = _measured_values(answer)
+    shared = set(fact_measured) & set(answer_measured)
+    if not shared:
+        return False
+    return any(
+        not (fact_measured[unit] & answer_measured[unit]) for unit in shared
+    )
 
 
 def _supported_subquestions(context: Mapping[str, Any]) -> frozenset[str]:
@@ -842,6 +1095,9 @@ def evaluate(
     learning_context: Mapping[str, Any] | None,
     safe_facts: Iterable[Any] = (),
     scope_for: Any = None,
+    answered_at: datetime | None = None,
+    asked_product_id: object = None,
+    exact_model_for: Any = None,
 ) -> LearningEvidenceDecision:
     """Whether approved Learning may settle this inquiry's product facts."""
 
@@ -856,6 +1112,42 @@ def evaluate(
     # fits this product and this time is GPT ②'s reading -- marking the
     # sub-question CONFLICT here decided it for the model.
     against_facts = fact_conflicts(approved, safe_facts, scope_for=scope_for)
+    # A conflict the confirmed priority settles is not a standoff.
+    #
+    # ``fact_conflict_winner`` returns a side only when the model, the
+    # measurement condition, the per-item approval and its time are all read
+    # from the record. Where Learning wins the row stays usable and nothing is
+    # disputed; where the catalogue wins only that row is dropped, and the
+    # sub-question goes back to ordinary evidence instead of CONFLICT. Where
+    # nothing may decide, the conflict travels on exactly as before.
+    settled_against_learning: set[Any] = set()
+    unsettled: list[dict[str, Any]] = []
+    for conflict in against_facts:
+        learning_id = conflict.get("learning_id")
+        item = next(
+            (
+                row for row in approved
+                if row.get("learning_example_id") == learning_id
+            ),
+            None,
+        )
+        winner = (
+            fact_conflict_winner(
+                item,
+                fact_value=conflict.get("fact_value"),
+                answered_at=answered_at,
+                asked_product_id=asked_product_id,
+                exact_model_for=exact_model_for,
+            )
+            if item is not None else None
+        )
+        if winner == LEARNING_WINS:
+            continue
+        if winner == PRODUCT_FACT_WINS:
+            settled_against_learning.add(learning_id)
+            continue
+        unsettled.append(conflict)
+    against_facts = tuple(unsettled)
     # A conflict belongs to the sub-question it was found under, and each one
     # already records which. Refusing the whole inquiry discarded the Learning
     # of every other atom with it: on "피벗? 높낮이? 각도? 스피커?" one
@@ -874,7 +1166,8 @@ def evaluate(
         if str(item.get("matched_subquestion") or "")
         not in disputed_subquestions
         and item.get("learning_example_id") not in disputed_ids
-    ] if against_facts else list(approved)
+        and item.get("learning_example_id") not in settled_against_learning
+    ] if (against_facts or settled_against_learning) else list(approved)
     if against_facts and not remaining:
         return LearningEvidenceDecision(
             False,

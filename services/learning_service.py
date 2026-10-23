@@ -36,6 +36,19 @@ UNSAFE_DELIVERY = re.compile(r"(?:확실히|반드시|무조건).{0,15}(?:배송
 SELLER_KEYS = {"selleranswer", "seller_answer", "answercontent", "commentcontent", "replycontent"}
 
 
+class LearningLinkError(ValueError):
+    """The question and the answer offered for one Learning row disagree.
+
+    Raised rather than stored. Every capture path reaches the store through
+    ``_build``, so a draft or a case that belongs to a different inquiry is a
+    programming error, not a data condition to absorb: absorbing it would
+    attach one customer's answer to another customer's question and the row
+    would look ordinary afterwards. The audit of the operational snapshot
+    found no such row among the 2,074 active ones, so this guards the paths
+    rather than repairing anything.
+    """
+
+
 def _first_text(value: Any) -> str:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -157,6 +170,26 @@ class LearningService:
         seller_answer: str = "", model_code: object = None,
     ) -> dict[str, Any] | None:
         clean_answer = str(answer or "").strip()
+        # The question is this inquiry's. The draft supplies the GPT draft, the
+        # edited text and the metadata naming the model and the route, so a
+        # draft from another inquiry would pair this question with another
+        # one's answer material. Checked once here because every capture path
+        # builds through this method. A missing id proves nothing and is left
+        # alone; only a present, disagreeing one is refused.
+        inquiry_key = inquiry.get("id")
+        draft_key = (draft or {}).get("inquiry_id")
+        if (
+            inquiry_key is not None
+            and draft_key is not None
+            and int(draft_key) != int(inquiry_key)
+        ):
+            raise LearningLinkError(
+                "Learning 저장을 중단"
+                "했습니다: 답변 초안 %s는 "
+                "문의 %s가 아닌 문의 %s의 "
+                "것입니다." % (
+                    (draft or {}).get("id"), inquiry_key, draft_key)
+            )
         question = "\n".join(
             part for part in (str(inquiry.get("title") or "").strip(), str(inquiry.get("content") or "").strip()) if part
         ).strip()
@@ -1006,6 +1039,32 @@ class LearningService:
 
         question = str(case.get("question") or "").strip()
         answer = str(case.get("seller_answer") or "").strip()
+        # This path does not build through ``_build``: the question and the
+        # answer both come from the case row, which is the connection to
+        # verify. The case also carries an ``inquiry_id``, and that link is
+        # what the promoted row stores and what the dashboard follows back, so
+        # it has to be the same market's inquiry. Whether that inquiry exists
+        # at all is the store's foreign key to answer, and it does -- a
+        # missing row is left to it rather than re-checked here. What the key
+        # cannot express is the two disagreeing about the market, and that is
+        # refused rather than stored, because nothing downstream could tell
+        # afterwards.
+        linked_inquiry_id = case.get("inquiry_id")
+        if linked_inquiry_id is not None:
+            linked = self.inquiries.get(int(linked_inquiry_id))
+            case_store = str(case.get("store_code") or "").strip()
+            linked_store = str((linked or {}).get("store_code") or "").strip()
+            if linked is not None and case_store and linked_store and (
+                case_store != linked_store
+            ):
+                raise LearningLinkError(
+                    "Historical 승경을 중단했습"
+                    "니다: 사례 %s의 마웓은 "
+                    "%s인데 연결된 문의 %s의 "
+                    "마웓은 %s입니다." % (
+                        case.get("id"), case_store,
+                        linked_inquiry_id, linked_store)
+                )
         if not question or not answer:
             raise ValueError("문의와 판매자 답변이 모두 있어야 승격할 수 있습니다.")
         source_key = hashlib.sha256(

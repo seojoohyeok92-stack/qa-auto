@@ -49,8 +49,10 @@ PIVOT_SPEC = "-92 ~ +92"
 HEIGHT_SPEC = "105.0 (±5.0)"
 
 
-def fact(field_key: str, value: str):
-    return SimpleNamespace(field_key=field_key, value=value)
+def fact(field_key: str, value: str, unit: str | None = None):
+    # 수치 fact 는 단위를 자기 컬럼에 담는다. 운영 PK 의 height_adjust 17행은
+    # value='105.0(±5.0)' / unit='mm' 형태이고, 측정값 비교는 그 단위를 읽는다.
+    return SimpleNamespace(field_key=field_key, value=value, unit=unit)
 
 
 def approved(learning_id: int, answer: str, subquestion: str):
@@ -129,7 +131,7 @@ def test_a_different_measurement_of_the_same_attribute_still_conflicts(
 ) -> None:
     conflicts = fact_conflicts(
         [approved(2, "높낮이는 120mm까지 조절됩니다.", "높낮이 조절이 가능한가요?")],
-        [fact("height_adjust", HEIGHT_SPEC)],
+        [fact("height_adjust", HEIGHT_SPEC, "mm")],
     )
     assert len(conflicts) == 1
     assert conflicts[0]["field_key"] == "height_adjust"
@@ -138,7 +140,7 @@ def test_a_different_measurement_of_the_same_attribute_still_conflicts(
 def test_the_same_measurement_is_not_a_conflict() -> None:
     assert fact_conflicts(
         [approved(3, "높낮이는 105mm까지 조절됩니다.", "높낮이 조절이 가능한가요?")],
-        [fact("height_adjust", HEIGHT_SPEC)],
+        [fact("height_adjust", HEIGHT_SPEC, "mm")],
     ) == ()
 
 
@@ -197,7 +199,7 @@ def test_every_atom_disputed_is_still_refused_whole() -> None:
     ]
     decision = evaluate(
         learning_context=_context(items),
-        safe_facts=[fact("speaker", "없음"), fact("height_adjust", HEIGHT_SPEC)],
+        safe_facts=[fact("speaker", "없음"), fact("height_adjust", HEIGHT_SPEC, "mm")],
     )
 
     assert decision.usable is False
@@ -262,16 +264,22 @@ def test_the_policy_is_market_independent() -> None:
     # takes a learning context, the safe facts and a scope callable, and
     # nothing else.
     signature = inspect.signature(policy.evaluate)
+    # 아래 세 개는 시장·스토어·applicability 가 아니다. ``answered_at`` 은 승인
+    # 후 3개월 창을 재는 기준 시각, ``asked_product_id`` 는 고객이 보고 있는
+    # 리스팅, ``exact_model_for`` 는 그 리스팅의 모델을 증명하는 카탈로그
+    # 리졸버다. 상품 ID 와 모델은 마켓 양쪽이 똑같이 가지는 값이고, 이 테스트가
+    # 막으려는 입력은 아래 ``for term in`` 이 이름으로 직접 확인한다.
     assert set(signature.parameters) == {
-        "learning_context", "safe_facts", "scope_for"}
+        "learning_context", "safe_facts", "scope_for", "answered_at",
+        "asked_product_id", "exact_model_for"}
     for term in ("store_code", "market_applicability", "origin_market",
                  "is_market_applicable"):
         assert term not in source, term
 
     items = [approved(50, "높낮이는 105mm까지 조절됩니다.", "높낮이 조절이 가능한가요?")]
     first = evaluate(learning_context=_context(items),
-                     safe_facts=[fact("height_adjust", HEIGHT_SPEC)])
+                     safe_facts=[fact("height_adjust", HEIGHT_SPEC, "mm")])
     second = evaluate(learning_context=_context(items),
-                      safe_facts=[fact("height_adjust", HEIGHT_SPEC)])
+                      safe_facts=[fact("height_adjust", HEIGHT_SPEC, "mm")])
     assert first.to_dict() == second.to_dict()
     assert first.usable is True

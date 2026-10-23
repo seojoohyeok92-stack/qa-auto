@@ -110,7 +110,13 @@ def learning(
     source: str = "APPROVED_EDITED",
     effective_at: str | None = None,
 ):
-    metadata: dict[str, object] = {"learning_topics": topics}
+    # 건별 승인 행의 실제 모양. 충돌 판정 권한은 ``classify_provenance`` 가
+    # 정하므로 human_verified 와 answer_provenance 가 함께 있어야 한다.
+    metadata: dict[str, object] = {
+        "learning_topics": topics,
+        "human_verified": True,
+        "answer_provenance": "STAFF_EDITED",
+    }
     if effective_at:
         metadata["effective_at"] = effective_at
     return {

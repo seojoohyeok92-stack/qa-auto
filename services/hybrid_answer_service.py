@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -25,9 +26,31 @@ from services.gpt_understanding_service import GptUnderstandingService
 # ``required_fact_groups`` is no longer consulted here: see _product_fact_fields.
 from services.product_knowledge_service import (
     SUBJECT_SENSITIVE_FIELDS,
+    ProductKnowledgeService,
     select_prompt_facts,
 )
 from services.self_review_service import SelfReviewService
+
+
+def _exact_model_for_listing(product_id: object) -> str | None:
+    """The one model a listing's own API record proves it sells, or None.
+
+    A thin pass-through to the catalogue service so the evidence policy, which
+    must not import it, can still ask. Cached there on (path, mtime, size), so
+    repeated calls inside one inquiry re-read nothing.
+    """
+
+    key = str(product_id or "").strip()
+    if not key:
+        return None
+    try:
+        return ProductKnowledgeService()._integrated_exact_model_for_listing(
+            key
+        )
+    except Exception:
+        # Resolving a model is an improvement on the conflict path, never a
+        # precondition for answering: a failure leaves the conflict unresolved.
+        return None
 
 
 def _join_evidence(*parts: str) -> str:
@@ -398,6 +421,17 @@ class HybridAnswerService:
             learning_context=learning_context,
             safe_facts=safe_facts,
             scope_for=_scope_for,
+            # When this answer is being produced. The approval window is
+            # measured against it, never against the inquiry's own date -- a
+            # customer asking today about a product approved last year must
+            # not make that approval look recent.
+            answered_at=datetime.now(timezone.utc),
+            # Which listing the customer is asking about, and the catalogue's
+            # own EXACT resolver. Every Learning row in the measured conflicts
+            # has a blank ``model_code``; this is how "the same canonical
+            # model" gets proven without writing anything back to the store.
+            asked_product_id=request.metadata.get("product_id"),
+            exact_model_for=_exact_model_for_listing,
         )
         learning_context["approved_learning_evidence"] = decision.to_dict()
         if not decision.conflict:
