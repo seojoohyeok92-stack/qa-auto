@@ -47,6 +47,7 @@ _REASON_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "POLICY_OR_HIGH_RISK_REVIEW", "DRAFT_REVIEW_REQUIRED",
         "ROUTE_BLOCKED_REVIEW_REQUIRED",
     )),
+    ("\uc870\uce58 \uc57d\uc18d \uac80\ud1a0", ("ACTION_COMMITMENT_REVIEW",)),
     ("Evidence 부족(제품 사실 미검증)", ("PRODUCT_FACT_NOT_VERIFIED",)),
     ("제품 호환성 근거 부족", ("PRODUCT_COMPATIBILITY_NOT_VERIFIED",)),
     ("낮은 신뢰도", (

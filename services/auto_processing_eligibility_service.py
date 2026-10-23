@@ -355,6 +355,65 @@ _EVIDENCE_EXEMPT_ROUTES = frozenset({
 POLICY_STAFF_ONLY_ACTIONS = frozenset({"CANCEL_RETURN", "DAMAGE_REPORT"})
 RETURN_OR_DAMAGE_POLICY_REVIEW = "RETURN_OR_DAMAGE_POLICY_REVIEW"
 
+
+# The customer asked for something to be *done*, and the answer said it would
+# be done. Inquiry 3145 -- "고효율 가전환급금 신청하는데 거래내역서가 필요합니다.
+# 발부 부탁드립니다." (ACTION_REQUEST / ACTION_EXECUTION) -- was auto-posted
+# with "정확한 결제 금액을 알려주시면 확인 후 작성해드리겠습니다": a document
+# nobody had agreed to write, promised to the customer with no person in the
+# loop. Validator PASS, no blocking reason, and nothing between the two.
+#
+# ``POLICY_STAFF_ONLY_ACTIONS`` does not reach it. That holds CANCEL_RETURN and
+# DAMAGE_REPORT by action, and GPT ① classified this one OTHER; the attribute
+# is where the request lives. ``_CASE_COMMITMENT`` does not reach it either and
+# must not be widened to: its verbs are 교환/환불/반품/회수/수거 -- the
+# return-and-damage domain those two actions already hold -- and its endings
+# include "가능합니다"/"됩니다", which is right for settling a defect case and
+# wrong here, where "수거를 요청해 주시면 됩니다" is procedure guidance that
+# must keep passing.
+ACTION_COMMITMENT_REVIEW = "ACTION_COMMITMENT_REVIEW"
+
+# What the customer wants is read from GPT ①'s requested_attribute.
+_ACTION_EXECUTION_ATTRIBUTE = "ACTION_EXECUTION"
+
+# A first-person undertaking to carry the action out, and only that. The verb
+# has to be the action itself and the undertaking has to follow it closely --
+# "안내드리겠습니다" and "확인했습니다" are information and acknowledgement, and
+# "요청해 주시면 됩니다" tells the customer where to go. Measured over the 31
+# ACTION_EXECUTION drafts in the operational snapshot this matches one, 3145.
+#
+# A looser first draft allowed a bare "드리겠습니다" anywhere after the verb and
+# read "변경 가능 여부를 안내드리겠습니다" (inquiries 10905, 10931) as a promise
+# to change the order. Adjacency is what separates them.
+_ACTION_COMMITMENT = re.compile(
+    r"(?:작성|발급|발부|변경|수정|반영|취소|등록|신청|접수|예약|조정|추가|"
+    r"수거|회수|교환|환불|재발송|발송|처리)"
+    r"[^.\n]{0,6}?(?:해\s*)?"
+    r"(?:도와드리겠|도와드립니다|드리겠|드립니다|하겠습니다)"
+)
+
+
+def _promises_an_action(questions: Any, *, answer: str) -> bool:
+    """Whether the answer undertakes an action the customer asked for.
+
+    Both halves are required, and each is read from a different party: GPT ①
+    says the customer asked for the action, the finished text says this system
+    promised to perform it. An inquiry that asked for information, or an answer
+    that only explains the procedure, is not this.
+    """
+
+    items = [item for item in questions if isinstance(item, Mapping)]
+    if not items:
+        return False
+    asked = any(
+        str(item.get("requested_attribute") or "").strip().upper()
+        == _ACTION_EXECUTION_ATTRIBUTE
+        for item in items
+    )
+    if not asked:
+        return False
+    return bool(_ACTION_COMMITMENT.search(str(answer or "")))
+
 # The one part of a DAMAGE_REPORT the store lets the system answer: how a
 # suspected defect is checked. Real inquiry 10635 ("모니터 화면에 검은 타원형이
 # 보이는데 어떻게 하면 되나요?", DAMAGE_REPORT + METHOD_OR_PROCEDURE) was
@@ -1255,6 +1314,11 @@ class AutoProcessingEligibilityService:
                 )
             ):
                 reasons.append(RETURN_OR_DAMAGE_POLICY_REVIEW)
+            # Read beside the action policy above and from the same
+            # understanding: that one asks which action was requested, this
+            # one asks whether the answer took it on.
+            if _promises_an_action(questions, answer=answer):
+                reasons.append(ACTION_COMMITMENT_REVIEW)
             asks_compatibility = any(
                 isinstance(item, Mapping)
                 and str(item.get("requested_attribute") or "").strip().upper()

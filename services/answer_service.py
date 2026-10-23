@@ -67,7 +67,14 @@ from services.gpt_semantic_analyzer_service import (
 )
 from services.learning_context_service import PRODUCT_FACT_ACTIONS
 from services.semantic_analysis import (
+    CANCEL_RETURN,
+    COLLECTION,
+    DAMAGE_REPORT,
+    DELIVERY_POLICY,
+    INHERENT_SCHEDULE_ACTIONS,
+    MISSING_ITEM_REPORT,
     ORDER_IDENTIFICATION,
+    OTHER,
     REPAIR,
     SemanticAnalysis,
     is_enabled as semantic_analyzer_enabled,
@@ -180,6 +187,51 @@ EXACT_TEMPLATE_MATCH_KINDS = frozenset({
 COUPANG_IDENTITY_REQUIRED_ACTIONS: frozenset[str] = frozenset(
     {*PRODUCT_FACT_ACTIONS, REPAIR}
 )
+
+
+# A market without order lookup cannot answer anything that needs this
+# customer's own schedule or a change to their order. These are those actions:
+# the five ``INHERENT_SCHEDULE_ACTIONS`` (every delivery action except
+# DELIVERY_POLICY -- each one is answered by a date that already exists), plus
+# the requests that ask for the order itself to be acted on.
+_ORDER_SCOPED_ACTIONS: frozenset[str] = frozenset({
+    *INHERENT_SCHEDULE_ACTIONS,
+    CANCEL_RETURN, DAMAGE_REPORT, MISSING_ITEM_REPORT, COLLECTION, REPAIR,
+    ORDER_IDENTIFICATION,
+})
+
+
+def _delivery_policy_only(semantic: SemanticAnalysis | None) -> bool:
+    """Whether every question asked is about the published delivery policy.
+
+    ``plan.is_delivery`` is one boolean over the whole message, so on a market
+    with no order lookup it ended "원하는 배송날짜 어떻게 지정해야하나요"
+    (inquiry 11199) and "배송날짜 선택지가 안나왔는데 제가 지정할 수 없는
+    건가요" (11231) with no draft at all -- procedure questions that need
+    nobody's order. ``DELIVERY_POLICY`` is the one delivery action the
+    published policy answers; the other five need a date only that customer's
+    order has.
+
+    Positively confirmed, never inferred from absence. ``DELIVERY_POLICY`` has
+    to be among the actions asked -- an inquiry that merely fails to match the
+    order-scoped set is not thereby a policy question. No understanding, no
+    actions, or ``OTHER`` keeps the block, and so does any order-scoped action
+    asked alongside the policy one.
+    """
+
+    if semantic is None or not semantic.usable:
+        return False
+    atoms = tuple(semantic.atomic_questions or ())
+    actions = {
+        str(getattr(atom, "action", "") or "").strip().upper()
+        for atom in atoms
+    } if atoms else set(semantic.actions)
+    actions.discard("")
+    if not actions or OTHER in actions:
+        return False
+    if actions & _ORDER_SCOPED_ACTIONS:
+        return False
+    return DELIVERY_POLICY in actions
 
 
 def _non_naver_market(store_code: object) -> str | None:
@@ -2115,8 +2167,16 @@ class AnswerService:
                     "문의와 처리계획의 식별자가 일치하지 않습니다."
                 )
             correlation_id = plan.correlation_id
+            # ``plan.is_delivery`` alone used to stand here. It is kept as
+            # the outer term so this can only ever narrow the block: an
+            # inquiry that is not delivery-related reaches exactly the same
+            # decision it did before, and an order lookup or a DPS
+            # requirement still blocks on its own whatever the actions say.
             if not is_store_dps_enabled(inquiry.get("store_code")) and (
-                plan.is_delivery
+                (
+                    plan.is_delivery
+                    and not _delivery_policy_only(routing_semantic)
+                )
                 or plan.requires_order_lookup
                 or plan.requires_dps_lookup
             ):

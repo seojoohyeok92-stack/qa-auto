@@ -947,6 +947,50 @@ def _list_findings(
     return list(best.values())
 
 
+# One colour, spelled two ways. The catalogue keeps its own spelling -- for
+# LS32DM501EKXKR ``stand_color`` is stored as "White" -- and the answer writes
+# it in Korean. On inquiry 11238 the fact was delivered, cited, recorded USED
+# and cleared by the validator, and then failed only this string comparison:
+# "White" was not found in "모니터와 스탠드 모두 화이트 구성입니다", so the
+# grounding reported VALUE_NOT_STATED_IN_ANSWER and auto-post was refused as
+# PRODUCT_FACT_NOT_VERIFIED.
+#
+# A closed list, and only for colour. This is not a similarity relaxation: a
+# value outside these groups is compared character for character exactly as
+# before, two different groups never match each other, and the answer still
+# has to contain one of the spellings -- an answer that does not name the
+# colour stays unverified.
+_COLOUR_SPELLINGS: tuple[frozenset[str], ...] = (
+    frozenset({"white", "화이트", "흰색", "백색"}),
+    frozenset({"black", "블랙", "검정", "검정색", "검은색"}),
+    frozenset({"silver", "실버", "은색"}),
+    frozenset({"gray", "grey", "그레이", "회색"}),
+    frozenset({"beige", "베이지"}),
+    frozenset({"ivory", "아이보리"}),
+    frozenset({"navy", "네이비", "남색"}),
+    frozenset({"blue", "블루", "파란색"}),
+    frozenset({"green", "그린", "초록", "초록색"}),
+    frozenset({"pink", "핑크", "분홍", "분홍색"}),
+    frozenset({"red", "레드", "빨간색"}),
+    frozenset({"gold", "골드", "금색"}),
+)
+# Read from the field, not only the value: a colour group may only speak for a
+# field that states a colour, so no other attribute can borrow it.
+_COLOUR_FIELD = re.compile(r"(?:^|_)colou?r(?:$|_)")
+
+
+def _colour_spellings(claim: "FactClaim") -> frozenset[str]:
+    """Spellings that mean this claim's colour, or empty when it is not one."""
+
+    if not _COLOUR_FIELD.search(str(claim.field_key or "").lower()):
+        return frozenset()
+    value = _compact(claim.value)
+    for group in _COLOUR_SPELLINGS:
+        if value in group:
+            return group
+    return frozenset()
+
+
 def _text_findings(
     answer: str, claim: FactClaim, definite: Sequence[str],
 ) -> list[dict[str, str]]:
@@ -965,9 +1009,21 @@ def _text_findings(
                 claim, "VALUE_CANNOT_BE_VERIFIED", claim.value[:60])]
         return []
     if compact_value not in _compact(answer):
-        if not definite and not _asserts_anything(answer):
-            return []
-        return [_finding(claim, "VALUE_NOT_STATED_IN_ANSWER", claim.value)]
+        # The same colour under its other spelling counts as stated, and the
+        # spelling the answer used becomes the one the negation check below
+        # looks for -- "화이트가 아닙니다" still negates "White".
+        spoken = next(
+            (
+                spelling for spelling in sorted(_colour_spellings(claim))
+                if spelling in _compact(answer)
+            ),
+            "",
+        )
+        if not spoken:
+            if not definite and not _asserts_anything(answer):
+                return []
+            return [_finding(claim, "VALUE_NOT_STATED_IN_ANSWER", claim.value)]
+        compact_value = spoken
     for sentence in definite:
         if compact_value in _compact(sentence) and _negated(sentence):
             return [_finding(claim, "ANSWER_NEGATES_THE_VALUE")]
