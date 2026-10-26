@@ -102,6 +102,7 @@ from ui.answer_status_presenter import (
     trace_stage_label,
 )
 from ui.rerun_profile import snapshot as rerun_profile_snapshot
+from ui.learning_manager import open_common_learning_editor
 from ui.session_identity import can, current_actor
 from ui.uat_presenters import answer_source_label
 
@@ -1071,6 +1072,18 @@ def approval_learning_trace(
         "human_verified": human_verified,
         "positive_learning": accepted is not None,
         "positive_learning_id": (accepted or {}).get("id"),
+        # Every active, human-verified Positive this inquiry holds.
+        #
+        # ``positive_learning_id`` is deliberately narrower: it names the one
+        # Learning that matches the answer currently shown, resolved through
+        # the posted-answer snapshot, and it is None for a posted answer whose
+        # snapshot is absent. That is right for the approval card, which
+        # reports the state of *this* answer.
+        #
+        # Adding a common Learning does not depend on which answer is on
+        # screen -- it only needs an approved Learning to read from -- so the
+        # button below uses this list instead. Same filter, already applied.
+        "approved_learning_ids": [int(row["id"]) for row in positives],
         "positive_active": bool((accepted or {}).get("active")),
         "positive_status": "ACTIVE" if accepted is not None else None,
         "learning_source": (accepted or {}).get("learning_source"),
@@ -2138,6 +2151,28 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     f"{inquiry_id} · {approval_trace['reference']} · "
                     f"Source {approval_trace.get('learning_source') or '-'}"
                 )
+            # Only an approved Learning can contribute a common one, and the
+            # card above already states which id that is. Offering it here
+            # saves the operator looking the id up again in Learning Manager.
+            # Reads nothing new and writes nothing: the editor and its save
+            # path are the manager's own.
+            approved_learning_id = approval_trace.get(
+                "positive_learning_id"
+            ) or next(
+                iter(approval_trace.get("approved_learning_ids") or ()), None
+            )
+            if approved_learning_id:
+                if st.button(
+                    "공통 Learning 추가",
+                    key=f"common_learning_from_review_{inquiry_id}",
+                    help=(
+                        "이 답변에서 다른 모델에도 적용되는 질문과 답변만 골라 "
+                        "별도 항목으로 등록합니다. 원본 Learning 은 변경되지 "
+                        "않습니다."
+                    ),
+                ):
+                    open_common_learning_editor(int(approved_learning_id))
+                    st.rerun()
         elif approval_trace.get("revoked_learning_id"):
             st.markdown(
                 '<div class="approval-cancelled-card">'

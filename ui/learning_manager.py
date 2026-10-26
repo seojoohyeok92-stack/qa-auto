@@ -469,6 +469,76 @@ def _render_scope_editor(
             st.rerun()
 
 
+# Which approved Learning the "공통 Learning 추가" editor should open on.
+# Set by the inquiry detail screen so an operator who just approved an answer
+# does not have to come here and search for its id again.
+COMMON_LEARNING_TARGET_KEY = "common_learning_target_id"
+_COMMON_TARGET_PREFIX = "common_target"
+
+
+def open_common_learning_editor(learning_id: int) -> None:
+    """Route to Learning Manager with this Learning's editor already open.
+
+    The routing guard in ``app.py`` sends every non-dashboard page back to the
+    dashboard unless admin mode is on, so both keys are set here -- the same
+    pair the validity editor's ``on_change`` already uses.
+    """
+
+    st.session_state[COMMON_LEARNING_TARGET_KEY] = int(learning_id)
+    st.session_state[f"{_COMMON_TARGET_PREFIX}_common_open_{int(learning_id)}"] = True
+    st.session_state["current_page"] = "learning"
+    st.session_state["production_admin_mode"] = True
+
+
+def _render_common_learning_target(repository: LearningRepository) -> None:
+    """Open the add editor on the Learning the inquiry screen handed over.
+
+    Rendered from the Learning it fetches by id rather than from the manager's
+    current page, so the row does not have to be in the visible list.
+    """
+
+    target = st.session_state.get(COMMON_LEARNING_TARGET_KEY)
+    if target in (None, ""):
+        return
+    try:
+        learning_id = int(target)
+    except (TypeError, ValueError):
+        st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
+        return
+
+    st.subheader("공통 Learning 추가")
+    row = repository.get(learning_id)
+    if row is None:
+        st.warning(f"Learning {learning_id} 을 찾을 수 없습니다.")
+    elif is_common_learning(_metadata(row)):
+        st.info(
+            f"Learning {learning_id} 은 이미 공통 Learning 입니다. "
+            "아래 '공통 Learning 관리'에서 수정할 수 있습니다."
+        )
+    elif not bool(row.get("active")):
+        st.warning(
+            f"Learning {learning_id} 은 비활성 상태입니다. "
+            "승인된 Learning 에서만 공통 항목을 추가할 수 있습니다."
+        )
+    else:
+        st.caption(
+            "문의 상세에서 전달된 Learning %s · 문의 ID %s" % (
+                learning_id, row.get("inquiry_id") or "-",
+            )
+        )
+        _render_common_learning_add(
+            row, repository, key_prefix=_COMMON_TARGET_PREFIX
+        )
+    if st.button("닫기", key="common_learning_target_close"):
+        st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
+        st.session_state.pop(
+            f"{_COMMON_TARGET_PREFIX}_common_open_{learning_id}", None
+        )
+        st.session_state["current_page"] = "learning"
+        st.rerun()
+    st.divider()
+
+
 def _render_common_learning_add(
     row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
 ) -> None:
@@ -597,12 +667,14 @@ def _render_common_learning_add(
         else:
             st.toast(f"공통 Learning {created['id']} 을 추가했습니다.")
             st.session_state.pop(state_key, None)
+            st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
             st.session_state["current_page"] = "learning"
             st.rerun()
     if actions[1].button(
         "취소", key=f"{key_prefix}_common_cancel_{learning_id}", width="stretch"
     ):
         st.session_state.pop(state_key, None)
+        st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
         st.session_state["current_page"] = "learning"
         st.rerun()
 
@@ -1241,6 +1313,7 @@ def render_learning_manager(database: Database | None) -> None:
 
     repository = LearningRepository(database)
     feedback_repository = LearningFeedbackRepository(database)
+    _render_common_learning_target(repository)
     summary = repository.manager_summary()
     feedback_summary = feedback_repository.manager_summary()
     metrics = st.columns(6, gap="small")
