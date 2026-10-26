@@ -4,7 +4,8 @@ import logging
 import re
 
 from datetime import UTC, datetime
-from typing import Any
+from hashlib import sha256
+from typing import Any, Mapping
 
 from answer.learning_conflict import LearningConflictError
 from answer.answer_format import format_final_answer
@@ -100,6 +101,79 @@ def origin_market_of(metadata: dict[str, Any]) -> str:
     return MARKET_NAVER
 
 
+# The three application targets an operator can choose for one Learning row.
+# A narrower set than ``PRODUCT_SCOPES`` in the compatibility service on
+# purpose: VARIANT/CATEGORY/GLOBAL remain reachable by the lexical profiler
+# that writes new rows, and nothing here reclassifies them.
+APPLICATION_SCOPES = ("MODEL", "PRODUCT_FAMILY", "POLICY")
+MARKET_APPLICABILITIES = (
+    f"{MARKET_NAVER}_ONLY", f"{MARKET_COUPANG}_ONLY", MARKET_APPLICABILITY_COMMON,
+)
+
+# The keys an operator owns, carried across a re-capture of the same answer.
+OPERATOR_SCOPE_KEYS = (
+    "product_scope",
+    "market_applicability",
+    "cross_model_policy",
+    "cross_model_policy_approved_by",
+    "cross_model_policy_approved_at",
+    "common_learning",
+    "common_learning_origin_id",
+    "common_learning_approved_by",
+    "common_learning_approved_at",
+)
+
+
+def is_common_learning(metadata: Mapping[str, Any] | None) -> bool:
+    """Whether this row is one an operator added as a common Learning.
+
+    This is the only thing that separates a common Learning from the 559
+    rows whose ``product_scope`` the lexical profiler happened to write as
+    POLICY. It is set once, by ``add_common_learning``, on a row the operator
+    authored -- never inferred from text.
+    """
+
+    metadata = metadata or {}
+    return bool(metadata.get("common_learning"))
+
+
+def is_operator_approved_policy(metadata: Mapping[str, Any] | None) -> bool:
+    """Whether an operator said *this row* applies to every model.
+
+    ``product_scope`` cannot answer that on its own. Every new row gets one
+    from the lexical profiler in ``LearningService._build``, and on the
+    26.10.22 snapshot 559 of 2,074 active rows already read ``POLICY`` that
+    way -- none of them reviewed by anybody. Reading that as an approval would
+    promote all 559 to cross-model evidence in one deploy, which is the
+    opposite of an explicit decision.
+
+    So the approval is its own key, written only by
+    ``update_application_scope``, and it is believed only while the scope it
+    was given still says POLICY.
+    """
+
+    metadata = metadata or {}
+    if not bool(metadata.get("cross_model_policy")):
+        return False
+    return str(metadata.get("product_scope") or "").strip().upper() == "POLICY"
+
+
+# What stops a composite inquiry becoming a common policy is structural, not
+# lexical. An earlier revision read the row's topics with ``classify_topics``
+# and refused POLICY whenever a product topic appeared. Audited against the
+# 26.10.22 snapshot that over-blocked 166 candidate rows on incidental part
+# nouns ("벽걸이" inside a 한전 복지할인 question) while still missing 25 rows
+# whose only topic was OTHER and whose answer stated a measurement ("다리사이
+# 간격" -> "812.6mm"). Widening the word lists would have traded one error for
+# the other indefinitely.
+#
+# The rule now is about which row is being approved, which the data answers
+# exactly: an original row -- the whole customer inquiry, however many
+# questions it holds -- can never be a common Learning. A common Learning is
+# a separate row the operator wrote by selecting the part that generalises,
+# and POLICY is reachable only there. A verified common specification is
+# therefore approvable, and a composite inquiry still cannot be promoted
+# whole.
 def normalize_market_applicability(value: Any) -> str | None:
     """Return the persisted applicability value, without inventing a scope."""
     normalized = str(value or "").strip().upper()
@@ -310,6 +384,19 @@ class LearningRepository:
             # automatic observations must not downgrade or resurrect it.
             return existing
 
+        # ``metadata_json`` is in the assignment list below, so a re-capture
+        # of the same original answer rewrites it wholesale with the scope the
+        # lexical profiler just inferred -- and an operator's explicit
+        # cross-model approval would disappear with it. Re-capture is not
+        # hypothetical: the 26.10.22 snapshot holds 8 duplicate pairs from
+        # exactly that path.
+        #
+        # Only an explicit approval is carried forward, and only onto the row
+        # that already held it. A row nobody decided about keeps today's
+        # behaviour in full, including the 559 rows whose POLICY scope the
+        # profiler wrote and the Coupang origin tagging.
+        example = cls._carry_operator_scope(example, existing or same_origin)
+
         columns = (
             "source_key", "inquiry_id", "answer_draft_id",
             "approval_history_id", "learning_source",
@@ -376,6 +463,39 @@ class LearningRepository:
             "SELECT * FROM learning_examples WHERE source_key=?",
             (example["source_key"],),
         ).fetchone()
+
+    @staticmethod
+    def _carry_operator_scope(
+        example: dict[str, Any], previous: Any
+    ) -> dict[str, Any]:
+        """Preserve an operator-approved application scope across an upsert.
+
+        Returns ``example`` untouched unless the row being replaced carried an
+        explicit cross-model policy approval, so this cannot change what any
+        row without one does.
+        """
+
+        if previous is None:
+            return example
+        try:
+            stored = deserialize_json(previous["metadata_json"])
+        except (KeyError, IndexError, TypeError):
+            return example
+        if not isinstance(stored, dict):
+            return example
+        # A common Learning counts even when its scope is one model: the
+        # operator still authored it, so a re-capture must not reset its
+        # application range either.
+        if not (is_operator_approved_policy(stored) or is_common_learning(stored)):
+            return example
+        incoming = example.get("metadata_json")
+        merged = dict(incoming) if isinstance(incoming, dict) else {}
+        for key in OPERATOR_SCOPE_KEYS:
+            if key in stored:
+                merged[key] = stored[key]
+        carried = dict(example)
+        carried["metadata_json"] = merged
+        return carried
 
     @staticmethod
     def _same_origin_answer(connection: Any, example: dict[str, Any]) -> Any:
@@ -987,6 +1107,328 @@ class LearningRepository:
                 "SELECT * FROM learning_examples WHERE id=?",
                 (int(learning_id),),
             ).fetchone()
+        result = self._row(row)
+        assert result is not None
+        return result
+
+    def update_application_scope(
+        self,
+        learning_id: int,
+        *,
+        product_scope: str,
+        market_applicability: str,
+        actor: str | None = None,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Record which products and which markets this Learning applies to.
+
+        Only the three application keys are rewritten; every other key in
+        ``metadata_json`` -- provenance, authority, topics, identity, the
+        semantic contract -- is read back and re-serialised unchanged, so the
+        row keeps the authority it was approved with. The validity axis has
+        its own editor and is not touched here.
+
+        ``cross_model_policy`` is written true only for POLICY, and cleared
+        otherwise, so narrowing a row back to one model also withdraws the
+        cross-model approval instead of leaving a stale flag behind.
+        """
+
+        scope = str(product_scope or "").strip().upper()
+        if scope not in APPLICATION_SCOPES:
+            raise ValueError(
+                "적용 대상은 %s 중 하나여야 합니다." % ", ".join(APPLICATION_SCOPES)
+            )
+        applicability = normalize_market_applicability(market_applicability)
+        if applicability is None or applicability not in MARKET_APPLICABILITIES:
+            raise ValueError(
+                "적용 마켓은 %s 중 하나여야 합니다." % ", ".join(MARKET_APPLICABILITIES)
+            )
+        now = datetime.now(UTC).isoformat(timespec="milliseconds")
+        clauses = ["id=?"]
+        tail: list[Any] = [int(learning_id)]
+        if expected_updated_at is not None:
+            clauses.append("updated_at=?")
+            tail.append(str(expected_updated_at))
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                """
+                SELECT metadata_json, question_original_masked, final_answer
+                FROM learning_examples WHERE id=?
+                """,
+                (int(learning_id),),
+            ).fetchone()
+            if current is None:
+                raise LookupError(f"Learning not found: {learning_id}")
+            metadata = deserialize_json(current["metadata_json"])
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            if scope == "POLICY" and not is_common_learning(metadata):
+                # An original row is the whole customer inquiry. Approving it
+                # as a common policy would publish every part of it, including
+                # the half that belongs to one model.
+                raise ValueError(
+                    "원본 Learning 은 전 모델 공통으로 승인할 수 없습니다. "
+                    "'공통 Learning 추가'에서 공통으로 사용할 질문과 답변만 "
+                    "선택해 등록해 주세요."
+                )
+            metadata["product_scope"] = scope
+            metadata["market_applicability"] = applicability
+            if scope == "POLICY":
+                metadata["cross_model_policy"] = True
+                metadata["cross_model_policy_approved_by"] = str(actor or "") or None
+                metadata["cross_model_policy_approved_at"] = now
+            else:
+                metadata.pop("cross_model_policy", None)
+                metadata.pop("cross_model_policy_approved_by", None)
+                metadata.pop("cross_model_policy_approved_at", None)
+            cursor = connection.execute(
+                f"""
+                UPDATE learning_examples
+                SET metadata_json=?,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE {' AND '.join(clauses)}
+                """,
+                (serialize_json(metadata), *tail),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "Learning 적용 범위가 다른 사용자에 의해 변경되었습니다. "
+                    "목록을 새로고침한 뒤 다시 시도해 주세요."
+                )
+            row = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(learning_id),),
+            ).fetchone()
+        result = self._row(row)
+        assert result is not None
+        return result
+
+    def add_common_learning(
+        self,
+        origin_learning_id: int,
+        *,
+        question: str,
+        answer: str,
+        product_scope: str,
+        market_applicability: str,
+        validity_type: str = "PERMANENT",
+        event_name: str | None = None,
+        valid_from: object = None,
+        valid_until: object = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a separate Learning holding the part of one answer that generalises.
+
+        The original row is read and never written. What is stored is a new
+        row carrying the operator's own question and answer text, its own
+        application range and its own validity window, plus the origin's id so
+        the two stay connected.
+
+        Duplicates are refused by ``source_key``, which digests the origin,
+        the text and the range together. The range is part of the digest on
+        purpose: the same sentence approved for Naver and for Coupang is two
+        decisions, not one, and only an identical repeat is a duplicate.
+        """
+
+        scope = str(product_scope or "").strip().upper()
+        if scope not in APPLICATION_SCOPES:
+            raise ValueError(
+                "적용 대상은 %s 중 하나여야 합니다." % ", ".join(APPLICATION_SCOPES)
+            )
+        applicability = normalize_market_applicability(market_applicability)
+        if applicability is None or applicability not in MARKET_APPLICABILITIES:
+            raise ValueError(
+                "적용 마켓은 %s 중 하나여야 합니다." % ", ".join(MARKET_APPLICABILITIES)
+            )
+        from services.similar_answer_service import normalize_learning_question
+
+        clean_question = str(question or "").strip()
+        clean_answer = str(answer or "").strip()
+        if not clean_question:
+            raise ValueError("공통으로 사용할 질문을 입력해 주세요.")
+        if not clean_answer:
+            raise ValueError("공통으로 사용할 답변을 입력해 주세요.")
+        validity = normalize_validity_update(
+            validity_type=validity_type,
+            event_name=event_name,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            validity_active=True,
+        )
+        now = datetime.now(UTC).isoformat(timespec="milliseconds")
+        digest = sha256(
+            "|".join((
+                "COMMON_LEARNING", str(int(origin_learning_id)),
+                _COLLAPSE.sub(" ", clean_question),
+                _COLLAPSE.sub(" ", clean_answer),
+                scope, applicability,
+            )).encode("utf-8")
+        ).hexdigest()
+
+        with self.database.transaction() as connection:
+            origin = connection.execute(
+                """
+                SELECT id, inquiry_id, store_code, inquiry_type, intent,
+                       product_name, model_code, metadata_json
+                FROM learning_examples WHERE id=?
+                """,
+                (int(origin_learning_id),),
+            ).fetchone()
+            if origin is None:
+                raise LookupError(f"Learning not found: {origin_learning_id}")
+            existing = connection.execute(
+                "SELECT id FROM learning_examples WHERE source_key=?", (digest,)
+            ).fetchone()
+            if existing is not None:
+                raise ValueError(
+                    "같은 원본에서 동일한 질문·답변·적용 범위의 공통 Learning 이 "
+                    "이미 등록되어 있습니다 (ID %s)." % int(existing["id"])
+                )
+            origin_metadata = deserialize_json(origin["metadata_json"])
+            origin_metadata = (
+                origin_metadata if isinstance(origin_metadata, dict) else {}
+            )
+            metadata: dict[str, Any] = {
+                # The operator selected and verified this text, so it carries
+                # the same authority an approved answer does -- which is what
+                # lets the retrieval ladder read it as human-approved.
+                "facts_authority": "APPROVED_REFERENCE",
+                "learning_signal_type": "POSITIVE",
+                "answer_provenance": "STAFF_EDITED",
+                "human_verified": True,
+                "verified_by": str(actor or "") or None,
+                "verified_at": now,
+                "product_scope": scope,
+                "market_applicability": applicability,
+                "common_learning": True,
+                "common_learning_origin_id": int(origin["id"]),
+                "common_learning_approved_by": str(actor or "") or None,
+                "common_learning_approved_at": now,
+            }
+            if scope == "POLICY":
+                metadata["cross_model_policy"] = True
+                metadata["cross_model_policy_approved_by"] = str(actor or "") or None
+                metadata["cross_model_policy_approved_at"] = now
+            # Origin market provenance decides what the market gate reads when
+            # applicability is absent; it is explicit here, but keeping it
+            # makes the row's origin legible beside the decision.
+            if origin_metadata.get("origin_market"):
+                metadata["origin_market"] = origin_metadata["origin_market"]
+            cursor = connection.execute(
+                """
+                INSERT INTO learning_examples(
+                    source_key, inquiry_id, learning_source,
+                    question_original_masked, question_normalized,
+                    store_code, inquiry_type, intent, product_name, model_code,
+                    final_answer, edited_answer, style_only, rating,
+                    edit_ratio, quality_score, version, style_features_json,
+                    metadata_json, active, validity_type, event_name,
+                    valid_from, valid_until, validity_active, created_at
+                ) VALUES (?,?,'APPROVED_EDITED',?,?,?,?,?,?,?,?,?,0,5,0.0,0.9,1,
+                          '{}',?,1,?,?,?,?,1,?)
+                """,
+                (
+                    digest, origin["inquiry_id"], clean_question,
+                    normalize_learning_question(clean_question),
+                    origin["store_code"], origin["inquiry_type"],
+                    origin["intent"], origin["product_name"],
+                    origin["model_code"], clean_answer, clean_answer,
+                    serialize_json(metadata), validity["validity_type"],
+                    validity["event_name"], validity["valid_from"],
+                    validity["valid_until"], now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        self._notify_committed()
+        result = self._row(row)
+        assert result is not None
+        return result
+
+    def common_learnings(
+        self, *, include_inactive: bool = True
+    ) -> list[dict[str, Any]]:
+        """Only the rows an operator added as common Learnings.
+
+        Keyed on ``metadata_json.common_learning``, so the rows whose POLICY
+        scope the lexical profiler wrote are not in this list.
+        """
+
+        clause = "" if include_inactive else " AND active=1 AND validity_active=1"
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM learning_examples
+                WHERE json_extract(metadata_json, '$.common_learning')=1{clause}
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        return [item for row in rows if (item := self._row(row)) is not None]
+
+    def update_common_learning_text(
+        self,
+        learning_id: int,
+        *,
+        question: str,
+        answer: str,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit the question and answer of a common Learning.
+
+        Refused on anything that is not one, so an original row's stored
+        answer can never be rewritten through this path.
+        """
+
+        from services.similar_answer_service import normalize_learning_question
+
+        clean_question = str(question or "").strip()
+        clean_answer = str(answer or "").strip()
+        if not clean_question or not clean_answer:
+            raise ValueError("질문과 답변을 모두 입력해 주세요.")
+        clauses = ["id=?"]
+        tail: list[Any] = [int(learning_id)]
+        if expected_updated_at is not None:
+            clauses.append("updated_at=?")
+            tail.append(str(expected_updated_at))
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                "SELECT metadata_json FROM learning_examples WHERE id=?",
+                (int(learning_id),),
+            ).fetchone()
+            if current is None:
+                raise LookupError(f"Learning not found: {learning_id}")
+            metadata = deserialize_json(current["metadata_json"])
+            if not is_common_learning(
+                metadata if isinstance(metadata, dict) else {}
+            ):
+                raise ValueError(
+                    "공통 Learning 이 아닌 행의 질문·답변은 이 화면에서 "
+                    "수정할 수 없습니다."
+                )
+            cursor = connection.execute(
+                f"""
+                UPDATE learning_examples
+                SET question_original_masked=?, question_normalized=?,
+                    final_answer=?, edited_answer=?,
+                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE {' AND '.join(clauses)}
+                """,
+                (
+                    clean_question, normalize_learning_question(clean_question),
+                    clean_answer, clean_answer, *tail,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "공통 Learning 이 다른 사용자에 의해 변경되었습니다. "
+                    "목록을 새로고침한 뒤 다시 시도해 주세요."
+                )
+            row = connection.execute(
+                "SELECT * FROM learning_examples WHERE id=?",
+                (int(learning_id),),
+            ).fetchone()
+        self._notify_committed()
         result = self._row(row)
         assert result is not None
         return result

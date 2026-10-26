@@ -20,7 +20,10 @@ from repositories.learning_manager_query import (
     LearningManagerPage,
     manager_search_matches,
 )
-from repositories.learning_repository import LearningRepository
+from repositories.learning_repository import (
+    LearningRepository,
+    is_common_learning,
+)
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_validity_service import validity_summary
 from services.learning_lifecycle_service import is_explicitly_approved_learning
@@ -372,6 +375,238 @@ def _render_default_table(rows: list[dict[str, Any]]) -> None:
     )
 
 
+APPLICATION_SCOPE_LABELS = {
+    "MODEL": "현재 모델",
+    "PRODUCT_FAMILY": "동일 제품군",
+    "POLICY": "전 모델 공통 정책",
+}
+
+MARKET_APPLICABILITY_LABELS = {
+    "NAVER_ONLY": "네이버",
+    "COUPANG_ONLY": "쿠팡",
+    "COMMON": "공통",
+}
+
+
+def _render_scope_editor(
+    row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
+) -> None:
+    """Choose which products and which markets one Learning row answers for.
+
+    The row's existing values are shown as-is and nothing is written until the
+    operator submits. A scope the lexical profiler inferred -- VARIANT,
+    CATEGORY or GLOBAL, none of which is offered here -- is named in the
+    caption and left alone, so opening this panel cannot silently reclassify
+    a row that nobody decided about.
+    """
+
+    learning_id = int(row["id"])
+    metadata = _metadata(row)
+    stored_scope = str(metadata.get("product_scope") or "").strip().upper()
+    stored_market = str(metadata.get("market_applicability") or "").strip().upper()
+    common = is_common_learning(metadata)
+    # "전 모델 공통" is not offered on an original row. That row is the whole
+    # customer inquiry, and approving it whole would publish every part of it.
+    # It is reachable through "공통 Learning 추가", which stores the part the
+    # operator selected as its own row.
+    scopes = [
+        value for value in APPLICATION_SCOPE_LABELS
+        if value != "POLICY" or common
+    ]
+    markets = list(MARKET_APPLICABILITY_LABELS)
+
+    st.markdown("**적용 범위 관리**")
+    st.caption(
+        "저장된 적용 대상: {scope} · 적용 마켓: {market} · 공통 Learning: {common}".format(
+            scope=APPLICATION_SCOPE_LABELS.get(stored_scope, stored_scope or "미지정"),
+            market=MARKET_APPLICABILITY_LABELS.get(
+                stored_market, stored_market or "미지정(출처 마켓 기준)"
+            ),
+            common="예" if common else "아니오",
+        )
+    )
+    if not common:
+        st.caption(
+            "전 모델 공통 적용은 아래 '공통 Learning 추가'에서 공통으로 사용할 "
+            "질문과 답변만 선택해 별도 항목으로 등록합니다. 원본 문의 전체는 "
+            "공통으로 승격되지 않습니다."
+        )
+    with st.form(f"{key_prefix}_scope_form_{learning_id}"):
+        product_scope = st.radio(
+            "적용 대상",
+            scopes,
+            index=scopes.index(stored_scope) if stored_scope in scopes else 0,
+            format_func=lambda value: APPLICATION_SCOPE_LABELS[value],
+            horizontal=True,
+        )
+        market_applicability = st.radio(
+            "적용 마켓",
+            markets,
+            index=markets.index(stored_market) if stored_market in markets else 2,
+            format_func=lambda value: MARKET_APPLICABILITY_LABELS[value],
+            horizontal=True,
+            help="마켓 전용 정책은 반대 마켓의 답변 근거에서 제외됩니다.",
+        )
+        st.caption(
+            "행사 기간은 아래 '학습 유효성 관리'에서 지정합니다. "
+            "카드 종류·결제수단 등 적용 조건은 학습답변 본문에 남아 있어야 합니다."
+        )
+        submitted = st.form_submit_button("적용 범위 저장", type="primary")
+    if submitted:
+        try:
+            repository.update_application_scope(
+                learning_id,
+                product_scope=product_scope,
+                market_applicability=market_applicability,
+                actor=current_actor(),
+                expected_updated_at=str(row.get("updated_at") or ""),
+            )
+        except (ValueError, LookupError, RuntimeError) as error:
+            st.error(str(error))
+        else:
+            st.toast("Learning 적용 범위를 저장했습니다.")
+            st.session_state["current_page"] = "learning"
+            st.rerun()
+
+
+def _render_common_learning_add(
+    row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
+) -> None:
+    """Add the part of this approved answer that applies beyond one model.
+
+    The original question and answer are loaded as the starting text and the
+    operator edits them down to the part that generalises, so a composite
+    inquiry contributes only the question they selected. Nothing is written
+    to the original row.
+    """
+
+    learning_id = int(row["id"])
+    if is_common_learning(_metadata(row)):
+        return
+    state_key = f"{key_prefix}_common_open_{learning_id}"
+    st.markdown("**공통 Learning 추가**")
+    st.caption(
+        "이 답변에서 다른 모델에도 적용되는 질문과 답변만 골라 별도 항목으로 "
+        "등록합니다. 원본 Learning 은 변경되지 않습니다."
+    )
+    if not st.session_state.get(state_key):
+        if st.button(
+            "공통 Learning 추가",
+            key=f"{key_prefix}_common_start_{learning_id}",
+            help="원본 질문과 승인된 최종 답변을 불러와 편집합니다.",
+        ):
+            st.session_state[state_key] = True
+            st.session_state["current_page"] = "learning"
+            st.rerun()
+        return
+
+    origin_question = str(_question(row) or row.get("question_original_masked") or "")
+    origin_answer = str(_learning_answer(row) or row.get("final_answer") or "")
+    scopes = list(APPLICATION_SCOPE_LABELS)
+    markets = list(MARKET_APPLICABILITY_LABELS)
+
+    question = st.text_area(
+        "공통으로 사용할 질문",
+        value=origin_question,
+        key=f"{key_prefix}_common_q_{learning_id}",
+        help="복합 문의라면 공통으로 쓸 질문만 남기고 나머지는 지웁니다.",
+    )
+    answer = st.text_area(
+        "공통으로 사용할 답변",
+        value=origin_answer,
+        height=160,
+        key=f"{key_prefix}_common_a_{learning_id}",
+        help="적용 조건(카드 종류·마켓·기간 등)은 본문에 남겨 두세요.",
+    )
+    scope_columns = st.columns(2, gap="small")
+    product_scope = scope_columns[0].radio(
+        "적용 모델",
+        scopes,
+        index=scopes.index("POLICY"),
+        format_func=lambda value: APPLICATION_SCOPE_LABELS[value],
+        key=f"{key_prefix}_common_scope_{learning_id}",
+    )
+    market_applicability = scope_columns[1].radio(
+        "적용 마켓",
+        markets,
+        index=markets.index("COMMON"),
+        format_func=lambda value: MARKET_APPLICABILITY_LABELS[value],
+        key=f"{key_prefix}_common_market_{learning_id}",
+    )
+    validity_type = st.radio(
+        "유효기간",
+        ["PERMANENT", "TEMPORARY"],
+        format_func=lambda value: "기간 지정" if value == "TEMPORARY" else "상시",
+        horizontal=True,
+        key=f"{key_prefix}_common_validity_{learning_id}",
+    )
+    event_name = ""
+    valid_from: date | None = None
+    valid_until: date | None = None
+    if validity_type == "TEMPORARY":
+        period = st.columns(3, gap="small")
+        event_name = period[0].text_input(
+            "이벤트명", key=f"{key_prefix}_common_event_{learning_id}"
+        )
+        valid_from = period[1].date_input(
+            "유효 시작일", value=date.today(),
+            key=f"{key_prefix}_common_from_{learning_id}",
+        )
+        valid_until = period[2].date_input(
+            "유효 종료일", value=date.today(),
+            key=f"{key_prefix}_common_until_{learning_id}",
+        )
+
+    st.markdown("**저장 전 확인**")
+    st.json(
+        {
+            "질문": question.strip(),
+            "답변": answer.strip(),
+            "적용 모델": APPLICATION_SCOPE_LABELS[product_scope],
+            "적용 마켓": MARKET_APPLICABILITY_LABELS[market_applicability],
+            "유효기간": (
+                "상시" if validity_type == "PERMANENT"
+                else f"{event_name or '(이벤트명 없음)'} · {valid_from} ~ {valid_until}"
+            ),
+            "원본 Learning ID": learning_id,
+        },
+        expanded=True,
+    )
+    actions = st.columns(2, gap="small")
+    if actions[0].button(
+        "공통 Learning 저장",
+        key=f"{key_prefix}_common_save_{learning_id}",
+        type="primary",
+        width="stretch",
+    ):
+        try:
+            created = repository.add_common_learning(
+                learning_id,
+                question=question,
+                answer=answer,
+                product_scope=product_scope,
+                market_applicability=market_applicability,
+                validity_type=validity_type,
+                event_name=event_name,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                actor=current_actor(),
+            )
+        except (ValueError, LookupError, RuntimeError) as error:
+            st.error(str(error))
+        else:
+            st.toast(f"공통 Learning {created['id']} 을 추가했습니다.")
+            st.session_state.pop(state_key, None)
+            st.session_state["current_page"] = "learning"
+            st.rerun()
+    if actions[1].button(
+        "취소", key=f"{key_prefix}_common_cancel_{learning_id}", width="stretch"
+    ):
+        st.session_state.pop(state_key, None)
+        st.session_state["current_page"] = "learning"
+        st.rerun()
+
+
 def _render_validity_editor(
     row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
 ) -> None:
@@ -503,6 +738,8 @@ def _render_details(
         st.markdown("**학습답변 원문**")
         st.write(_learning_answer(row) or "-")
         if repository is not None:
+            _render_scope_editor(row, repository, key_prefix=key_prefix)
+            _render_common_learning_add(row, repository, key_prefix=key_prefix)
             _render_validity_editor(row, repository, key_prefix=key_prefix)
         if repository is not None and row.get("inquiry_id") is not None:
             signals = LearningSignalRepository(repository.database).for_inquiry(
@@ -542,6 +779,17 @@ def _render_details(
                 "내부 Inquiry ID": row.get("inquiry_id"),
                 "Draft ID": row.get("answer_draft_id") or "-",
                 "Human verified": _is_human_verified(row),
+                "적용 대상": APPLICATION_SCOPE_LABELS.get(
+                    str(metadata.get("product_scope") or "").upper(),
+                    metadata.get("product_scope") or "미지정",
+                ),
+                "적용 마켓": MARKET_APPLICABILITY_LABELS.get(
+                    str(metadata.get("market_applicability") or "").upper(),
+                    metadata.get("market_applicability") or "미지정(출처 마켓 기준)",
+                ),
+                "전 모델 공통 정책 승인": bool(metadata.get("cross_model_policy")),
+                "공통 정책 승인자": metadata.get("cross_model_policy_approved_by") or "-",
+                "공통 정책 승인 시각": metadata.get("cross_model_policy_approved_at") or "-",
                 "학습 상태": _learning_status_label(row),
                 "유효성 상태": row.get("validity_status") or "ACTIVE",
                 "이벤트명": row.get("event_name") or "-",
@@ -776,6 +1024,197 @@ def _render_excel_export() -> None:
         st.caption(f"저장 위치: {path}")
 
 
+def _common_status(row: dict[str, Any]) -> str:
+    """Reuse the existing validity status rather than inventing a second one."""
+
+    if not bool(row.get("active")):
+        return "사용 중지"
+    status = str(row.get("validity_status") or "ACTIVE").upper()
+    return {
+        "ACTIVE": "사용 중",
+        "DISABLED": "사용 중지",
+        "EXPIRED": "기간 종료",
+        "SCHEDULED": "시작 전",
+    }.get(status, status)
+
+
+def _render_common_learning_manager(repository: LearningRepository) -> None:
+    """Only the rows an operator added as common Learnings.
+
+    The list is keyed on ``metadata_json.common_learning``, so the rows whose
+    POLICY scope the lexical profiler wrote are not here -- nobody approved
+    those for cross-model use.
+    """
+
+    st.subheader("공통 Learning 관리")
+    st.caption(
+        "운영자가 승인한 Learning 에서 직접 추가한 공통 항목만 표시합니다. "
+        "어휘 분류로 POLICY 가 된 Learning 은 공통 승인이 아니므로 제외됩니다."
+    )
+    rows = repository.common_learnings()
+    if not rows:
+        st.info(
+            "등록된 공통 Learning 이 없습니다. Positive Learning 상세의 "
+            "'공통 Learning 추가'에서 등록할 수 있습니다."
+        )
+        return
+
+    filters = st.columns([2.4, 1.2, 1.2], gap="small")
+    query = filters[0].text_input(
+        "공통 Learning 검색",
+        placeholder="질문, 답변, 원본 Learning ID 검색",
+        key="common_learning_query",
+    )
+    status_options = ["ALL", "사용 중", "사용 중지", "기간 종료", "시작 전"]
+    selected_status = filters[1].selectbox(
+        "상태", status_options,
+        format_func=lambda value: "전체" if value == "ALL" else value,
+        key="common_learning_status",
+    )
+    market_options = ["ALL", *MARKET_APPLICABILITY_LABELS]
+    selected_market = filters[2].selectbox(
+        "적용 마켓", market_options,
+        format_func=lambda value: (
+            "전체" if value == "ALL" else MARKET_APPLICABILITY_LABELS[value]
+        ),
+        key="common_learning_market",
+    )
+
+    needle = str(query or "").strip().lower()
+    visible: list[dict[str, Any]] = []
+    for row in rows:
+        metadata = _metadata(row)
+        status = _common_status(row)
+        market = str(metadata.get("market_applicability") or "").upper()
+        if selected_status != "ALL" and status != selected_status:
+            continue
+        if selected_market != "ALL" and market != selected_market:
+            continue
+        if needle and not manager_search_matches(needle, _search_blob(row)):
+            continue
+        visible.append(row)
+    if not visible:
+        st.info("조건에 맞는 공통 Learning 이 없습니다.")
+        return
+
+    st.dataframe(
+        [
+            {
+                "공통 ID": row["id"],
+                "질문 요약": str(
+                    row.get("question_original_masked") or ""
+                )[:60],
+                "답변": str(row.get("final_answer") or "")[:80],
+                "적용 모델": APPLICATION_SCOPE_LABELS.get(
+                    str(_metadata(row).get("product_scope") or "").upper(), "-"
+                ),
+                "적용 마켓": MARKET_APPLICABILITY_LABELS.get(
+                    str(_metadata(row).get("market_applicability") or "").upper(),
+                    "-",
+                ),
+                "유효기간": validity_summary(row),
+                "상태": _common_status(row),
+                "원본 ID": _metadata(row).get("common_learning_origin_id") or "-",
+                "승인자": _metadata(row).get("common_learning_approved_by") or "-",
+                "승인 시각": format_datetime_minute_kst(
+                    _metadata(row).get("common_learning_approved_at"), empty="-"
+                ),
+            }
+            for row in visible
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+    by_id = {int(row["id"]): row for row in visible}
+    selected_id = st.selectbox(
+        "상세 관리 항목",
+        list(by_id),
+        format_func=lambda value: "공통 %s · %s" % (
+            value, str(by_id[value].get("question_original_masked") or "")[:40]
+        ),
+        key="common_learning_selected",
+    )
+    row = by_id[int(selected_id)]
+    metadata = _metadata(row)
+    learning_id = int(row["id"])
+    st.caption(
+        "원본 Learning ID %s · 상태 %s · %s" % (
+            metadata.get("common_learning_origin_id") or "-",
+            _common_status(row), validity_summary(row),
+        )
+    )
+
+    with st.form(f"common_learning_text_{learning_id}"):
+        question = st.text_area(
+            "질문", value=str(row.get("question_original_masked") or "")
+        )
+        answer = st.text_area(
+            "답변", value=str(row.get("final_answer") or ""), height=150
+        )
+        saved = st.form_submit_button("질문·답변 저장", type="primary")
+    if saved:
+        try:
+            repository.update_common_learning_text(
+                learning_id, question=question, answer=answer,
+                expected_updated_at=str(row.get("updated_at") or ""),
+            )
+        except (ValueError, LookupError, RuntimeError) as error:
+            st.error(str(error))
+        else:
+            st.toast("공통 Learning 질문·답변을 저장했습니다.")
+            st.session_state["current_page"] = "learning"
+            st.rerun()
+
+    # The same two editors the Positive detail uses, so scope, market and
+    # period behave here exactly as they do there.
+    _render_scope_editor(row, repository, key_prefix="common_learning")
+    _render_validity_editor(row, repository, key_prefix="common_learning")
+
+    if bool(row.get("validity_active", True)):
+        if st.button(
+            "사용 중지",
+            key=f"common_learning_disable_{learning_id}",
+            help="삭제하지 않고 다음 답변 생성부터 검색 후보에서 제외합니다.",
+        ):
+            _set_common_active(repository, row, active=False)
+    else:
+        st.caption(
+            "사용 중지된 항목입니다. 다시 사용하면 현재 설정된 마켓·기간 조건이 "
+            "그대로 적용됩니다."
+        )
+        if st.button("다시 사용", key=f"common_learning_enable_{learning_id}"):
+            _set_common_active(repository, row, active=True)
+
+
+def _set_common_active(
+    repository: LearningRepository, row: dict[str, Any], *, active: bool
+) -> None:
+    """Stop or resume a common Learning through the existing validity switch."""
+
+    try:
+        repository.update_validity(
+            int(row["id"]),
+            validity_type=str(row.get("validity_type") or "PERMANENT"),
+            event_name=row.get("event_name"),
+            valid_from=row.get("valid_from"),
+            valid_until=row.get("valid_until"),
+            validity_active=active,
+            validity_note=row.get("validity_note"),
+            condition=row.get("condition_json") or {},
+            expected_updated_at=str(row.get("updated_at") or ""),
+        )
+    except (ValueError, LookupError, RuntimeError) as error:
+        st.error(str(error))
+    else:
+        st.toast(
+            "공통 Learning 을 다시 사용합니다." if active
+            else "공통 Learning 을 사용 중지했습니다. 이력은 보존됩니다."
+        )
+        st.session_state["current_page"] = "learning"
+        st.rerun()
+
+
 def render_learning_manager(database: Database | None) -> None:
     st.session_state["current_page"] = "learning"
     # The admin-mode toggle lives on Dashboard and Streamlit removes widget
@@ -933,5 +1372,6 @@ def render_learning_manager(database: Database | None) -> None:
             key_prefix="learning_manager_feedback",
         )
 
+    _render_common_learning_manager(repository)
     _render_structured_signal_manager(database)
     _render_excel_export()

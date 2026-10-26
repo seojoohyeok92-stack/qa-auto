@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
+from repositories.learning_repository import is_operator_approved_policy
 from repositories.product_catalog_repository import (
     ProductCatalogRepository,
     canonical_model_identity,
@@ -812,9 +813,23 @@ class LearningCompatibilityService:
         product_match = "POLICY_COMPATIBLE"
         product_reason = "PRODUCT_INDEPENDENT_POLICY_OR_GENERAL_KNOWLEDGE"
         if current.category and candidate.category and current.category != candidate.category:
-            adjustment -= 0.05
-            product_match = "CATEGORY_UNCERTAIN"
-            product_reason = "POLICY_CATEGORY_DIFFERS_SOFT_PENALTY"
+            # A differing category is the right doubt for a row whose scope
+            # nobody checked: it projects to ``UNKNOWN_IDENTITY`` in the GPT ②
+            # prompt, and an uncertain-identity label is read as a reason not
+            # to use the row. For a sales policy that is the wrong answer --
+            # "행사카드는 신용·체크카드 동일 적용" is a payment term, and a TV
+            # and a monitor differ in nothing it depends on.
+            #
+            # So the downgrade is skipped only where an operator has said this
+            # row is model-independent. The scope the lexical profiler wrote
+            # does not qualify; ``is_operator_approved_policy`` requires the
+            # explicit approval key. Everything else keeps the penalty.
+            if not is_operator_approved_policy(metadata):
+                adjustment -= 0.05
+                product_match = "CATEGORY_UNCERTAIN"
+                product_reason = "POLICY_CATEGORY_DIFFERS_SOFT_PENALTY"
+            else:
+                product_reason = "OPERATOR_APPROVED_CROSS_MODEL_POLICY"
         elif current.product_id and candidate.product_id and current.product_id == candidate.product_id:
             product_match = "EXACT_PRODUCT"
             product_reason = "SOURCE_PRODUCT_ID_MATCH"
