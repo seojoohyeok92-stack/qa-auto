@@ -98,6 +98,20 @@ def test_an_installation_inclusive_question_asks_about_both():
 # --- the identity boundaries the merged record has to keep ----------------------
 
 @pytest.mark.parametrize(
+    "question",
+    [
+        "크기와 무게, 응답속도 알려주세요",
+        # The three real inquiries that crossed the line. Each asked about a
+        # different attribute and each was answered from a neighbouring
+        # model's record: 10661 from ``catalog:LH50BEDH:ethernet_present``
+        # (and auto-posted), 3256 from its ``usb_present``, 10586 from its
+        # ``rf_terminal``. All three listings were LH50BEHHLGFXKR.
+        "넷플릭스 사용은 가능한가요?",
+        "C타입 단자가 있나요?",
+        "지역케이블TV 유선방송도 연결되나요?",
+    ],
+)
+@pytest.mark.parametrize(
     "model, forbidden",
     [
         ("LH43BEHHLGFXKR", ("LH43BEDHLGFXKR", "LH43BEDH", "LH43BEFHLGFXKR")),
@@ -105,12 +119,23 @@ def test_an_installation_inclusive_question_asks_about_both():
         ("LS22D400GAKXKR", ("LS24D400GAKXKR", "LS27D400GAKXKR")),
         ("LS32DM500EKXKR", ("LS32DM501EKXKR",)),
         ("LS32DM501EKXKR", ("LS32DM500EKXKR",)),
+        # The 50-inch pair the 43-inch rows above already stood for. It was
+        # the one that actually leaked, and the rows were never parametrised
+        # for it. BED-H carries three spellings of one base model, which may
+        # donate to each other; BEH-H is a different base model and may not.
+        ("LH50BEHHLGFXKR", (
+            "LH50BEDHLGFXKR", "LH50BEDH", "LH50BEDHLBFXKR",
+            "LH50BEFHLGFXKR",
+        )),
+        ("LH50BEDHLGFXKR", ("LH50BEHHLGFXKR", "LH50BEHH")),
     ],
 )
-def test_retrieved_evidence_never_crosses_into_a_neighbouring_model(model, forbidden):
+def test_retrieved_evidence_never_crosses_into_a_neighbouring_model(
+    model, forbidden, question,
+):
     repository = ProductCatalogRepository()
     aliases = repository.catalog()["aliases"]
-    _, kept, _ = _selected(model, "크기와 무게, 응답속도 알려주세요")
+    _, kept, _ = _selected(model, question)
 
     target = canonical_model_identity(model, aliases=aliases)
     for fact in kept:
@@ -119,6 +144,21 @@ def test_retrieved_evidence_never_crosses_into_a_neighbouring_model(model, forbi
         assert canonical_model_identity(fact.model_code, aliases=aliases) == target, (
             fact.field_key, fact.model_code
         )
+        # ``model_code`` alone cannot see the whole boundary. A pooled fact is
+        # attributed to the record the lookup resolved -- that is whose fact
+        # it is -- and names the record that stated it only in
+        # ``canonical_fact_id``. Inquiry 10661's leak was visible there and
+        # nowhere else, so the identifier is checked too.
+        #
+        # Normalised through the same aliases, so a second spelling of one
+        # model and a legitimate same-base donor both still pass; only a
+        # different base model fails.
+        stated = str(getattr(fact, "canonical_fact_id", "") or "")
+        if stated.startswith("catalog:"):
+            donor = stated.split(":")[1]
+            assert canonical_model_identity(donor, aliases=aliases) == target, (
+                fact.field_key, stated
+            )
     seen = {str(fact.model_code) for fact in kept}
     assert not (seen & set(forbidden)), seen & set(forbidden)
 
