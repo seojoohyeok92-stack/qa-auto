@@ -1411,6 +1411,142 @@ def _source_answer_view(inquiry: dict[str, Any]) -> str | None:
     return COUPANG_SELLER_VIEW if _source_seller_answer(inquiry) else None
 
 
+AUTHOR_UNKNOWN = "확인 불가"
+
+
+def comment_thread(inquiry: dict[str, Any]) -> list[dict[str, Any]]:
+    """The marketplace's own comment list for this inquiry, in stored order.
+
+    Coupang returns ``commentDtoList``, and every one of the 7,780 comments in
+    the 26.10.22 snapshot carries exactly four fields: ``content``,
+    ``inquiryCommentAt``, ``inquiryCommentId`` and ``inquiryId``. **There is no
+    author or role field**, so who wrote a comment cannot be read and is not
+    guessed -- it is reported as 확인 불가. The time and the order can be read,
+    and they are.
+
+    The display path in ``InquiryRepository`` joins these bodies with blank
+    lines into one ``seller_answer`` string, which is what the representative
+    answer box shows. That loses the boundaries, the ids and the timestamps;
+    this returns them. It reads the stored payload only -- no API call, no
+    write, and the join it sits beside is unchanged.
+    """
+
+    raw = inquiry.get("raw_json")
+    raw = raw if isinstance(raw, dict) else {}
+    payload = raw.get("source_payload")
+    payload = payload if isinstance(payload, dict) else {}
+    comments = payload.get("commentDtoList")
+    if not isinstance(comments, list):
+        comments = raw.get("commentDtoList")
+    if not isinstance(comments, list):
+        return []
+    thread: list[dict[str, Any]] = []
+    for index, comment in enumerate(comments, start=1):
+        if not isinstance(comment, dict):
+            continue
+        body = str(comment.get("content") or "").strip()
+        if not body:
+            continue
+        thread.append({
+            "order": index,
+            "author": AUTHOR_UNKNOWN,
+            "written_at": str(comment.get("inquiryCommentAt") or "").strip(),
+            "comment_id": str(comment.get("inquiryCommentId") or "").strip(),
+            "body": body,
+        })
+    return thread
+
+
+def naver_answer_observations(
+    database: Database, inquiry_id: int
+) -> list[dict[str, Any]]:
+    """What this system has observed in Naver's single answer slot, in order.
+
+    These are **not** several coexisting comments, and must not be shown as
+    such. ``NaverPostedAnswerRepository.observe`` keys a row on
+    ``sha256("NAVER_POSTED|{inquiry_id}|{body}")`` and clears ``is_current``
+    on every row of the inquiry before marking the one it just saw, so a
+    second row means the text in that one slot changed between observations --
+    an edited or replaced answer. On the 26.10.22 snapshot 151 of 1,564
+    inquiries have more than one, and ``author_type`` is NULL on all 1,720
+    rows, so no author can be read here either.
+
+    The collected Naver payload carries no comment list at all: its
+    ``source_payload`` holds only ``answered``, ``createDate``, ``productId``,
+    ``questionId``, ``inquiryNo``, ``inquiryRegistrationDateTime`` and
+    ``answerContentId``. So this is the whole of what is available, and it is
+    labelled as an observation history rather than a conversation.
+    """
+
+    history = NaverPostedAnswerRepository(database).history(int(inquiry_id))
+    observations: list[dict[str, Any]] = []
+    for index, row in enumerate(history, start=1):
+        body = str(row.get("answer_body") or "").strip()
+        if not body:
+            continue
+        observations.append({
+            "order": index,
+            "body": body,
+            "answer_id": str(row.get("answer_id") or "").strip(),
+            "posted_at": str(row.get("posted_at") or "").strip(),
+            "first_observed_at": str(row.get("first_observed_at") or "").strip(),
+            "last_observed_at": str(row.get("last_observed_at") or "").strip(),
+            "is_current": bool(row.get("is_current")),
+        })
+    return observations
+
+
+def _render_comment_thread(
+    database: Database, inquiry: dict[str, Any], *, inquiry_id: int
+) -> None:
+    """Show the whole comment list beside the representative answer.
+
+    Drawn only when there is more than one entry: a single comment is already
+    the representative answer above, and an expander for it would add a click
+    for nothing.
+    """
+
+    market = market_of(inquiry.get("store_code"))
+    if market == COUPANG:
+        thread = comment_thread(inquiry)
+        if len(thread) < 2:
+            return
+        with st.expander(f"전체 답글 보기 ({len(thread)}건)", expanded=False):
+            st.caption(
+                "마켓이 제공한 댓글 전체입니다. 쿠팡 응답에는 작성자 구분 필드가 "
+                "없어 고객·판매자를 확정할 수 없으므로 작성자는 '확인 불가'로 "
+                "표시합니다. 읽기 전용이며 Learning 승인 대상이 아닙니다."
+            )
+            for item in thread:
+                st.markdown(
+                    f"**{item['order']}. {item['author']}** · "
+                    + (
+                        format_datetime_kst(item["written_at"], empty="시각 확인 불가")
+                        if item["written_at"] else "시각 확인 불가"
+                    )
+                )
+                st.text(item["body"])
+        return
+    observations = naver_answer_observations(database, inquiry_id)
+    if len(observations) < 2:
+        return
+    with st.expander(f"답변 관측 이력 ({len(observations)}건)", expanded=False):
+        st.caption(
+            "네이버 응답에는 댓글 목록이 없고 답변 한 건만 제공됩니다. "
+            "아래는 그 한 건의 본문이 관측 시점마다 달라진 이력이며, "
+            "서로 다른 여러 댓글이 아닙니다. 작성자 구분 필드도 없습니다."
+        )
+        for item in observations:
+            label = "현재 관측" if item["is_current"] else "이전 관측"
+            st.markdown(
+                f"**{item['order']}. {label}** · 최초 "
+                + format_datetime_kst(item["first_observed_at"], empty="-")
+                + " · 최근 "
+                + format_datetime_kst(item["last_observed_at"], empty="-")
+            )
+            st.text(item["body"])
+
+
 def _source_seller_answer(inquiry: dict[str, Any]) -> str:
     """The marketplace's own reply, as the repository read it back."""
 
@@ -2059,6 +2195,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     "아래 승인은 마켓 재등록이 아니라 이 답변을 "
                     "Human Verified Positive Learning으로 사용할지에 대한 승인입니다."
                 )
+                _render_comment_thread(
+                    database, inquiry, inquiry_id=inquiry_id
+                )
             elif selected_view == NAVER_POSTED_VIEW:
                 if posted_answer_available:
                     st.text_area(
@@ -2084,6 +2223,9 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                             f"Source {posted_answer_record['source_api']}"
                         )
                     st.caption(" · ".join(posted_metadata))
+                    _render_comment_thread(
+                        database, inquiry, inquiry_id=inquiry_id
+                    )
                 else:
                     st.warning(
                         "네이버에서는 답변완료 상태이지만 현재 조회 응답에 "
