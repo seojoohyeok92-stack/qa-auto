@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import streamlit as st
 
@@ -469,7 +469,7 @@ def _render_scope_editor(
             st.rerun()
 
 
-def _clear_editor_inputs(key_prefix: str, learning_id: int) -> None:
+def _clear_editor_inputs(key_prefix: str, slot: str) -> None:
     """Drop this editor's widget state when it closes.
 
     Streamlit keeps a widget's value under its key for as long as the key is
@@ -482,59 +482,63 @@ def _clear_editor_inputs(key_prefix: str, learning_id: int) -> None:
     for suffix in (
         "q", "a", "scope", "market", "validity", "event", "from", "until",
     ):
-        st.session_state.pop(f"{key_prefix}_common_{suffix}_{learning_id}", None)
+        st.session_state.pop(f"{key_prefix}_common_{suffix}_{slot}", None)
 
 
-def render_common_learning_add(
-    row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
+def _render_common_learning_editor(
+    *,
+    key_prefix: str,
+    slot: str,
+    origin_question: str,
+    origin_answer: str,
+    save: Callable[..., dict[str, Any]],
+    caption: str,
+    button_label: str,
+    button_help: str,
+    context: dict[str, Any],
 ) -> None:
-    """Add the part of this approved answer that applies beyond one model.
+    """One editor, two entry points.
 
-    The original question and answer are loaded as the starting text and the
-    operator edits them down to the part that generalises, so a composite
-    inquiry contributes only the question they selected. Nothing is written
-    to the original row.
+    The form is the same whether the operator starts from an approved
+    Learning or from the inquiry itself; only where the saved row gets its
+    context differs, and that is the ``save`` callable's business. Keeping one
+    form means the range, the validity window and the preview cannot drift
+    apart between the two paths.
+
+    Nothing here writes ``current_page`` or ``production_admin_mode``, so the
+    caller's screen -- Dashboard or Learning Manager -- stays where it is.
     """
 
-    learning_id = int(row["id"])
-    if is_common_learning(_metadata(row)):
-        return
-    state_key = f"{key_prefix}_common_open_{learning_id}"
-    st.markdown("**공통 Learning 추가**")
-    st.caption(
-        "이 답변에서 다른 모델에도 적용되는 질문과 답변만 골라 별도 항목으로 "
-        "등록합니다. 원본 Learning 은 변경되지 않습니다."
-    )
+    state_key = f"{key_prefix}_common_open_{slot}"
     if not st.session_state.get(state_key):
         created_id = st.session_state.get(f"{state_key}_saved")
         if created_id:
             st.success(f"공통 Learning {created_id} 을 추가했습니다.")
+        st.caption(caption)
         if st.button(
-            "공통 Learning 추가",
-            key=f"{key_prefix}_common_start_{learning_id}",
-            help="원본 질문과 승인된 최종 답변을 불러와 편집합니다.",
+            button_label,
+            key=f"{key_prefix}_common_start_{slot}",
+            help=button_help,
         ):
             st.session_state[state_key] = True
             st.session_state.pop(f"{state_key}_saved", None)
             st.rerun()
         return
 
-    origin_question = str(_question(row) or row.get("question_original_masked") or "")
-    origin_answer = str(_learning_answer(row) or row.get("final_answer") or "")
+    st.caption(caption)
     scopes = list(APPLICATION_SCOPE_LABELS)
     markets = list(MARKET_APPLICABILITY_LABELS)
-
     question = st.text_area(
         "공통으로 사용할 질문",
         value=origin_question,
-        key=f"{key_prefix}_common_q_{learning_id}",
+        key=f"{key_prefix}_common_q_{slot}",
         help="복합 문의라면 공통으로 쓸 질문만 남기고 나머지는 지웁니다.",
     )
     answer = st.text_area(
         "공통으로 사용할 답변",
         value=origin_answer,
         height=160,
-        key=f"{key_prefix}_common_a_{learning_id}",
+        key=f"{key_prefix}_common_a_{slot}",
         help="적용 조건(카드 종류·마켓·기간 등)은 본문에 남겨 두세요.",
     )
     scope_columns = st.columns(2, gap="small")
@@ -543,21 +547,21 @@ def render_common_learning_add(
         scopes,
         index=scopes.index("POLICY"),
         format_func=lambda value: APPLICATION_SCOPE_LABELS[value],
-        key=f"{key_prefix}_common_scope_{learning_id}",
+        key=f"{key_prefix}_common_scope_{slot}",
     )
     market_applicability = scope_columns[1].radio(
         "적용 마켓",
         markets,
         index=markets.index("COMMON"),
         format_func=lambda value: MARKET_APPLICABILITY_LABELS[value],
-        key=f"{key_prefix}_common_market_{learning_id}",
+        key=f"{key_prefix}_common_market_{slot}",
     )
     validity_type = st.radio(
         "유효기간",
         ["PERMANENT", "TEMPORARY"],
         format_func=lambda value: "기간 지정" if value == "TEMPORARY" else "상시",
         horizontal=True,
-        key=f"{key_prefix}_common_validity_{learning_id}",
+        key=f"{key_prefix}_common_validity_{slot}",
     )
     event_name = ""
     valid_from: date | None = None
@@ -565,15 +569,15 @@ def render_common_learning_add(
     if validity_type == "TEMPORARY":
         period = st.columns(3, gap="small")
         event_name = period[0].text_input(
-            "이벤트명", key=f"{key_prefix}_common_event_{learning_id}"
+            "이벤트명", key=f"{key_prefix}_common_event_{slot}"
         )
         valid_from = period[1].date_input(
             "유효 시작일", value=date.today(),
-            key=f"{key_prefix}_common_from_{learning_id}",
+            key=f"{key_prefix}_common_from_{slot}",
         )
         valid_until = period[2].date_input(
             "유효 종료일", value=date.today(),
-            key=f"{key_prefix}_common_until_{learning_id}",
+            key=f"{key_prefix}_common_until_{slot}",
         )
 
     st.markdown("**저장 전 확인**")
@@ -587,20 +591,19 @@ def render_common_learning_add(
                 "상시" if validity_type == "PERMANENT"
                 else f"{event_name or '(이벤트명 없음)'} · {valid_from} ~ {valid_until}"
             ),
-            "원본 Learning ID": learning_id,
+            **context,
         },
         expanded=True,
     )
     actions = st.columns(2, gap="small")
     if actions[0].button(
         "공통 Learning 저장",
-        key=f"{key_prefix}_common_save_{learning_id}",
+        key=f"{key_prefix}_common_save_{slot}",
         type="primary",
         width="stretch",
     ):
         try:
-            created = repository.add_common_learning(
-                learning_id,
+            created = save(
                 question=question,
                 answer=answer,
                 product_scope=product_scope,
@@ -612,23 +615,95 @@ def render_common_learning_add(
                 actor=current_actor(),
             )
         except (ValueError, LookupError, RuntimeError) as error:
+            # 입력은 위젯 key 에 남아 있고, rerun 하지 않으므로 그대로 보인다.
             st.error(str(error))
         else:
-            # 편집 영역만 닫는다. ``current_page`` 를 비롯한 화면 상태는
-            # 건드리지 않으므로, 호출한 화면이 Dashboard 든 Learning Manager
-            # 든 그 자리에 머문다.
             st.session_state.pop(state_key, None)
             st.session_state[f"{state_key}_saved"] = int(created["id"])
-            _clear_editor_inputs(key_prefix, learning_id)
+            _clear_editor_inputs(key_prefix, slot)
             st.rerun()
     if actions[1].button(
-        "취소", key=f"{key_prefix}_common_cancel_{learning_id}", width="stretch"
+        "취소", key=f"{key_prefix}_common_cancel_{slot}", width="stretch"
     ):
         st.session_state.pop(state_key, None)
         st.session_state.pop(f"{state_key}_saved", None)
-        _clear_editor_inputs(key_prefix, learning_id)
+        _clear_editor_inputs(key_prefix, slot)
         st.rerun()
 
+
+def render_common_learning_add(
+    row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
+) -> None:
+    """Add the part of this approved answer that applies beyond one model.
+
+    The original question and answer are loaded as the starting text and the
+    operator edits them down to the part that generalises, so a composite
+    inquiry contributes only the question they selected. Nothing is written
+    to the original row.
+    """
+
+    if is_common_learning(_metadata(row)):
+        return
+    learning_id = int(row["id"])
+    st.markdown("**공통 Learning 추가**")
+    _render_common_learning_editor(
+        key_prefix=key_prefix,
+        slot=str(learning_id),
+        origin_question=str(
+            _question(row) or row.get("question_original_masked") or ""
+        ),
+        origin_answer=str(
+            _learning_answer(row) or row.get("final_answer") or ""
+        ),
+        save=lambda **values: repository.add_common_learning(
+            learning_id, **values
+        ),
+        caption=(
+            "이 답변에서 다른 모델에도 적용되는 질문과 답변만 골라 별도 항목으로 "
+            "등록합니다. 원본 Learning 은 변경되지 않습니다."
+        ),
+        button_label="공통 Learning 추가",
+        button_help="원본 질문과 승인된 최종 답변을 불러와 편집합니다.",
+        context={"원본 Learning ID": learning_id},
+    )
+
+
+def render_common_learning_direct(
+    inquiry: dict[str, Any],
+    repository: LearningRepository,
+    *,
+    key_prefix: str,
+    answer: str = "",
+) -> None:
+    """Approve a common Learning straight from the inquiry, with no approval first.
+
+    The general Positive approval and this one are separate decisions, and
+    neither is a precondition for the other. A seasonal policy -- 삼성감사제 and
+    the like -- can be recorded without first approving an answer nobody
+    wanted in the corpus, and approving one here creates no Positive Learning
+    and changes no approval state.
+    """
+
+    inquiry_id = int(inquiry["id"])
+    st.markdown("**공통 Learning 직접 승인**")
+    _render_common_learning_editor(
+        key_prefix=key_prefix,
+        slot=f"inq{inquiry_id}",
+        origin_question=str(inquiry.get("content") or ""),
+        origin_answer=str(answer or ""),
+        save=lambda **values: repository.add_common_learning_for_inquiry(
+            inquiry_id, **values
+        ),
+        caption=(
+            "이 문의와 답변에서 다른 문의에도 적용되는 판매·결제·배송 정책이나 "
+            "운영자가 확인한 공통 사양만 골라 공통 Learning 으로 등록합니다. "
+            "일반 Learning 승인과는 별개이며, 이 저장으로 일반 Positive "
+            "Learning 이 만들어지거나 승인 상태가 바뀌지 않습니다."
+        ),
+        button_label="공통 Learning 직접 승인",
+        button_help="현재 문의와 답변을 불러와 편집합니다. 일반 승인은 필요하지 않습니다.",
+        context={"원본 문의 ID": inquiry_id},
+    )
 
 def _render_validity_editor(
     row: dict[str, Any], repository: LearningRepository, *, key_prefix: str

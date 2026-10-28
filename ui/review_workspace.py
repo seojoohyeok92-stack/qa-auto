@@ -40,7 +40,10 @@ from repositories.database import Database
 from repositories.dps_repository import DpsRepository
 from repositories.inquiry_repository import InquiryRepository
 from repositories.learning_feedback_repository import LearningFeedbackRepository
-from repositories.learning_repository import LearningRepository
+from repositories.learning_repository import (
+    LearningRepository,
+    is_common_learning,
+)
 from repositories.log_repository import LogRepository
 from repositories.naver_post_repository import NaverPostRepository
 from repositories.naver_posted_answer_repository import (
@@ -102,7 +105,10 @@ from ui.answer_status_presenter import (
     trace_stage_label,
 )
 from ui.rerun_profile import snapshot as rerun_profile_snapshot
-from ui.learning_manager import render_common_learning_add
+from ui.learning_manager import (
+    render_common_learning_add,
+    render_common_learning_direct,
+)
 from ui.session_identity import can, current_actor
 from ui.uat_presenters import answer_source_label
 
@@ -933,6 +939,13 @@ def approval_learning_trace(
             )
         ).upper()
         == "POSITIVE"
+        # A common Learning is an operator's own sentence about how the shop
+        # sells, stored against this inquiry because that is where it was
+        # written. It is not an approval of this inquiry's answer, so it does
+        # not belong in the approval card's reading, and it must not be the
+        # row the "공통 Learning 추가" editor opens on -- that editor refuses a
+        # common Learning, so picking one would make the button disappear.
+        and not is_common_learning(row.get("metadata_json") or {})
     ]
     identities: list[tuple[str, int, str]] = []
     privacy = LearningPrivacyService()
@@ -2335,6 +2348,22 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                 "</div>",
                 unsafe_allow_html=True,
             )
+
+        # 공통 Learning 직접 승인.
+        #
+        # 일반 Positive 승인과 서로 선행 조건이 아니다. 승인 여부와 무관하게
+        # 같은 자리에서 열리고, 저장해도 Positive Learning 이 만들어지거나
+        # 승인 상태가 바뀌지 않는다 -- 저장 경로가 승인 저장소를 건드리지
+        # 않고, 만들어진 행은 공통 Learning 으로만 집계된다.
+        #
+        # 초깃값은 화면에 보이는 답변이다: 마켓에서 조회한 판매자 답변이
+        # 있으면 그것, 없으면 승인·생성된 Final Answer.
+        render_common_learning_direct(
+            inquiry,
+            LearningRepository(database),
+            key_prefix=f"review_direct_{inquiry_id}",
+            answer=_source_seller_answer(inquiry) or final_answer,
+        )
 
         positive_reason = ""
         positive_note = ""

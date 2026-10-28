@@ -1216,18 +1216,167 @@ class LearningRepository:
         valid_until: object = None,
         actor: str | None = None,
     ) -> dict[str, Any]:
-        """Add a separate Learning holding the part of one answer that generalises.
+        """Add a common Learning from an approved Learning's answer.
 
         The original row is read and never written. What is stored is a new
         row carrying the operator's own question and answer text, its own
         application range and its own validity window, plus the origin's id so
         the two stay connected.
-
-        Duplicates are refused by ``source_key``, which digests the origin,
-        the text and the range together. The range is part of the digest on
-        purpose: the same sentence approved for Naver and for Coupang is two
-        decisions, not one, and only an identical repeat is a duplicate.
         """
+
+        with self.database.transaction() as connection:
+            origin = connection.execute(
+                """
+                SELECT id, inquiry_id, store_code, inquiry_type, intent,
+                       product_name, model_code, metadata_json
+                FROM learning_examples WHERE id=?
+                """,
+                (int(origin_learning_id),),
+            ).fetchone()
+            if origin is None:
+                raise LookupError(f"Learning not found: {origin_learning_id}")
+            origin_metadata = deserialize_json(origin["metadata_json"])
+            origin_metadata = (
+                origin_metadata if isinstance(origin_metadata, dict) else {}
+            )
+            return self._insert_common_learning(
+                connection,
+                digest_scope=f"L{int(origin['id'])}",
+                provenance={
+                    "common_learning_source": "APPROVED_LEARNING",
+                    "common_learning_origin_id": int(origin["id"]),
+                    "common_learning_inquiry_id": (
+                        int(origin["inquiry_id"])
+                        if origin["inquiry_id"] is not None else None
+                    ),
+                    "common_learning_store_code": origin["store_code"],
+                    "origin_market": origin_metadata.get("origin_market"),
+                },
+                columns={
+                    "inquiry_id": origin["inquiry_id"],
+                    "store_code": origin["store_code"],
+                    "inquiry_type": origin["inquiry_type"],
+                    "intent": origin["intent"],
+                    "product_name": origin["product_name"],
+                    "model_code": origin["model_code"],
+                },
+                question=question,
+                answer=answer,
+                product_scope=product_scope,
+                market_applicability=market_applicability,
+                validity_type=validity_type,
+                event_name=event_name,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                actor=actor,
+            )
+
+    def add_common_learning_for_inquiry(
+        self,
+        inquiry_id: int,
+        *,
+        question: str,
+        answer: str,
+        product_scope: str,
+        market_applicability: str,
+        validity_type: str = "PERMANENT",
+        event_name: str | None = None,
+        valid_from: object = None,
+        valid_until: object = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a common Learning directly from an inquiry, with no approval first.
+
+        A common Learning is the operator's own sentence about how the shop
+        sells, and approving the inquiry's own answer as a Positive Learning is
+        a separate decision. Requiring one before the other made a seasonal
+        policy -- 삼성감사제 and the like -- impossible to record without first
+        approving an answer nobody wanted in the corpus.
+
+        So the context the stored row needs comes from the inquiry instead of
+        from a Learning: ``inquiry_id``, ``store_code``, ``inquiry_type`` and
+        ``product_name`` are read off it, and ``model_code`` is derived from
+        the product name by the same extractor the rest of the system uses.
+        Nothing is written to the inquiry, no Positive Learning is created, and
+        no approval state is touched. Everything past that point -- the range,
+        the validity window, the duplicate check, the approval keys and the
+        retrieval rules -- is the path ``add_common_learning`` already uses.
+        """
+
+        from services.product_fact_guard import extract_model_code
+
+        with self.database.transaction() as connection:
+            inquiry = connection.execute(
+                """
+                SELECT id, store_code, source_type, inquiry_type, product_name
+                FROM inquiries WHERE id=?
+                """,
+                (int(inquiry_id),),
+            ).fetchone()
+            if inquiry is None:
+                raise LookupError(f"Inquiry not found: {inquiry_id}")
+            store_code = inquiry["store_code"]
+            return self._insert_common_learning(
+                connection,
+                digest_scope=f"I{int(inquiry['id'])}",
+                provenance={
+                    # No origin Learning exists, and none is invented. The
+                    # inquiry, its store and the fact that this was approved
+                    # directly are what provenance can state.
+                    "common_learning_source": "DIRECT_INQUIRY",
+                    "common_learning_inquiry_id": int(inquiry["id"]),
+                    "common_learning_store_code": store_code,
+                    "common_learning_inquiry_source_type": inquiry["source_type"],
+                    "origin_market": market_from_store_code(store_code),
+                },
+                columns={
+                    "inquiry_id": inquiry["id"],
+                    "store_code": store_code,
+                    "inquiry_type": inquiry["inquiry_type"],
+                    "intent": None,
+                    "product_name": inquiry["product_name"],
+                    "model_code": extract_model_code(inquiry["product_name"]),
+                },
+                question=question,
+                answer=answer,
+                product_scope=product_scope,
+                market_applicability=market_applicability,
+                validity_type=validity_type,
+                event_name=event_name,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                actor=actor,
+            )
+
+    def _insert_common_learning(
+        self,
+        connection: Any,
+        *,
+        digest_scope: str,
+        provenance: Mapping[str, Any],
+        columns: Mapping[str, Any],
+        question: str,
+        answer: str,
+        product_scope: str,
+        market_applicability: str,
+        validity_type: str,
+        event_name: str | None,
+        valid_from: object,
+        valid_until: object,
+        actor: str | None,
+    ) -> dict[str, Any]:
+        """Store one common Learning. Shared by both approval paths.
+
+        Duplicates are refused by ``source_key``, which digests the scope the
+        row was approved from, the text and the range together. The range is
+        part of the digest on purpose: the same sentence approved for Naver and
+        for Coupang is two decisions, not one, and only an identical repeat is
+        a duplicate. ``digest_scope`` distinguishes the two entry points, so a
+        direct approval and one made from an approved Learning are separate
+        decisions even when the words match.
+        """
+
+        from services.similar_answer_service import normalize_learning_question
 
         scope = str(product_scope or "").strip().upper()
         if scope not in APPLICATION_SCOPES:
@@ -1239,8 +1388,6 @@ class LearningRepository:
             raise ValueError(
                 "적용 마켓은 %s 중 하나여야 합니다." % ", ".join(MARKET_APPLICABILITIES)
             )
-        from services.similar_answer_service import normalize_learning_question
-
         clean_question = str(question or "").strip()
         clean_answer = str(answer or "").strip()
         if not clean_question:
@@ -1257,90 +1404,72 @@ class LearningRepository:
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         digest = sha256(
             "|".join((
-                "COMMON_LEARNING", str(int(origin_learning_id)),
+                "COMMON_LEARNING", str(digest_scope),
                 _COLLAPSE.sub(" ", clean_question),
                 _COLLAPSE.sub(" ", clean_answer),
                 scope, applicability,
             )).encode("utf-8")
         ).hexdigest()
 
-        with self.database.transaction() as connection:
-            origin = connection.execute(
-                """
-                SELECT id, inquiry_id, store_code, inquiry_type, intent,
-                       product_name, model_code, metadata_json
-                FROM learning_examples WHERE id=?
-                """,
-                (int(origin_learning_id),),
-            ).fetchone()
-            if origin is None:
-                raise LookupError(f"Learning not found: {origin_learning_id}")
-            existing = connection.execute(
-                "SELECT id FROM learning_examples WHERE source_key=?", (digest,)
-            ).fetchone()
-            if existing is not None:
-                raise ValueError(
-                    "같은 원본에서 동일한 질문·답변·적용 범위의 공통 Learning 이 "
-                    "이미 등록되어 있습니다 (ID %s)." % int(existing["id"])
-                )
-            origin_metadata = deserialize_json(origin["metadata_json"])
-            origin_metadata = (
-                origin_metadata if isinstance(origin_metadata, dict) else {}
+        existing = connection.execute(
+            "SELECT id FROM learning_examples WHERE source_key=?", (digest,)
+        ).fetchone()
+        if existing is not None:
+            raise ValueError(
+                "동일한 질문·답변·적용 범위의 공통 Learning 이 "
+                "이미 등록되어 있습니다 (ID %s)." % int(existing["id"])
             )
-            metadata: dict[str, Any] = {
-                # The operator selected and verified this text, so it carries
-                # the same authority an approved answer does -- which is what
-                # lets the retrieval ladder read it as human-approved.
-                "facts_authority": "APPROVED_REFERENCE",
-                "learning_signal_type": "POSITIVE",
-                "answer_provenance": "STAFF_EDITED",
-                "human_verified": True,
-                "verified_by": str(actor or "") or None,
-                "verified_at": now,
-                "product_scope": scope,
-                "market_applicability": applicability,
-                "common_learning": True,
-                "common_learning_origin_id": int(origin["id"]),
-                "common_learning_approved_by": str(actor or "") or None,
-                "common_learning_approved_at": now,
-            }
-            if scope == "POLICY":
-                metadata["cross_model_policy"] = True
-                metadata["cross_model_policy_approved_by"] = str(actor or "") or None
-                metadata["cross_model_policy_approved_at"] = now
-            # Origin market provenance decides what the market gate reads when
-            # applicability is absent; it is explicit here, but keeping it
-            # makes the row's origin legible beside the decision.
-            if origin_metadata.get("origin_market"):
-                metadata["origin_market"] = origin_metadata["origin_market"]
-            cursor = connection.execute(
-                """
-                INSERT INTO learning_examples(
-                    source_key, inquiry_id, learning_source,
-                    question_original_masked, question_normalized,
-                    store_code, inquiry_type, intent, product_name, model_code,
-                    final_answer, edited_answer, style_only, rating,
-                    edit_ratio, quality_score, version, style_features_json,
-                    metadata_json, active, validity_type, event_name,
-                    valid_from, valid_until, validity_active, created_at
-                ) VALUES (?,?,'APPROVED_EDITED',?,?,?,?,?,?,?,?,?,0,5,0.0,0.9,1,
-                          '{}',?,1,?,?,?,?,1,?)
-                """,
-                (
-                    digest, origin["inquiry_id"], clean_question,
-                    normalize_learning_question(clean_question),
-                    origin["store_code"], origin["inquiry_type"],
-                    origin["intent"], origin["product_name"],
-                    origin["model_code"], clean_answer, clean_answer,
-                    serialize_json(metadata), validity["validity_type"],
-                    validity["event_name"], validity["valid_from"],
-                    validity["valid_until"], now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM learning_examples WHERE id=?",
-                (int(cursor.lastrowid),),
-            ).fetchone()
+        metadata: dict[str, Any] = {
+            # The operator selected and verified this text, so it carries the
+            # same authority an approved answer does -- which is what lets the
+            # retrieval ladder read it as human-approved.
+            "facts_authority": "APPROVED_REFERENCE",
+            "learning_signal_type": "POSITIVE",
+            "answer_provenance": "STAFF_EDITED",
+            "human_verified": True,
+            "verified_by": str(actor or "") or None,
+            "verified_at": now,
+            "product_scope": scope,
+            "market_applicability": applicability,
+            "common_learning": True,
+            "common_learning_approved_by": str(actor or "") or None,
+            "common_learning_approved_at": now,
+        }
+        for key, value in provenance.items():
+            if value is not None:
+                metadata[key] = value
+        if scope == "POLICY":
+            metadata["cross_model_policy"] = True
+            metadata["cross_model_policy_approved_by"] = str(actor or "") or None
+            metadata["cross_model_policy_approved_at"] = now
+        cursor = connection.execute(
+            """
+            INSERT INTO learning_examples(
+                source_key, inquiry_id, learning_source,
+                question_original_masked, question_normalized,
+                store_code, inquiry_type, intent, product_name, model_code,
+                final_answer, edited_answer, style_only, rating,
+                edit_ratio, quality_score, version, style_features_json,
+                metadata_json, active, validity_type, event_name,
+                valid_from, valid_until, validity_active, created_at
+            ) VALUES (?,?,'APPROVED_EDITED',?,?,?,?,?,?,?,?,?,0,5,0.0,0.9,1,
+                      '{}',?,1,?,?,?,?,1,?)
+            """,
+            (
+                digest, columns["inquiry_id"], clean_question,
+                normalize_learning_question(clean_question),
+                columns["store_code"], columns["inquiry_type"],
+                columns["intent"], columns["product_name"],
+                columns["model_code"], clean_answer, clean_answer,
+                serialize_json(metadata), validity["validity_type"],
+                validity["event_name"], validity["valid_from"],
+                validity["valid_until"], now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM learning_examples WHERE id=?",
+            (int(cursor.lastrowid),),
+        ).fetchone()
         self._notify_committed()
         result = self._row(row)
         assert result is not None
