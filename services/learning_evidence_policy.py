@@ -38,6 +38,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
 from answer.answer_format import extract_answer_body
+from repositories.learning_repository import is_common_learning
 from answer.learning_signal import detect_polarity
 from services.auto_post_validation_service import INTERNAL_PLACEHOLDER
 
@@ -212,6 +213,23 @@ class LearningEvidenceDecision:
             "subquestions": list(self.subquestions),
             "conflicts": [dict(item) for item in self.conflicts],
         }
+
+
+def is_operator_common_row(item: Mapping[str, Any]) -> bool:
+    """Whether this evidence row is an operator-approved common Learning.
+
+    Two shapes reach this module. The repository row carries
+    ``metadata_json``; the row projected into ``similar_approved_answers`` --
+    which is what ``evaluate`` actually receives -- does not, and carries the
+    ``operator_common_policy`` flag that ``SimilarAnswerService`` puts there
+    instead. Reading only the metadata made the precedence below unreachable
+    in the real pipeline while the unit tests passed, so both are read.
+    """
+
+    if bool(item.get("operator_common_policy")):
+        return True
+    metadata = item.get("metadata_json")
+    return is_common_learning(metadata if isinstance(metadata, Mapping) else {})
 
 
 def _text(value: object) -> str:
@@ -770,6 +788,32 @@ def fact_conflict_winner(
     fails the first two conditions returns None -- the existing conflict hold.
     """
 
+    # An operator's common Learning wins first, before the exact-model test.
+    #
+    # Confirmed policy: inside the range the operator approved, their explicit
+    # common approval outranks the catalogue. The exact-model requirement below
+    # exists to establish that a row is about *this* product; a common Learning
+    # is about every product in the range it states, which the operator decided
+    # and the retrieval pipeline already enforced -- this row only reaches here
+    # after ``candidates()`` applied active/validity/market and compatibility
+    # applied model and family. So the test it cannot pass is also the test it
+    # does not need.
+    #
+    # Only the explicit approval qualifies. ``is_common_learning`` reads
+    # ``metadata_json.common_learning``, written by the two approval paths
+    # alone, so the 559 rows whose POLICY scope the lexical profiler inferred
+    # and every ordinary Positive keep the existing precedence exactly.
+    #
+    # The measurement-condition test still applies: two numbers measured
+    # differently are not a disagreement anybody can settle.
+    if is_operator_common_row(item):
+        fact_text = str(fact_value or "")
+        if _CONDITION_MARKER.search(fact_text) and not _CONDITION_MARKER.search(
+            str(item.get("answer") or "")
+        ):
+            return None
+        return LEARNING_WINS
+
     model = str(item.get("model_code") or "").strip()
     if not model:
         # The row does not name its model. The listings on both sides may still
@@ -819,6 +863,22 @@ def _qualifying(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         if (
             str(compatibility.get("product_match") or "")
             not in EXACT_PRODUCT_MATCHES
+            # An operator's common Learning states its own range, and the
+            # retrieval pipeline already enforced it -- active, in period, the
+            # right market, the right model or family. The exact-product test
+            # is how this function establishes that a row is about the asked
+            # product, and for these rows the operator established it instead.
+            #
+            # Without this they never reach ``fact_conflicts`` at all, so the
+            # confirmed precedence below could not apply to the rows it was
+            # written for: a common Learning that disagrees with the catalogue
+            # was simply absent from the comparison.
+            #
+            # ``usable`` becoming true for such a row changes one telemetry
+            # field (``learning_verified`` in the auto-post decision record)
+            # and no gate: auto-post allowance is decided by the eligibility
+            # service, which does not read it.
+            and not is_operator_common_row(item)
         ):
             continue
         # ``answer_support`` -- how much of the question's wording reappears in
@@ -1064,6 +1124,85 @@ def _measurements_conflict(
     )
 
 
+def _answers_measure_differently(left: object, right: object) -> bool:
+    """Two stored answers stating different numbers for the same measurement.
+
+    The same two conditions ``_measurements_conflict`` applies between an
+    answer and a catalogue value, read between two answers: the unit has to be
+    written in both texts, and a listed value ("1110.8 x 643.8 x 76.4 mm")
+    is never compared because which of its figures a loose number corresponds
+    to is not knowable here.
+    """
+
+    left_text, right_text = _text(left), _text(right)
+    if _LISTED_MEASUREMENTS.search(left_text) or _LISTED_MEASUREMENTS.search(
+        right_text
+    ):
+        return False
+    left_measured = _measured_values(left_text)
+    right_measured = _measured_values(right_text)
+    shared = set(left_measured) & set(right_measured)
+    if not shared:
+        return False
+    return any(
+        not (left_measured[unit] & right_measured[unit]) for unit in shared
+    )
+
+
+def _common_rows_disagree(
+    item: Mapping[str, Any] | None,
+    approved: Iterable[Mapping[str, Any]],
+    *,
+    field_key: str,
+    subquestion: object,
+) -> bool:
+    """Whether another operator-approved common row contradicts this one.
+
+    The disagreement is read from the rows, not from the conflicts they
+    produced, because the conflict list cannot show it. A row is reported as
+    contradicted by a fact only when its polarity opposes the fact's value, so
+    two rows that both appear there necessarily share that polarity -- they
+    agree with each other -- while a genuinely opposed pair puts only one of
+    them on the list. Grouping the conflicts instead counted how many distinct
+    *wordings* contradicted one fact: two operator rows that both said 터치를
+    지원합니다 in different words were declared a standoff and lost the
+    priority, and 지원합니다 against 지원하지 않습니다 -- the case the operator
+    has to settle -- was granted the win. Both were measured.
+
+    Only rows matched to the same sub-question and talking about the same
+    attribute are compared; the two axes are the ones ``fact_conflicts``
+    itself uses, polarity and a measurement in a shared unit.
+    """
+
+    if item is None:
+        return False
+    text = item.get("answer")
+    routed, fragments = _fields_the_text_is_about(text)
+    if not _is_about_field(field_key, routed, fragments):
+        return False
+    polarity = detect_polarity(text)
+    learning_id = item.get("learning_example_id")
+    for other in approved:
+        if other is item or other.get("learning_example_id") == learning_id:
+            continue
+        if not is_operator_common_row(other):
+            continue
+        if str(other.get("matched_subquestion") or "") != str(subquestion or ""):
+            continue
+        other_text = other.get("answer")
+        other_routed, other_fragments = _fields_the_text_is_about(other_text)
+        if not _is_about_field(field_key, other_routed, other_fragments):
+            continue
+        other_polarity = detect_polarity(other_text)
+        if polarity != "UNCERTAIN" and other_polarity not in {
+            "UNCERTAIN", polarity,
+        }:
+            return True
+        if _answers_measure_differently(text, other_text):
+            return True
+    return False
+
+
 def _supported_subquestions(context: Mapping[str, Any]) -> frozenset[str]:
     """Sub-questions retrieval itself resolved from approved Learning.
 
@@ -1122,6 +1261,13 @@ def evaluate(
     # nothing may decide, the conflict travels on exactly as before.
     settled_against_learning: set[Any] = set()
     unsettled: list[dict[str, Any]] = []
+    # Two operator-approved common Learnings that disagree with each other are
+    # a standoff, not a win. Both outrank the catalogue, so granting the win
+    # would pick one of them for the operator; instead the conflict travels on
+    # and the sub-question is marked CONFLICT, which is the review channel this
+    # module already has. ``_common_rows_disagree`` reads the rows themselves,
+    # which is the only population where the disagreement is visible -- see its
+    # docstring.
     for conflict in against_facts:
         learning_id = conflict.get("learning_id")
         item = next(
@@ -1142,6 +1288,14 @@ def evaluate(
             if item is not None else None
         )
         if winner == LEARNING_WINS:
+            if is_operator_common_row(item) and _common_rows_disagree(
+                item,
+                approved,
+                field_key=str(conflict.get("field_key") or ""),
+                subquestion=conflict.get("subquestion"),
+            ):
+                unsettled.append(conflict)
+                continue
             continue
         if winner == PRODUCT_FACT_WINS:
             settled_against_learning.add(learning_id)

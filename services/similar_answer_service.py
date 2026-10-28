@@ -7,7 +7,11 @@ from typing import Any
 
 from answer.evidence_support import SUPPORTED_THRESHOLD, apply_answer_support
 from answer.learning_signal import facts_conflict
-from repositories.learning_repository import LearningRepository, market_from_store_code
+from repositories.learning_repository import (
+    LearningRepository,
+    is_common_learning,
+    market_from_store_code,
+)
 from repositories.product_catalog_repository import normalize_model
 from services.learning_compatibility_service import (
     LearningCompatibilityService,
@@ -1490,6 +1494,21 @@ class SimilarAnswerService:
                 "SELLER_POSTED" if item["style_only"]
                 else "APPROVED" if payload["authority"] == "APPROVED"
                 else "AUTO"
+            )
+            # Whether an operator added this row as a common Learning.
+            #
+            # Confirmed policy: inside the range the operator approved, their
+            # common Learning outranks the catalogue and the ordinary
+            # Positives. GPT ② has to be able to see which row that is, and
+            # ``evidence_origin.reason`` cannot say it -- it reads
+            # OPERATOR_APPROVED_CROSS_MODEL_POLICY only when the categories
+            # differ, and EXACT_NAME for the product it was written on.
+            #
+            # Read off ``metadata_json.common_learning``, which only the two
+            # approval paths write; the 559 rows whose POLICY scope the lexical
+            # profiler inferred do not have it and are unaffected.
+            payload["operator_common_policy"] = is_common_learning(
+                item.get("metadata_json") or {}
             )
             payload["hedge_reason"] = estimation_reason(item["final_answer"])
             normalized = _normalized_answer(item["final_answer"])

@@ -1965,6 +1965,21 @@ class LearningContextService:
                 "period, a dispatch cutoff or an arrival date, and do not ask "
                 "for an order number. Staff will answer this item."
             ),
+            # Keyed by the row's own flag rather than a status, like the
+            # entry below: the row is an ordinary CANDIDATE and this says what
+            # rank it carries. Confirmed policy -- inside the range an
+            # operator approved (model, family, market, period), their common
+            # Learning outranks the product catalogue and the ordinary
+            # approved answers. Outside that range nothing changes.
+            "OPERATOR_COMMON_POLICY": (
+                "Rows marked operator_common_policy were approved by an "
+                "operator as common to every product in the range they state. "
+                "Inside that range they outrank the product catalogue and the "
+                "other approved answers: when one of them disagrees with a "
+                "catalogue fact, answer from the row and do not hedge the "
+                "answer over that disagreement. Two such rows that contradict "
+                "each other are a CONFLICT -- do not choose between them."
+            ),
             # Keyed by source rather than status: the row is an ordinary
             # CANDIDATE, and this says what its only grounds may be used for.
             "GENERAL_DELIVERY_ESTIMATE": (
