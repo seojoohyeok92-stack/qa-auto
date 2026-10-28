@@ -102,7 +102,7 @@ from ui.answer_status_presenter import (
     trace_stage_label,
 )
 from ui.rerun_profile import snapshot as rerun_profile_snapshot
-from ui.learning_manager import open_common_learning_editor
+from ui.learning_manager import render_common_learning_add
 from ui.session_identity import can, current_actor
 from ui.uat_presenters import answer_source_label
 
@@ -2152,27 +2152,33 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     f"Source {approval_trace.get('learning_source') or '-'}"
                 )
             # Only an approved Learning can contribute a common one, and the
-            # card above already states which id that is. Offering it here
-            # saves the operator looking the id up again in Learning Manager.
-            # Reads nothing new and writes nothing: the editor and its save
-            # path are the manager's own.
+            # card above already states which id that is.
+            #
+            # The editor renders here, in the inquiry the operator is looking
+            # at. It used to route to Learning Manager, which meant leaving
+            # the dashboard -- losing the open inquiry, the filters, the
+            # search text and the page -- to do one edit and then navigate
+            # back. The form, its save path and its duplicate check are the
+            # manager's own, unchanged; only where it is drawn moved.
+            #
+            # ``key_prefix`` carries the inquiry id so two inquiries never
+            # share widget state, and nothing here writes ``current_page`` or
+            # ``production_admin_mode``.
             approved_learning_id = approval_trace.get(
                 "positive_learning_id"
             ) or next(
                 iter(approval_trace.get("approved_learning_ids") or ()), None
             )
             if approved_learning_id:
-                if st.button(
-                    "공통 Learning 추가",
-                    key=f"common_learning_from_review_{inquiry_id}",
-                    help=(
-                        "이 답변에서 다른 모델에도 적용되는 질문과 답변만 골라 "
-                        "별도 항목으로 등록합니다. 원본 Learning 은 변경되지 "
-                        "않습니다."
-                    ),
-                ):
-                    open_common_learning_editor(int(approved_learning_id))
-                    st.rerun()
+                learning_row = LearningRepository(database).get(
+                    int(approved_learning_id)
+                )
+                if learning_row is not None and learning_row.get("active"):
+                    render_common_learning_add(
+                        learning_row,
+                        LearningRepository(database),
+                        key_prefix=f"review_{inquiry_id}",
+                    )
         elif approval_trace.get("revoked_learning_id"):
             st.markdown(
                 '<div class="approval-cancelled-card">'

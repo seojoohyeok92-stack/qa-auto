@@ -469,77 +469,23 @@ def _render_scope_editor(
             st.rerun()
 
 
-# Which approved Learning the "공통 Learning 추가" editor should open on.
-# Set by the inquiry detail screen so an operator who just approved an answer
-# does not have to come here and search for its id again.
-COMMON_LEARNING_TARGET_KEY = "common_learning_target_id"
-_COMMON_TARGET_PREFIX = "common_target"
+def _clear_editor_inputs(key_prefix: str, learning_id: int) -> None:
+    """Drop this editor's widget state when it closes.
 
-
-def open_common_learning_editor(learning_id: int) -> None:
-    """Route to Learning Manager with this Learning's editor already open.
-
-    The routing guard in ``app.py`` sends every non-dashboard page back to the
-    dashboard unless admin mode is on, so both keys are set here -- the same
-    pair the validity editor's ``on_change`` already uses.
+    Streamlit keeps a widget's value under its key for as long as the key is
+    in session state, so a reopened editor would otherwise show whatever was
+    typed the previous time instead of the origin's text. Keys are scoped by
+    ``key_prefix`` and the Learning id, so clearing one editor cannot touch
+    another inquiry's.
     """
 
-    st.session_state[COMMON_LEARNING_TARGET_KEY] = int(learning_id)
-    st.session_state[f"{_COMMON_TARGET_PREFIX}_common_open_{int(learning_id)}"] = True
-    st.session_state["current_page"] = "learning"
-    st.session_state["production_admin_mode"] = True
+    for suffix in (
+        "q", "a", "scope", "market", "validity", "event", "from", "until",
+    ):
+        st.session_state.pop(f"{key_prefix}_common_{suffix}_{learning_id}", None)
 
 
-def _render_common_learning_target(repository: LearningRepository) -> None:
-    """Open the add editor on the Learning the inquiry screen handed over.
-
-    Rendered from the Learning it fetches by id rather than from the manager's
-    current page, so the row does not have to be in the visible list.
-    """
-
-    target = st.session_state.get(COMMON_LEARNING_TARGET_KEY)
-    if target in (None, ""):
-        return
-    try:
-        learning_id = int(target)
-    except (TypeError, ValueError):
-        st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
-        return
-
-    st.subheader("공통 Learning 추가")
-    row = repository.get(learning_id)
-    if row is None:
-        st.warning(f"Learning {learning_id} 을 찾을 수 없습니다.")
-    elif is_common_learning(_metadata(row)):
-        st.info(
-            f"Learning {learning_id} 은 이미 공통 Learning 입니다. "
-            "아래 '공통 Learning 관리'에서 수정할 수 있습니다."
-        )
-    elif not bool(row.get("active")):
-        st.warning(
-            f"Learning {learning_id} 은 비활성 상태입니다. "
-            "승인된 Learning 에서만 공통 항목을 추가할 수 있습니다."
-        )
-    else:
-        st.caption(
-            "문의 상세에서 전달된 Learning %s · 문의 ID %s" % (
-                learning_id, row.get("inquiry_id") or "-",
-            )
-        )
-        _render_common_learning_add(
-            row, repository, key_prefix=_COMMON_TARGET_PREFIX
-        )
-    if st.button("닫기", key="common_learning_target_close"):
-        st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
-        st.session_state.pop(
-            f"{_COMMON_TARGET_PREFIX}_common_open_{learning_id}", None
-        )
-        st.session_state["current_page"] = "learning"
-        st.rerun()
-    st.divider()
-
-
-def _render_common_learning_add(
+def render_common_learning_add(
     row: dict[str, Any], repository: LearningRepository, *, key_prefix: str
 ) -> None:
     """Add the part of this approved answer that applies beyond one model.
@@ -560,13 +506,16 @@ def _render_common_learning_add(
         "등록합니다. 원본 Learning 은 변경되지 않습니다."
     )
     if not st.session_state.get(state_key):
+        created_id = st.session_state.get(f"{state_key}_saved")
+        if created_id:
+            st.success(f"공통 Learning {created_id} 을 추가했습니다.")
         if st.button(
             "공통 Learning 추가",
             key=f"{key_prefix}_common_start_{learning_id}",
             help="원본 질문과 승인된 최종 답변을 불러와 편집합니다.",
         ):
             st.session_state[state_key] = True
-            st.session_state["current_page"] = "learning"
+            st.session_state.pop(f"{state_key}_saved", None)
             st.rerun()
         return
 
@@ -665,17 +614,19 @@ def _render_common_learning_add(
         except (ValueError, LookupError, RuntimeError) as error:
             st.error(str(error))
         else:
-            st.toast(f"공통 Learning {created['id']} 을 추가했습니다.")
+            # 편집 영역만 닫는다. ``current_page`` 를 비롯한 화면 상태는
+            # 건드리지 않으므로, 호출한 화면이 Dashboard 든 Learning Manager
+            # 든 그 자리에 머문다.
             st.session_state.pop(state_key, None)
-            st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
-            st.session_state["current_page"] = "learning"
+            st.session_state[f"{state_key}_saved"] = int(created["id"])
+            _clear_editor_inputs(key_prefix, learning_id)
             st.rerun()
     if actions[1].button(
         "취소", key=f"{key_prefix}_common_cancel_{learning_id}", width="stretch"
     ):
         st.session_state.pop(state_key, None)
-        st.session_state.pop(COMMON_LEARNING_TARGET_KEY, None)
-        st.session_state["current_page"] = "learning"
+        st.session_state.pop(f"{state_key}_saved", None)
+        _clear_editor_inputs(key_prefix, learning_id)
         st.rerun()
 
 
@@ -811,7 +762,7 @@ def _render_details(
         st.write(_learning_answer(row) or "-")
         if repository is not None:
             _render_scope_editor(row, repository, key_prefix=key_prefix)
-            _render_common_learning_add(row, repository, key_prefix=key_prefix)
+            render_common_learning_add(row, repository, key_prefix=key_prefix)
             _render_validity_editor(row, repository, key_prefix=key_prefix)
         if repository is not None and row.get("inquiry_id") is not None:
             signals = LearningSignalRepository(repository.database).for_inquiry(
@@ -1313,7 +1264,6 @@ def render_learning_manager(database: Database | None) -> None:
 
     repository = LearningRepository(database)
     feedback_repository = LearningFeedbackRepository(database)
-    _render_common_learning_target(repository)
     summary = repository.manager_summary()
     feedback_summary = feedback_repository.manager_summary()
     metrics = st.columns(6, gap="small")
