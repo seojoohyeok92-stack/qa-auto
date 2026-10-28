@@ -487,6 +487,71 @@ def render_sync_status(data: dict[str, Any]) -> None:
             ("수동검토 대기", data.get("manual_waiting", 0)),
         )):
             column.metric(label, value)
+        st.caption(
+            "기존 Pending 은 자동처리 ON 이전에 수집되어 Auto Sync Event 가 없는 "
+            "문의 수입니다. 자동등록은 Event 큐로만 동작하므로 이 건들은 자동으로 "
+            "처리되지 않으며, 문의 상세에서 수동으로 등록합니다."
+        )
+        _render_post_failures(data)
+
+
+def _render_post_failures(data: dict[str, Any]) -> None:
+    """등록 실패 중 아직 해결되지 않은 건.
+
+    ``auto_failed`` 는 당일 실패만 세므로 오래된 실패는 그 숫자에서 0 으로
+    보인다. 두 숫자를 함께 둬서 "오늘 몇 건 실패했는가" 와 "지금 몇 건이 남아
+    있는가" 가 구분되게 한다. 재시도 가능 여부는 기존 종결 오류 정책을 읽은
+    결과이고, 이 화면은 아무것도 등록하거나 재시도하지 않는다.
+    """
+
+    failures = [row for row in (data.get("post_failures") or []) if isinstance(row, dict)]
+    operational = [row for row in failures if not row.get("uat_origin")]
+    columns = st.columns(4, gap="small")
+    for column, (label, value, help_text) in zip(columns, (
+        ("당일 등록 실패", data.get("auto_failed", 0),
+         "오늘 실패한 자동등록 시도 수"),
+        ("미해결 등록 실패", data.get("post_failed_open", 0),
+         "원본에 아직 답변이 없고 POST_FAILED 로 남아 있는 문의 수"),
+        ("재시도 가능", data.get("post_failed_retryable", 0),
+         "종결 오류가 아니어서 문의 상세에서 재시도할 수 있는 건"),
+        ("운영자 조치 필요", data.get("post_failed_manual_only", 0),
+         "종결 오류 또는 원본 삭제로 재시도가 금지된 건"),
+    )):
+        column.metric(label, value, help=help_text)
+    uat_count = int(data.get("post_failed_uat", 0) or 0)
+    if uat_count:
+        st.caption(
+            f"과거 UAT 실행에서 남은 실패 {uat_count}건은 위 미해결 집계에서 "
+            "제외했습니다. 상태는 그대로 보존되며 자동으로 재등록되지 않습니다."
+        )
+    if not operational:
+        st.caption("미해결 등록 실패가 없습니다.")
+        return
+    st.dataframe(
+        [
+            {
+                "문의 ID": row.get("id"),
+                "마켓": row.get("market") or "-",
+                "스토어": row.get("store_code") or "-",
+                "문의 유형": row.get("source_type") or "-",
+                "오류 코드": row.get("error_code") or "-",
+                "실패 시각": format_datetime_kst(row.get("failed_at"), empty="-"),
+                "경과(일)": row.get("elapsed_days"),
+                "실패 횟수": row.get("failed_attempts"),
+                "자동 재시도": "가능" if row.get("retryable") else "금지",
+                "상태": "운영자 조치 필요" if row.get("needs_operator") else "재시도 대기",
+                "필요 조치": row.get("manual_action") or "-",
+            }
+            for row in operational
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "재시도는 문의 상세의 답변 등록 패널에서 운영자가 명시적으로 확인한 "
+        "뒤에만 실행됩니다. 대상 식별 오류 등 종결 오류는 기존 정책에 따라 "
+        "재시도되지 않습니다."
+    )
 
 
 def render_operations_statistics(data: dict[str, Any]) -> None:

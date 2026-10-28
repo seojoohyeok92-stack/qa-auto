@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from repositories.auto_post_repository import AutoPostRepository
@@ -8,9 +9,106 @@ from repositories.auto_post_event_repository import AutoPostEventRepository
 from repositories.database import Database
 from repositories.learning_repository import LearningRepository
 from repositories.naver_sync_repository import NaverSyncRepository
+from services.market_policy import market_of
 
 
 TODAY_SQL = "date({column}, '+9 hours') = date('now', '+9 hours')"
+
+# Which post attempts came from a UAT run rather than from production.
+#
+# Attempt 1 on inquiry 2054 is one: actor ``SYSTEM_AUTO_POST_V22_UAT``, run id
+# ``V22-UAT-…``, 2026-08-06 -- before this repository's first commit. Counting
+# it as an open operational failure would put a permanent 1 on the operator's
+# screen for a POST that was never meant for a customer.
+#
+# Read off the attempt's own actor and run id, which is where the distinction
+# was already recorded. Display-only: nothing here changes what may be posted
+# or retried, and a UAT row keeps its POST_FAILED state untouched.
+_UAT_ACTOR_MARKERS = ("_UAT", "UAT_")
+_UAT_RUN_PREFIXES = ("V22-UAT-", "UAT-")
+
+# What an operator can do about one failure, by the error the market returned.
+# ``NON_RETRYABLE_TARGET_ERRORS`` is the existing policy and is read, never
+# re-stated: a target-identity failure is not retried by guessing.
+_MANUAL_ACTION_BY_CODE = {
+    "REMOTE_TARGET_NOT_FOUND": (
+        "네이버에서 원본 문의가 조회되지 않았습니다. 판매자센터에서 해당 문의의 "
+        "현재 상태(삭제·답변 완료)를 확인해 주세요."
+    ),
+    "TARGET_NOT_FOUND": (
+        "대상 문의를 찾지 못했습니다. 동기화 후 원본 상태를 확인해 주세요."
+    ),
+    "TARGET_ID_MAPPING_ERROR": (
+        "저장된 문의번호와 원본 식별자가 일치하지 않습니다. 동기화 기록을 "
+        "확인해 주세요."
+    ),
+    "STORE_CREDENTIAL_MISMATCH": (
+        "스토어 자격증명이 일치하지 않습니다. 스토어 설정을 확인해 주세요."
+    ),
+    "INQUIRY_TYPE_ENDPOINT_MISMATCH": (
+        "문의 유형과 등록 엔드포인트가 맞지 않습니다. 문의 유형을 확인해 주세요."
+    ),
+    "MASKED_EXTERNAL_ID": (
+        "외부 문의번호가 마스킹되어 있어 대상을 특정할 수 없습니다."
+    ),
+}
+
+
+def classify_post_failure(row: dict[str, Any]) -> dict[str, Any]:
+    """Describe one open POST_FAILED inquiry for the operator.
+
+    Reports only what the stored rows already say -- the error the market
+    returned, when it happened, and whether the existing retry policy allows
+    another attempt. It decides nothing: the refusal still lives in
+    ``NaverPostService.post``, and this never widens it.
+    """
+
+    from repositories.naver_post_repository import NON_RETRYABLE_TARGET_ERRORS
+
+    code = str(row.get("post_error_code") or "").strip().upper()
+    actor = str(row.get("last_actor") or "").upper()
+    run_id = str(row.get("last_run_id") or "")
+    uat_origin = any(
+        marker in actor for marker in _UAT_ACTOR_MARKERS
+    ) or any(run_id.startswith(prefix) for prefix in _UAT_RUN_PREFIXES)
+    terminal = code in NON_RETRYABLE_TARGET_ERRORS
+    deleted = bool(row.get("source_deleted"))
+    failed_at = str(row.get("last_failed_at") or row.get("post_attempted_at") or "")
+    if deleted:
+        manual_action = "네이버 원본이 삭제된 것으로 기록되어 등록할 수 없습니다."
+    elif terminal:
+        manual_action = _MANUAL_ACTION_BY_CODE.get(code, "")
+    else:
+        manual_action = ""
+    return {
+        **row,
+        "failed_at": failed_at,
+        "elapsed_days": _elapsed_days(failed_at),
+        "market": market_of(row.get("store_code")),
+        "error_code": code or "UNKNOWN",
+        "uat_origin": uat_origin,
+        # A deleted source is refused before the retry gate is even reached,
+        # so it is not retryable either.
+        "retryable": not terminal and not deleted,
+        "terminal_error": terminal,
+        "manual_action": manual_action,
+        "needs_operator": not uat_origin and (terminal or deleted),
+    }
+
+
+def _elapsed_days(timestamp: str) -> int | None:
+    """Whole days since that timestamp, or None when it cannot be read."""
+
+    text = str(timestamp or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return max(0, (datetime.now(UTC) - moment).days)
 
 REVIEW_EVENT_CODES = (
     "AUTO_PROCESSING_REVIEW_REQUIRED",
@@ -230,6 +328,39 @@ class DashboardOperationsService:
                 ORDER BY created_at DESC, id DESC LIMIT 1
                 """
             ).fetchone()
+            # ``auto_failed`` above counts attempts that failed *today*, which
+            # is the right number for a daily run report and the wrong one for
+            # "what is still broken". A failure from two months ago reads as
+            # zero there, so inquiries 2054 and 10621 sat in POST_FAILED
+            # without appearing in any failure figure.
+            #
+            # These rows are the open ones instead: still unanswered at the
+            # source, so a POST is still outstanding. The last attempt comes
+            # along because the error code and the actor live on it, and both
+            # decide how the row is presented.
+            post_failed_rows = connection.execute(
+                """
+                SELECT i.id, i.store_code, i.source_type, i.post_status,
+                       i.post_error_code, i.post_error_message,
+                       i.post_attempted_at, i.source_answered, i.source_deleted,
+                       a.actor AS last_actor,
+                       a.auto_post_run_id AS last_run_id,
+                       a.http_status AS last_http_status,
+                       a.completed_at AS last_failed_at,
+                       (SELECT COUNT(*) FROM naver_post_attempts f
+                        WHERE f.inquiry_id=i.id AND f.status='POST_FAILED')
+                           AS failed_attempts
+                FROM inquiries i
+                LEFT JOIN naver_post_attempts a ON a.id=(
+                    SELECT id FROM naver_post_attempts
+                    WHERE inquiry_id=i.id AND status='POST_FAILED'
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                )
+                WHERE i.post_status='POST_FAILED'
+                  AND COALESCE(i.source_answered,0)=0
+                ORDER BY COALESCE(a.completed_at, i.post_attempted_at), i.id
+                """
+            ).fetchall()
 
         learning = LearningRepository(self.database).manager_summary()
         sync = NaverSyncRepository(self.database)
@@ -241,6 +372,12 @@ class DashboardOperationsService:
             + event_summary["RETRY_BY_SCHEDULER"]
         )
         manual_waiting = existing_pending + event_summary["BLOCKED_AUTO_POST_OFF"]
+        post_failures = [
+            classify_post_failure(dict(row)) for row in post_failed_rows
+        ]
+        operational_failures = [
+            row for row in post_failures if not row["uat_origin"]
+        ]
         return {
             "today_inquiries": today_inquiries,
             "auto_answers": auto_answers,
@@ -253,6 +390,17 @@ class DashboardOperationsService:
             "review_required": review_required,
             "existing_pending": existing_pending,
             "new_pending": max(0, pending - existing_pending),
+            # Today's failed attempts (``auto_failed``) and the failures still
+            # open are different questions; both are reported.
+            "post_failed_open": len(operational_failures),
+            "post_failed_retryable": sum(
+                1 for row in operational_failures if row["retryable"]
+            ),
+            "post_failed_manual_only": sum(
+                1 for row in operational_failures if not row["retryable"]
+            ),
+            "post_failed_uat": sum(1 for row in post_failures if row["uat_origin"]),
+            "post_failures": post_failures,
             "automatic_waiting": automatic_waiting,
             "manual_waiting": manual_waiting,
             "event_summary": event_summary,

@@ -69,6 +69,15 @@ class AutoPostRepository:
         # Version 1.0 operator terminology. Keep the legacy alias because the
         # scheduler and older deployments already persist this singleton row.
         value["auto_processing_enabled"] = value["enabled"]
+        # Persisted by migration 37 and read here, but **not consumed by any
+        # code path**: auto-post is queue-only (see the comment in
+        # ``NaverAutoPostScheduler.run_once``), and ``save_settings`` below
+        # does not write this column either, so there is no way to turn it on.
+        # It is kept so the stored row keeps its shape -- dropping the column
+        # would be a migration for no behavioural gain -- and named here only
+        # so a reader does not mistake it for a working switch. The operator
+        # sees "기존 Pending" on the dashboard, which counts those inquiries
+        # and says there that they are handled manually.
         value["allow_existing_pending"] = bool(
             value.get("allow_existing_pending", False)
         )
