@@ -359,11 +359,79 @@ class NaverAutoSyncScheduler:
         if self.coupang_sync is None:
             return
         try:
-            self.coupang_sync(self.database)
+            self._record_coupang_results(self.coupang_sync(self.database))
         except Exception as error:
             LOGGER.warning(
                 "COUPANG_SYNC_CYCLE_FAILED error_type=%s",
                 error.__class__.__name__,
+            )
+            # The warning above goes to a logger nothing configures on the
+            # server, so a cycle that never ran left no trace a person could
+            # find later. This is the same record the per-account results get.
+            self._record_system_safely(
+                "COUPANG_SYNC_CYCLE_FAILED",
+                "쿠팡 문의 수집 주기가 실패했습니다.",
+                level="ERROR",
+                details={"error_type": error.__class__.__name__},
+            )
+
+    def _record_coupang_results(self, results: Any) -> None:
+        """One durable row per seller account per cycle.
+
+        Measured on the 2026-10-29 server copy: COUPANG_OJE_PLUS had collected
+        nothing since 2026-09-16 and synchronised nothing since 09-17, and no
+        stored row could say whether the account had been called and returned
+        nothing or had failed every cycle. ``sync_accounts`` keeps one
+        account's failure off the other and reports each outcome -- but only by
+        printing it, and the console is gone on the next restart.
+
+        Recorded here rather than inside the sync service on purpose. That
+        service is held to a read-and-persist path: ``LogRepository`` is in the
+        set of names ``test_the_service_imports_only_the_read_path`` forbids it,
+        and ``test_a_cycle_writes_no_table_but_inquiries_and_the_queue`` pins
+        that a cycle writes no table but ``inquiries`` and ``auto_sync_events``.
+        Both still hold. The scheduler already owns a log for its own cycle,
+        and the results it is handed carry every count, so the record belongs
+        on this side of that boundary.
+        """
+
+        for result in results if isinstance(results, (list, tuple)) else ():
+            to_dict = getattr(result, "to_dict", None)
+            if not callable(to_dict):
+                continue
+            details = {
+                key: ("" if value is None else value)
+                for key, value in to_dict().items()
+            }
+            details["start_date"] = str(details.get("start_date") or "")
+            details["end_date"] = str(details.get("end_date") or "")
+            succeeded = bool(getattr(result, "succeeded", False))
+            self._record_system_safely(
+                (
+                    "COUPANG_SYNC_ACCOUNT_COMPLETED" if succeeded
+                    else "COUPANG_SYNC_ACCOUNT_FAILED"
+                ),
+                (
+                    "쿠팡 계정 문의 수집을 완료했습니다." if succeeded
+                    else "쿠팡 계정 문의 수집에 실패했습니다."
+                ),
+                level="INFO" if succeeded else "ERROR",
+                details=details,
+            )
+
+    def _record_system_safely(
+        self, event_code: str, message: str, *, level: str, details: Any,
+    ) -> None:
+        """A diagnostic record must never fail the cycle that produced it."""
+
+        try:
+            self.logs.record_system(
+                event_code, message, level=level, details=details,
+            )
+        except Exception as error:  # noqa: BLE001
+            LOGGER.warning(
+                "COUPANG_SYNC_RECORD_FAILED event=%s error_type=%s",
+                event_code, error.__class__.__name__,
             )
 
 

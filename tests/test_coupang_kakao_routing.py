@@ -224,12 +224,29 @@ def test_both_accounts_share_one_room_rather_than_splitting(coupang_posting_open
 
 # --- C. a failed registration --------------------------------------------------
 
-def test_a_failed_coupang_post_sends_no_notification(coupang_posting_opened, database, outbox) -> None:
-    """The Naver post service notifies only on success; this matches it.
+def test_a_failed_coupang_post_reports_the_failure_in_the_coupang_room(
+    coupang_posting_opened, database, outbox,
+) -> None:
+    """A failed registration is now reported, and the parity still holds.
 
-    A failure is recorded on the attempt and shown on the screen the operator
-    is already looking at, so inventing a notification here would be a Coupang
-    policy Naver does not have.
+    This test used to assert the opposite -- that a Coupang failure sends
+    nothing -- on the grounds that "the Naver post service notifies only on
+    success, so inventing a notification here would be a Coupang policy Naver
+    does not have". That reason is what changed, not the principle: the Naver
+    post service now reports its own failures too
+    (``NaverPostService._notify_post_failure``), so reporting one here is the
+    parity, not a departure from it.
+
+    Why it changed: of the 974 notifications the server had sent by
+    2026-10-29, not one was a registration failure, and the only "등록 실패"
+    title in the tree belonged to ``naver_workflow`` -- the standalone CLI that
+    stopped running on 2026-09-01. A POST_FAILED produced an attempt row, an
+    activity log and a dashboard entry, and silence in the room where staff
+    actually watch, while a *hold* produced a message. The screen only tells an
+    operator who is already looking at it.
+
+    What did not change: the room is still chosen by market, the key is still
+    the immutable attempt id, and nothing here relaxes a gate.
     """
 
     inquiry_id = coupang_inquiry(database, inquiry_id="17000013")
@@ -239,7 +256,13 @@ def test_a_failed_coupang_post_sends_no_notification(coupang_posting_opened, dat
     )
 
     assert post(database, inquiry_id, transport).status == "POST_FAILED"
-    assert events(outbox) == []
+    sent = events(outbox)
+    assert len(sent) == 1, sent
+    assert sent[0]["title"] == "[쿠팡 Q&A 답변 등록 실패]"
+    assert sent[0]["recipient"] == COUPANG_ROOM
+    assert "쿠팡 등록: 실패" in sent[0]["message"]
+    # 보류와 혼동되지 않는다.
+    assert "미등록 사유:" not in sent[0]["message"]
 
 
 # --- the hold / 직원 확인 필요 path ----------------------------------------------

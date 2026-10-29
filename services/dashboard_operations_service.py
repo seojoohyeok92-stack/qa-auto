@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from answer.hold_reasons import STAFF_REASON_LABELS
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.auto_post_event_repository import AutoPostEventRepository
 from repositories.database import Database
@@ -182,6 +183,23 @@ def _reason_bucket(reason_code: str) -> str:
         return _REASON_TO_BUCKET[code]
     if code.startswith("ROUTE_"):
         return "자동등록 불가 라우트"
+    # The same Korean phrase the Kakao message already shows for this code.
+    #
+    # Measured on the 2026-10-29 server copy: of the 127 inquiries waiting for
+    # review, the largest single group -- 37 on its own and 55 counting the
+    # combinations -- was held by GPT_REPORTED_UNRESOLVED and
+    # GPT_WITHHELD_AUTO_POST, and neither had a bucket here, so the screen
+    # printed the raw codes. ``STAFF_REASON_LABELS`` is where the staff-facing
+    # wording for a hold reason already lives (``answer.hold_reasons``), and
+    # reading it here means the dashboard and the chat room say the same thing
+    # about the same hold instead of maintaining two vocabularies. It covers
+    # 15 codes this table does not, including the three asked for.
+    #
+    # Display only: the raw code is what is stored, logged and compared, and
+    # nothing about eligibility reads this function.
+    label = STAFF_REASON_LABELS.get(code)
+    if label:
+        return label
     return code or "기타"
 
 

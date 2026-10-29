@@ -107,6 +107,83 @@ class NaverPostService:
             "BLOCKED", inquiry_id, None, None, code, message, 0
         )
 
+    def _notify_post_failure(
+        self,
+        *,
+        inquiry: dict[str, Any],
+        inquiry_id: int,
+        attempt_id: int,
+        target: str,
+        error_code: str,
+        http_status: object,
+        automatic: bool,
+    ) -> None:
+        """Tell the operations room that a registration did not succeed.
+
+        Measured gap, not a redesign: of the 974 notifications the server has
+        sent, none was a registration failure -- the only "등록 실패" title in
+        the tree belongs to ``naver_workflow``, the standalone CLI that stopped
+        running on 2026-09-01. So a POST_FAILED produced an activity log, a
+        dashboard row and silence in the chat room, while a *hold* produced a
+        message. The two outcomes an operator must act on were reported
+        unequally.
+
+        Keyed on the immutable attempt id, like the success notification: a
+        repeated call for the same attempt cannot duplicate the message, and a
+        genuine retry is a new attempt and so is allowed to speak.
+        ``POST_UNKNOWN`` never says 실패 -- whether it arrived is exactly what
+        is unknown.
+        """
+
+        uncertain = target == "POST_UNKNOWN"
+        market = "네이버"
+        if uncertain:
+            title = f"[{market} Q&A 등록 결과 확인 필요]"
+        elif automatic:
+            title = f"[{market} Q&A 자동등록 실패]"
+        else:
+            title = f"[{market} Q&A 답변 등록 실패]"
+        reason = str(error_code or "UNKNOWN")
+        if http_status:
+            reason = f"{reason} (HTTP {http_status})"
+        try:
+            notify_qna_safely(
+                title=title,
+                store_code=str(inquiry.get("store_code") or ""),
+                product=str(
+                    inquiry.get("product_name") or inquiry.get("product") or ""
+                ),
+                option_name=str(inquiry.get("option_name") or ""),
+                question=str(
+                    inquiry.get("content") or inquiry.get("question") or ""
+                ),
+                answer="-",
+                action="post_unknown" if uncertain else "post_failed",
+                inquiry_id=str(inquiry_id),
+                notify_key=(
+                    f"post-{'unknown' if uncertain else 'failed'}"
+                    f":{inquiry_id}:{attempt_id}"
+                ),
+                failure_reason=reason,
+                on_error=lambda error: self.logs.record_inquiry(
+                    inquiry_id,
+                    "KAKAO_FAILED_NOTIFICATION_WARNING",
+                    "등록 실패 알림을 대기열에 추가하지 못했습니다.",
+                    level="WARNING",
+                    details={"error_type": error.__class__.__name__},
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - the failure is recorded
+            # Outbox trouble must not change the post outcome, exactly as on
+            # the success path.
+            self.logs.record_inquiry(
+                inquiry_id,
+                "KAKAO_FAILED_NOTIFICATION_WARNING",
+                "등록 실패 알림을 대기열에 추가하지 못했습니다.",
+                level="WARNING",
+                details={"exception_type": error.__class__.__name__},
+            )
+
     def _complete_workflow(
         self, inquiry_id: int, *, attempt_id: int, actor: str,
         automatic: bool = False,
@@ -447,6 +524,15 @@ class NaverPostService:
                     "network_call_count": 1,
                 },
             )
+            self._notify_post_failure(
+                inquiry=inquiry,
+                inquiry_id=inquiry_id,
+                attempt_id=attempt_id,
+                target=target,
+                error_code=error.code,
+                http_status=error.http_status,
+                automatic=automatic,
+            )
             return NaverPostResult(
                 target,
                 inquiry_id,
@@ -474,6 +560,15 @@ class NaverPostService:
                     "error_type": error.__class__.__name__,
                     "network_call_count": 0,
                 },
+            )
+            self._notify_post_failure(
+                inquiry=inquiry,
+                inquiry_id=inquiry_id,
+                attempt_id=attempt_id,
+                target="POST_FAILED",
+                error_code=error.__class__.__name__.upper(),
+                http_status=None,
+                automatic=automatic,
             )
             return NaverPostResult(
                 "POST_FAILED",

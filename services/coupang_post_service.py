@@ -512,6 +512,58 @@ class CoupangPostService:
                     "network_call_count": 1,
                 },
             )
+            # The same report the Naver service now makes on the same event.
+            # Coupang's ``post`` has no automatic/manual flag -- the success
+            # notification above uses one title for both and this follows it
+            # rather than inventing a distinction the method cannot make.
+            # ``POST_UNKNOWN`` (NETWORK_ERROR) never says 실패: whether Coupang
+            # received the reply is exactly what is not known, and saying
+            # 실패 would invite the duplicate the comment above refuses.
+            uncertain = status == "POST_UNKNOWN"
+            failed_product, failed_option = self._display_names(inquiry)
+            reason = str(error.code or "UNKNOWN")
+            if error.http_status:
+                reason = f"{reason} (HTTP {error.http_status})"
+            try:
+                notify_qna_safely(
+                    title=(
+                        "[쿠팡 Q&A 등록 결과 확인 필요]" if uncertain
+                        else "[쿠팡 Q&A 답변 등록 실패]"
+                    ),
+                    store_code=store_code,
+                    product=failed_product,
+                    option_name=failed_option,
+                    question=str(
+                        inquiry.get("content") or inquiry.get("title") or ""
+                    ),
+                    answer="-",
+                    action="post_unknown" if uncertain else "post_failed",
+                    inquiry_id=str(inquiry_id),
+                    notify_key=(
+                        f"post-{'unknown' if uncertain else 'failed'}"
+                        f":{inquiry_id}:{attempt_id}"
+                    ),
+                    failure_reason=reason,
+                    on_error=lambda notify_error: self.logs.record_inquiry(
+                        inquiry_id,
+                        "KAKAO_FAILED_NOTIFICATION_WARNING",
+                        "쿠팡 등록 실패 알림을 대기열에 추가하지 못했습니다.",
+                        level="WARNING",
+                        details={
+                            "error_type": notify_error.__class__.__name__
+                        },
+                    ),
+                )
+            except Exception as notify_error:  # noqa: BLE001
+                self.logs.record_inquiry(
+                    inquiry_id,
+                    "KAKAO_FAILED_NOTIFICATION_WARNING",
+                    "쿠팡 등록 실패 알림을 대기열에 추가하지 못했습니다.",
+                    level="WARNING",
+                    details={
+                        "exception_type": notify_error.__class__.__name__
+                    },
+                )
             return CoupangPostResult(
                 status, inquiry_id, attempt_id, error.http_status,
                 error.code, error.message or "쿠팡 등록 실패", 1,

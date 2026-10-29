@@ -417,6 +417,10 @@ def format_qna_message(
     hold_reason: str = "",
     hold_codes: tuple = (),
     generation_skipped: bool = False,
+    store_label: str = "",
+    inquiry_id: str = "",
+    draft: str = "",
+    failure_reason: str = "",
 ) -> str:
     """The message an operator reads.
 
@@ -426,9 +430,24 @@ def format_qna_message(
     diagnostic reasons are deliberately independent of this display rule.
     """
 
-    lines = [
-        f"상품명: {product or '-'}",
-    ]
+    held = bool(hold_reason or hold_codes)
+    failed = str(action or "").strip().lower() in {"post_failed", "post_unknown"}
+    uncertain = str(action or "").strip().lower() == "post_unknown"
+
+    # Which shop and which inquiry, on the two messages an operator has to act
+    # on. A hold and a failure both end with "open the marketplace and do this
+    # by hand", and the message did not say which store to open or which
+    # inquiry to find: the id lived only in ``notify_key``, which is not sent,
+    # and the seller account appeared nowhere. Both are omitted from the
+    # success message, which is a receipt rather than a task, so that message
+    # stays byte-for-byte what it has always been.
+    lines: list[str] = []
+    if held or failed:
+        if store_label:
+            lines.append(f"스토어: {store_label}")
+        if inquiry_id:
+            lines.append(f"문의 ID: {inquiry_id}")
+    lines.append(f"상품명: {product or '-'}")
 
     if option_name:
         lines.append(
@@ -441,8 +460,6 @@ def format_qna_message(
             f"질문: {question or '-'}",
         ]
     )
-
-    held = bool(hold_reason or hold_codes)
 
     if held:
         # ``hold_reason`` is the dashboard's sentence for this same hold, and it
@@ -468,12 +485,54 @@ def format_qna_message(
             [
                 "",
                 "답변: -",
+            ]
+        )
+        # The text waiting in the dashboard, labelled as the draft it is.
+        #
+        # ``답변`` above stays "-" because only a registered answer may appear
+        # under that name -- that is the rule this function is built on and it
+        # is unchanged. What an operator needs in the chat room is different:
+        # whether there is anything to approve at all, and whether it is close
+        # enough to send. So the draft is shown under its own name, where it
+        # cannot be read as proof that anything was published.
+        if draft:
+            lines.extend(["", f"답변 초안(미등록): {draft}"])
+        lines.extend(
+            [
                 "",
                 f"답변 생성: {'생략됨' if generation_skipped else '완료'}",
                 # Which marketplace the answer was not posted to.  A staff
                 # member reading this on their phone needs to know which shop
                 # to open; "등록: 안 됨" on its own does not say.
                 f"{_market_display_name(market)} 등록: 안 됨",
+                "처리: 답변 초안을 확인한 뒤 직접 등록해 주세요.",
+            ]
+        )
+    elif failed:
+        # A registration that was attempted and did not succeed. This is not
+        # the hold above and must not read like it: the hold means the pipeline
+        # decided not to send, while this means it sent and the marketplace
+        # did not accept -- or, for ``post_unknown``, that whether it arrived
+        # is not knowable here, which is why that case never says 실패.
+        lines.extend(
+            [
+                "",
+                f"등록 실패 사유: {failure_reason or '-'}"
+                if not uncertain
+                else f"확인 필요 사유: {failure_reason or '-'}",
+                "",
+                "답변: -",
+                "",
+                (
+                    f"{_market_display_name(market)} 등록 결과: 확인 필요"
+                    if uncertain
+                    else f"{_market_display_name(market)} 등록: 실패"
+                ),
+                (
+                    "처리: 등록 여부를 마켓에서 직접 확인한 뒤 조치해 주세요."
+                    if uncertain
+                    else "처리: 운영자 확인 후 재시도가 필요합니다."
+                ),
             ]
         )
     else:
@@ -513,6 +572,9 @@ def notify_qna_safely(
     hold_reason: str = "",
     hold_codes: tuple = (),
     generation_skipped: bool = False,
+    draft: str = "",
+    failure_reason: str = "",
+    on_error: Any = None,
 ) -> bool:
     """
     동일한 문의는 카카오톡으로 한 번만 알린다.
@@ -581,6 +643,15 @@ def notify_qna_safely(
             )
             return False
 
+        # The seller account this inquiry belongs to, resolved here rather
+        # than at each call site: every caller already passes ``store_code``
+        # for the room routing above, and one resolution means the dashboard
+        # and the chat room name the same store the same way.
+        store_label = ""
+        if store_code:
+            from services.market_policy import store_label as _store_label
+
+            store_label = _store_label(store_code)
         message = format_qna_message(
             market=market,
             product=product,
@@ -592,6 +663,10 @@ def notify_qna_safely(
             hold_reason=hold_reason,
             hold_codes=tuple(hold_codes or ()),
             generation_skipped=generation_skipped,
+            store_label=store_label,
+            inquiry_id=str(inquiry_id or ""),
+            draft=draft,
+            failure_reason=failure_reason,
         )
 
         outbox = enqueue_kakao_message(
@@ -632,4 +707,19 @@ def notify_qna_safely(
         print(
             f"[WARN] 카카오 알림 등록 실패: {exc}"
         )
+        # The console line above is the only record this module can keep: it
+        # has no database and deliberately no logger. A send that failed was
+        # therefore invisible the moment the server restarted, while a *held*
+        # inquiry it failed to announce stayed held with nothing saying the
+        # operator had never been told. Callers that do have a log pass
+        # ``on_error`` and record it; the return value stays a bool, so no
+        # existing caller changes.
+        if callable(on_error):
+            try:
+                on_error(exc)
+            except Exception as hook_error:  # noqa: BLE001
+                print(
+                    "[WARN] 카카오 알림 실패 기록 실패: "
+                    f"{hook_error}"
+                )
         return False

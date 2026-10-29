@@ -1513,6 +1513,10 @@ class AnswerService:
                 hold_reason=hold_reason,
                 hold_codes=hold_codes,
                 generation_skipped=generation_skipped,
+                # Same draft the message already carries as ``answer``, passed
+                # under its own name: the held branch renders ``답변: -`` on
+                # purpose, so without this the operator saw no text at all.
+                draft=str(draft.get("original_answer") or result.answer or ""),
             )
             if notification_enqueued:
                 self.logs.record_inquiry(

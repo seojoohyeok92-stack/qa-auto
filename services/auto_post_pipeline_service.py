@@ -194,6 +194,20 @@ class AutoPostPipelineService:
                 generation_skipped=not bool(
                     str(draft.get("original_answer") or "").strip()
                 ),
+                # The text an operator would be approving. Shown under its own
+                # name in the message, never as ``답변``.
+                draft=str(draft.get("original_answer") or ""),
+                # A failed enqueue used to leave no trace here: the notifier
+                # swallows its own exception and returns False, so the
+                # ``except`` below never ran and the missing announcement was
+                # invisible.
+                on_error=lambda error: self.logs.record_inquiry(
+                    inquiry_id,
+                    "KAKAO_NOTIFICATION_ENQUEUE_FAILED",
+                    "Final review lifecycle notification could not be queued.",
+                    level="WARNING",
+                    details={"error_type": error.__class__.__name__},
+                ),
             )
             if sent:
                 self.logs.record_inquiry(
