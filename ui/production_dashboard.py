@@ -351,6 +351,31 @@ def render_realtime_operations(
         for column, (label, value) in zip(columns, details):
             column.metric(label, value)
 
+        # 운영자가 요청할 때만 읽는다.
+        #
+        # 이 블록은 접힌 expander 안에 있는데 Streamlit 은 접혀 있어도 본문을
+        # 실행한다. 그래서 ``queue_diagnostics()`` 가 열지도 않은 패널을 위해
+        # 매 rerun 마다 돌았고, 이 함수는 ``@st.fragment(run_every="30s")`` 이라
+        # 아무 조작이 없어도 30 초마다 한 번씩 더 돌았다. 운영 DB 사본에서
+        # 7.2 초(콜드 17.9 초)였으므로, 클릭과 겹칠 때마다 그만큼 밀렸다.
+        #
+        # 숨기는 것이 아니다: KPI, 검토 대기 수, 자동등록 실패 현황, 운영 경고는
+        # 모두 ``snapshot()`` 에서 오고 이 체크박스 밖에서 그대로 표시된다.
+        # 여기 있는 것은 Queue 진단 상세뿐이다.
+        show_diagnostics = st.checkbox(
+            "Queue 진단 상세 불러오기",
+            key="production_queue_diagnostics_on",
+            help=(
+                "자동등록 큐의 상세 집계와 최근 처리 이벤트를 조회합니다. "
+                "문의가 많을 때 몇 초 걸릴 수 있어 요청할 때만 읽습니다."
+            ),
+        )
+        if not show_diagnostics:
+            st.caption(
+                "Queue 진단 상세는 위 체크박스를 선택하면 조회합니다. "
+                "KPI·검토 대기·실패 현황은 선택과 무관하게 항상 표시됩니다."
+            )
+            return data
         diagnostics = DashboardOperationsService(database).queue_diagnostics()
         queue = diagnostics["queue"]
         st.markdown("**Queue 진단** (claim 가능 여부 기준, Pending/직원 검토 필요 KPI와는 다른 모집단)")

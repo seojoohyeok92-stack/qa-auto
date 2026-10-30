@@ -8,6 +8,12 @@ until somebody noticed and pressed 초기화.
 Following the calendar is only half of it. A range the operator picked is an
 instruction, and a date change is not a reason to discard it -- so these pin
 both directions, plus the reset that has to keep working either way.
+
+기대하는 **시작일**은 한 번 바뀌었다. 기본 기간이 "항목이 없으면 30 일 전" 에서
+``default_dashboard_range`` (달력 3개월 전) 로 바뀌었기 때문이다. 이 파일이
+검증하는 것은 그 길이가 아니라 자정을 넘을 때의 동작이고, 그 부분(종료일이
+새 오늘로 따라오는 것, 운영자가 고른 범위는 따라오지 않는 것, 초기화가 오늘
+기준으로 되돌리는 것)은 그대로다.
 """
 from __future__ import annotations
 
@@ -55,7 +61,7 @@ def test_a_same_kst_day_keeps_the_existing_range() -> None:
 
     app = _run()
     first = _range(app)
-    assert first == (date(2026, 8, 3), date(2026, 9, 2))
+    assert first == (date(2026, 6, 2), date(2026, 9, 2))
 
     app = app.run(timeout=30)
 
@@ -71,7 +77,7 @@ def test_b_kst_midnight_moves_the_automatic_range_to_the_new_today() -> None:
     app.session_state["fake_kst_day"] = 3
     app = app.run(timeout=30)
 
-    assert _range(app) == (date(2026, 8, 4), date(2026, 9, 3))
+    assert _range(app) == (date(2026, 6, 3), date(2026, 9, 3))
 
 
 def test_c_a_manually_chosen_range_survives_midnight() -> None:
@@ -116,7 +122,7 @@ def test_d_reset_restores_the_default_range_for_the_current_kst_day() -> None:
     app.session_state["simulate_reset"] = True
     app = app.run(timeout=30)
 
-    assert _range(app) == (date(2026, 8, 6), date(2026, 9, 5))
+    assert _range(app) == (date(2026, 6, 5), date(2026, 9, 5))
 
 
 def test_the_automatic_range_is_tracked_with_the_day_it_was_derived_for() -> None:
@@ -127,4 +133,4 @@ def test_the_automatic_range_is_tracked_with_the_day_it_was_derived_for() -> Non
 
     applied = app.session_state[AUTO_RANGE_STATE_KEY]
 
-    assert applied == (date(2026, 9, 2), (date(2026, 8, 3), date(2026, 9, 2)))
+    assert applied == (date(2026, 9, 2), (date(2026, 6, 2), date(2026, 9, 2)))

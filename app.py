@@ -39,6 +39,7 @@ from services.work_queue_service import (
 from ui.dashboard import (
     UNCLASSIFIED_FILTER_VALUE,
     apply_kpi_filter,
+    current_dashboard_range,
     load_dashboard_css,
     metadata_filter_matches,
     render_filter_bar,
@@ -251,13 +252,31 @@ def _load_work_items() -> tuple[
         return [], [], False
 
 
+#: 이 프로세스에서 이미 마이그레이션을 끝낸 DB 경로.
+#
+# ``Database.initialize()`` 는 마이그레이션마다 쓰기 트랜잭션을 하나씩 열고,
+# 38 개가 넘는 지금은 그것이 rerun 당 173ms 다 -- 문의를 고르거나 페이지를
+# 넘길 때마다 2.2GB WAL DB 에 쓰기 잠금을 38 번 잡았다는 뜻이다. 스키마는
+# 프로세스가 시작할 때 한 번 맞추면 되고, 배포하면 Streamlit 이 재시작한다.
+#
+# 가드를 ``Database`` 안이 아니라 이 호출부에 둔 이유: ``initialize()`` 자체의
+# 동작은 테스트와 서비스가 그대로 쓰고 있어서 건드리지 않는다. 바뀌는 것은
+# 대시보드 rerun 경로뿐이다. 같은 경로에 대한 두 번째 호출은 원래도 빈
+# 목록을 돌려주므로 반환값은 달라지지 않는다.
+_MIGRATED_DB_PATHS: set[str] = set()
+
+
 def _initialize_database() -> tuple[
     Database | None,
     dict[str, Any],
 ]:
     database = Database()
     try:
-        database.initialize()
+        resolved = str(database.path.resolve())
+        if resolved not in _MIGRATED_DB_PATHS:
+            database.initialize()
+            _MIGRATED_DB_PATHS.add(resolved)
+        # health() 는 매번 읽는다. 5ms 이고, 연결이 끊긴 것을 화면이 알아야 한다.
         return database, database.health()
     except Exception as error:
         LOGGER.exception("Q&A auto DB 초기화 실패")
@@ -429,16 +448,42 @@ def _attach_dashboard_learning(
 
 
 def dashboard_work_items_from_database(
-    database: Database, *, limit: int | None = None
+    database: Database,
+    *,
+    limit: int | None = None,
+    registered_from: str | None = None,
+    registered_to: str | None = None,
 ) -> list[WorkItem]:
-    """외부 API 호출 없이 현재 DB 상태를 Dashboard 작업 항목으로 변환합니다."""
+    """외부 API 호출 없이 현재 DB 상태를 Dashboard 작업 항목으로 변환합니다.
+
+    ``registered_from``/``registered_to`` 는 화면이 조회하는 기간이다. 전에는
+    이 함수가 언제나 테이블 전체를 읽었고(측정: 11,395 행, 1.05 초), 그 결과를
+    ``filter_work_items`` 가 파이썬에서 같은 기간으로 다시 걸렀다. 즉 범위 밖
+    행을 읽어 놓고 버렸다. 기간을 SQL 로 내리면 그 뒤의 필터 결과는 그대로이고
+    (같은 조건을 한 단계 먼저 적용하는 것이므로) 읽는 양만 줄어든다.
+
+    KPI 숫자는 ``dashboard_operational_card_counts`` 가 같은 기간으로 따로
+    집계하고, Learning 성과와 운영 진단은 각자의 기준을 쓴다 -- 이 인자는 그
+    어느 것도 바꾸지 않는다.
+    """
 
     repository = InquiryRepository(database)
-    resolved_limit = repository.count() if limit is None else int(limit)
+    scoped = bool(registered_from and registered_to)
+    resolved_limit = (
+        int(limit) if limit is not None
+        else repository.count(
+            registered_from=registered_from if scoped else None,
+            registered_to=registered_to if scoped else None,
+        )
+    )
     return _attach_dashboard_routes(
         database,
         _dashboard_work_items_from_rows(
-            repository.list(limit=max(1, resolved_limit))
+            repository.list(
+                limit=max(1, resolved_limit),
+                registered_from=registered_from if scoped else None,
+                registered_to=registered_to if scoped else None,
+            )
         ),
     )
 
@@ -1001,6 +1046,11 @@ def render_dashboard_page(
         # Only the Learning filter needs every candidate row's state; when it
         # is off, the badges are read solely by the rows that get rendered, so
         # they are decorated further down once the page is known.
+        #
+        # 이 호출이 115.7 초였던 것은 행 수가 아니라 상태를 내는 식 때문이었다.
+        # ``_effective_learning_status_sql`` 이 문의 한 행마다 다시 평가되는
+        # 상관 서브쿼리였고, 그것을 비상관으로 바꾼 뒤 같은 11,395 행이
+        # 35ms 다. 그래서 구조는 그대로 둔다.
         if database is not None and learning_filter != "ALL":
             work_items = _attach_dashboard_learning(database, work_items)
     # Streamlit can keep an already-imported ui.dashboard module alive while
@@ -1187,8 +1237,17 @@ def main() -> None:
 
     if current_page in {"dashboard", "inquiries"}:
         if database is not None:
+            # 이번 실행이 보여 줄 기간. 운영자가 고른 범위가 세션에 있으면
+            # 그것이고, 최초 진입이면 기본값(달력 3개월)이다. 날짜 위젯은
+            # 아래 ``render_filter_bar`` 에서 그려지지만 값은 세션에 있으므로,
+            # 위젯이 바뀐 다음 rerun 에서는 이 조회가 이미 새 범위를 쓴다.
+            range_start, range_end = current_dashboard_range()
             with profile_stage("work_queue_load"):
-                work_items = dashboard_work_items_from_database(database)
+                work_items = dashboard_work_items_from_database(
+                    database,
+                    registered_from=range_start.isoformat(),
+                    registered_to=range_end.isoformat(),
+                )
             load_errors, load_succeeded = [], True
         else:
             work_items, load_errors, load_succeeded = [], [], False

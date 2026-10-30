@@ -207,6 +207,57 @@ def _correction_summary(
     return f"현재 {current:.1f}% · 이전 기간 {previous:.1f}% · {comparison}"
 
 
+def learning_performance_revision(database: Database) -> tuple[int, str, int, int]:
+    """승인·Learning 수정이 일어났는지 알려 주는 값싼 키.
+
+    승인은 ``approval_history`` 에 행을 하나 넣고 ``learning_examples`` 를
+    쓴다. Learning 편집은 ``learning_examples.updated_at`` 을 올린다. 둘 중
+    무엇이 일어나도 이 값이 바뀌므로 캐시가 즉시 비워진다. 모두 작은 테이블이고
+    집계 하나뿐이라 운영 DB 사본에서 6.5ms 였다 -- 캐시하려는 대상이 445ms 다.
+
+    ``inquiries`` 의 ``MAX(updated_at)`` 은 쓰지 않는다. 같은 신호를 주지만
+    인덱스가 없어 전체 스캔이고 혼자서 32.8ms 다.
+    """
+
+    with database.connection() as connection:
+        row = connection.execute(
+            """
+            SELECT (SELECT COUNT(*) FROM learning_examples) AS learning_count,
+                   (SELECT COALESCE(MAX(updated_at), '')
+                      FROM learning_examples) AS learning_updated_at,
+                   (SELECT COALESCE(MAX(id), 0) FROM answer_drafts) AS draft_id,
+                   (SELECT COALESCE(MAX(id), 0)
+                      FROM approval_history) AS approval_id
+            """
+        ).fetchone()
+    return (
+        int(row["learning_count"] or 0),
+        str(row["learning_updated_at"] or ""),
+        int(row["draft_id"] or 0),
+        int(row["approval_id"] or 0),
+    )
+
+
+# 같은 rerun 안에서도, 그리고 연속된 클릭 사이에서도 다시 계산하지 않는다.
+#
+# 이 패널은 11 개 집계를 7/30/60/90 일 구간으로 돌려서 운영 DB 사본에서
+# 445ms 가 걸리고, 그것을 **모든** rerun 이 지불했다 -- 문의를 고르거나 페이지를
+# 넘길 때마다. 내용은 승인이나 Learning 수정이 있을 때만 달라지므로 그 신호를
+# 키로 받는다. TTL 은 키가 잡지 못하는 변화(예: 시간이 흘러 7 일 구간의 경계가
+# 움직이는 것)를 위한 상한이다.
+#
+# ``database`` 가 인자가 아닌 이유: ``Database`` 는 해시할 수 없고, 같은
+# 프로세스에서 경로가 다른 DB 를 섞어 쓰지 않도록 경로를 키에 넣는다.
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_performance_snapshot(
+    _database: Database, database_path: str, period_days: int,
+    revision: tuple[int, str, int, int],
+) -> dict[str, Any]:
+    return LearningPerformanceService(_database).snapshot(
+        period_days=period_days
+    )
+
+
 def render_learning_performance(database: Database) -> None:
     period = st.session_state.setdefault("learning_performance_period", "최근 30일")
     st.markdown('<div class="learning-performance-anchor"></div>', unsafe_allow_html=True)
@@ -217,8 +268,11 @@ def render_learning_performance(database: Database) -> None:
         key="learning_performance_period", label_visibility="collapsed",
     )
     period_days = {"최근 7일": 7, "최근 30일": 30, "최근 90일": 90}[period]
-    data = LearningPerformanceService(database).snapshot(
-        period_days=period_days
+    data = _cached_performance_snapshot(
+        database,
+        str(database.path.resolve()),
+        period_days,
+        learning_performance_revision(database),
     )
     current = data["quality"]["current"]
     # Three numbers, one line, no comparison.

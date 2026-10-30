@@ -59,6 +59,63 @@ def _as_range(value: Any) -> tuple[date, date] | None:
     return None
 
 
+#: Learning 상태 필터의 화면 라벨과 판정 코드.
+#
+# 위젯의 선택지와, 목록을 읽을 때 쓰는 코드가 같은 표에서 나와야 한다. 둘이
+# 갈라지면 화면에 고른 것과 조회한 것이 달라진다.
+LEARNING_FILTER_CODES = {
+    "전체": "ALL", "승인": "APPROVED", "자동": "AUTO",
+    "제외": "EXCLUDED", "교정": "CORRECTED", "없음": "NONE",
+}
+
+#: 기본 조회 기간의 길이. 달(month) 단위로 세며 90일 고정이 아니다.
+DEFAULT_RANGE_MONTHS = 3
+
+
+def months_before(day: date, months: int) -> date:
+    """``months`` 달 전의 같은 날짜. 그 날이 없는 달이면 그 달의 마지막 날.
+
+    달력으로 센다. 10월 29일의 3개월 전은 7월 29일이고, 5월 31일은 2월에 31일이
+    없으므로 2월 말일이 된다. 90 일을 빼면 각각 7월 말과 3월 초가 되어 "3개월
+    전" 과 어긋난다 -- 정확한 값은 ``test_three_months_before_follows_the_calendar``
+    가 고정한다.
+    """
+
+    import calendar
+
+    total = (day.year * 12 + (day.month - 1)) - int(months)
+    year, month = divmod(total, 12)
+    month += 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def default_dashboard_range(today: date | None = None) -> tuple[date, date]:
+    """최초 진입 시의 조회 기간: 달력 기준 3개월 전부터 오늘(KST)까지.
+
+    전에는 가장 오래된 문의의 날짜부터 열었다. 운영 DB 에서 그 값은
+    2024-09-01 이고, 그래서 기본 화면이 11,395 건 전체를 대상으로 열렸다.
+    목록·건수·페이지네이션은 이 범위를 SQL 에 그대로 넘기므로, 범위를 좁히는
+    것은 화면 표시가 아니라 실제 조회 대상을 좁히는 일이다 (측정: 같은 DB 에서
+    11,395 → 2,961 행).
+    """
+
+    day = today or today_kst()
+    return months_before(day, DEFAULT_RANGE_MONTHS), day
+
+
+def current_dashboard_range(today: date | None = None) -> tuple[date, date]:
+    """이번 실행이 조회해야 할 기간.
+
+    운영자가 고른 범위가 세션에 있으면 그것이고, 없으면 기본값이다. 목록을
+    읽는 쪽(``app.main``)과 날짜 위젯을 그리는 쪽이 같은 답을 봐야 하므로 한
+    군데서만 계산한다. 위젯이 시작일만 고른 중간 상태에서는 범위로 쓸 수 없어
+    기본값으로 떨어진다.
+    """
+
+    stored = _as_range(st.session_state.get("dashboard_date_range"))
+    return stored or default_dashboard_range(today)
+
+
 def metadata_filter_matches(value: Any, selected: list[str]) -> bool:
     if not selected:
         return True
@@ -94,15 +151,11 @@ def render_header(
     environment = configured_environment or (
         "테스트" if mode in {"FAKE", "SHADOW"} else "운영"
     )
-    item_dates = [
-        parsed.date()
-        for item in (items or [])
-        if (parsed := parse_registered_at(item.get("registered_at")))
-        != datetime.min
-    ]
     today = today_kst()
-    default_start = min(item_dates) if item_dates else today - timedelta(days=30)
-    default_end = max([today, *item_dates]) if item_dates else today
+    # 기본 기간은 화면에 올라온 행이 아니라 달력으로 정한다. 전에는 가장
+    # 오래된 문의 날짜(min)에서 시작했는데, 그것이 기본 조회를 전체 기간으로
+    # 벌려 놓는 원인이었다. 운영자가 고른 범위는 아래에서 그대로 보존된다.
+    default_start, default_end = default_dashboard_range(today)
     default_range = (default_start, default_end)
     if not st.session_state.get("dashboard_full_range_v1"):
         st.session_state["dashboard_date_range"] = default_range
@@ -552,7 +605,7 @@ def render_filter_bar(
         with learning_col:
             learning_label = st.selectbox(
                 "Learning 상태",
-                ["전체", "승인", "자동", "제외", "교정", "없음"],
+                list(LEARNING_FILTER_CODES),
                 key=keys["learning"],
             )
         with option_col:
@@ -597,10 +650,7 @@ def render_filter_bar(
         "delivery_only": delivery_only,
         "display_limit": display_limit,
         "route": selected_route,
-        "learning_status": {
-            "전체": "ALL", "승인": "APPROVED", "자동": "AUTO",
-            "제외": "EXCLUDED", "교정": "CORRECTED", "없음": "NONE",
-        }[learning_label],
+        "learning_status": LEARNING_FILTER_CODES[learning_label],
     }
 
 

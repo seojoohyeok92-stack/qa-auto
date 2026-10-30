@@ -455,23 +455,38 @@ class DashboardOperationsService:
 
         event_summary = AutoPostEventRepository(self.database).summary()
         with self.database.connection() as connection:
+            # 같은 결과, 다른 출발점.
+            #
+            # 전에는 ``activity_logs`` 에서 출발해 ``a.id = MAX(...)`` 로 각
+            # 문의의 마지막 검토 이벤트를 골랐다. 그 상관 서브쿼리가 214 만
+            # 행 테이블에서 후보 행마다 한 번씩 돌아 2,107ms 가 걸렸다.
+            # ``inquiries`` 에서 출발하면 ``workflow_status`` 인덱스가 먼저
+            # 모집단을 좁히고, 좁혀진 문의마다 ``idx_activity_logs_inquiry_created``
+            # 로 마지막 한 건만 읽는다 -- 18ms.
+            #
+            # ``ORDER BY a.id DESC LIMIT 1`` 은 ``a.id = MAX(a.id)`` 와 같은
+            # 행을 고른다. 검토 이벤트가 아예 없는 문의는 그 값이 NULL 이고,
+            # 기존 쿼리는 JOIN 으로 그런 문의를 떨어뜨렸으므로 바깥에서 NULL 을
+            # 제외한다. 같은 운영 DB 사본에서 127 행, 값까지 동일함을 확인했다.
             review_rows = connection.execute(
                 """
-                SELECT a.details_json
-                FROM activity_logs a
-                JOIN inquiries i ON i.id = a.inquiry_id
-                WHERE a.event_code IN ({codes})
-                  AND a.id = (
-                      SELECT MAX(a2.id) FROM activity_logs a2
-                      WHERE a2.inquiry_id = a.inquiry_id
-                        AND a2.event_code IN ({codes})
-                  )
-                  AND i.workflow_status IN ('REVIEW_PENDING', 'NEEDS_ATTENTION')
-                  AND COALESCE(i.source_answered, 0) = 0
+                SELECT details_json FROM (
+                    SELECT (
+                        SELECT a.details_json FROM activity_logs a
+                        WHERE a.inquiry_id = i.id
+                          AND a.event_code IN ({codes})
+                        ORDER BY a.id DESC LIMIT 1
+                    ) AS details_json
+                    FROM inquiries i
+                    WHERE i.workflow_status IN (
+                        'REVIEW_PENDING', 'NEEDS_ATTENTION'
+                    )
+                      AND COALESCE(i.source_answered, 0) = 0
+                ) WHERE details_json IS NOT NULL
                 """.format(
                     codes=",".join("?" for _ in REVIEW_EVENT_CODES)
                 ),
-                REVIEW_EVENT_CODES * 2,
+                REVIEW_EVENT_CODES,
             ).fetchall()
             dps_required = connection.execute(
                 """
@@ -485,30 +500,49 @@ class DashboardOperationsService:
                   )
                 """
             ).fetchone()[0]
+            # 20 행을 먼저 고르고 나서 상세를 붙인다.
+            #
+            # 세 개의 상관 서브쿼리가 ``LIMIT`` 앞에 있었고, ``ORDER BY`` 가
+            # 조기 종료를 막아서 1,978 개 이벤트 **전부**에 대해 세 번씩 돌았다
+            # -- 20 행을 돌려주는 데 5,041ms. 정렬·개수는 이벤트 테이블만으로
+            # 정해지므로 그 20 행을 CTE 로 먼저 확정한 뒤 상세를 붙이면 같은
+            # 20 행이 1ms 에 나온다.
+            #
+            # ``auto_sync_events.inquiry_id`` 는 NOT NULL 이고 ``inquiries`` 를
+            # 참조하므로(실측: 짝 없는 이벤트 0 건) JOIN 을 LIMIT 뒤로 옮겨도
+            # 걸러지는 행이 없다. 같은 운영 DB 사본에서 20 행의 모든 컬럼과
+            # 순서가 동일함을 확인했다.
             recent_rows = connection.execute(
                 """
-                SELECT e.id, e.inquiry_id, e.external_id, e.status AS queue_status,
-                       e.updated_at, e.attempt_count, e.last_error_code,
+                WITH recent AS (
+                    SELECT e.id, e.inquiry_id, e.external_id,
+                           e.status AS queue_status, e.updated_at,
+                           e.attempt_count, e.last_error_code
+                    FROM auto_sync_events e
+                    ORDER BY e.updated_at DESC, e.id DESC
+                    LIMIT ?
+                )
+                SELECT r.id, r.inquiry_id, r.external_id, r.queue_status,
+                       r.updated_at, r.attempt_count, r.last_error_code,
                        i.workflow_status, i.post_status,
                        (SELECT p.status FROM naver_post_attempts p
-                         WHERE p.inquiry_id = e.inquiry_id
+                         WHERE p.inquiry_id = r.inquiry_id
                          ORDER BY p.id DESC LIMIT 1) AS last_post_status,
                        (SELECT a.details_json FROM activity_logs a
-                         WHERE a.inquiry_id = e.inquiry_id
+                         WHERE a.inquiry_id = r.inquiry_id
                            AND a.event_code IN ({codes})
                          ORDER BY a.id DESC LIMIT 1) AS review_details_json,
                        (SELECT a.details_json FROM activity_logs a
-                         WHERE a.inquiry_id = e.inquiry_id
+                         WHERE a.inquiry_id = r.inquiry_id
                            AND a.event_code = ?
                          ORDER BY a.id DESC LIMIT 1) AS soft_details_json
-                FROM auto_sync_events e
-                JOIN inquiries i ON i.id = e.inquiry_id
-                ORDER BY e.updated_at DESC, e.id DESC
-                LIMIT ?
+                FROM recent r
+                JOIN inquiries i ON i.id = r.inquiry_id
+                ORDER BY r.updated_at DESC, r.id DESC
                 """.format(codes=",".join("?" for _ in REVIEW_EVENT_CODES)),
                 (
-                    *REVIEW_EVENT_CODES, SOFT_WARNING_EVENT_CODE,
-                    int(recent_limit),
+                    int(recent_limit), *REVIEW_EVENT_CODES,
+                    SOFT_WARNING_EVENT_CODE,
                 ),
             ).fetchall()
 

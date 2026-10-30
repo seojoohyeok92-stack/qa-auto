@@ -481,24 +481,20 @@ def format_qna_message(
         detail = staff_reason_summary(hold_codes)
         if detail:
             lines.append(f"세부 사유: {detail}")
+        # 미등록 문의는 본문을 보내지 않는다. 운영 결정이다.
+        #
+        # 한동안 ``답변 초안(미등록):`` 으로 초안을 함께 보냈는데, 운영자가
+        # 개발·운영 양쪽에서 그 두 줄을 직접 지웠다. 채팅방에는 "확인이
+        # 필요하다" 는 사실과 그 사유만 가고, 보낼 문장은 대시보드에서 본다.
+        # ``답변`` 은 등록된 답변에만 쓰는 이름이므로 여기서는 "-" 그대로다.
+        # 초안 자체는 DB 와 화면에 그대로 있고 아무것도 지워지지 않는다.
+        #
+        # ``draft`` 인자는 호출부가 계속 넘기지만 이 분기에서는 쓰지 않는다 --
+        # 정책을 되돌릴 때 호출부를 다시 고치지 않아도 되도록 남겨 둔다.
         lines.extend(
             [
                 "",
                 "답변: -",
-            ]
-        )
-        # The text waiting in the dashboard, labelled as the draft it is.
-        #
-        # ``답변`` above stays "-" because only a registered answer may appear
-        # under that name -- that is the rule this function is built on and it
-        # is unchanged. What an operator needs in the chat room is different:
-        # whether there is anything to approve at all, and whether it is close
-        # enough to send. So the draft is shown under its own name, where it
-        # cannot be read as proof that anything was published.
-        if draft:
-            lines.extend(["", f"답변 초안(미등록): {draft}"])
-        lines.extend(
-            [
                 "",
                 f"답변 생성: {'생략됨' if generation_skipped else '완료'}",
                 # Which marketplace the answer was not posted to.  A staff

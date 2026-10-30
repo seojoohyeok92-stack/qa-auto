@@ -640,6 +640,13 @@ class InquiryRepository:
             )
         return restored
 
+    #: 대시보드가 쓰는 등록일 범위 조건.
+    #
+    # ``dashboard_page`` 의 ``_dashboard_where`` 와 **같은 식**을 쓴다. 두
+    # 경로가 같은 기간을 다르게 해석하면 목록과 건수가 어긋나기 때문이다.
+    # 저장 형식은 ISO 문자열이므로 앞 10 자가 날짜다.
+    REGISTERED_RANGE_SQL = "substr(registered_at, 1, 10) BETWEEN ? AND ?"
+
     def list(
         self,
         *,
@@ -647,9 +654,14 @@ class InquiryRepository:
         search: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        registered_from: str | None = None,
+        registered_to: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         parameters: list[Any] = []
+        if registered_from and registered_to:
+            clauses.append(self.REGISTERED_RANGE_SQL)
+            parameters.extend([str(registered_from), str(registered_to)])
         if workflow_status is not None:
             clauses.append("workflow_status = ?")
             parameters.append(validate_inquiry_status(workflow_status).value)
@@ -678,105 +690,127 @@ class InquiryRepository:
     def count(
         self,
         workflow_status: str | InquiryStatus | None = None,
+        *,
+        registered_from: str | None = None,
+        registered_to: str | None = None,
     ) -> int:
-        if workflow_status is None:
-            sql = "SELECT COUNT(*) FROM inquiries"
-            parameters: tuple[Any, ...] = ()
+        clauses: list[str] = []
+        parameters_list: list[Any] = []
+        if workflow_status is not None:
+            clauses.append("workflow_status = ?")
+            parameters_list.append(
+                validate_inquiry_status(workflow_status).value
+            )
+        if registered_from and registered_to:
+            clauses.append(self.REGISTERED_RANGE_SQL)
+            parameters_list.extend([str(registered_from), str(registered_to)])
+        if clauses:
+            sql = "SELECT COUNT(*) FROM inquiries WHERE " + " AND ".join(clauses)
+            parameters: tuple[Any, ...] = tuple(parameters_list)
         else:
-            sql = "SELECT COUNT(*) FROM inquiries WHERE workflow_status = ?"
-            parameters = (validate_inquiry_status(workflow_status).value,)
+            sql = "SELECT COUNT(*) FROM inquiries"
+            parameters = ()
         with self.database.connection() as connection:
             return int(connection.execute(sql, parameters).fetchone()[0])
 
     @staticmethod
     def _effective_learning_status_sql(inquiry_alias: str) -> str:
-        """One SQL definition shared by dashboard badges and filters."""
+        """One SQL definition shared by dashboard badges and filters.
 
+        각 분기는 바깥 행을 참조하지 않는 ``IN (SELECT ...)`` 이다. 전에는
+        ``EXISTS (... WHERE x.inquiry_id = <문의>.id ...)`` 즉 **상관**
+        서브쿼리였고, 그래서 문의 한 행마다 네 번씩 다시 평가됐다. 운영 DB
+        에서 11,395 행의 상태를 내는 데 108 초가 걸렸고, 그 식을 쓰는 Learning
+        상태 필터가 115.7 초였던 이유가 이것이다.
+
+        비상관으로 바꾸면 SQLite 가 각 집합을 **한 번** 계산해 재사용한다.
+        읽는 쪽 테이블이 작아서(``learning_examples`` 2,166 행,
+        ``learning_feedback`` 245 행) 그 한 번이 싸다 -- 같은 11,395 행이
+        40ms 다. 판정 조건은 한 글자도 바뀌지 않았고, 같은 운영 DB 사본에서
+        11,395 행 **전부**의 상태가 기존 식과 같음을 확인했다.
+        """
+
+        superseded_by_approved = """
+            (SELECT sup.id FROM learning_examples sup
+             WHERE sup.active=1
+               AND COALESCE(json_extract(sup.metadata_json,
+                   '$.human_verified'),0)=1)
+        """
         approved = f"""
-            EXISTS (SELECT 1 FROM learning_examples ap
-                    WHERE ap.inquiry_id={inquiry_alias}.id
-                      AND ap.active=1 AND ap.validity_active=1
-                      AND COALESCE(json_extract(ap.metadata_json,
-                          '$.learning_signal_type'),'POSITIVE')='POSITIVE'
-                      AND (COALESCE(json_extract(ap.metadata_json,
-                              '$.human_verified'),0)=1
-                        OR ap.approval_history_id IS NOT NULL
-                        OR upper(COALESCE(ap.validator_result,'')) IN (
-                          'HUMAN_VERIFIED_NAVER_POSTED',
-                          'HISTORICAL_ADMIN_APPROVED'
-                        )
-                        OR (upper(COALESCE(json_extract(ap.metadata_json,
-                              '$.source_origin'),''))='HISTORICAL_PROMOTED'
-                          AND trim(COALESCE(json_extract(ap.metadata_json,
-                              '$.promoted_by'),''))<>'')))
+            {inquiry_alias}.id IN (
+                SELECT ap.inquiry_id FROM learning_examples ap
+                WHERE ap.inquiry_id IS NOT NULL
+                  AND ap.active=1 AND ap.validity_active=1
+                  AND COALESCE(json_extract(ap.metadata_json,
+                      '$.learning_signal_type'),'POSITIVE')='POSITIVE'
+                  AND (COALESCE(json_extract(ap.metadata_json,
+                          '$.human_verified'),0)=1
+                    OR ap.approval_history_id IS NOT NULL
+                    OR upper(COALESCE(ap.validator_result,'')) IN (
+                      'HUMAN_VERIFIED_NAVER_POSTED',
+                      'HISTORICAL_ADMIN_APPROVED'
+                    )
+                    OR (upper(COALESCE(json_extract(ap.metadata_json,
+                          '$.source_origin'),''))='HISTORICAL_PROMOTED'
+                      AND trim(COALESCE(json_extract(ap.metadata_json,
+                          '$.promoted_by'),''))<>'')))
         """
         automatic = f"""
-            EXISTS (SELECT 1 FROM learning_examples au
-                    WHERE au.inquiry_id={inquiry_alias}.id
-                      AND au.active=1 AND au.validity_active=1
-                      AND COALESCE(json_extract(au.metadata_json,
-                          '$.learning_signal_type'),'POSITIVE')='POSITIVE'
-                      AND COALESCE(json_extract(au.metadata_json,
-                          '$.human_verified'),0)=0
-                      AND au.approval_history_id IS NULL
-                      AND upper(COALESCE(au.validator_result,'')) NOT IN (
-                        'HUMAN_VERIFIED_NAVER_POSTED',
-                        'HISTORICAL_ADMIN_APPROVED'
-                      )
-                      AND NOT (upper(COALESCE(json_extract(au.metadata_json,
-                            '$.source_origin'),''))='HISTORICAL_PROMOTED'
-                        AND trim(COALESCE(json_extract(au.metadata_json,
-                            '$.promoted_by'),''))<>''))
+            {inquiry_alias}.id IN (
+                SELECT au.inquiry_id FROM learning_examples au
+                WHERE au.inquiry_id IS NOT NULL
+                  AND au.active=1 AND au.validity_active=1
+                  AND COALESCE(json_extract(au.metadata_json,
+                      '$.learning_signal_type'),'POSITIVE')='POSITIVE'
+                  AND COALESCE(json_extract(au.metadata_json,
+                      '$.human_verified'),0)=0
+                  AND au.approval_history_id IS NULL
+                  AND upper(COALESCE(au.validator_result,'')) NOT IN (
+                    'HUMAN_VERIFIED_NAVER_POSTED',
+                    'HISTORICAL_ADMIN_APPROVED'
+                  )
+                  AND NOT (upper(COALESCE(json_extract(au.metadata_json,
+                        '$.source_origin'),''))='HISTORICAL_PROMOTED'
+                    AND trim(COALESCE(json_extract(au.metadata_json,
+                        '$.promoted_by'),''))<>''))
         """
         exclusion = f"""
-            (EXISTS (SELECT 1 FROM learning_feedback ex
-                     WHERE ex.inquiry_id={inquiry_alias}.id AND ex.active=1
-                       AND ex.learning_signal_type IN ('NEGATIVE','EXCLUDED')
-                       AND NOT (
-                         json_extract(ex.metadata_json,
-                           '$.lifecycle_superseded_by_learning_id') IS NOT NULL
-                         AND EXISTS (
-                           SELECT 1 FROM learning_examples sup
-                           WHERE sup.id=json_extract(ex.metadata_json,
-                             '$.lifecycle_superseded_by_learning_id')
-                             AND sup.active=1
-                             AND COALESCE(json_extract(sup.metadata_json,
-                               '$.human_verified'),0)=1
-                         )
-                       ))
-             OR EXISTS (SELECT 1 FROM learning_examples rv
-                        WHERE rv.inquiry_id={inquiry_alias}.id AND rv.active=0
-                          AND COALESCE(json_extract(rv.metadata_json,
-                              '$.verification_revoked'),0)=1
-                          AND NOT (
-                            json_extract(rv.metadata_json,
-                              '$.lifecycle_superseded_by_learning_id') IS NOT NULL
-                            AND EXISTS (
-                              SELECT 1 FROM learning_examples sup
-                              WHERE sup.id=json_extract(rv.metadata_json,
-                                '$.lifecycle_superseded_by_learning_id')
-                                AND sup.active=1
-                                AND COALESCE(json_extract(sup.metadata_json,
-                                  '$.human_verified'),0)=1
-                            )
-                          )))
+            ({inquiry_alias}.id IN (
+                SELECT ex.inquiry_id FROM learning_feedback ex
+                WHERE ex.inquiry_id IS NOT NULL AND ex.active=1
+                  AND ex.learning_signal_type IN ('NEGATIVE','EXCLUDED')
+                  AND NOT (
+                    json_extract(ex.metadata_json,
+                      '$.lifecycle_superseded_by_learning_id') IS NOT NULL
+                    AND json_extract(ex.metadata_json,
+                      '$.lifecycle_superseded_by_learning_id')
+                        IN {superseded_by_approved}
+                  ))
+             OR {inquiry_alias}.id IN (
+                SELECT rv.inquiry_id FROM learning_examples rv
+                WHERE rv.inquiry_id IS NOT NULL AND rv.active=0
+                  AND COALESCE(json_extract(rv.metadata_json,
+                      '$.verification_revoked'),0)=1
+                  AND NOT (
+                    json_extract(rv.metadata_json,
+                      '$.lifecycle_superseded_by_learning_id') IS NOT NULL
+                    AND json_extract(rv.metadata_json,
+                      '$.lifecycle_superseded_by_learning_id')
+                        IN {superseded_by_approved}
+                  )))
         """
         corrected = f"""
-            EXISTS (SELECT 1 FROM learning_feedback co
-                    WHERE co.inquiry_id={inquiry_alias}.id AND co.active=1
-                      AND co.learning_signal_type='INTENT_CORRECTION'
-                      AND NOT (
-                        json_extract(co.metadata_json,
-                          '$.lifecycle_superseded_by_learning_id') IS NOT NULL
-                        AND EXISTS (
-                          SELECT 1 FROM learning_examples sup
-                          WHERE sup.id=json_extract(co.metadata_json,
-                            '$.lifecycle_superseded_by_learning_id')
-                            AND sup.active=1
-                            AND COALESCE(json_extract(sup.metadata_json,
-                              '$.human_verified'),0)=1
-                        )
-                      ))
+            {inquiry_alias}.id IN (
+                SELECT co.inquiry_id FROM learning_feedback co
+                WHERE co.inquiry_id IS NOT NULL AND co.active=1
+                  AND co.learning_signal_type='INTENT_CORRECTION'
+                  AND NOT (
+                    json_extract(co.metadata_json,
+                      '$.lifecycle_superseded_by_learning_id') IS NOT NULL
+                    AND json_extract(co.metadata_json,
+                      '$.lifecycle_superseded_by_learning_id')
+                        IN {superseded_by_approved}
+                  ))
         """
         return f"""
             CASE
