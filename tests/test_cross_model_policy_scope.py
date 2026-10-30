@@ -421,9 +421,13 @@ def test_a_common_learning_may_be_narrowed_back_to_one_model(repository):
     assert "cross_model_policy" not in metadata
     # 공통 Learning 이라는 사실 자체는 남아야 관리 목록에서 사라지지 않는다.
     assert is_common_learning(metadata)
-    assert _identity(_found(repository, product_name=MONITOR)[0]) == (
-        "CATEGORY_UNCERTAIN"
-    )
+    # "현재 모델" 로 좁힌 공통 행은 다른 모델에 닿지 않는다. 전에는
+    # CATEGORY_UNCERTAIN 으로 남아 공통 우선권 표시를 단 채 전달됐다 --
+    # tests/test_common_learning_scope_range.py 참조.
+    assert not [
+        item for item in _found(repository, product_name=MONITOR)
+        if int(item["id"]) == learning_id
+    ]
 
 
 # ===========================================================================

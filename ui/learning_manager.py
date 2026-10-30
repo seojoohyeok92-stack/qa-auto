@@ -526,7 +526,10 @@ def _render_common_learning_editor(
         return
 
     st.caption(caption)
-    scopes = list(APPLICATION_SCOPE_LABELS)
+    # "동일 제품군" is not offered for a common Learning. Its range is enforced
+    # by product identity, and no stored row records a product family, so it
+    # could only ever apply as "현재 모델" -- a second label for the same range.
+    scopes = [value for value in APPLICATION_SCOPE_LABELS if value != "PRODUCT_FAMILY"]
     markets = list(MARKET_APPLICABILITY_LABELS)
     question = st.text_area(
         "공통으로 사용할 질문",

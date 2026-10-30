@@ -270,7 +270,7 @@ def test_only_the_selected_part_is_saved(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "scope", ["POLICY", "PRODUCT_FAMILY", "MODEL"],
+    "scope", ["POLICY", "MODEL"],
 )
 def test_each_application_target_is_stored(tmp_path, scope):
     database, inquiry_id, _ = _approved(tmp_path, f"scope-{scope}")
@@ -282,6 +282,18 @@ def test_each_application_target_is_stored(tmp_path, scope):
     assert not app.exception
     created = LearningRepository(database).common_learnings()[0]
     assert created["metadata_json"]["product_scope"] == scope
+
+
+def test_product_family_is_not_offered_for_a_common_learning(tmp_path):
+    """제품군 정보가 저장된 행이 없으므로 "동일 제품군"은 "현재 모델"과
+    같은 범위로만 적용될 수 있다. 같은 범위에 두 이름을 주지 않는다."""
+
+    database, inquiry_id, _ = _approved(tmp_path, "scope-family")
+
+    app = _click(_panel(database, inquiry_id), BUTTON_LABEL)
+
+    radio = next(radio for radio in app.radio if radio.label == "적용 모델")
+    assert list(radio.options) == ["현재 모델", "전 모델 공통 정책"]
 
 
 @pytest.mark.parametrize(

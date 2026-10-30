@@ -5,7 +5,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
-from repositories.learning_repository import is_operator_approved_policy
+from repositories.learning_repository import (
+    is_common_learning,
+    is_operator_approved_policy,
+)
 from repositories.product_catalog_repository import (
     ProductCatalogRepository,
     canonical_model_identity,
@@ -567,6 +570,45 @@ def _attribute_conflict(
     return sorted(query)[0], sorted(candidate)[0]
 
 
+def _within_common_scope(
+    scope: str, current: ProductIdentity, candidate: ProductIdentity
+) -> bool:
+    """Whether the asked product is inside a model-narrowed common Learning.
+
+    Only identities both sides state: the same listing, the same model code,
+    or the same normalised name. A family counts for PRODUCT_FAMILY only when
+    both rows record one -- nothing infers it from a category or a size.
+
+    A model both sides state decides before the listing or the name does. One
+    listing, under one name, can sell several models as options, and the model
+    code is then read from the chosen option. The codes are already canonical
+    (``_model_code`` folds aliases), so plain equality is the same-model test.
+    Where a side has no code, a stated size that differs still means another
+    model; otherwise the listing and the name decide as before.
+    """
+
+    if (
+        scope == "PRODUCT_FAMILY"
+        and current.family
+        and current.family == candidate.family
+    ):
+        return True
+    if current.model_code and candidate.model_code:
+        return current.model_code == candidate.model_code
+    if (
+        current.size_inches is not None
+        and candidate.size_inches is not None
+        and current.size_inches != candidate.size_inches
+    ):
+        return False
+    if current.product_id and current.product_id == candidate.product_id:
+        return True
+    return bool(
+        current.normalized_name
+        and current.normalized_name == candidate.normalized_name
+    )
+
+
 def _topic_compatibility(
     query_topics: tuple[str, ...], candidate_topics: tuple[str, ...]
 ) -> tuple[bool, str, str, float]:
@@ -631,6 +673,38 @@ class LearningCompatibilityService:
             identity=candidate_product,
             metadata=metadata,
         )
+        # An operator's common Learning narrowed to one model is out of its
+        # range on any other product, and that is a decision, not a doubt.
+        #
+        # It used to fall through to the checks below, which read a "현재
+        # 모델" row like any other: on a non-specification question a same-
+        # category product got POLICY_COMPATIBLE, a different category got
+        # CATEGORY_UNCERTAIN, and either way the row stayed in the prompt
+        # carrying ``operator_common_policy`` -- the flag that tells GPT ② it
+        # outranks the catalogue, and that ``fact_conflict_winner`` settles in
+        # its favour. So the range the operator chose was enforced nowhere.
+        #
+        # Removed outright (``hard_reject``) rather than labelled: the soft
+        # path keeps a row for GPT ② to judge, and nothing is left to judge
+        # once the operator has said where it applies. "동일 제품군" is held to
+        # the same identity: no active Learning row records a product family
+        # (0 of 2,162 on the 26.10.30 copy), and a family that cannot be read
+        # is not one that matches.
+        if (
+            is_common_learning(metadata)
+            and profile.scope in {"MODEL", "PRODUCT_FAMILY"}
+            and not _within_common_scope(
+                profile.scope, current_product, candidate_product
+            )
+        ):
+            return CompatibilityDecision(
+                False, True, "COMMON_LEARNING_OUT_OF_SCOPE",
+                IDENTITY_MISMATCH_PENALTY, profile.scope, "MISMATCH",
+                f"COMMON_LEARNING_{profile.scope}_SCOPE_NOT_MATCHED",
+                query_topics, profile.topics, "MISMATCH",
+                "COMMON_LEARNING_OUT_OF_SCOPE",
+                current_product, candidate_product,
+            )
         topic_ok, topic_match, topic_reason, topic_adjustment = _topic_compatibility(
             query_topics, profile.topics
         )
