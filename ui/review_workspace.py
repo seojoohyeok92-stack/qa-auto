@@ -111,6 +111,11 @@ from ui.learning_manager import (
 )
 from ui.session_identity import can, current_actor
 from ui.uat_presenters import answer_source_label
+from ui.answer_history_presenter import (
+    MARKET_ANSWER,
+    NO_GENERATED_ANSWER,
+    build_answer_history,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1566,6 +1571,86 @@ def _source_seller_answer(inquiry: dict[str, Any]) -> str:
     return str(inquiry.get("seller_answer") or "").strip()
 
 
+def _render_answer_history(
+    database: Database,
+    inquiry: dict[str, Any],
+    *,
+    inquiry_id: int,
+    market_answer: str,
+) -> None:
+    """The generated answers kept for this inquiry beside the market's reply.
+
+    Read-only, and drawn on read-only inquiries too: a Coupang inquiry a person
+    answered in Wing turns read-only on the next sync, and its stored program
+    answer used to vanish from the screen with it. One indexed query on the
+    selected inquiry; nothing on the list, no write, no provider call.
+
+    Skipped when it would only repeat the Program Answer tab -- one generated
+    answer, no edit, nothing registered.
+    """
+
+    history = build_answer_history(
+        inquiry,
+        AnswerRepository(database).history_for_inquiry(inquiry_id),
+        market_answer=market_answer,
+        source_label=answer_source_label,
+        format_time=lambda value: format_datetime_kst(value, empty="시각 미기록"),
+    )
+    if not history.has_generated:
+        if inquiry.get("source_answered"):
+            st.caption(
+                f"{NO_GENERATED_ANSWER} · 이 문의에는 Q&A Auto가 생성해 저장한 "
+                "답변이 없습니다."
+            )
+        return
+    if len(history.entries) < 2:
+        return
+    with st.expander(
+        f"답변 이력 · 생성 원본과 등록 답변 ({len(history.entries)}건)",
+        expanded=False,
+    ):
+        st.caption(
+            "Q&A Auto가 저장한 생성 답변과 마켓에 등록된 답변입니다. 생성 "
+            "답변은 직원 수정이나 마켓 답변으로 덮어쓰지 않고 그대로 보존됩니다. "
+            "읽기 전용이며 등록·승인·Learning에 영향을 주지 않습니다."
+        )
+        for entry in history.entries:
+            st.markdown(f"**{entry.label}** · {entry.note}")
+            st.text(entry.body)
+        # The record of what Q&A Auto registered, kept apart from the market's
+        # current reply: on 11407 Q&A Auto auto-posted, and Coupang now shows
+        # a different reply with no author on it.
+        st.caption(f"Q&A Auto 등록 기록: {history.registration}")
+        if history.market_matches_sent is not None:
+            st.caption(
+                f"{MARKET_ANSWER}이 Q&A Auto 전송 답변과 같습니다(공백 제외)."
+                if history.market_matches_sent
+                else f"{MARKET_ANSWER}이 Q&A Auto 전송 답변과 다릅니다. "
+                "등록 이후 마켓에서 바뀌었거나 다른 답변이 달렸을 수 있으며, "
+                "작성자는 기록되어 있지 않습니다."
+            )
+        compared = history.compared_generated
+        if compared is None or history.same_text is None:
+            return
+        if history.same_text:
+            st.caption(
+                f"{compared.label}과 {MARKET_ANSWER}의 본문이 같습니다(공백 제외)."
+            )
+            return
+        st.markdown(f"**비교 · {compared.label} ↔ {MARKET_ANSWER}**")
+        left, right = st.columns(2, gap="small")
+        with left:
+            st.caption(compared.label)
+            st.text(compared.body)
+        with right:
+            st.caption(MARKET_ANSWER)
+            st.text(history.market_answer)
+        # Nothing stored says who changed a reply in a seller centre.
+        st.caption(
+            "두 본문이 다릅니다. 차이만으로 직원 수정 여부를 판단하지 않습니다."
+        )
+
+
 def _seller_answer_learning_approval(inquiry: dict[str, Any]) -> bool:
     """Whether this read-only inquiry may be approved for Learning.
 
@@ -1599,11 +1684,11 @@ def _read_only_notice(inquiry: dict[str, Any]) -> str:
     if not _seller_answer_learning_approval(inquiry):
         return (
             opening + "승인·등록은 실행하지 않고, 마켓에서 조회한 문의와 "
-            "판매자 답변만 표시합니다."
+            "판매자 답변을 표시합니다."
         )
     return (
         opening + f"{market} 등록은 실행하지 않고, 마켓에서 조회한 문의와 "
-        "판매자 답변만 표시합니다. 아래 승인은 마켓 등록이 아니라 이 판매자 "
+        "판매자 답변을 표시합니다. 아래 승인은 마켓 등록이 아니라 이 판매자 "
         "답변을 Human Verified Positive Learning으로 사용할지에 대한 "
         "승인입니다."
     )
@@ -2279,6 +2364,16 @@ def _render_answer_panel(database: Database, inquiry: dict[str, Any]) -> None:
                     label_visibility="collapsed",
                     key=draft_session_key,
                 )
+        _render_answer_history(
+            database,
+            inquiry,
+            inquiry_id=inquiry_id,
+            market_answer=(
+                posted_answer_body
+                if market_of(inquiry.get("store_code")) == NAVER
+                else _source_seller_answer(inquiry)
+            ),
+        )
 
         if approval_complete:
             st.markdown(
