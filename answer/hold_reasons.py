@@ -43,6 +43,13 @@ REASON_LABELS: dict[str, str] = {
         "반품·교환·파손 문의는 회사 정책상 자동 등록하지 않고 직원이 처리합니다."
     ),
     "DRAFT_REVIEW_REQUIRED": "답변 초안이 직원 검토 대상으로 판정되었습니다.",
+    "STAFF_ACTION_REQUEST_REVIEW": (
+        "고객이 전달·연락·변경·취소 등 실제 조치를 요청한 문의라 "
+        "직원이 처리합니다."
+    ),
+    "ACTION_COMMITMENT_REVIEW": (
+        "답변이 시스템이 수행하지 않는 조치를 약속하고 있어 자동 등록하지 않았습니다."
+    ),
     # Evidence
     "EVIDENCE_CONFLICT": (
         "확보된 근거가 서로 일치하지 않아 자동으로 확정할 수 없습니다."
@@ -166,6 +173,8 @@ STAFF_REASON_LABELS: dict[str, str] = {
     "POLICY_OR_HIGH_RISK_REVIEW": "위험·분쟁 가능성",
     "RETURN_OR_DAMAGE_POLICY_REVIEW": "반품·교환·파손 직원 처리",
     "DRAFT_REVIEW_REQUIRED": "초안 검토 필요",
+    "STAFF_ACTION_REQUEST_REVIEW": "직원 조치 요청",
+    "ACTION_COMMITMENT_REVIEW": "조치 약속 답변",
     "PRODUCT_FACT_NOT_VERIFIED": "상품 정보 근거 부족",
     "PRODUCT_COMPATIBILITY_NOT_VERIFIED": "호환 여부 미확인",
     # Evidence
@@ -281,6 +290,12 @@ STAFF_HEADLINES: dict[str, str] = {
     ),
     "INTENT_NOT_AUTO_POSTABLE": (
         "답변에 필요한 정보를 충분히 확인하지 못해 직원 확인이 필요합니다."
+    ),
+    "STAFF_ACTION_REQUEST_REVIEW": (
+        "고객이 실제 조치(전달·연락·변경·취소 등)를 요청해 직원 처리가 필요합니다."
+    ),
+    "ACTION_COMMITMENT_REVIEW": (
+        "고객이 실제 조치(전달·연락·변경·취소 등)를 요청해 직원 처리가 필요합니다."
     ),
     "EVIDENCE_CONFLICT": (
         "답변 근거가 서로 달라 직원 확인이 필요합니다."

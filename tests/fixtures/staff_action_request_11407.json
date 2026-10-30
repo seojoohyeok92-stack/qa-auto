@@ -1,0 +1,702 @@
+{
+ "source": "2026-10-30 server copy, inquiry 11407 / active draft 1309 (Coupang OJE_NS). Eligibility inputs only; retrieval, product catalog and historical usage removed.",
+ "inquiry": {
+  "store_code": "COUPANG_OJE_NS",
+  "source_type": "COUPANG_ONLINE_INQUIRY",
+  "inquiry_type": "COUPANG_ONLINE_INQUIRY",
+  "title": "Coupang 상품문의",
+  "content": "답변 잘 받았습니다.앞의 내용 담당 기사님께 전달 부탁드릴게요\r\n제가 지금이후 전화통화 불가능합니다"
+ },
+ "draft": {
+  "final_answer": "♣♧안녕하세요♧♣\n오제 챗봇(Chat Bot)이 답변드립니다.\n\n앞서 말씀해 주신 내용과 현재 전화 통화가 불가능하신 점을 담당 기사님께 전달 요청하겠습니다.\n\n안내드린 내용이 문의하신 내용과 다른 경우,\n네이버 톡톡으로 문의 남겨주시면 담당자가 확인 후 안내드리겠습니다.\n\n감사합니다.",
+  "validation_status": "PASS",
+  "answer_strategy": "MANUAL_REVIEW",
+  "category": "UNCLASSIFIED",
+  "validator_result_json": {
+   "checked_facts": [],
+   "errors": [],
+   "passed": true,
+   "review_signals": [],
+   "rules": [
+    {
+     "code": "FACT_GROUNDING",
+     "message": "선택된 사실 3개를 기준으로 검증했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "DATE_GROUNDING",
+     "message": "답변 날짜가 허용된 사실과 일치합니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "UNVERIFIED_DATE_BLOCK",
+     "message": "확인되지 않은 날짜를 생성하지 않았습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "ORDER_ID_REQUEST_REQUIRED",
+     "message": "주문번호 요청을 확인했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "PRIVATE_POST_GUIDANCE_REQUIRED",
+     "message": "비밀글 안내를 확인했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "ORDER_ID_TYPE_CORRECTNESS",
+     "message": "네이버 일반 주문번호 기준을 유지했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "INTERNAL_STATUS_LEAK",
+     "message": "고객 답변에 내부 상태를 노출하지 않았습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "CROSS_INQUIRY_CONTAMINATION",
+     "message": "현재 문의의 사실 범위만 사용했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "PERSONAL_DATA_EXPOSURE",
+     "message": "불필요한 개인정보 노출이 없습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "ANSWER_RELEVANCE",
+     "message": "문의 목적에 직접 답변했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "REQUIRED_CONTENT",
+     "message": "전략별 필수 내용을 포함했습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "PROHIBITED_CONTENT",
+     "message": "전략별 금지 내용을 포함하지 않았습니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "EMPTY_OR_LOW_QUALITY",
+     "message": "답변 길이와 내용이 유효합니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "FINAL_ANSWER_PROTECTION",
+     "message": "최종 답변 보호는 draft repository transaction에서 적용됩니다.",
+     "status": "PASS"
+    },
+    {
+     "code": "ANSWER_TOPIC_RELEVANCE",
+     "message": "ANSWER_TOPIC_COMPATIBLE",
+     "status": "PASS"
+    }
+   ],
+   "status": "PASS",
+   "warnings": [
+    "실제 전달 조치가 필요한 요청이므로 게시 전 담당자의 처리 가능 여부 확인이 필요합니다."
+   ]
+  },
+  "metadata_json": {
+   "selected_answer_route": "GPT_FALLBACK",
+   "generation_mode": "GPT_FALLBACK",
+   "answer_source": "openai",
+   "detected_intent": "GENERAL",
+   "question_category": "INFORMATION_INSUFFICIENT",
+   "semantic_routing": {
+    "called": true,
+    "fallback": null,
+    "phase": "PRE_ROUTING",
+    "router": {
+     "reasons": [
+      "CLASSIFIER_HAS_NO_ACTION",
+      "SEMANTIC_FIRST_ROUTING"
+     ],
+     "use_semantic": true
+    },
+    "trace": {
+     "cache_hit": false,
+     "confidence": 0.76,
+     "fingerprint": "517bbcb6ba98da61",
+     "latency_ms": 5063.0,
+     "outcome": "OK"
+    },
+    "understanding": {
+     "need_dps": false,
+     "need_learning": true,
+     "need_order": false,
+     "need_order_lookup": false,
+     "need_product": false,
+     "need_template": false,
+     "offer_product_record": true,
+     "purchase_state": "UNKNOWN",
+     "questions": [
+      {
+       "action": "OTHER",
+       "requested_attribute": "ACTION_EXECUTION",
+       "requested_information": "앞서 전달된 내용을 담당 기사님에게 전달하는 조치",
+       "text": "앞의 내용을 담당 기사님께 전달해 주세요."
+      }
+     ],
+     "source": "GPT_UNDERSTAND",
+     "usable": true
+    },
+    "usable": true
+   },
+   "processing_plan": {
+    "analysis": {
+     "answer_strategy": "MANUAL_REVIEW",
+     "auto_answerable": false,
+     "can_execute_dps_lookup": false,
+     "can_generate_answer": true,
+     "confidence": 0.45,
+     "delivery_question": false,
+     "delivery_related": false,
+     "detected_intent": "GENERAL",
+     "inquiry_subtype": "UNCLASSIFIED",
+     "inquiry_type": "INFORMATION_INSUFFICIENT",
+     "manual_review_required": true,
+     "manual_review_sources": [
+      "UNCLASSIFIED"
+     ],
+     "needs_delivery_lookup": false,
+     "order_id_present": false,
+     "order_id_status": "NOT_REQUIRED",
+     "order_id_validated": false,
+     "purchase_confirmed": false,
+     "question_category": "INFORMATION_INSUFFICIENT",
+     "reasons": [
+      "결정적인 문의 유형 규칙과 일치하지 않습니다."
+     ],
+     "requires_dps_lookup": false,
+     "requires_order_id": false,
+     "requires_order_lookup": false,
+     "selected_fact_keys": [
+      "rule.answer"
+     ],
+     "subquestion_analyses": [
+      {
+       "detected_intent": "OTHER",
+       "inquiry_subtype": "SEMANTIC_OTHER",
+       "manual_review_required": false,
+       "question": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "requires_dps_lookup": false,
+       "requires_order_lookup": false,
+       "semantic_source": "GPT"
+      }
+     ]
+    },
+    "can_generate_draft": true,
+    "correlation_id": "e4f93d7f-bf92-4501-824e-ca1103c16472",
+    "detected_intent": "GENERAL",
+    "dps_lookup_action": "SKIP",
+    "dps_lookup_status": "NOT_REQUIRED",
+    "generation_mode": "GPT_FALLBACK",
+    "inquiry_id": 11407,
+    "inquiry_type": "COUPANG_ONLINE_INQUIRY",
+    "installation_date_display": null,
+    "installation_date_raw": null,
+    "is_delivery": false,
+    "is_high_risk": false,
+    "is_installation": false,
+    "needs_staff_review": false,
+    "normalized_text": "답변 잘 받았습니다.앞의 내용 담당 기사님께 전달 부탁드릴게요\n제가 지금이후 전화통화 불가능합니다",
+    "order_id": "<masked-order-id>",
+    "order_id_status": "NOT_REQUIRED",
+    "order_lookup_action": "SKIP",
+    "order_lookup_status": "NOT_REQUIRED",
+    "order_number_followup": null,
+    "product_order_id": "",
+    "reason_code": "GPT_FALLBACK",
+    "requires_dps_lookup": false,
+    "requires_order_lookup": false,
+    "selected_answer_route": "GPT_FALLBACK",
+    "semantic_routing": {
+     "called": true,
+     "fallback": null,
+     "phase": "PRE_ROUTING",
+     "router": {
+      "reasons": [
+       "CLASSIFIER_HAS_NO_ACTION",
+       "SEMANTIC_FIRST_ROUTING"
+      ],
+      "use_semantic": true
+     },
+     "semantic": {
+      "asks_delivery_outcome": false,
+      "asks_delivery_schedule": false,
+      "atomic_questions": [
+       {
+        "action": "OTHER",
+        "requested_attribute": "ACTION_EXECUTION",
+        "requested_information": "앞서 전달된 내용을 담당 기사님에게 전달하는 조치",
+        "retrieval_queries": [],
+        "text": "앞의 내용을 담당 기사님께 전달해 주세요."
+       }
+      ],
+      "conditional": false,
+      "confidence": 0.76,
+      "constraints": [
+       "지금 이후 전화 통화 불가"
+      ],
+      "deadline": "지금 이후",
+      "negation": true,
+      "objects": [
+       {
+        "states": [],
+        "type": "담당 기사님"
+       }
+      ],
+      "primary_action": "OTHER",
+      "purchase_state": "UNKNOWN",
+      "reason": "",
+      "request_type": "ACTION_REQUEST",
+      "requires_delivery_schedule": false,
+      "requires_order_context": false,
+      "secondary_actions": [],
+      "source": "GPT"
+     },
+     "trace": {
+      "cache_hit": false,
+      "confidence": 0.76,
+      "fingerprint": "517bbcb6ba98da61",
+      "latency_ms": 5063.0,
+      "outcome": "OK"
+     },
+     "understanding": {
+      "need_dps": false,
+      "need_learning": true,
+      "need_order": false,
+      "need_order_lookup": false,
+      "need_product": false,
+      "need_template": false,
+      "offer_product_record": true,
+      "purchase_state": "UNKNOWN",
+      "questions": [
+       {
+        "action": "OTHER",
+        "requested_attribute": "ACTION_EXECUTION",
+        "requested_information": "앞서 전달된 내용을 담당 기사님에게 전달하는 조치",
+        "text": "앞의 내용을 담당 기사님께 전달해 주세요."
+       }
+      ],
+      "source": "GPT_UNDERSTAND",
+      "usable": true
+     },
+     "usable": true
+    },
+    "template_id": null,
+    "template_preferred": true,
+    "valid_dps_snapshot_available": false,
+    "valid_order_snapshot_available": false,
+    "workflow_answer_status": "COMPLETED",
+    "workflow_block_reasons": [],
+    "workflow_dps_status": "SKIPPED",
+    "workflow_order_status": "SKIPPED"
+   },
+   "phase9": {
+    "analysis": {
+     "answer_strategy": "MANUAL_REVIEW",
+     "auto_answerable": false,
+     "can_execute_dps_lookup": false,
+     "can_generate_answer": true,
+     "confidence": 0.45,
+     "delivery_question": false,
+     "delivery_related": false,
+     "detected_intent": "GENERAL",
+     "inquiry_subtype": "UNCLASSIFIED",
+     "inquiry_type": "INFORMATION_INSUFFICIENT",
+     "manual_review_required": true,
+     "manual_review_sources": [
+      "UNCLASSIFIED"
+     ],
+     "needs_delivery_lookup": false,
+     "order_id_present": false,
+     "order_id_status": "NOT_REQUIRED",
+     "order_id_validated": false,
+     "purchase_confirmed": false,
+     "question_category": "INFORMATION_INSUFFICIENT",
+     "reasons": [
+      "결정적인 문의 유형 규칙과 일치하지 않습니다."
+     ],
+     "requires_dps_lookup": false,
+     "requires_order_id": false,
+     "requires_order_lookup": false,
+     "selected_fact_keys": [
+      "rule.answer"
+     ],
+     "subquestion_analyses": [
+      {
+       "detected_intent": "OTHER",
+       "inquiry_subtype": "SEMANTIC_OTHER",
+       "manual_review_required": false,
+       "question": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "requires_dps_lookup": false,
+       "requires_order_lookup": false,
+       "semantic_source": "GPT"
+      }
+     ]
+    },
+    "selected_facts": {
+     "keys": [
+      "product.product_id",
+      "product.name",
+      "product.option_name"
+     ],
+     "values": {
+      "product.name": "사이니지 BED / 모음전 / 메인코드 / O",
+      "product.option_name": "스탠드형 방문설치 LH43BEDH 43인치",
+      "product.product_id": "15252727782"
+     }
+    }
+   },
+   "governance": {
+    "api_key_configured": true,
+    "canary_selected": false,
+    "company_approved": true,
+    "company_tone_version": "tone-v1",
+    "correlation_id": "7870a4a7-e574-4469-8561-7c60dc90038a",
+    "mode": "ACTIVE",
+    "model": "gpt-5.6-sol",
+    "policy_version": "governance-v1",
+    "privacy": {
+     "blocking_issues": [],
+     "masked_patterns": [],
+     "removed_count": 0,
+     "removed_fields": [],
+     "safe_to_send": true
+    },
+    "privacy_policy_version": "privacy-v1",
+    "prompt_version": "prompt-v1",
+    "provider": "openai",
+    "shadow": false,
+    "validator_policy_version": "validator-v1"
+   },
+   "hybrid": {
+    "answer_pipeline": "GPT_UNDERSTAND_RETRIEVE_ANSWER",
+    "approved_learning_evidence": {
+     "conflict": false,
+     "conflicts": [],
+     "learning_ids": [
+      319240
+     ],
+     "reason": "APPROVED_LEARNING_SUPPORTED",
+     "subquestions": [
+      "앞의 내용을 담당 기사님께 전달해 주세요."
+     ],
+     "usable": true
+    },
+    "subquestion_evidence": [
+     {
+      "answer_required": true,
+      "evidence_coverage": "SUPPORTED",
+      "feedback_signal_ids": [],
+      "historical_case_ids": [
+       1095
+      ],
+      "learning_conflicts": [],
+      "learning_ids": [
+       203,
+       319231,
+       319240,
+       163,
+       319081
+      ],
+      "product_fact_fields": [],
+      "retrieved_learning_ids": [
+       203,
+       319231,
+       319240,
+       163,
+       319081
+      ],
+      "source": "ACTIVE_POSITIVE_LEARNING",
+      "status": "CANDIDATE",
+      "subquestion": "앞의 내용을 담당 기사님께 전달해 주세요."
+     }
+    ],
+    "self_review": {
+     "answered_all_questions": true,
+     "facts_consistent": true,
+     "has_speculation": false,
+     "passed": true,
+     "reason": "Validator가 결정적으로 검증합니다.",
+     "requires_review": false,
+     "warnings": []
+    },
+    "validation": {
+     "checked_facts": [],
+     "errors": [],
+     "passed": true,
+     "review_signals": [],
+     "rules": [
+      {
+       "code": "FACT_GROUNDING",
+       "message": "선택된 사실 3개를 기준으로 검증했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "DATE_GROUNDING",
+       "message": "답변 날짜가 허용된 사실과 일치합니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "UNVERIFIED_DATE_BLOCK",
+       "message": "확인되지 않은 날짜를 생성하지 않았습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "ORDER_ID_REQUEST_REQUIRED",
+       "message": "주문번호 요청을 확인했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "PRIVATE_POST_GUIDANCE_REQUIRED",
+       "message": "비밀글 안내를 확인했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "ORDER_ID_TYPE_CORRECTNESS",
+       "message": "네이버 일반 주문번호 기준을 유지했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "INTERNAL_STATUS_LEAK",
+       "message": "고객 답변에 내부 상태를 노출하지 않았습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "CROSS_INQUIRY_CONTAMINATION",
+       "message": "현재 문의의 사실 범위만 사용했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "PERSONAL_DATA_EXPOSURE",
+       "message": "불필요한 개인정보 노출이 없습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "ANSWER_RELEVANCE",
+       "message": "문의 목적에 직접 답변했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "REQUIRED_CONTENT",
+       "message": "전략별 필수 내용을 포함했습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "PROHIBITED_CONTENT",
+       "message": "전략별 금지 내용을 포함하지 않았습니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "EMPTY_OR_LOW_QUALITY",
+       "message": "답변 길이와 내용이 유효합니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "FINAL_ANSWER_PROTECTION",
+       "message": "최종 답변 보호는 draft repository transaction에서 적용됩니다.",
+       "status": "PASS"
+      },
+      {
+       "code": "ANSWER_TOPIC_RELEVANCE",
+       "message": "ANSWER_TOPIC_COMPATIBLE",
+       "status": "PASS"
+      }
+     ],
+     "status": "PASS",
+     "warnings": [
+      "실제 전달 조치가 필요한 요청이므로 게시 전 담당자의 처리 가능 여부 확인이 필요합니다."
+     ]
+    },
+    "intent": {
+     "category": "UNCLASSIFIED",
+     "confidence": 0.45,
+     "emotion": "NORMAL",
+     "questions": [
+      "앞의 내용을 담당 기사님께 전달해 주세요."
+     ],
+     "reason": "GPT① 이해 결과로 문의를 분해했습니다.",
+     "requires_review": false,
+     "urgency": "NORMAL"
+    },
+    "draft": {
+     "answer": "앞서 말씀해 주신 내용과 현재 전화 통화가 불가능하신 점을 담당 기사님께 전달 요청하겠습니다.",
+     "can_auto_post": true,
+     "confidence": 0.72,
+     "evidence_decisions": [
+      {
+       "decision": "USED",
+       "id": 163,
+       "kind": "LEARNING",
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "판매처가 담당 기사님을 통해 내용을 확인할 수 있다는 운영 사례로, 전달 요청 안내를 뒷받침합니다."
+      },
+      {
+       "decision": "IGNORED",
+       "id": 203,
+       "kind": "LEARNING",
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "상담 전화가 완료된 다른 사례로, 현재 전달 요청의 처리 방법을 뒷받침하지 않습니다."
+      },
+      {
+       "decision": "IGNORED",
+       "id": 319231,
+       "kind": "LEARNING",
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "기사님과 통화할 때 고객이 직접 요청하는 방식이므로 현재 전화 통화가 불가능하다는 상황에 맞지 않습니다."
+      },
+      {
+       "decision": "IGNORED",
+       "id": 319240,
+       "kind": "LEARNING",
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "고객이 기사님 연락 시 직접 요청하도록 안내하는 사례여서 현재 상황에 적용하기 어렵습니다."
+      },
+      {
+       "decision": "IGNORED",
+       "id": 319081,
+       "kind": "LEARNING",
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "기사님의 사전 연락 시 고객이 직접 요청하도록 안내하는 내용이므로 전화 통화가 불가능한 현재 상황과 맞지 않습니다."
+      },
+      {
+       "decision": "IGNORED",
+       "id": 1095,
+       "kind": "HISTORICAL",
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "고객센터 연락처 안내로, 담당 기사님에게 내용을 전달해 달라는 요청에 직접 도움이 되지 않습니다."
+      }
+     ],
+     "feedback_signal_usage": [],
+     "ignored_evidence": [
+      {
+       "id": 203,
+       "kind": "LEARNING",
+       "reason": "다른 상담의 전화 완료 사실으로 현재 요청에 재사용할 수 없습니다."
+      },
+      {
+       "id": 319231,
+       "kind": "LEARNING",
+       "reason": "고객이 기사님과 직접 통화해야 하는 방식이라 현재 상황에 맞지 않습니다."
+      },
+      {
+       "id": 319240,
+       "kind": "LEARNING",
+       "reason": "기사님 연락 시 직접 요청하라는 내용이라 전화 통화가 불가능한 상황에 적용하지 않았습니다."
+      },
+      {
+       "id": 319081,
+       "kind": "LEARNING",
+       "reason": "기사님과의 직접 통화를 전제로 한 안내라 사용하지 않았습니다."
+      },
+      {
+       "id": 1095,
+       "kind": "HISTORICAL",
+       "reason": "고객센터 연락 안내는 담당 기사님 전달 요청을 직접 지원하지 않습니다."
+      }
+     ],
+     "learning_recovery_used": false,
+     "learning_usage": [
+      {
+       "answer_supported": true,
+       "authority": "AUTO",
+       "compatibility": {
+        "candidate_product": {
+         "brand": "SAMSUNG",
+         "category": "MONITOR",
+         "family": null,
+         "model_code": "32FG500",
+         "normalized_name": "삼성 오디세이 G5 LS32FG500 80.1cm(32인치) 게이밍 모니터 180Hz",
+         "option": null,
+         "product_id": null,
+         "product_name": "삼성 오디세이 G5 LS32FG500 80.1cm(32인치) 게이밍 모니터 180Hz",
+         "size_inches": 32.0
+        },
+        "candidate_topics": [
+         "OTHER"
+        ],
+        "current_product": {
+         "brand": null,
+         "category": null,
+         "family": null,
+         "model_code": "43BEH",
+         "normalized_name": "사이니지 BED / 모음전 / 메인코드 / O",
+         "option": "스탠드형 방문설치 LH43BEDH 43인치",
+         "product_id": "15252727782",
+         "product_name": "사이니지 BED / 모음전 / 메인코드 / O",
+         "size_inches": 43.0
+        },
+        "eligible": true,
+        "hard_reject": false,
+        "product_match": "POLICY_COMPATIBLE",
+        "product_match_reason": "PRODUCT_INDEPENDENT_POLICY_OR_GENERAL_KNOWLEDGE",
+        "product_scope": "PRODUCT_FAMILY",
+        "query_topics": [
+         "OTHER"
+        ],
+        "reject_reason": null,
+        "score_adjustment": -0.08,
+        "topic_match": "UNCERTAIN",
+        "topic_match_reason": "TOPIC_UNCLEAR"
+       },
+       "learning_id": 163,
+       "matched_subquestion": "앞의 내용을 담당 기사님께 전달해 주세요.",
+       "reason": "판매처가 기사님을 통해 확인할 수 있다는 운영 사례를 근거로 전달 요청 문구에 사용했습니다."
+      }
+     ],
+     "missing_information": [
+      "담당 기사님에게 실제로 전달되었는지 여부"
+     ],
+     "missing_information_details": [
+      {
+       "severity": "OPTIONAL_DETAIL",
+       "text": "담당 기사님에게 실제로 전달되었는지 여부"
+      }
+     ],
+     "optional_missing_information": [
+      "담당 기사님에게 실제로 전달되었는지 여부"
+     ],
+     "provider_requires_review": true,
+     "reason": "고객의 요청은 담당 기사님에게 내용을 전달하는 실제 조치가 필요합니다. 관련 운영 사례를 바탕으로 전달 요청 문안을 작성했으나, 처리 완료를 단정하지 않도록 담당자 검토가 필요합니다.",
+     "required_missing_information": [],
+     "requires_review": false,
+     "subquestion_results": [
+      {
+       "answered": true,
+       "learning_ids": [
+        163
+       ],
+       "status": "ANSWERABLE",
+       "subquestion": "앞의 내용을 담당 기사님께 전달해 주세요."
+      }
+     ],
+     "unknown_product_facts": [],
+     "unresolved": [],
+     "used_facts": [],
+     "used_historical_ids": [],
+     "used_learning_ids": [
+      163
+     ],
+     "used_product_facts": [],
+     "used_template_ids": [],
+     "warnings": [
+      "실제 전달 조치가 필요한 요청이므로 게시 전 담당자의 처리 가능 여부 확인이 필요합니다."
+     ]
+    }
+   }
+  }
+ },
+ "recorded_auto_post_decision": {
+  "eligibility": "SAFE",
+  "final_decision": "AUTO_POST_ALLOWED",
+  "blocking_reason_codes": [],
+  "soft_reason_codes": [
+   "INTENT_CONFIDENCE_LOW"
+  ]
+ }
+}

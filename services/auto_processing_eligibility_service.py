@@ -414,6 +414,55 @@ def _promises_an_action(questions: Any, *, answer: str) -> bool:
         return False
     return bool(_ACTION_COMMITMENT.search(str(answer or "")))
 
+
+# The customer asked for something to be *done*, whatever the answer says.
+#
+# Inquiry 11407 (Coupang) -- "앞의 내용 담당 기사님께 전달 부탁드릴게요 / 제가
+# 지금이후 전화통화 불가능합니다" -- was read by GPT ① as exactly that
+# (action OTHER, requested_attribute ACTION_EXECUTION) and auto-posted with
+# "담당 기사님께 전달 요청하겠습니다". Nothing relayed anything, and the market
+# showed the inquiry as answered, so it left the unanswered queue staff work
+# from. ``_promises_an_action`` needed the answer to promise the action too and
+# its verbs had no 전달; widening the wording would only move the gap to the
+# next phrasing. The request itself is the reason: a relay, a call-back, a date
+# or address change, a cancellation is work a person has to do, and an answer
+# cannot do it however it is worded.
+#
+# Read from GPT ①'s requested_attribute -- "대신 처리해 달라 (정보 요구가
+# 아니다)" -- not from keywords: "설치일 변경 가능한가요?" or "기사님은 언제
+# 연락하나요?" are EXISTENCE_OR_CAPABILITY / TIMING and keep their existing
+# route. Measured on the 2026-10-30 server copy: 48 of 1,232 active drafts carry
+# it, 6 of them were auto-posted, and all six asked for something to be done.
+STAFF_ACTION_REQUEST_REVIEW = "STAFF_ACTION_REQUEST_REVIEW"
+
+
+def _requests_staff_action(questions: Any) -> bool:
+    """Whether GPT ① read any part of the inquiry as a request to act."""
+
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("requested_attribute") or "").strip().upper()
+        == _ACTION_EXECUTION_ATTRIBUTE
+        for item in questions
+    )
+
+
+# The answer says this system will pass the message on to someone. It has no
+# way to, whatever GPT ① made of the question, so this reads the answer alone:
+# a second check for when the understanding missed the request. The recipient
+# has to be a third party and the relay has to be undertaken -- "고객님께
+# 안내 전달드립니다" or "기사님께 전달된 일정" are not this. Over the 1,232
+# active drafts in the 2026-10-30 server copy it matches one, 11407.
+_HANDOFF_COMMITMENT = re.compile(
+    r"(?:기사|담당|설치|배송|택배|업체|센터|본사|제조사|부서)[^.\n]{0,12}?"
+    r"전달[^.\n]{0,6}?(?:해\s*)?"
+    r"(?:도와드리겠|드리겠|드릴게|하겠습니다)"
+)
+
+
+def _promises_a_handoff(answer: str) -> bool:
+    return bool(_HANDOFF_COMMITMENT.search(str(answer or "")))
+
 # The one part of a DAMAGE_REPORT the store lets the system answer: how a
 # suspected defect is checked. Real inquiry 10635 ("모니터 화면에 검은 타원형이
 # 보이는데 어떻게 하면 되나요?", DAMAGE_REPORT + METHOD_OR_PROCEDURE) was
@@ -1319,6 +1368,10 @@ class AutoProcessingEligibilityService:
             # one asks whether the answer took it on.
             if _promises_an_action(questions, answer=answer):
                 reasons.append(ACTION_COMMITMENT_REVIEW)
+            # What was asked, beside what was promised: the request alone is
+            # enough, whatever the answer said about it.
+            if _requests_staff_action(questions):
+                reasons.append(STAFF_ACTION_REQUEST_REVIEW)
             asks_compatibility = any(
                 isinstance(item, Mapping)
                 and str(item.get("requested_attribute") or "").strip().upper()
@@ -1338,6 +1391,11 @@ class AutoProcessingEligibilityService:
                 gpt_draft=gpt_draft,
             ):
                 reasons.append(PRODUCT_COMPATIBILITY_NOT_VERIFIED)
+
+        # Outside the understanding block: it must hold even when GPT ① is
+        # absent or read the request as a question.
+        if _promises_a_handoff(answer):
+            reasons.append(ACTION_COMMITMENT_REVIEW)
 
         # Confidence remains operator telemetry only.  It is deliberately in
         # SOFT_REASONS and therefore cannot change publishability.
