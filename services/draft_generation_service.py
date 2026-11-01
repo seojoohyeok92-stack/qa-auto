@@ -653,14 +653,16 @@ class DraftGenerationService:
         # answered the same question about the same text, so the regex pass is
         # skipped and its verdict comes from the model.
         raw = (
-            self._apply_reported_resolution(raw)
+            self._apply_reported_resolution(raw, learning_context)
             if gpt_judged_evidence
             else self._classify_missing_information(raw, intent)
         )
         return self.parse(raw)
 
     @staticmethod
-    def _apply_reported_resolution(raw: dict[str, Any]) -> dict[str, Any]:
+    def _apply_reported_resolution(
+        raw: dict[str, Any], learning_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Read the model's own unresolved list instead of classifying prose.
 
         Same output shape as ``_classify_missing_information`` so every
@@ -706,10 +708,41 @@ class DraftGenerationService:
                 text = str(item.get("subquestion") or "").strip()
                 if text:
                     unresolved.add(text)
-        required = [item for item in missing if item in unresolved]
-        optional = [item for item in missing if item not in unresolved]
+        # The one case the legacy classifier never let through, kept here: the
+        # model asked for review *and* named, as something it could not
+        # confirm, an operational commitment (order, date, money, benefit).
+        # 11331 answered "where do I get the Samsung 8%" from two learnings
+        # about other benefits, asked for review, and listed "this product's
+        # 8% eligibility and conditions" as unknown -- all three were lowered
+        # to optional and the wrong procedure was auto-posted. A review
+        # request alone, or an unknown product detail, still does not hold,
+        # and neither does an answer that rests on an approved Learning that
+        # qualified for this product: 11412's "계단 배송비는 현장 상황에 따라
+        # 기사님과 협의" is that policy's own wording, so review would only
+        # repeat it.
+        provider_review = bool(raw.get("requires_review"))
+        approved = (learning_context or {}).get("approved_learning_evidence")
+        approved = approved if isinstance(approved, dict) else {}
+        rests_on_approved = bool(
+            approved.get("usable")
+            and set(_int_ids(approved.get("learning_ids")))
+            & set(_int_ids(raw.get("used_learning_ids")))
+        )
+        held = {
+            item for item in missing
+            if provider_review
+            and not rests_on_approved
+            and item not in unresolved
+            and _OPERATIONAL_COMMITMENT_DETAIL.search(item)
+        }
+        required = [
+            item for item in missing if item in unresolved or item in held
+        ]
+        optional = [
+            item for item in missing if item not in unresolved and item not in held
+        ]
         copied = dict(raw)
-        copied["provider_requires_review"] = bool(raw.get("requires_review"))
+        copied["provider_requires_review"] = provider_review
         copied["provider_can_auto_post"] = raw.get("can_auto_post")
         copied["unresolved"] = list(unresolved)
         copied["missing_information_details"] = [
@@ -717,7 +750,7 @@ class DraftGenerationService:
                 "text": item,
                 "severity": (
                     "REQUIRED_FOR_SAFE_ANSWER"
-                    if item in unresolved
+                    if item in unresolved or item in held
                     else "OPTIONAL_DETAIL"
                 ),
             }
@@ -729,8 +762,8 @@ class DraftGenerationService:
         # the raw provider preference above for diagnosis, but do not let
         # "a staff check would be nice" turn an otherwise resolved answer into
         # a review.  Hard safety is deliberately evaluated later by CODE.
-        copied["requires_review"] = bool(unresolved)
-        copied["can_auto_post"] = not bool(unresolved)
+        copied["requires_review"] = bool(unresolved or held)
+        copied["can_auto_post"] = not bool(unresolved or held)
         return copied
 
     @staticmethod
