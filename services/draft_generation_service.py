@@ -490,7 +490,30 @@ class DraftGenerationService:
                 # not match any block in the prompt, and a test that
                 # asserts no product facts reached the model checks for
                 # exactly that string.
-                "PRODUCT_CATALOG_JSON": "이 상품에 대해 검증된 사양.",
+                #
+                # The block used to be described only as "검증된 사양" while
+                # 93% of its facts arrive labelled ``verification:
+                # CANDIDATE_NOT_APPROVED`` -- the integrated record's own review
+                # stage, kept on purpose (see product_knowledge_service). GPT ②
+                # read the label as a ban: 11180 (height_adjust, speaker),
+                # 11261 (bluetooth_audio) and 11166 (return_delivery_fee) were
+                # left unresolved as "승인되지 않은 후보" with the answering fact
+                # in the prompt. Only ``safe_facts`` are rendered into this
+                # block, so the label is provenance, the same way the Learning
+                # labels below are. Which product, component and condition a
+                # fact is about stays GPT ②'s judgement, and the candidate
+                # models in ``product_candidates`` are not this block.
+                "PRODUCT_CATALOG_JSON": (
+                    "이 상품(또는 고객이 지목한 모델)의 기록 중 상품 식별·충돌 검사를"
+                    " 통과해 답변 근거로 사용할 수 있는 사양."
+                    " verification(CANDIDATE_NOT_APPROVED,"
+                    " CANDIDATE_REVIEW_RESOLVED, CATALOG_JSON 등)은 원본 기록의"
+                    " 검수 단계를 알려주는 출처 정보이며 사용 허가나 금지가 아니다."
+                    " 질문에 답하는 항목이면 verification 값만을 이유로 버리지 마라."
+                    " 그 항목이 질문의 대상과 같은 상품·모델(product_scope,"
+                    " model_code)·부품(subject)·조건인지는 직접 판단하라."
+                    " product_candidates 의 후보 모델 사양은 이 블록이 아니다."
+                ),
                 # Provenance only. Every label on a Learning row -- identity,
                 # knowledge, authority, hedge -- used to arrive with an
                 # instruction attached ("자동 적용하지 마라", "사실 근거로는
@@ -517,6 +540,19 @@ class DraftGenerationService:
                     " hedge_reason 이 있으면 그 답변의 일부 문장이 추정이라는 표시다."
                     " 내용을 읽고 현재 질문과 현재 상품에 적용되는지 직접 판단하라."
                     " 적용되면 그 내용으로 답하고 사용한 learning_id 를 보고하라."
+                    # 10640 / 11396 / 11397: the store's answer to "기존
+                    # 브라켓에 설치 가능한가요?" is a procedure -- buy the
+                    # "벽걸이 설치 변경" add-on, have the installer check on
+                    # site, partial-return the bracket if the old one fits.
+                    # GPT ② cited 266353 / 316844 and kept only "기사님이 현장
+                    # 확인", which reads as a promise the store never made. The
+                    # Learning reached the prompt whole; the conditions were
+                    # lost in writing the answer.
+                    " 적용한 답변이 결론을 조건·절차와 함께 말하면(예: 특정"
+                    " 추가상품·옵션을 먼저 구매, 현장 확인 결과에 따른 부분 반품,"
+                    " 처리를 위한 연락처) 그 조건과 절차는 답의 일부이므로 빼고"
+                    " 결론만 옮기지 마라. 그 조건이 현재 상품에도 해당하는지 근거로"
+                    " 판단할 수 없으면 설치·반품·환불이 된다고 확정하지 마라."
                     " 전달된 근거 중 어느 것도 그 질문에 답하지 않을 때에만"
                     " unresolved 로 남겨라."
                 ),
