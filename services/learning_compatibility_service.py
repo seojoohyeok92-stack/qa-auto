@@ -8,6 +8,8 @@ from answer.text_utils import SELLER_IDENTITY_QUERY, normalize_product_name
 from repositories.learning_repository import (
     is_common_learning,
     is_operator_approved_policy,
+    listing_id_of,
+    pinned_listing,
 )
 from repositories.product_catalog_repository import (
     ProductCatalogRepository,
@@ -21,6 +23,7 @@ from services.product_fact_guard import (
 
 
 PRODUCT_SCOPES = {
+    "PRODUCT",
     "MODEL",
     "VARIANT",
     "PRODUCT_FAMILY",
@@ -571,7 +574,10 @@ def _attribute_conflict(
 
 
 def _within_common_scope(
-    scope: str, current: ProductIdentity, candidate: ProductIdentity
+    scope: str,
+    current: ProductIdentity,
+    candidate: ProductIdentity,
+    metadata: Mapping[str, Any] | None = None,
 ) -> bool:
     """Whether the asked product is inside a model-narrowed common Learning.
 
@@ -585,7 +591,45 @@ def _within_common_scope(
     (``_model_code`` folds aliases), so plain equality is the same-model test.
     Where a side has no code, a stated size that differs still means another
     model; otherwise the listing and the name decide as before.
+
+    PRODUCT is the listing pinned on the row when it was approved, and only
+    that: a matching model code, name or size elsewhere never widens it, and
+    an inquiry with no listing id is outside it. Inside the listing, a model
+    or size both sides state that differs is another option of that listing
+    and is outside it too -- 10914781557 sells LH50BED and the 26년형 LH50BEH
+    side by side.
     """
+
+    if scope == "PRODUCT":
+        pinned = pinned_listing(metadata)
+        if pinned is None or listing_id_of(current.product_id) != pinned[0]:
+            return False
+        if (
+            current.model_code and candidate.model_code
+            and current.model_code != candidate.model_code
+        ):
+            return False
+        # ``model_code`` reads the listing name before the option, so on one
+        # listing both sides carry the name's model. The chosen options are
+        # what tell two models of that listing apart. Listing options join
+        # their parts with "_" ("24년형_LH50BED UHDTV_무료배송설치"), which the
+        # model pattern reads as part of a word, so it is spaced out first.
+        current_option_model = _model_code(
+            None, None, str(current.option or "").replace("_", " ")
+        )
+        candidate_option_model = _model_code(
+            None, None, str(candidate.option or "").replace("_", " ")
+        )
+        if (
+            current_option_model and candidate_option_model
+            and current_option_model != candidate_option_model
+        ):
+            return False
+        return not (
+            current.size_inches is not None
+            and candidate.size_inches is not None
+            and current.size_inches != candidate.size_inches
+        )
 
     if (
         scope == "PRODUCT_FAMILY"
@@ -692,9 +736,9 @@ class LearningCompatibilityService:
         # is not one that matches.
         if (
             is_common_learning(metadata)
-            and profile.scope in {"MODEL", "PRODUCT_FAMILY"}
+            and profile.scope in {"PRODUCT", "MODEL", "PRODUCT_FAMILY"}
             and not _within_common_scope(
-                profile.scope, current_product, candidate_product
+                profile.scope, current_product, candidate_product, metadata
             )
         ):
             return CompatibilityDecision(
@@ -768,7 +812,9 @@ class LearningCompatibilityService:
                 )
             )
         )
-        variant = profile.variant_sensitive or profile.scope in {"MODEL", "VARIANT"}
+        variant = profile.variant_sensitive or profile.scope in {
+            "PRODUCT", "MODEL", "VARIANT",
+        }
         current = current_product
         candidate = candidate_product
 

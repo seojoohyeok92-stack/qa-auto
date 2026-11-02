@@ -23,6 +23,7 @@ from repositories.learning_manager_query import (
 from repositories.learning_repository import (
     LearningRepository,
     is_common_learning,
+    pinned_listing,
 )
 from repositories.learning_signal_repository import LearningSignalRepository
 from services.learning_validity_service import validity_summary
@@ -376,6 +377,7 @@ def _render_default_table(rows: list[dict[str, Any]]) -> None:
 
 
 APPLICATION_SCOPE_LABELS = {
+    "PRODUCT": "현재 판매 페이지",
     "MODEL": "현재 모델",
     "PRODUCT_FAMILY": "동일 제품군",
     "POLICY": "전 모델 공통 정책",
@@ -386,6 +388,11 @@ MARKET_APPLICABILITY_LABELS = {
     "COUPANG_ONLY": "쿠팡",
     "COMMON": "공통",
 }
+
+PRODUCT_SCOPE_NOTICE = (
+    "이 Learning은 선택한 판매 페이지의 상품에만 적용됩니다. 모델명이 같더라도 "
+    "다른 판매 페이지에는 적용되지 않습니다."
+)
 
 
 def _render_scope_editor(
@@ -409,9 +416,12 @@ def _render_scope_editor(
     # customer inquiry, and approving it whole would publish every part of it.
     # It is reachable through "공통 Learning 추가", which stores the part the
     # operator selected as its own row.
+    # "현재 판매 페이지" is pinned when a common Learning is approved, so it is
+    # offered here only to keep a row that already has it; it cannot be given.
+    pinned = pinned_listing(metadata) if common else None
     scopes = [
         value for value in APPLICATION_SCOPE_LABELS
-        if value != "POLICY" or common
+        if (value != "POLICY" or common) and (value != "PRODUCT" or pinned)
     ]
     markets = list(MARKET_APPLICABILITY_LABELS)
 
@@ -425,6 +435,11 @@ def _render_scope_editor(
             common="예" if common else "아니오",
         )
     )
+    if pinned:
+        st.caption(
+            f"적용 판매 페이지: {pinned[0]} ({pinned[1]}) · {PRODUCT_SCOPE_NOTICE} "
+            "다른 적용 대상으로 바꾸면 판매 페이지 지정은 해제됩니다."
+        )
     if not common:
         st.caption(
             "전 모델 공통 적용은 아래 '공통 Learning 추가'에서 공통으로 사용할 "
@@ -496,6 +511,7 @@ def _render_common_learning_editor(
     button_label: str,
     button_help: str,
     context: dict[str, Any],
+    product_target_lookup: Callable[[], dict[str, Any] | None] | None = None,
 ) -> None:
     """One editor, two entry points.
 
@@ -526,10 +542,17 @@ def _render_common_learning_editor(
         return
 
     st.caption(caption)
+    # Read only once the editor is open, so a closed editor costs no query.
+    product_target = product_target_lookup() if product_target_lookup else None
     # "동일 제품군" is not offered for a common Learning. Its range is enforced
     # by product identity, and no stored row records a product family, so it
     # could only ever apply as "현재 모델" -- a second label for the same range.
-    scopes = [value for value in APPLICATION_SCOPE_LABELS if value != "PRODUCT_FAMILY"]
+    # "현재 판매 페이지" needs a listing id and a market to pin; without them
+    # it is not offered rather than guessed from a name or a size.
+    scopes = [
+        value for value in APPLICATION_SCOPE_LABELS
+        if value != "PRODUCT_FAMILY" and (value != "PRODUCT" or product_target)
+    ]
     markets = list(MARKET_APPLICABILITY_LABELS)
     question = st.text_area(
         "공통으로 사용할 질문",
@@ -552,13 +575,33 @@ def _render_common_learning_editor(
         format_func=lambda value: APPLICATION_SCOPE_LABELS[value],
         key=f"{key_prefix}_common_scope_{slot}",
     )
-    market_applicability = scope_columns[1].radio(
-        "적용 마켓",
-        markets,
-        index=markets.index("COMMON"),
-        format_func=lambda value: MARKET_APPLICABILITY_LABELS[value],
-        key=f"{key_prefix}_common_market_{slot}",
-    )
+    listing_scope: dict[str, Any] = {}
+    if product_scope == "PRODUCT" and product_target:
+        # A listing id means something only inside its own marketplace, so the
+        # market is the listing's and is not a choice.
+        market_applicability = f"{product_target['market']}_ONLY"
+        scope_columns[1].caption(
+            "적용 마켓: "
+            f"{MARKET_APPLICABILITY_LABELS[market_applicability]} (판매 페이지 마켓 고정)"
+        )
+        listing_scope = {
+            "적용 판매 페이지": {
+                "마켓": MARKET_APPLICABILITY_LABELS[market_applicability],
+                "판매 페이지 상품 ID": product_target["product_id"],
+                "상품명": product_target.get("product_name") or "-",
+                "모델명": product_target.get("model_code") or "-",
+                "적용 범위": PRODUCT_SCOPE_NOTICE,
+            }
+        }
+        st.info(PRODUCT_SCOPE_NOTICE)
+    else:
+        market_applicability = scope_columns[1].radio(
+            "적용 마켓",
+            markets,
+            index=markets.index("COMMON"),
+            format_func=lambda value: MARKET_APPLICABILITY_LABELS[value],
+            key=f"{key_prefix}_common_market_{slot}",
+        )
     validity_type = st.radio(
         "유효기간",
         ["PERMANENT", "TEMPORARY"],
@@ -590,6 +633,7 @@ def _render_common_learning_editor(
             "답변": answer.strip(),
             "적용 모델": APPLICATION_SCOPE_LABELS[product_scope],
             "적용 마켓": MARKET_APPLICABILITY_LABELS[market_applicability],
+            **listing_scope,
             "유효기간": (
                 "상시" if validity_type == "PERMANENT"
                 else f"{event_name or '(이벤트명 없음)'} · {valid_from} ~ {valid_until}"
@@ -668,6 +712,9 @@ def render_common_learning_add(
         button_label="공통 Learning 추가",
         button_help="원본 질문과 승인된 최종 답변을 불러와 편집합니다.",
         context={"원본 Learning ID": learning_id},
+        product_target_lookup=lambda: repository.product_scope_target(
+            learning_id=learning_id
+        ),
     )
 
 
@@ -706,6 +753,9 @@ def render_common_learning_direct(
         button_label="공통 Learning 직접 승인",
         button_help="현재 문의와 답변을 불러와 편집합니다. 일반 승인은 필요하지 않습니다.",
         context={"원본 문의 ID": inquiry_id},
+        product_target_lookup=lambda: repository.product_scope_target(
+            inquiry_id=inquiry_id
+        ),
     )
 
 def _render_validity_editor(

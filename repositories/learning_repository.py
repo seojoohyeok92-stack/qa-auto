@@ -106,6 +106,15 @@ def origin_market_of(metadata: dict[str, Any]) -> str:
 # purpose: VARIANT/CATEGORY/GLOBAL remain reachable by the lexical profiler
 # that writes new rows, and nothing here reclassifies them.
 APPLICATION_SCOPES = ("MODEL", "PRODUCT_FAMILY", "POLICY")
+# One listing, and nothing else. Offered only for a common Learning, because
+# only there is the range enforced (``_within_common_scope``): "현재 모델" is
+# keyed on the model code, and one model is routinely sold on several
+# listings whose installation options, delivery and refund terms differ --
+# 9645661432 takes the wall-mount as a main option while the LH43B/LH50B
+# listings sell it as an add-on. The listing id is pinned on the row when it
+# is approved and never inferred later from a name or a size.
+PRODUCT_SCOPE = "PRODUCT"
+COMMON_LEARNING_SCOPES = (PRODUCT_SCOPE, *APPLICATION_SCOPES)
 MARKET_APPLICABILITIES = (
     f"{MARKET_NAVER}_ONLY", f"{MARKET_COUPANG}_ONLY", MARKET_APPLICABILITY_COMMON,
 )
@@ -121,7 +130,37 @@ OPERATOR_SCOPE_KEYS = (
     "common_learning_origin_id",
     "common_learning_approved_by",
     "common_learning_approved_at",
+    "common_learning_product_id",
+    "common_learning_product_market",
 )
+
+
+def listing_id_of(value: Any) -> str | None:
+    """A listing id as identity compares it, or ``None`` when there is none.
+
+    The same whitespace fold the compatibility gate applies to every identity
+    field, so a value read back as text and one passed as a number agree. A
+    masked placeholder ("<masked-product-order-id>") is not an id: hundreds of
+    rows share that one string, and matching on it would join them all.
+    """
+
+    text = " ".join(str(value if value is not None else "").split()).strip()
+    if not text or not text.replace("-", "").replace("_", "").isalnum():
+        return None
+    return text
+
+
+def pinned_listing(metadata: Mapping[str, Any] | None) -> tuple[str, str] | None:
+    """(listing id, market) a PRODUCT-scoped common Learning was approved for."""
+
+    metadata = metadata or {}
+    if str(metadata.get("product_scope") or "").strip().upper() != PRODUCT_SCOPE:
+        return None
+    product_id = listing_id_of(metadata.get("common_learning_product_id"))
+    market = str(metadata.get("common_learning_product_market") or "").strip().upper()
+    if not product_id or not market:
+        return None
+    return product_id, market
 
 
 def is_common_learning(metadata: Mapping[str, Any] | None) -> bool:
@@ -1134,7 +1173,7 @@ class LearningRepository:
         """
 
         scope = str(product_scope or "").strip().upper()
-        if scope not in APPLICATION_SCOPES:
+        if scope not in COMMON_LEARNING_SCOPES:
             raise ValueError(
                 "적용 대상은 %s 중 하나여야 합니다." % ", ".join(APPLICATION_SCOPES)
             )
@@ -1170,6 +1209,24 @@ class LearningRepository:
                     "'공통 Learning 추가'에서 공통으로 사용할 질문과 답변만 "
                     "선택해 등록해 주세요."
                 )
+            if scope == PRODUCT_SCOPE:
+                # Kept, never granted here: the listing is pinned when the
+                # common Learning is approved, and a row without one has no
+                # listing this editor could name.
+                pinned = pinned_listing(metadata)
+                if pinned is None or not is_common_learning(metadata):
+                    raise ValueError(
+                        "판매 페이지 범위는 '공통 Learning 추가'에서 판매 "
+                        "페이지가 확인된 경우에만 지정할 수 있습니다."
+                    )
+                if applicability != f"{pinned[1]}_ONLY":
+                    raise ValueError(
+                        "판매 페이지 범위는 해당 판매 페이지의 마켓(%s)에만 "
+                        "적용할 수 있습니다." % pinned[1]
+                    )
+            else:
+                metadata.pop("common_learning_product_id", None)
+                metadata.pop("common_learning_product_market", None)
             metadata["product_scope"] = scope
             metadata["market_applicability"] = applicability
             if scope == "POLICY":
@@ -1242,6 +1299,7 @@ class LearningRepository:
             return self._insert_common_learning(
                 connection,
                 digest_scope=f"L{int(origin['id'])}",
+                listing_market=origin_market_of(origin_metadata),
                 provenance={
                     "common_learning_source": "APPROVED_LEARNING",
                     "common_learning_origin_id": int(origin["id"]),
@@ -1319,6 +1377,7 @@ class LearningRepository:
             return self._insert_common_learning(
                 connection,
                 digest_scope=f"I{int(inquiry['id'])}",
+                listing_market=market_from_store_code(store_code),
                 provenance={
                     # No origin Learning exists, and none is invented. The
                     # inquiry, its store and the fact that this was approved
@@ -1348,11 +1407,89 @@ class LearningRepository:
                 actor=actor,
             )
 
+    @staticmethod
+    def _listing_target(
+        connection: Any, inquiry_id: Any, market: str | None
+    ) -> dict[str, Any] | None:
+        """The one listing a PRODUCT-scoped common Learning would be pinned to.
+
+        Read from the inquiry the Learning comes from -- the same
+        ``inquiries.product_id`` retrieval joins as ``source_product_id`` --
+        and from nothing else. No id, or no market, means no listing.
+        """
+
+        normalized_market = str(market or "").strip().upper()
+        if inquiry_id is None or normalized_market not in {
+            MARKET_NAVER, MARKET_COUPANG,
+        }:
+            return None
+        inquiry = connection.execute(
+            "SELECT product_id, product_name FROM inquiries WHERE id=?",
+            (int(inquiry_id),),
+        ).fetchone()
+        if inquiry is None:
+            return None
+        product_id = listing_id_of(inquiry["product_id"])
+        if product_id is None:
+            return None
+        return {
+            "product_id": product_id,
+            "market": normalized_market,
+            "product_name": inquiry["product_name"],
+        }
+
+    def product_scope_target(
+        self, *, learning_id: int | None = None, inquiry_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """What "현재 판매 페이지" would pin, for the editor to show first.
+
+        The same lookup the save path uses, so what the operator is shown is
+        what gets stored.
+        """
+
+        with self.database.connection() as connection:
+            if learning_id is not None:
+                origin = connection.execute(
+                    "SELECT inquiry_id, model_code, metadata_json "
+                    "FROM learning_examples WHERE id=?",
+                    (int(learning_id),),
+                ).fetchone()
+                if origin is None:
+                    return None
+                metadata = deserialize_json(origin["metadata_json"])
+                metadata = metadata if isinstance(metadata, dict) else {}
+                target = self._listing_target(
+                    connection, origin["inquiry_id"], origin_market_of(metadata)
+                )
+                if target is not None:
+                    target["model_code"] = origin["model_code"]
+                return target
+            if inquiry_id is not None:
+                from services.product_fact_guard import extract_model_code
+
+                inquiry = connection.execute(
+                    "SELECT store_code FROM inquiries WHERE id=?",
+                    (int(inquiry_id),),
+                ).fetchone()
+                if inquiry is None:
+                    return None
+                target = self._listing_target(
+                    connection, inquiry_id,
+                    market_from_store_code(inquiry["store_code"]),
+                )
+                if target is not None:
+                    target["model_code"] = extract_model_code(
+                        target.get("product_name")
+                    )
+                return target
+        return None
+
     def _insert_common_learning(
         self,
         connection: Any,
         *,
         digest_scope: str,
+        listing_market: str | None,
         provenance: Mapping[str, Any],
         columns: Mapping[str, Any],
         question: str,
@@ -1379,15 +1516,33 @@ class LearningRepository:
         from services.similar_answer_service import normalize_learning_question
 
         scope = str(product_scope or "").strip().upper()
-        if scope not in APPLICATION_SCOPES:
+        if scope not in COMMON_LEARNING_SCOPES:
             raise ValueError(
-                "적용 대상은 %s 중 하나여야 합니다." % ", ".join(APPLICATION_SCOPES)
+                "적용 대상은 %s 중 하나여야 합니다." % ", ".join(COMMON_LEARNING_SCOPES)
             )
         applicability = normalize_market_applicability(market_applicability)
         if applicability is None or applicability not in MARKET_APPLICABILITIES:
             raise ValueError(
                 "적용 마켓은 %s 중 하나여야 합니다." % ", ".join(MARKET_APPLICABILITIES)
             )
+        listing = None
+        if scope == PRODUCT_SCOPE:
+            listing = self._listing_target(
+                connection, columns["inquiry_id"], listing_market
+            )
+            if listing is None:
+                raise ValueError(
+                    "판매 페이지(상품 ID)나 마켓을 확인할 수 없는 문의라 판매 "
+                    "페이지 범위로 등록할 수 없습니다."
+                )
+            # Listing ids are only unique within one marketplace: Naver and
+            # Coupang ids share the same numeric range, so the market is part
+            # of the range and the existing market gate enforces it.
+            if applicability != f"{listing['market']}_ONLY":
+                raise ValueError(
+                    "판매 페이지 범위는 해당 판매 페이지의 마켓(%s)에만 적용할 "
+                    "수 있습니다." % listing["market"]
+                )
         clean_question = str(question or "").strip()
         clean_answer = str(answer or "").strip()
         if not clean_question:
@@ -1442,6 +1597,9 @@ class LearningRepository:
             metadata["cross_model_policy"] = True
             metadata["cross_model_policy_approved_by"] = str(actor or "") or None
             metadata["cross_model_policy_approved_at"] = now
+        if listing is not None:
+            metadata["common_learning_product_id"] = listing["product_id"]
+            metadata["common_learning_product_market"] = listing["market"]
         cursor = connection.execute(
             """
             INSERT INTO learning_examples(
