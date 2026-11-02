@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from functools import lru_cache
 from pathlib import Path
@@ -185,6 +185,7 @@ class AnswerConfig:
     model_catalog: dict[str, Any]
     install_schedule_rules: tuple[dict[str, Any], ...]
     learned_rules: tuple[dict[str, Any], ...] = ()
+    battery_catalog: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -385,6 +386,7 @@ def _load_cached(
         models=models,
         model_catalog=model_data["MODEL_CATALOG"],
         install_schedule_rules=enabled_schedules,
+        battery_catalog=model_data.get("BATTERY_CATALOG") or {},
     )
 
 
