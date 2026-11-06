@@ -47,6 +47,7 @@ from repositories.learning_repository import (
 from repositories.log_repository import LogRepository
 from repositories.naver_post_repository import NaverPostRepository
 from repositories.naver_posted_answer_repository import (
+    NaverMarketAnswerRepository,
     NaverPostedAnswerRepository,
 )
 from repositories.post_review_repository import PostReviewRepository
@@ -1478,22 +1479,18 @@ def comment_thread(inquiry: dict[str, Any]) -> list[dict[str, Any]]:
 def naver_answer_observations(
     database: Database, inquiry_id: int
 ) -> list[dict[str, Any]]:
-    """What this system has observed in Naver's single answer slot, in order.
+    """What this system has observed in Naver's ``answer`` field, in order.
 
-    These are **not** several coexisting comments, and must not be shown as
-    such. ``NaverPostedAnswerRepository.observe`` keys a row on
+    ``NaverPostedAnswerRepository.observe`` keys a row on
     ``sha256("NAVER_POSTED|{inquiry_id}|{body}")`` and clears ``is_current``
     on every row of the inquiry before marking the one it just saw, so a
-    second row means the text in that one slot changed between observations --
-    an edited or replaced answer. On the 26.10.22 snapshot 151 of 1,564
-    inquiries have more than one, and ``author_type`` is NULL on all 1,720
-    rows, so no author can be read here either.
+    second row means the text of that one field changed between observations.
+    ``author_type`` is NULL on every row, so no author can be read here.
 
-    The collected Naver payload carries no comment list at all: its
-    ``source_payload`` holds only ``answered``, ``createDate``, ``productId``,
-    ``questionId``, ``inquiryNo``, ``inquiryRegistrationDateTime`` and
-    ``answerContentId``. So this is the whole of what is available, and it is
-    labelled as an observation history rather than a conversation.
+    That field is the *first* answer only. The product Q&A API also lists
+    every answer under ``answers`` (read on 694758083: a chatbot answer and a
+    staff answer added 26 seconds later); those are kept in
+    ``naver_market_answers`` and shown in the answer history, not here.
     """
 
     history = NaverPostedAnswerRepository(database).history(int(inquiry_id))
@@ -1550,9 +1547,9 @@ def _render_comment_thread(
         return
     with st.expander(f"답변 관측 이력 ({len(observations)}건)", expanded=False):
         st.caption(
-            "네이버 응답에는 댓글 목록이 없고 답변 한 건만 제공됩니다. "
-            "아래는 그 한 건의 본문이 관측 시점마다 달라진 이력이며, "
-            "서로 다른 여러 댓글이 아닙니다. 작성자 구분 필드도 없습니다."
+            "네이버 응답의 대표 답변(첫 번째 답변) 본문이 관측 시점마다 "
+            "달라진 이력입니다. 같은 문의에 추가로 등록된 답변은 '답변 이력'에 "
+            "따로 표시됩니다. 작성자 구분 필드는 없습니다."
         )
         for item in observations:
             label = "현재 관측" if item["is_current"] else "이전 관측"
@@ -1593,6 +1590,11 @@ def _render_answer_history(
         inquiry,
         AnswerRepository(database).history_for_inquiry(inquiry_id),
         market_answer=market_answer,
+        market_answers=(
+            NaverMarketAnswerRepository(database).history(int(inquiry_id))
+            if market_of(inquiry.get("store_code")) == NAVER
+            else ()
+        ),
         source_label=answer_source_label,
         format_time=lambda value: format_datetime_kst(value, empty="시각 미기록"),
     )

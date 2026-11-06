@@ -8,6 +8,7 @@ from repositories.inquiry_repository import InquiryRepository
 from repositories.auto_post_repository import AutoPostRepository
 from repositories.log_repository import LogRepository, mask_sensitive_data
 from repositories.naver_posted_answer_repository import (
+    NaverMarketAnswerRepository,
     NaverPostedAnswerRepository,
 )
 from repositories.workflow_repository import WorkflowRepository
@@ -318,6 +319,33 @@ class InquirySyncService:
                             "sync_provenance": "NAVER_API_RESPONSE"
                         },
                     )
+                    # The other answers on the same question. Kept out of the
+                    # single posted-answer slot above, which Learning reads,
+                    # and recorded only: no state, draft or Learning changes.
+                    market_answers = work_item.get("posted_answers")
+                    if isinstance(market_answers, list) and market_answers:
+                        try:
+                            NaverMarketAnswerRepository(
+                                self.inquiries.database
+                            ).observe_all(
+                                inquiry_id=upsert.inquiry_id,
+                                answers=market_answers,
+                                source_api=str(
+                                    normalized.get("source_type") or "NAVER"
+                                ),
+                            )
+                        except Exception as capture_error:
+                            self.logs.record_inquiry(
+                                upsert.inquiry_id,
+                                "NAVER_MARKET_ANSWERS_CAPTURE_FAILED",
+                                "네이버 답변 목록 저장에 실패했지만 동기화는 계속됩니다.",
+                                level="WARNING",
+                                details={
+                                    "exception_type": (
+                                        capture_error.__class__.__name__
+                                    ),
+                                },
+                            )
                 failed_stage = "SELLER_ANSWER_OBSERVATION"
                 seller_answer = str(work_item.get("seller_answer") or "").strip()
                 if seller_answer:

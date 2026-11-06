@@ -48,6 +48,35 @@ def _bool(value: Any) -> bool | None:
     return None
 
 
+def _product_answers(value: Any) -> tuple[dict[str, Any], ...]:
+    """Each answer in a product question's ``answers`` list, in order.
+
+    ``answer`` holds only the first of them. Read on 694758083: a chatbot
+    answer at 15:45:36 and a staff answer at 15:46:02 were both in ``answers``
+    as ``{"answer", "createDate"}``, and ``answer`` was the chatbot one. No
+    entry carries an id or an author, so neither is invented here.
+    """
+
+    if not isinstance(value, list):
+        return ()
+    answers: list[dict[str, Any]] = []
+    for position, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("answer") or "").strip()
+        if not body:
+            continue
+        created = item.get("createDate")
+        answers.append({
+            "position": position,
+            "body": body,
+            "created_at": (
+                str(created).strip() if created not in (None, "") else None
+            ),
+        })
+    return tuple(answers)
+
+
 def derive_operational_metadata(
     title: Any,
     content: Any,
@@ -108,6 +137,8 @@ class NormalizedInquiry:
     seller_answer_id: str | None = None
     seller_answer_at: str | None = None
     seller_answer_author_type: str | None = None
+    #: Every answer the market lists for this question, in its order.
+    seller_answers: tuple[dict[str, Any], ...] = ()
 
     def to_work_item(self) -> dict[str, Any]:
         metadata = derive_operational_metadata(
@@ -152,6 +183,11 @@ class NormalizedInquiry:
                 }
                 if self.answered is True
                 else None
+            ),
+            "posted_answers": (
+                [dict(item) for item in self.seller_answers]
+                if self.answered is True
+                else []
             ),
             "registered_at": self.source_created_at,
             "analysis": metadata["analysis"],
@@ -266,6 +302,7 @@ class InquiryNormalizer:
             seller_answer_at=_source_time(
                 _first(payload, "answerRegistrationDateTime")
             ),
+            seller_answers=_product_answers(payload.get("answers")),
             raw_payload=self._safe_raw(
                 payload, self._PRODUCT_RAW_FIELDS
             ),

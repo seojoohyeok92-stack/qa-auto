@@ -146,3 +146,83 @@ class NaverPostedAnswerRepository:
         assert result is not None
         return result
 
+
+
+class NaverMarketAnswerRepository:
+    """Every answer Naver lists for a product question, each its own row.
+
+    Kept apart from :class:`NaverPostedAnswerRepository`, whose single current
+    row is what Learning feedback reads as the posted answer. Nothing here is
+    read by Learning, answer generation or auto-post.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def observe_all(
+        self,
+        *,
+        inquiry_id: int,
+        answers: list[dict[str, Any]],
+        source_api: str,
+    ) -> int:
+        """Record one response's ``answers``; returns how many were recorded.
+
+        An answer seen again only moves ``last_observed_at``. One that drops
+        out of a later response keeps its row, with an older
+        ``last_observed_at`` than the rest.
+        """
+
+        now = utc_now()
+        recorded = 0
+        with self.database.transaction() as connection:
+            for index, item in enumerate(answers, start=1):
+                if not isinstance(item, dict):
+                    continue
+                body = str(item.get("body") or "").strip()
+                if not body:
+                    continue
+                position = int(item.get("position") or index)
+                created = str(item.get("created_at") or "").strip() or None
+                remote_id = str(item.get("answer_id") or "").strip() or None
+                key = (
+                    f"ID:{remote_id}" if remote_id
+                    else f"CREATED:{created}" if created
+                    else f"POSITION:{position}"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO naver_market_answers(
+                        inquiry_id, answer_key, position, answer_body,
+                        body_sha256, market_answer_id, market_created_at,
+                        author_type, source_api, first_observed_at,
+                        last_observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(inquiry_id, answer_key, body_sha256) DO UPDATE SET
+                        position=excluded.position,
+                        author_type=COALESCE(excluded.author_type, author_type),
+                        source_api=excluded.source_api,
+                        last_observed_at=excluded.last_observed_at
+                    """,
+                    (
+                        int(inquiry_id), key, position, body,
+                        hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                        remote_id, created, item.get("author_type"),
+                        str(source_api), now, now,
+                    ),
+                )
+                recorded += 1
+        return recorded
+
+    def history(self, inquiry_id: int) -> list[dict[str, Any]]:
+        """Oldest first: the market's own time, then its order, then the row."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM naver_market_answers WHERE inquiry_id=?
+                ORDER BY COALESCE(market_created_at, ''), position, id
+                """,
+                (int(inquiry_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]

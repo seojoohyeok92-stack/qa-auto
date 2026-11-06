@@ -35,6 +35,9 @@ STAFF_EDIT = "직원 수정본"
 SENT_ANSWER = "Q&A Auto 전송 답변"
 MARKET_ANSWER = "마켓 등록 답변"
 MARKET_ANSWER_NOTE = "마켓에서 조회한 현재 답변 · 작성자 구분 정보 없음"
+NAVER_ANSWER = "네이버 등록 답변"
+NAVER_EARLIER_ANSWER = "네이버 이전 관측 답변"
+AUTHOR_UNKNOWN = "작성자 확인 불가"
 
 NO_GENERATED_ANSWER = "생성된 프로그램 답변 없음"
 
@@ -118,11 +121,53 @@ def registration_label(
     return "미등록"
 
 
+def market_answer_entries(
+    rows: Iterable[dict[str, Any]], *, format_time: Any = None
+) -> list[HistoryEntry]:
+    """One entry per answer Naver listed, oldest first.
+
+    ``rows`` are ``naver_market_answers`` rows. The latest observation is the
+    newest ``last_observed_at``; a row older than that was not in the most
+    recent response, and is said to be so rather than explained. Naver gives
+    no author, so none is shown unless a row carries one.
+    """
+
+    fmt = format_time or (lambda value: str(value or "").strip() or "시각 미기록")
+    rows = [row for row in rows if isinstance(row, dict)
+            and str(row.get("answer_body") or "").strip()]
+    if not rows:
+        return []
+    latest = max(str(row.get("last_observed_at") or "") for row in rows)
+    current = [row for row in rows if str(row.get("last_observed_at") or "") == latest]
+    entries: list[HistoryEntry] = []
+    number = 0
+    for row in rows:
+        author = str(row.get("author_type") or "").strip() or AUTHOR_UNKNOWN
+        times = (
+            f"등록 {fmt(row.get('market_created_at'))} · {author} · "
+            f"최초 관측 {fmt(row.get('first_observed_at'))}"
+        )
+        if row in current:
+            number += 1
+            label = f"{NAVER_ANSWER} {number}"
+            if len(current) > 1 and row is current[-1]:
+                label += " (최신)"
+            entries.append(HistoryEntry(label, str(row["answer_body"]), times))
+        else:
+            entries.append(HistoryEntry(
+                NAVER_EARLIER_ANSWER, str(row["answer_body"]),
+                times + f" · 마지막 관측 {fmt(row.get('last_observed_at'))}"
+                " · 최근 조회에서 보이지 않음",
+            ))
+    return entries
+
+
 def build_answer_history(
     inquiry: dict[str, Any],
     drafts: Iterable[dict[str, Any]],
     *,
     market_answer: str = "",
+    market_answers: Iterable[dict[str, Any]] = (),
     source_label: Any = lambda draft: str(draft.get("source") or "-"),
     format_time: Any = None,
 ) -> AnswerHistory:
@@ -208,7 +253,13 @@ def build_answer_history(
                 int(registered["id"]),
             ))
     market = str(market_answer or "").strip()
-    if market:
+    # Every answer Naver lists, when they were collected. ``market_answer`` is
+    # the first of them and is still what the comparisons below read, so the
+    # single entry is replaced rather than shown a second time.
+    listed = market_answer_entries(market_answers, format_time=fmt)
+    if listed:
+        entries.extend(listed)
+    elif market:
         entries.append(HistoryEntry(MARKET_ANSWER, market, MARKET_ANSWER_NOTE))
 
     # Compare the market reply with the text that would have gone out: the

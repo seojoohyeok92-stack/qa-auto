@@ -2365,6 +2365,52 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        39,
+        (
+            # Every answer Naver lists for one product question.
+            #
+            # ``naver_posted_answers`` models one answer slot: a new body clears
+            # ``is_current`` on the others, and Learning feedback reads that
+            # current row as "the answer that was posted". The product Q&A API
+            # also returns ``answers`` -- on 694758083 a chatbot answer and a
+            # staff answer added 26 seconds later -- and only the first of them
+            # reaches that slot. Writing the others into it would change what
+            # Learning reads, so they get a table of their own.
+            #
+            # No entry carries an id or an author. ``answer_key`` is the
+            # answer's own ``createDate`` (or its position when there is none),
+            # so two answers with the same text stay two rows, and a re-sync of
+            # the same answer updates ``last_observed_at`` instead of adding a
+            # row. A new body under the same key is a new row; nothing here says
+            # whether that was an edit.
+            #
+            # Additive only: a build that does not know this table ignores it.
+            """
+            CREATE TABLE IF NOT EXISTS naver_market_answers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inquiry_id INTEGER NOT NULL,
+                answer_key TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                answer_body TEXT NOT NULL,
+                body_sha256 TEXT NOT NULL,
+                market_answer_id TEXT,
+                market_created_at TEXT,
+                author_type TEXT,
+                source_api TEXT NOT NULL,
+                first_observed_at TEXT NOT NULL,
+                last_observed_at TEXT NOT NULL,
+                UNIQUE (inquiry_id, answer_key, body_sha256),
+                FOREIGN KEY (inquiry_id) REFERENCES inquiries(id)
+                    ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_naver_market_answers_inquiry
+            ON naver_market_answers(inquiry_id, last_observed_at)
+            """,
+        ),
+    ),
 )
 
 
