@@ -220,17 +220,6 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
      ("usb_port_count", "usb_present", "usb_version"), ()),
     (("랜포트", "랜 포트", "이더넷", "유선랜"),
      ("ethernet_port_count",), ()),
-    # Antenna reception. The registry routes 동축/안테나 to ``rf_terminal``,
-    # a name the integrated records do not use: they store the jack as
-    # ``rf_in`` / ``rf_antenna_input`` / ``port_antenna`` and reception as
-    # ``analog_tuner`` / ``digital_broadcast_standard`` / ``broadcast_system``.
-    # On 11344 ("동축케이블로만 시청이 가능한가요?", LH43BEHHLGFXKR) only
-    # ``rf_in`` survived the prompt budget, by sharing the token "rf";
-    # ``analog_tuner`` ranked 89th of 112 and was cut. Each name stays its own
-    # fact -- this only asks for them, it does not make one stand for another.
-    (("동축", "안테나", "지상파", "공중파", "방송 수신", "방송수신", "튜너"),
-     ("rf_terminal", "rf_in", "rf_antenna_input", "port_antenna",
-      "analog_tuner", "digital_broadcast_standard", "broadcast_system"), ()),
     (("베사", "vesa", "벽걸이", "브라켓", "브래킷"),
      ("vesa_mm",), ("accessory_vesa_mm",)),
     (("스피커", "소리", "사운드", "음량"),
@@ -666,14 +655,6 @@ def _normalized_value(value: object) -> str:
     return re.sub(r"\s+", "", str(value or "")).lower()
 
 
-# Words a requested field's name shares with unrelated fields.  Asking for
-# ``broadcast_system`` / ``digital_broadcast_standard`` (an antenna question)
-# lifted operating_system, safety_standard and quality_warranty_standard over
-# facts that used to be carried -- 10843/10919 lost tv_plus and multi_device.
-# The asked field itself still ranks first; only the borrowed word is dropped.
-_GENERIC_FIELD_NAME_TERMS = frozenset({"system", "standard"})
-
-
 def _rank_index(value: object, order: tuple[str, ...]) -> int:
     text = str(value or "").upper()
     return order.index(text) if text in order else len(order)
@@ -729,7 +710,7 @@ def select_prompt_facts(
         term for topic in topics or () for term in _terms(topic)
     }
     for field in asked:
-        wanted |= _terms(field.replace("_", " ")) - _GENERIC_FIELD_NAME_TERMS
+        wanted |= _terms(field.replace("_", " "))
 
     ordered = sorted(
         facts, key=lambda item: _fact_relevance(item, asked=asked, wanted=wanted),
@@ -1844,9 +1825,6 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
                 fields.extend(accessory_fields)
             continue
         fields.extend(accessory_fields)
-    if _asks_for_aux_output(text):
-        topics.append("aux")
-        fields.extend(AUX_OUTPUT_FIELDS)
     # The JSON catalog states attributes the retired Product Facts ontology
     # did not model. Which wording asks for them is decided in exactly one
     # place -- ``services.spec_attributes`` -- because this list and the supply
@@ -1858,28 +1836,6 @@ def fields_for_question(question: object) -> tuple[tuple[str, ...], tuple[str, .
     fields.extend(spec_fields)
     topics.extend(spec_topics)
     return tuple(dict.fromkeys(fields)), tuple(dict.fromkeys(topics))
-
-
-# "AUX" names a 3.5mm jack, not a direction. A monitor's AUX for "스피커
-# 연결" is its audio *output* -- 11279 (LS49DG930) asked exactly that and its
-# ``headphone_out`` was cut by the budget -- while "AUX 입력" asks whether the
-# product takes sound *in*, which no stored field records. So the output
-# fields are asked for only when the wording points outward and never when it
-# names an input: an output jack is not evidence of an input.
-AUX_TERMS = ("aux", "auxiliary", "보조 단자", "보조단자")
-AUX_OUTPUT_MARKERS = (
-    "스피커", "헤드폰", "이어폰", "출력", "아웃", "aux out", "aux-out",
-)
-AUX_INPUT_MARKERS = ("입력", "인풋", "input", "aux in", "aux-in")
-AUX_OUTPUT_FIELDS = ("headphone_out", "audio_out_mini_jack")
-
-
-def _asks_for_aux_output(text: str) -> bool:
-    if not any(term in text for term in AUX_TERMS):
-        return False
-    if any(marker in text for marker in AUX_INPUT_MARKERS):
-        return False
-    return any(marker in text for marker in AUX_OUTPUT_MARKERS)
 
 
 # Wording that names a component in order to take it *out* of the question:

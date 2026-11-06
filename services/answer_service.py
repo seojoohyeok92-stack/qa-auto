@@ -4052,28 +4052,6 @@ class AnswerService:
                 and not learning_evidence.get("conflict")
                 and validator_cleared
             )
-            # ``approved_learning_evidence`` is decided before GPT ② writes
-            # anything: it says which approved rows *may* settle the
-            # sub-question, not which ones the answer was written from. Where
-            # GPT ② composed the answer, a row it did not use is not evidence
-            # for it. Measured on 10942: 190232 and 318190 ("호환 불가", about
-            # 43-inch models) were IGNORED by GPT ②, yet recorded the
-            # "호환 가능" answer as verified by APPROVED_LEARNING. The
-            # publishing verdict does not change -- this path is already
-            # allowed by ``auto_post_allowed`` below whenever there is no
-            # conflict -- only what the record says verified the answer.
-            if (
-                gpt_understanding_usable
-                and hybrid_metadata.get("answer_pipeline")
-                == "GPT_UNDERSTAND_RETRIEVE_ANSWER"
-            ):
-                learning_verified = bool(
-                    learning_verified
-                    and {
-                        str(item)
-                        for item in learning_evidence.get("learning_ids") or ()
-                    } & gpt_used_learning
-                )
             # Three ways a sensitive product claim can be verified, and the
             # fourth is gone. PRODUCT_DB used to be a route that answered the
             # customer directly from the catalogue, so being on it was itself
