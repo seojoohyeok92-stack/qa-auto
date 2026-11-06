@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -148,6 +149,7 @@ def inquiry(
     product_order_id: str | None = None,
     inquiry_type: str = "CUSTOMER_INQUIRY",
     product_name: str | None = None,
+    registered_at: str = "2026-08-05T12:00:00+09:00",
 ) -> int:
     return InquiryRepository(database).upsert_work_item(
         {
@@ -161,7 +163,7 @@ def inquiry(
             "order_id": order_id,
             "product_order_id": product_order_id,
             "product_name": product_name,
-            "registered_at": "2026-08-05T12:00:00+09:00",
+            "registered_at": registered_at,
             "raw_json": {},
         }
     ).inquiry_id
@@ -456,6 +458,13 @@ def test_order_identifiers_are_normalized_from_safe_json_paths_only(
         ("product", True, "PRODUCT_DB"),
     ],
 )
+def _registered_now() -> str:
+    """Today in KST: the dashboard lists only the last three calendar months,
+    so a fixed date drops out of the list as the calendar moves on."""
+
+    return datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds")
+
+
 def _open_full_dashboard_inquiry(
     database: Database,
     monkeypatch,
@@ -502,6 +511,7 @@ def test_full_app_actual_324599122_shows_ready_order_and_enabled_answer(
         "324599122",
         "7월4일 주문 언제 배송되나요?",
         order_id="2026070448206811",
+        registered_at=_registered_now(),
     )
     AnswerRepository(database).create_program_draft(
         inquiry_id,
@@ -546,6 +556,7 @@ def test_full_app_actual_684104045_skips_lookups_and_enables_fallback(
         "684104045",
         "tv로도 사용하려면 어떻게 해야 하나요??",
         inquiry_type="PRODUCT_INQUIRY",
+        registered_at=_registered_now(),
     )
     app = _open_full_dashboard_inquiry(database, monkeypatch, "684104045")
 
