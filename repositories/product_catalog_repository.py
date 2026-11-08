@@ -39,6 +39,8 @@ DEFAULT_PRODUCT_CATALOG_PATH = (
     / "data" / "model_data_with_color.json"
 )
 
+ACCESSORY_CATALOG_SECTIONS = ("STAND_CATALOG", "BATTERY_CATALOG", "BRACKET_CATALOG")
+
 
 def normalize_model(value: object) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
@@ -377,6 +379,15 @@ def _load_catalog(path_text: str, mtime_ns: int, size: int) -> dict[str, Any]:
         # index canonicalises every record, and rebuilding the alias table
         # for each would cost what one ``facts_for_inquiry`` used to.
         "base_models": _base_model_index(catalog, aliases),
+        # Stands, batteries and brackets: products a customer asks about by
+        # naming the display they want to pair them with.
+        "accessory_models": {
+            normalize_model(key): str(key)
+            for section in ACCESSORY_CATALOG_SECTIONS
+            if isinstance(value.get(section), dict)
+            for key in value[section]
+            if normalize_model(key)
+        },
     }
 
 
@@ -398,6 +409,28 @@ class ProductCatalogRepository:
         """
         return dict(self.catalog().get("product_knowledge") or {})
 
+    def accessory_model_for_listing(
+        self, *, product_name: object = "", model_code: object = None,
+    ) -> str | None:
+        """The stand, battery or bracket this listing sells, when it sells one.
+
+        Read from the listing's own code or from the operator's alias for its
+        exact title -- the two places the catalogue already says which product
+        a listing is. Nothing is inferred from words in the title.
+        """
+
+        catalog = self.catalog()
+        accessories = catalog.get("accessory_models") or {}
+        if not accessories:
+            return None
+        aliases = catalog.get("aliases") or {}
+        for candidate in (
+            model_code, aliases.get(str(product_name or "").strip()),
+        ):
+            key = accessories.get(normalize_model(candidate))
+            if key:
+                return key
+        return None
 
     def base_model_identity(self, model_key: object) -> str | None:
         """The canonical base model this record describes, by the record.

@@ -381,10 +381,24 @@ FIELD_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ..
 #                           not an answer about a model the customer did not ask
 #                           about, and substituting it is the failure this
 #                           resolution exists to prevent.
+# LISTING_OPTION_MODEL      the inquiry named no model code but a model year
+#                           ("26년형"), and this listing's own option names
+#                           exactly one model for each year it mentioned
+# ACCESSORY_WITH_NAMED_DEVICE the listing sells a stand, battery or bracket and
+#                           the inquiry named the display to pair it with; both
+#                           are targets, because compatibility is a property
+#                           of the pair
 LISTING_FALLBACK = "LISTING_FALLBACK"
 INQUIRY_EXPLICIT_MODEL = "INQUIRY_EXPLICIT_MODEL"
 MULTI_MODEL_COMPARISON = "MULTI_MODEL_COMPARISON"
 UNRESOLVED_EXPLICIT_MODEL = "UNRESOLVED_EXPLICIT_MODEL"
+LISTING_OPTION_MODEL = "LISTING_OPTION_MODEL"
+ACCESSORY_WITH_NAMED_DEVICE = "ACCESSORY_WITH_NAMED_DEVICE"
+
+# Model years as an option states them ("26년형_LH43BEH UHD 43인치 TV") and as
+# a customer writes them ("26년형", "2026년형", "25년식").
+_OPTION_MODEL_YEAR = re.compile(r"(?<!\d)(?:20)?(\d{2})\s*년\s*형")
+_INQUIRY_MODEL_YEAR = re.compile(r"(?<!\d)(?:20)?(\d{2})\s*['’]?\s*년\s*(?:형|식)")
 
 # "이 제품이랑 43BEF 차이가 뭐예요?" names one model and points at another.
 # Deixis, not a product: the phrase means whichever listing the customer is
@@ -2143,6 +2157,7 @@ class ProductKnowledgeService:
         # title, so a title can never nominate itself as an explicit target.
         resolution = self._resolve_inquiry_targets(
             combined, listing_model=model_code, listing_id=key,
+            listing_name=product_name,
         )
 
         def _catalog(target: InquiryTarget) -> ProductKnowledgeResult:
@@ -2256,6 +2271,7 @@ class ProductKnowledgeService:
 
     def _resolve_inquiry_targets(
         self, text: str, *, listing_model: object, listing_id: str,
+        listing_name: object = "",
     ) -> TargetResolution:
         """Which product(s) this inquiry is about.
 
@@ -2287,6 +2303,11 @@ class ProductKnowledgeService:
         stated = self._stated_models_without_spec_words(text)
 
         def _listing_only(reason: str) -> TargetResolution:
+            optioned = self._option_year_targets(
+                text, listing_target=listing_target, stated=stated,
+            )
+            if optioned is not None:
+                return optioned
             return TargetResolution(
                 (listing_target,), reason, listing_code or None,
                 listing_identity, stated,
@@ -2338,10 +2359,102 @@ class ProductKnowledgeService:
             and (listing_code or listing_id)
         ):
             targets.insert(0, listing_target)
+        # "LS43FM701 호환되나요" on a stand's page names the display, not a
+        # replacement for the stand. Answering it needs the stand's own limits
+        # -- its recommended size, load and VESA -- as much as the display's,
+        # so the listing stays a target beside the model that was named.
+        accessory = self.catalog_repository.accessory_model_for_listing(
+            product_name=listing_name, model_code=listing_code,
+        )
+        if accessory and not any(target.is_listing for target in targets):
+            targets.insert(0, replace(
+                listing_target,
+                model_code=listing_code or accessory,
+                identity=listing_identity or accessory,
+            ))
+            return TargetResolution(
+                tuple(targets), ACCESSORY_WITH_NAMED_DEVICE,
+                listing_code or accessory, listing_identity or accessory,
+                stated,
+            )
         return TargetResolution(
             tuple(targets),
             MULTI_MODEL_COMPARISON if len(targets) > 1 else INQUIRY_EXPLICIT_MODEL,
             listing_code or None, listing_identity, stated,
+        )
+
+    def _option_year_targets(
+        self, text: str, *, listing_target: InquiryTarget,
+        stated: StatedModels,
+    ) -> TargetResolution | None:
+        """The models this listing's options name for the years asked about.
+
+        "25년형과 26년형 차이가 뭔가요" names no model code, and the listing's
+        API identity is only the option it was registered with -- 694966530
+        was answered from the 24년형 record for a customer holding a 26년형.
+        The listing's own option values say which model each year is
+        ("25년형_LH43BEF UHD 43인치 TV"), and each model is then identified by
+        the catalogue's ordinary lookup.
+
+        Only when every year the customer mentioned names exactly one model on
+        this listing. Anything less leaves the listing as the subject, as it
+        was: a year this listing does not sell, or one that two of its
+        options share, is not settled by picking one.
+        """
+
+        years = list(dict.fromkeys(_INQUIRY_MODEL_YEAR.findall(text)))
+        listing_id = str(listing_target.product_id or "").strip()
+        if not years or not listing_id:
+            return None
+        knowledge = self.catalog_repository.product_knowledge()
+        by_year: dict[str, dict[str, str]] = {}
+        for row in knowledge.get("listing_facts", ()) or ():
+            if not isinstance(row, dict) or row.get("field") != "option_value":
+                continue
+            if listing_id not in {
+                str(item) for item in row.get("source_product_ids") or ()
+            }:
+                continue
+            value = str(row.get("value") or "")
+            option_years = set(_OPTION_MODEL_YEAR.findall(value))
+            if len(option_years) != 1:
+                continue
+            year = option_years.pop()
+            found = self.catalog_repository.models_stated_in(
+                value.replace("_", " "))
+            for _token, model_key, identity in found.resolved:
+                by_year.setdefault(year, {})[identity] = model_key
+        chosen: list[tuple[str, str]] = []
+        for year in years:
+            models = by_year.get(year) or {}
+            if len(models) != 1:
+                return None
+            chosen.append(next(iter(models.items())))
+        api_model = self._integrated_exact_model_for_listing(listing_id)
+        api_identity = (
+            _settled_identity(api_model, self.catalog_repository)
+            if api_model else None
+        )
+        own = {item for item in (listing_target.identity, api_identity) if item}
+        if all(identity in own for identity, _key in chosen):
+            # Only the listing's own model was asked about: nothing to change.
+            return None
+        targets: list[InquiryTarget] = []
+        for identity, model_key in dict.fromkeys(chosen):
+            if identity in own:
+                # Looked up exactly as the listing always is, and labelled by
+                # the model that lookup settles rather than a title fragment.
+                targets.append(replace(
+                    listing_target, identity=api_identity or identity))
+            else:
+                targets.append(InquiryTarget(
+                    model_code=model_key, identity=identity,
+                    product_id="", is_listing=False,
+                ))
+        return TargetResolution(
+            tuple(targets), LISTING_OPTION_MODEL,
+            listing_target.model_code or api_model or None,
+            api_identity or listing_target.identity, stated,
         )
 
     @staticmethod

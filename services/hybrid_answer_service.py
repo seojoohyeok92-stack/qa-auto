@@ -166,7 +166,48 @@ class HybridAnswerService:
         )
         listing_model = getattr(knowledge, "listing_model", None)
         reason = getattr(knowledge, "target_resolution_reason", None)
-        if targets and (len(targets) > 1 or targets[0] != listing_model):
+        # Two records side by side are not two complete specifications: one
+        # model's record can hold a field the other's simply never collected.
+        # 694966530's 25년형 and 26년형 records carry 91 and 94 facts, and a
+        # field present on one side only says nothing about the other.
+        uneven_records = (
+            " 모델마다 기록된 항목이 다를 수 있습니다. 한 모델에만 있는 항목은"
+            " 다른 모델에 그 기능·사양이 없다는 뜻이 아니므로 차이로 단정하지"
+            " 마세요. 두 모델 모두에 같은 항목이 있고 값이 다를 때만 차이로"
+            " 안내하고, 비교에 필요한 항목이 한쪽에 없으면 확인이 필요하다고"
+            " 안내하세요."
+        )
+        if targets and reason == "ACCESSORY_WITH_NAMED_DEVICE":
+            context["product_identity"].update({
+                "listing_model": listing_model,
+                "answer_target_models": list(targets),
+                "usage": (
+                    "현재 판매 상품(listing_model)은 거치대·배터리·브라켓 같은"
+                    " 액세서리이고, 고객은 함께 쓰려는 기기 모델을 언급했습니다."
+                    " 아래 사양 근거는 model_code 로 판매 상품과 기기가 구분돼"
+                    " 있습니다. 호환 여부는 판매 상품의 권장 인치·허용 무게·VESA"
+                    " 조건과 기기의 인치·무게·VESA 를 대조해서만 판단하세요."
+                    " VESA 가 맞아도 권장 인치나 허용 무게 범위를 벗어나면, 판매"
+                    " 상품 근거에 그 경우를 허용하는 조건이 명시돼 있지 않은 한"
+                    " 호환 가능으로 단정하지 말고 확인이 필요하다고 안내하세요."
+                    " 다른 거치대·기기에 대한 과거 답변은 이 조합의 호환 확정"
+                    " 근거로 쓰지 마세요."
+                ),
+            })
+        elif targets and reason == "LISTING_OPTION_MODEL":
+            context["product_identity"].update({
+                "listing_model": listing_model,
+                "answer_target_models": list(targets),
+                "usage": (
+                    "고객이 언급한 연식을 판매 페이지의 옵션 표기로 확인한"
+                    " 모델(answer_target_models)입니다. 아래 사양 근거는 각"
+                    " 모델의 것이며 model_code 로 구분됩니다. listing_model 은"
+                    " 판매 페이지에 등록된 기본 모델일 뿐이므로, 언급된 연식의"
+                    " 사양으로 listing_model 의 사양을 대신 사용하지 마세요."
+                    + (uneven_records if len(targets) > 1 else "")
+                ),
+            })
+        elif targets and (len(targets) > 1 or targets[0] != listing_model):
             context["product_identity"].update({
                 "listing_model": listing_model,
                 "answer_target_models": list(targets),
@@ -177,6 +218,7 @@ class HybridAnswerService:
                     " 대해 답하고, listing_model 의 사양을 대신 사용하지"
                     " 마세요. 주문·배송·설치일은 이 고객의 실제 주문 기준"
                     " 그대로이며, 지목된 모델 때문에 바뀌지 않습니다."
+                    + (uneven_records if len(targets) > 1 else "")
                 ),
             })
         elif reason == "UNRESOLVED_EXPLICIT_MODEL":

@@ -40,6 +40,10 @@ from .text_utils import (
 )
 
 
+# Samsung monitor model codes as the battery catalog writes them: S32DM700,
+# S32BM701. "LS32FM700M-2MS" and "LS32BM701UKXKR" carry one inside.
+_MONITOR_MODEL_CODE = re.compile(r"S\d{2}[A-Z]{2}\d{3}")
+
 # A body that already opens with a figure ("1~2주", "3영업일") or with an
 # immediacy statement has answered the timing question itself.
 _DIRECT_TIMING_ANSWER = re.compile(
@@ -1093,6 +1097,31 @@ class AnswerEngine:
             return self.yes("폐가전수거", self.config.shipping["old_appliance_pickup_answer"], "방문설치 상품의 폐가전 수거 안내입니다.")
         return self.need_info("폐가전수거", self.config.shipping["old_appliance_pickup_answer"], "방문설치 상품 여부 확인이 필요합니다.")
 
+    def _battery_lists_named_monitors(self, question: str) -> bool:
+        """Whether every monitor model the question names is on the battery's list.
+
+        The M7 sentence says M7 works with the battery, and "m7" is found
+        inside model codes as well as on its own: "LS32FM700M-2MS" holds it
+        in "fm7". 10942 asked about that model -- a moving-style set, not on
+        the list -- and was told it is compatible; staff corrected it. The
+        43-inch M7s (LS43FM703, LS43BM702) are off the list too, and staff
+        answered both as not compatible.
+
+        The catalog lists the monitors the battery fits by model code, so a
+        named model is checked against that list. A question naming no model
+        code keeps the sentence as before.
+        """
+
+        named = set(_MONITOR_MODEL_CODE.findall(question.upper()))
+        if not named:
+            return True
+        listed: set[str] = set()
+        for battery in self.config.battery_catalog.values():
+            if isinstance(battery, dict):
+                text = str(battery.get("available_monitor") or "").upper()
+                listed.update(_MONITOR_MODEL_CODE.findall(text.replace(" ", "")))
+        return named <= listed
+
     def _stand_or_battery(self, product: str, question: str) -> AnswerResult | None:
         q = compact(question)
         p = compact(product)
@@ -1106,6 +1135,8 @@ class AnswerEngine:
 
         if any(k in p + q for k in ["vipb01", "삼탠배터리", "배터리"]):
             if "m7" in q:
+                if not self._battery_lists_named_monitors(question):
+                    return self.no_answer("배터리호환/목록외모델", "배터리 호환 목록에 없는 모니터 모델코드가 포함된 문의는 자동답변하지 않습니다.")
                 return self.yes("배터리호환", self.config.models["battery_rules"]["m7_answer"], "M7 배터리 사용 및 PD 단자 사용불가 안내입니다.")
             if any(k in q for k in ["m5", "ls32dm5", "ls27dm5", "ls32fm5", "ls27fm5"]):
                 if any(k in q for k in ["안맞", "안 맞", "단자", "케이블"]):
