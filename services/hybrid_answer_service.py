@@ -476,6 +476,26 @@ class HybridAnswerService:
             exact_model_for=_exact_model_for_listing,
         )
         learning_context["approved_learning_evidence"] = decision.to_dict()
+        # A settled conflict used to change only this record: both figures
+        # still reached GPT ② with nothing saying which one answers the field.
+        # The verdict is written onto the row the model reads, per field, so
+        # the losing figure is not used for that field and the rest of the row
+        # stays evidence.
+        resolutions: dict[Any, list[dict[str, Any]]] = {}
+        for settled in decision.settled:
+            resolutions.setdefault(settled.get("learning_id"), []).append({
+                "field_key": settled.get("field_key"),
+                "catalog_value": settled.get("fact_value"),
+                "use": (
+                    "THIS_ROW"
+                    if settled.get("resolution")
+                    == learning_evidence_policy.LEARNING_WINS
+                    else "PRODUCT_CATALOG"
+                ),
+            })
+        for row in learning_context.get("similar_approved_answers") or ():
+            if isinstance(row, dict) and row.get("learning_example_id") in resolutions:
+                row["catalog_conflicts"] = resolutions[row["learning_example_id"]]
         if not decision.conflict:
             return learning_context
         disputed = {

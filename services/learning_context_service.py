@@ -163,6 +163,9 @@ _LEARNING_ITEM_PROMPT_DROP: frozenset[str] = frozenset(
         # the customer's question. This projection is a deny-list, so leaving
         # them out here would have put all three in the prompt.
         "attribute_state", "query_attributes", "answer_attributes",
+        # Read by the PK precedence; what it decided reaches the model as
+        # ``catalog_conflicts`` instead.
+        "operator_approval", "approved_at",
     }
 )
 _LEARNING_PROMPT_KEYS: frozenset[str] = frozenset(
@@ -1979,6 +1982,19 @@ class LearningContextService:
                 "catalogue fact, answer from the row and do not hedge the "
                 "answer over that disagreement. Two such rows that contradict "
                 "each other are a CONFLICT -- do not choose between them."
+            ),
+            # Written by the PK precedence onto the row it settled: an
+            # operator's per-item approval within three months outranks the
+            # catalogue, an older one does not.
+            "CATALOG_CONFLICTS": (
+                "A row carrying catalog_conflicts disagrees with the product "
+                "catalogue on each listed field_key, and that disagreement is "
+                "already settled. use PRODUCT_CATALOG: for that field answer "
+                "from the catalogue value and do not use this row's figure. "
+                "use THIS_ROW: an operator approved this row within the last "
+                "three months, so for that field answer from this row instead "
+                "of the catalogue value, without hedging over the difference. "
+                "Everything else the row says stays usable as usual."
             ),
             # Keyed by source rather than status: the row is an ordinary
             # CANDIDATE, and this says what its only grounds may be used for.

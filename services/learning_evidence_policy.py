@@ -33,7 +33,7 @@ a data conflict: both reach GPT ②, which judges which one applies.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
@@ -203,6 +203,9 @@ class LearningEvidenceDecision:
     learning_ids: tuple[int, ...] = ()
     subquestions: tuple[str, ...] = ()
     conflicts: tuple[dict[str, Any], ...] = dataclass_field(default=())
+    # PK ↔ Learning conflicts the confirmed precedence decided, each with its
+    # ``resolution`` (LEARNING or PRODUCT_FACT).
+    settled: tuple[dict[str, Any], ...] = dataclass_field(default=())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +215,7 @@ class LearningEvidenceDecision:
             "learning_ids": list(self.learning_ids),
             "subquestions": list(self.subquestions),
             "conflicts": [dict(item) for item in self.conflicts],
+            "settled": [dict(item) for item in self.settled],
         }
 
 
@@ -337,6 +341,45 @@ def human_approved_trust(item: Mapping[str, Any]) -> bool:
     return classify_provenance(item) in HUMAN_APPROVED_PROVENANCES
 
 
+# What only the operator's "마켓 판매자 답변 Learning 승인" action writes
+# (``LearningService.capture_verified_posted_answer``, reached from
+# ``ApprovalService`` one inquiry at a time). On the 26.11.12 server copy all
+# 708 SELLER_ANSWER_VERIFIED rows carry it and each has its own
+# NAVER_POSTED_ANSWER_APPROVED_FOR_LEARNING event; a row merely flagged
+# human_verified by an import does not.
+_PER_ITEM_POSTED_APPROVAL = "HUMAN_VERIFIED_NAVER_POSTED"
+
+
+def operator_approval_class(item: Mapping[str, Any]) -> str | None:
+    """The provenance class when a person approved this row one at a time.
+
+    APPROVED_EDITED/UNEDITED as before, plus a seller answer the operator
+    approved through the per-item approval path. None for anything else --
+    imports, bulk verification, promoted history.
+
+    A row projected into ``similar_approved_answers`` has no
+    ``metadata_json``; the projection carries the verdict as
+    ``operator_approval`` instead, and that is read first.
+    """
+
+    if "operator_approval" in item:
+        value = str(item.get("operator_approval") or "")
+        return value or None
+    provenance = classify_provenance(item)
+    if provenance in HUMAN_APPROVED_PROVENANCES:
+        return provenance
+    metadata = item.get("metadata_json")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    if (
+        provenance == SELLER_ANSWER_VERIFIED
+        and metadata.get("facts_authority") == _PER_ITEM_POSTED_APPROVAL
+        and str(metadata.get("verified_by") or "").strip()
+        and str(metadata.get("verified_at") or "").strip()
+    ):
+        return provenance
+    return None
+
+
 def classify_provenance(item: Mapping[str, Any]) -> str:
     """Which kind of answer a Learning row actually is."""
 
@@ -447,6 +490,10 @@ _TEMPORARY_LEAD_TIME = re.compile(
     # the customer chose, not how long the product takes.
     r"|차이|오차"
 )
+# "배송은 영업일기준 2일~3일 정도 소요 되며 배송지연은 없습니다" (319183) says
+# there is *no* delay; reading 지연 there as a temporary lead time threw away
+# the product's ordinary one. Only the negated phrase is set aside.
+_NO_DELAY = re.compile(r"(?:배송|출고|설치)?\s*지연(?:은|이|도)?\s*(?:없|않)")
 # A named day is one order's schedule, never a lead time.
 _SPECIFIC_DAY = re.compile(
     r"\d{1,2}\s*월\s*\d{1,2}\s*일|(?<![\d.])\d{1,2}\s*/\s*\d{1,2}(?!\d)"
@@ -496,7 +543,7 @@ def general_delivery_estimate_claims(
             continue
         if (
             _OTHER_SUBJECT.search(sentence)
-            or _TEMPORARY_LEAD_TIME.search(sentence)
+            or _TEMPORARY_LEAD_TIME.search(_NO_DELAY.sub("", sentence))
             or _SPECIFIC_DAY.search(sentence)
         ):
             continue
@@ -834,7 +881,7 @@ def fact_conflict_winner(
         str(item.get("answer") or "")
     ):
         return None
-    if classify_provenance(item) not in HUMAN_APPROVED_PROVENANCES:
+    if operator_approval_class(item) is None:
         # Approved, but not one at a time. The catalogue stays in front.
         return PRODUCT_FACT_WINS
     approved = approval_time(item)
@@ -1009,6 +1056,7 @@ def fact_conflicts(
         # sentence contradict a verified absence. An answer can only
         # contradict a fact it talks about.
         routed, fragments = _fields_the_text_is_about(item.get("answer"))
+        sentences = _claim_sentences(item.get("answer"))
         for fact in facts:
             field_key = getattr(fact, "field_key", "")
             if allowed is not None and field_key not in allowed:
@@ -1017,9 +1065,23 @@ def fact_conflicts(
                 continue
             value = getattr(fact, "value", None)
             polarity = value_polarity(value)
+            # The polarity of the sentences that talk about this field, not of
+            # the whole answer. "HDMI케이블을 통해 연결 가능한 제품 입니다 ...
+            # 애플 미러링은 지원하지 않습니다" reached ``ethernet`` through its
+            # HDMI sentence and contradicted ``ethernet = 1`` with the
+            # mirroring sentence's "아니요" (318201, 319310, 61828 on the
+            # 26.11.12 copy). When no single sentence names the field, the
+            # whole answer is read as before.
+            about = [
+                sentence for sentence in sentences
+                if _is_about_field(field_key, *_fields_the_text_is_about(sentence))
+            ]
+            field_polarity = (
+                detect_polarity(" ".join(about)) if about else answer_polarity
+            )
             opposed_polarity = (
-                answer_polarity != "UNCERTAIN"
-                and polarity not in {"UNCERTAIN", answer_polarity}
+                field_polarity != "UNCERTAIN"
+                and polarity not in {"UNCERTAIN", field_polarity}
             )
             # A verified count must also be able to contradict an approved
             # answer that states a different count; neither text carries a
@@ -1260,6 +1322,7 @@ def evaluate(
     # sub-question goes back to ordinary evidence instead of CONFLICT. Where
     # nothing may decide, the conflict travels on exactly as before.
     settled_against_learning: set[Any] = set()
+    settled: list[dict[str, Any]] = []
     unsettled: list[dict[str, Any]] = []
     # Two operator-approved common Learnings that disagree with each other are
     # a standoff, not a win. Both outrank the catalogue, so granting the win
@@ -1296,12 +1359,28 @@ def evaluate(
             ):
                 unsettled.append(conflict)
                 continue
+            settled.append({**conflict, "resolution": LEARNING_WINS})
             continue
         if winner == PRODUCT_FACT_WINS:
             settled_against_learning.add(learning_id)
+            settled.append({**conflict, "resolution": PRODUCT_FACT_WINS})
             continue
         unsettled.append(conflict)
     against_facts = tuple(unsettled)
+    decision = _evaluate_remaining(
+        context, approved, against_facts, settled_against_learning,
+    )
+    # Which side won each settled conflict travels with the decision, so the
+    # prompt can tell GPT ② which figure answers that field.
+    return replace(decision, settled=tuple(settled))
+
+
+def _evaluate_remaining(
+    context: Mapping[str, Any],
+    approved: list[dict[str, Any]],
+    against_facts: tuple[dict[str, Any], ...],
+    settled_against_learning: set[Any],
+) -> LearningEvidenceDecision:
     # A conflict belongs to the sub-question it was found under, and each one
     # already records which. Refusing the whole inquiry discarded the Learning
     # of every other atom with it: on "피벗? 높낮이? 각도? 스피커?" one

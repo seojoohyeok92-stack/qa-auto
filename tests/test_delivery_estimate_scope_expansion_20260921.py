@@ -1053,3 +1053,21 @@ def test_G_compound_attaches_the_estimate_to_the_duration_atom_only(database):
         row = _row(context, other)
         assert row["source"] != "GENERAL_DELIVERY_ESTIMATE"
         assert not row.get("general_delivery_estimate")
+
+
+# ------------------------------------- 부정된 "지연"은 임시 배송기간이 아니다
+@pytest.mark.parametrize("answer, expected", [
+    # 319183: "배송지연은 없습니다" 는 지연이 없다는 말이다.
+    ("안녕하세요. 금일 주문후 13일 요청 하시면 됩니다. 배송은 영업일기준 2일~3일"
+     " 정도 소요 되며 배송지연은 없습니다. 감사합니다.",
+     ("배송은 영업일기준 2일~3일 정도 소요 되며 배송지연은 없습니다.",)),
+    # 실제 지연은 여전히 임시 기간이다.
+    ("현재 물량 증가로 배송이 지연되어 약 2주 정도 소요됩니다.", ()),
+    ("감사페스티벌 여파로 배송까지 1~2주 정도 소요되고 있습니다.", ()),
+])
+def test_negated_delay_does_not_discard_the_lead_time(answer, expected):
+    from services.learning_evidence_policy import (
+        general_delivery_estimate_claims,
+    )
+
+    assert general_delivery_estimate_claims(answer) == expected

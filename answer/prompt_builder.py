@@ -162,7 +162,8 @@ class PromptBuilder:
         " 질문은 답한 것이므로 unresolved 로 남기지 않되 호환된다/안 된다고"
         " 단정하지 않는다. 현재 상품의 호환 조건도 근거에 없으면 unresolved 로"
         " 남긴다. 후보의 수치와 Product Catalog 수치가 다르면 Product Catalog 를"
-        " 따른다. 근거에 없는 항목은 '-'·'미확인'처럼 나열하지 않는다.",
+        " 따른다(단, 후보의 catalog_conflicts 에 use THIS_ROW 로 표시된 필드는"
+        " 그 후보를 따른다). 근거에 없는 항목은 '-'·'미확인'처럼 나열하지 않는다.",
         # A general lead time and this customer's schedule are different
         # facts, and only the second is DPS's. The evidence map says which one
         # an item may be answered from (source GENERAL_DELIVERY_ESTIMATE).

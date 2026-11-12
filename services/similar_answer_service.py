@@ -25,6 +25,7 @@ from services.learning_evidence_policy import (
     classify_provenance,
     contamination_reason,
     estimation_reason,
+    operator_approval_class,
     order_identifier_request_reason,
     quantities_conflict,
 )
@@ -247,6 +248,12 @@ def _has_human_conflict_authority(item: dict[str, Any]) -> bool:
     one. Rows outside it keep every other path they had -- they are still
     retrieved, still ranked, still offered as evidence. They just no longer
     delete each other.
+
+    Per-item approved seller answers (``operator_approval_class``) are
+    deliberately not added here although the PK precedence accepts them. This
+    resolver's POLICY/GENERAL scope has no product boundary; on the 26.11.12
+    copy admitting them removed another product's delivery rows in 15 pools
+    (a parcel item's "날짜 지정 불가" deleting an installed TV's lead time).
     """
 
     return classify_provenance(item) in HUMAN_APPROVED_PROVENANCES
@@ -1404,6 +1411,14 @@ class SimilarAnswerService:
                     or market_from_store_code(item.get("store_code"))
                 ),
                 "source_product_id": item.get("source_product_id"),
+                # The approval facts the PK precedence reads. This projection
+                # carries no ``metadata_json``, so without them every row read
+                # as unapproved and the catalogue always won.
+                "operator_approval": operator_approval_class(item),
+                "approved_at": (
+                    _effective_time(item).isoformat()
+                    if _effective_time(item) is not None else None
+                ),
                 "authority": (
                     "APPROVED"
                     if (item.get("metadata_json") or {}).get("human_verified") is True
