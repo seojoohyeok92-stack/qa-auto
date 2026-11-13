@@ -239,7 +239,8 @@ def test_confirmed_schedule_is_answered_from_dps() -> None:
 
     assert source_of(result) == "dps"
     assert route_of(result) == "DELIVERY_WITH_INSTALLATION_DATE"
-    assert UPCOMING_DATE_KR in result.answer
+    month, day = (int(part) for part in UPCOMING_DATE.split("-")[1:])
+    assert f"고객님의 배송일정 조회시 {month}월 {day}일로 예상됩니다." in result.answer
 
 
 def test_dps_success_without_a_confirmed_date_invents_nothing() -> None:

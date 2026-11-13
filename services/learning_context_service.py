@@ -38,6 +38,7 @@ from repositories.feedback_signal_provenance_repository import (
 )
 from services.learning_evidence_policy import (
     _claim_sentences,
+    asks_dated_arrival,
     contamination_reason,
     general_delivery_estimate_claims,
     order_identifier_request_reason,
@@ -979,6 +980,7 @@ class LearningContextService:
         order_scope_by_question: dict[str, bool | None] = {}
         pre_purchase_by_question: dict[str, bool] = {}
         timing_by_question: dict[str, bool] = {}
+        dated_arrival_by_question: dict[str, bool] = {}
         schedule_by_question: dict[str, bool | None] = {}
         # A validated order id on the inquiry proves the order exists whatever
         # the wording says, so it settles the same question the understanding
@@ -1184,6 +1186,16 @@ class LearningContextService:
             timing_by_question[question] = bool(
                 atomic is not None
                 and str(atomic.requested_attribute).upper() == TIMING_ATTRIBUTE
+            )
+            # "오늘 주문하면 내일 오나요?" asks whether a day works; before an
+            # order exists it is answered with the lead time (operator policy,
+            # 2026-11-13), whichever attribute GPT ① gave it.
+            dated_arrival_by_question[question] = bool(
+                atomic is not None
+                and str(atomic.action).upper() in {
+                    "DELIVERY_DEADLINE_CONFIRMATION", "DELIVERY_POLICY",
+                }
+                and asks_dated_arrival(atomic.text)
             )
 
         def merged(key: str, limit: int | None = None) -> list[dict[str, Any]]:
@@ -1734,15 +1746,31 @@ class LearningContextService:
             general_estimate_cases: list[
                 tuple[dict[str, Any], tuple[str, ...]]
             ] = []
-            if timing_by_question.get(question) and (
+            if (timing_by_question.get(question) and (
                 pre_purchase_delivery
                 or (schedule_specific and not confirmed_schedule)
+            )) or (
+                dated_arrival_by_question.get(question)
+                and pre_purchase_delivery
             ):
                 general_estimate_rows = general_estimates(
                     approved_for_question, "answer",
                 )
-                general_estimate_cases = general_estimates(
-                    historical_for_question, "seller_answer",
+                # One same-product row: the most recently approved.
+                general_estimate_rows = sorted(
+                    general_estimate_rows,
+                    key=lambda pair: str(
+                        pair[0].get("approved_at")
+                        or pair[0].get("source_date") or ""
+                    )[:19],
+                    reverse=True,
+                )[:1]
+                # The approved, most recent same-product lead time is the
+                # answer; a historical case's older figure beside it is the
+                # mix that held these answers. Cases speak only when no
+                # Learning does.
+                general_estimate_cases = [] if general_estimate_rows else (
+                    general_estimates(historical_for_question, "seller_answer")
                 )
             general_estimate_claims = sorted(
                 (

@@ -719,7 +719,7 @@ def test_delivery_with_order_always_uses_dps(
 
     metadata = outcome.draft["metadata_json"]
     assert outcome.result.answer == DELIVERY_DATE_ANSWER.format(
-        delivery_date="2026년 8월 5일"
+        delivery_date="8월 5일"
     )
     assert metadata["generation_mode"] == "DPS"
     assert metadata["template_override"] is False

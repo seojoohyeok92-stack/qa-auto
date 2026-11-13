@@ -42,6 +42,7 @@ CUSTOMER_DATE_PATTERN = re.compile(
     r"(?<!\d)(20\d{2})\s*(?:년|[-./])\s*(\d{1,2})\s*"
     r"(?:월|[-./])\s*(\d{1,2})\s*(?:일)?(?!\d)"
 )
+_MONTH_DAY_PATTERN = re.compile(r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일")
 UNAVAILABLE_DATE_PHRASES = (
     "구체적인 배송·설치 예정일을 확인할 수 없습니다",
     "설치 예정일을 확인할 수 없습니다",
@@ -517,6 +518,17 @@ class AnswerValidator:
                 answer_dates.add(parsed.isoformat())
         expected_date = parse_date_value(installation_date)
         expected = expected_date.isoformat() if expected_date else None
+        # The fixed DPS wording names the month and day only ("11월 14일로
+        # 예상됩니다"). A year-less date counts as the DPS date when its month
+        # and day are the DPS date's, and as an unverified date otherwise.
+        for match in _MONTH_DAY_PATTERN.finditer(CUSTOMER_DATE_PATTERN.sub(" ", text)):
+            month, day = (int(part) for part in match.groups())
+            answer_dates.add(
+                expected
+                if expected_date is not None
+                and (expected_date.month, expected_date.day) == (month, day)
+                else f"--{month:02d}-{day:02d}"
+            )
         if route == "DELIVERY_WITH_INSTALLATION_DATE":
             add(
                 "DELIVERY_DATE_REQUIRED",
@@ -536,8 +548,11 @@ class AnswerValidator:
         answer_times = {match.group(0).strip() for match in clock_pattern.finditer(text)}
         add(
             "DELIVERY_TIME_GROUNDED",
+            # The fixed DPS wording carries no visit time even when DPS has
+            # one; a time that is stated must still be DPS's own.
             (
-                str(installation_time).strip() in text
+                answer_times <= {str(installation_time).strip()}
+                or str(installation_time).strip() in text
                 if installation_time
                 else not answer_times
             ),

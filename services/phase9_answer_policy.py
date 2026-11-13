@@ -24,19 +24,21 @@ ORDER_ID_REQUEST_ANSWER = format_final_answer(
 주문번호를 확인해주시면 확인 후 배송 또는 설치 예정일을 조회해 안내드리겠습니다."""
 )
 
+# Operator-fixed wording (2026-11-13) for a valid DPS date, with or without a
+# visit time: the date is DPS's month and day, nothing else is added.
 DELIVERY_DATE_ANSWER = format_final_answer(
-    """확인 결과 설치 예정일은 {delivery_date}입니다.
-
-현재 조회 결과에서 정확한 방문 시간까지는 확인되지 않습니다. 방문 시간은 설치일 전날 또는 당일 담당 기사님이 연락드려 안내할 예정입니다.
-
-기사님의 배차 및 현장 상황에 따라 일정이나 방문 시간이 변경될 수 있는 점 참고 부탁드립니다."""
+    """고객님의 배송일정 조회시 {delivery_date}로 예상됩니다.
+담당기사님 배정 과정에서 1~2일이 더 소요될수 있으며, 설치일 전날 저녁 수취인 연락처로 해피콜 드릴 예정이니 받으셔서 다음 날 시간약속을 꼭 잡아주시길 바랍니다."""
 )
 
-DELIVERY_DATE_TIME_ANSWER = format_final_answer(
-    """확인 결과 설치 예정일은 {delivery_date}, 방문 예정 시간은 {installation_time}입니다.
+# Kept as a name for callers; the fixed wording does not vary with a time.
+DELIVERY_DATE_TIME_ANSWER = DELIVERY_DATE_ANSWER
 
-기사님의 배차 및 현장 상황에 따라 일정이나 방문 시간이 변경될 수 있는 점 참고 부탁드립니다."""
-)
+
+def _month_day(iso_date: str | None) -> str | None:
+    parsed = parse_date_value(iso_date) if iso_date else None
+    return f"{parsed.month}월 {parsed.day}일" if parsed else None
+
 
 DELIVERY_DATE_PENDING_ANSWER = format_final_answer(
     """현재 삼성 설치 시스템에는
@@ -369,19 +371,15 @@ def apply_phase9_rule_policy(
         and date_value
         and not dps.get("change_request")
     ):
-        variables = {"delivery_date": date_value}
-        if context.installation_time:
-            variables["installation_time"] = context.installation_time
-            answer = DELIVERY_DATE_TIME_ANSWER.format(**variables)
-        else:
-            answer = DELIVERY_DATE_ANSWER.format(**variables)
+        variables = {
+            "delivery_date": (
+                _month_day(context.installation_date_raw) or date_value
+            ),
+        }
+        answer = DELIVERY_DATE_ANSWER.format(**variables)
         return routed_result(
             route="DELIVERY_WITH_INSTALLATION_DATE",
-            template=(
-                "PHASE9_CONFIRMED_INSTALLATION_DATE_TIME"
-                if context.installation_time
-                else "PHASE9_CONFIRMED_INSTALLATION_DATE"
-            ),
+            template="PHASE9_CONFIRMED_INSTALLATION_DATE",
             answer=answer,
             answer_type="delivery_date",
             source="dps",

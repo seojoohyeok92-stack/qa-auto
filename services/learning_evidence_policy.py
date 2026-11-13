@@ -554,6 +554,33 @@ def general_delivery_estimate_claims(
     return tuple(claims)
 
 
+# "오늘 주문하면 내일 오나요?", "월요일에 주문하면 수요일에 받을 수 있나요?",
+# "이번 주 안에 받을 수 있나요?" -- whether a given day works, asked before an
+# order exists. Operator policy (2026-11-13): answered with the product's
+# general lead time ("영업일 기준 2~3일 정도 소요됩니다"), neither confirming
+# the day nor held. An existing order's schedule stays with DPS; callers apply
+# this only where the inquiry has no confirmed order.
+_DATED_ARRIVAL_DAY = re.compile(
+    r"오늘|내일|모레|글피|이번\s*주|다음\s*주|금주|주말|주중|평일"
+    r"|[월화수목금토일]요일|\d{1,2}\s*월\s*\d{1,2}\s*일|\d{1,2}\s*일\s*(?:까지|에|안|내|전)"
+)
+_DATED_ARRIVAL_VERB = re.compile(r"도착|받|오나|올까|와요|오면|배송|설치|출고|발송")
+# "배송일을 10월 20일 이후로 지정할 수 있나요" asks to choose a day, not how long
+# delivery takes; that stays where it was.
+_DAY_DESIGNATION = re.compile(r"지정|예약|미뤄|늦춰|연기|변경")
+
+
+def asks_dated_arrival(question: object) -> bool:
+    """Whether the customer asks if delivery lands on or by a given day."""
+
+    text = _text(question)
+    return bool(
+        text and _DATED_ARRIVAL_DAY.search(text)
+        and _DATED_ARRIVAL_VERB.search(text)
+        and not _DAY_DESIGNATION.search(text)
+    )
+
+
 def order_identifier_request_reason(answer: object) -> str | None:
     """Which "tell us your order number" phrasing this answer carries, or None.
 

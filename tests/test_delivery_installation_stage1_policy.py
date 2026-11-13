@@ -166,6 +166,7 @@ def verdict(
     understanding,
     store: str = "OJE_PLUS",
     route: str | None = None,
+    extra_metadata: dict | None = None,
 ):
     """실제 자동등록 게이트의 판정. plan 은 실제 Plan 서비스가 만든 것이다."""
 
@@ -205,6 +206,7 @@ def verdict(
             },
         },
     }
+    draft["metadata_json"].update(extra_metadata or {})
     return AutoProcessingEligibilityService().evaluate(
         inquiry={
             "id": 1, "store_code": store, "source_answered": 0,
@@ -457,6 +459,54 @@ def test_07c_plan_and_analysis_disagreement_is_reported(database):
     )
     assert result.decision == "REVIEW_REQUIRED"
     assert DPS_REQUIREMENT_INCONSISTENT in result.reasons
+    assert DPS_SCHEDULE_AUTO_POST_NOT_ENABLED in result.reasons
+
+
+def _dps_date_case(database, *, lookup="SUCCESS", snapshot=True,
+                   dps_date="2026-11-20", answer_date="11월 20일",
+                   change=False, route="DELIVERY_WITH_INSTALLATION_DATE"):
+    from services.phase9_answer_policy import DELIVERY_DATE_ANSWER
+
+    understanding = semantic(**ORDER_INSTALL_UNDERSTANDING)
+    plan = plan_for(database, ORDER_INSTALL, understanding, order_id=ORDER_ID)
+    value = plan.to_dict()
+    value.update(dps_lookup_status=lookup, valid_dps_snapshot_available=snapshot,
+                 order_lookup_status="SUCCESS", selected_answer_route=route)
+
+    class _Plan:
+        def to_dict(self):
+            return value
+
+    return verdict(
+        _Plan(), answer=DELIVERY_DATE_ANSWER.format(delivery_date=answer_date),
+        evidence=[], understanding=understanding, route=route,
+        extra_metadata={
+            "dps": {"lookup_status": lookup, "installation_date": dps_date,
+                    "change_request": change},
+            "delivery_context": {"installation_date_raw": dps_date,
+                                 "installation_time": "오후 2시"},
+        },
+    )
+
+
+def test_07d_a_confirmed_dps_date_in_the_fixed_wording_may_auto_post(database):
+    """조회 성공 + 유효 스냅숏 + DPS 날짜와 같은 월·일의 고정 문구 → 이 차단은 없다."""
+
+    result = _dps_date_case(database)
+    assert DPS_SCHEDULE_AUTO_POST_NOT_ENABLED not in result.reasons
+    assert not any(reason.startswith("DPS_") for reason in result.reasons)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"lookup": "AUTOMATION_ERROR"},                      # 조회 실패
+    {"snapshot": False},                                 # 스냅숏 미검증
+    {"answer_date": "11월 21일"},                        # 날짜 불일치
+    {"change": True},                                    # 일정 변경 요청
+    {"route": "DELIVERY_DATE_UNCONFIRMED"},              # 예정일 미등록
+])
+def test_07e_anything_short_of_a_confirmed_date_stays_held(database, kwargs):
+    result = _dps_date_case(database, **kwargs)
+    assert result.decision != "SAFE"
     assert DPS_SCHEDULE_AUTO_POST_NOT_ENABLED in result.reasons
 
 

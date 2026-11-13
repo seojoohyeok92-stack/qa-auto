@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -25,6 +26,8 @@ from services.learning_evidence_policy import (
     classify_provenance,
     contamination_reason,
     estimation_reason,
+    asks_dated_arrival,
+    general_delivery_estimate_claims,
     operator_approval_class,
     order_identifier_request_reason,
     quantities_conflict,
@@ -79,6 +82,128 @@ CONTEXT_ANCHOR_CONCEPTS = {
 # whose staff answer is "기사님이 ... 연결 및 확인해 드리고 있으니").
 _SET_TOP_BOX = re.compile(r"셋\s*[탑톱]|set\s*-?\s*top|settop", re.IGNORECASE)
 _TECHNICIAN = re.compile(r"기사|(?:연결|설치|셋팅|세팅)\s*(?:을|를)?\s*해\s*주")
+
+# "배송이 얼마나 걸릴까요?" -- a general lead time. The pool holds the same
+# listing's own answers ("43인치 방문설치 상품 ... 1~2주", 10963) below other
+# listings' and other periods' ones ("3일 정도", "3주 소요"), and the five
+# that reached GPT ② on 10901/10924/10953/10969 were all the latter, so the
+# general-estimate channel (same product only) found nothing and the answer
+# was held. Here: the same listing first, then the same model; within that
+# one row, the most recently approved, under the customer's own condition --
+# a 제주/도서산간 or one named region's lead time, or a 택배 one when the
+# customer asks about 택배, is a different condition and never mixed in. The
+# other lead-time rows leave this sub-question. No same-product row -> nothing
+# changes and the existing hold stands.
+_LEAD_TIME_GOALS = frozenset({"DELIVERY_DEADLINE_CONFIRMATION", "DELIVERY_POLICY"})
+_LEAD_TIME_ASK = re.compile(
+    r"언제|얼마나|며칠|몇\s*일|기간|소요|걸리|걸릴|빨리|빠르게|빠른"
+)
+_REMOTE_AREA = re.compile(r"제주|도서|산간|섬\s*지역|울릉")
+# Ordinary regions: a 서울 lead time is not an 인천 customer's, but with no
+# region named it is the listing's usual one.
+_REGION = re.compile(
+    r"서울|경기|인천|수도권|부산|대구|광주|대전|울산|세종|강원"
+    r"|충북|충남|충청|전북|전남|전라|경북|경남|경상"
+)
+_REGION_ALIASES = {"수도권": {"서울", "경기", "인천"}}
+
+
+def _regions(text: str) -> set[str]:
+    found: set[str] = set()
+    for name in _REGION.findall(text):
+        found |= _REGION_ALIASES.get(name, {name})
+    return found
+
+
+_PARCEL = re.compile(r"택배")
+_LEAD_TIME_IDENTITY_TIER = {"EXACT_PRODUCT": 2, "EXACT_NAME": 2, "EXACT_MODEL": 1}
+
+
+def _lead_time_row_fits(item: dict[str, Any], claims: tuple[str, ...], question: str) -> bool:
+    """Whether this row's lead time is stated for the customer's condition.
+
+    The condition is read from the whole row, question included: 319103 says
+    only "일반적인 배송보다 +1~2일 추가소요" and the 제주도 it is about is in the
+    question it answered.
+    """
+
+    row = " ".join(str(item.get(key) or "") for key in (
+        "question_original_masked", "question_normalized", "final_answer",
+    ))
+    if bool(_REMOTE_AREA.search(row)) != bool(_REMOTE_AREA.search(question)):
+        return False
+    row_regions, asked_regions = _regions(row), _regions(question)
+    if row_regions and asked_regions and not row_regions & asked_regions:
+        return False
+    return not _PARCEL.search(question) or any(_PARCEL.search(c) for c in claims)
+
+
+def _approved_when(item: dict[str, Any]) -> datetime:
+    when = _effective_time(item)
+    if when is not None:
+        return when
+    try:
+        parsed = datetime.fromisoformat(
+            str(item.get("created_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _latest_same_product_lead_time(
+    ranked: list[tuple[float, dict[str, Any]]], *, question: str,
+) -> tuple[list[tuple[float, dict[str, Any]]], dict[str, Any] | None]:
+    lead_rows = [
+        (index, item) for index, (_score, item) in enumerate(ranked)
+        if general_delivery_estimate_claims(item.get("final_answer"))
+    ]
+
+    def tier(item: dict[str, Any]) -> int:
+        compatibility = item.get("compatibility")
+        compatibility = compatibility if isinstance(compatibility, dict) else {}
+        return _LEAD_TIME_IDENTITY_TIER.get(
+            str(compatibility.get("product_match") or ""), 0)
+
+    fitting = [
+        (index, item) for index, item in lead_rows
+        if tier(item) and _lead_time_row_fits(
+            item, general_delivery_estimate_claims(item.get("final_answer")),
+            question,
+        )
+    ]
+    if not fitting:
+        # This product's lead times are all stated for another condition
+        # (서울 지역, 섬 지역, ...). They cannot become this customer's, so they
+        # leave; nothing else changes and the hold stands.
+        mismatched = {index for index, item in lead_rows if tier(item)}
+        if not mismatched:
+            return ranked, None
+        return [
+            pair for index, pair in enumerate(ranked) if index not in mismatched
+        ], {
+            "selected_learning_id": None,
+            "approved_at": None,
+            "removed_lead_time_learning_ids": [
+                int(ranked[index][1]["id"]) for index in sorted(mismatched)
+            ],
+        }
+    best = max(tier(item) for _index, item in fitting)
+    winner_index, winner = max(
+        ((index, item) for index, item in fitting if tier(item) == best),
+        key=lambda pair: (_approved_when(pair[1]), -pair[0]),
+    )
+    dropped = {index for index, _item in lead_rows if index != winner_index}
+    kept = [ranked[winner_index]] + [
+        pair for index, pair in enumerate(ranked)
+        if index != winner_index and index not in dropped
+    ]
+    return kept, {
+        "selected_learning_id": int(winner["id"]),
+        "approved_at": _approved_when(winner).isoformat(),
+        "removed_lead_time_learning_ids": [
+            int(ranked[index][1]["id"]) for index in sorted(dropped)
+        ],
+    }
 
 
 def normalize_learning_question(value: object) -> str:
@@ -1348,6 +1473,17 @@ class SimilarAnswerService:
         ranked, learning_conflicts = _resolve_latest_valid_conflicts(
             ranked, priority_for=self._source_priority,
         )
+        lead_time_choice = None
+        lead_time_question = atomic_question or query
+        if required_action == "DELIVERY_DEADLINE_CONFIRMATION" or (
+            required_action in _LEAD_TIME_GOALS and (
+                _LEAD_TIME_ASK.search(lead_time_question)
+                or asks_dated_arrival(lead_time_question)
+            )
+        ):
+            ranked, lead_time_choice = _latest_same_product_lead_time(
+                ranked, question=lead_time_question,
+            )
         # ``min(limit, 3)`` used to cap this at three whatever the caller asked
         # for, so 669 candidates that had already cleared validity, identity and
         # the relevance floor were reduced to three before GPT ② saw any of
@@ -1389,6 +1525,7 @@ class SimilarAnswerService:
             "selected_count": len(selected),
             "selected_learning_ids": [int(item["id"]) for item in selected],
             "learning_conflicts": learning_conflicts,
+            "lead_time_choice": lead_time_choice,
             "retracted_learnings": retracted_learnings,
             "unresolved_learning_conflicts": [
                 item for item in learning_conflicts

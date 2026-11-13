@@ -497,7 +497,7 @@ def test_eligibility_holds_an_exact_date_from_general_evidence():
 def test_prompt_separates_general_lead_time_from_current_schedule():
     rules = " ".join(PromptBuilder.EVIDENCE_JUDGEMENT_RULES)
     for phrase in ("GENERAL_DELIVERY_ESTIMATE", "DPS 설치예정일이 있으면",
-                   "방문 시간은 만들지", "재고·입고·품절"):
+                   "날짜를 만들지 않는다", "재고·입고·품절"):
         assert phrase in rules
 
 
@@ -629,7 +629,7 @@ def test_C_D_dps_installation_date_wins_over_learning(monkeypatch):
     assert run.gpt_drafts == 0
     assert "2026년 9월 24일" in run.answer or "9월 24일" in run.answer
     assert "1~2주" not in run.answer
-    assert "변경될 수 있" in run.answer
+    assert "1~2일이 더 소요될수 있으며" in run.answer
     assert "방문 예정 시간" not in run.answer
 
 

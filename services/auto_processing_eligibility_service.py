@@ -145,6 +145,45 @@ GENERAL_ESTIMATE_CURRENT_STATE = "GENERAL_ESTIMATE_CURRENT_STATE"
 # already held by the disabled/untrusted reasons below -- adding this one
 # would only restate it under a name that points at the wrong stage.
 DPS_SCHEDULE_AUTO_POST_NOT_ENABLED = "DPS_SCHEDULE_AUTO_POST_NOT_ENABLED"
+# Opened for one answer only (operator decision, 2026-11-13): the fixed
+# "고객님의 배송일정 조회시 n월 m일로 예상됩니다 ..." template of a successful
+# lookup with a validated snapshot, whose date is the lookup's own date by the
+# existing delivery Validator. A failed lookup, an unregistered date, a
+# schedule-change request, a date that disagrees, or any other route keeps
+# this hold; every other reason in this stage is untouched.
+_DPS_DATE_ROUTE = "DELIVERY_WITH_INSTALLATION_DATE"
+_DPS_DATE_FIXED_WORDING = ("고객님의 배송일정 조회시", "해피콜 드릴 예정이니")
+
+
+def _confirmed_dps_date_answer(
+    route: str, plan: Mapping[str, Any], metadata: Mapping[str, Any],
+    answer: str,
+) -> bool:
+    from answer.answer_validator import AnswerValidator
+    from services.phase9_answer_policy import _canonical_date
+
+    if route != _DPS_DATE_ROUTE:
+        return False
+    if str(plan.get("dps_lookup_status") or "").upper() != "SUCCESS":
+        return False
+    if not bool(plan.get("valid_dps_snapshot_available")):
+        return False
+    if not all(part in answer for part in _DPS_DATE_FIXED_WORDING):
+        return False
+    dps = metadata.get("dps")
+    dps = dps if isinstance(dps, Mapping) else {}
+    if dps.get("change_request"):
+        return False
+    context = metadata.get("delivery_context")
+    context = context if isinstance(context, Mapping) else {}
+    date = str(context.get("installation_date_raw") or "").strip()
+    dps_date, _display = _canonical_date(dict(dps)) if dps else (None, None)
+    if not date or (dps_date is not None and dps_date != date):
+        return False
+    return AnswerValidator().validate_delivery_route(
+        answer, route=_DPS_DATE_ROUTE, installation_date=date,
+        installation_time=context.get("installation_time"),
+    ).passed
 
 # The plan and the analysis it was built from disagree about whether a DPS
 # lookup is required. One of the two is wrong and this stage cannot tell
@@ -1237,7 +1276,11 @@ class AutoProcessingEligibilityService:
         plan_requires_dps = bool(plan.get("requires_dps_lookup"))
         analysis_requires_dps = bool(analysis.get("requires_dps_lookup"))
         if is_store_dps_enabled(inquiry.get("store_code")):
-            if plan_requires_dps or analysis_requires_dps:
+            if (plan_requires_dps or analysis_requires_dps) and not (
+                _confirmed_dps_date_answer(
+                    normalized_route, plan, metadata, answer,
+                )
+            ):
                 reasons.append(DPS_SCHEDULE_AUTO_POST_NOT_ENABLED)
             if plan_requires_dps != analysis_requires_dps:
                 reasons.append(DPS_REQUIREMENT_INCONSISTENT)

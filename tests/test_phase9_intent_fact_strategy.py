@@ -182,7 +182,7 @@ def test_installation_general_does_not_require_order() -> None:
 def test_confirmed_date_policy_removes_internal_purchase_status() -> None:
     req, analysis = confirmed_request("2026-07-31")
     result = apply_phase9_rule_policy(req, rule(), analysis)
-    assert "2026년 7월 31일" in result.answer
+    assert "고객님의 배송일정 조회시 7월 31일로 예상됩니다." in result.answer
     assert "구매요청 상태" not in result.answer
     assert "DPS" not in result.answer
     assert "요구납기일" not in result.answer
@@ -487,3 +487,24 @@ def test_order_info_required_program_answer_renders_immediately(
     assert widgets[0].value == draft["original_answer"]
     assert widgets[0].disabled
     assert widgets[0].key == f"draft_text_{inquiry_id}"
+
+
+def test_a_dps_visit_time_does_not_change_the_fixed_wording() -> None:
+    from answer.answer_validator import AnswerValidator
+
+    req, analysis = confirmed_request("2026-11-20")
+    req.metadata["dps"]["installation_time"] = "오후 2시"
+    result = apply_phase9_rule_policy(req, rule(), analysis)
+
+    assert "고객님의 배송일정 조회시 11월 20일로 예상됩니다." in result.answer
+    assert "해피콜 드릴 예정이니" in result.answer
+    assert "2시" not in result.answer
+    validator = AnswerValidator()
+    assert validator.validate_delivery_route(
+        result.answer, route="DELIVERY_WITH_INSTALLATION_DATE",
+        installation_date="2026-11-20", installation_time="오후 2시").passed
+    # A month-day that is not DPS's is still blocked.
+    assert not validator.validate_delivery_route(
+        result.answer.replace("11월 20일", "11월 21일"),
+        route="DELIVERY_WITH_INSTALLATION_DATE",
+        installation_date="2026-11-20").passed
