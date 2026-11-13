@@ -60,6 +60,25 @@ CONTEXT_ANCHOR_CONCEPTS = {
     "PANEL_TYPE",
     "POINT_PROMOTION",
 }
+# "SK유선 셋탑박스 사용중인데 기사님이 오셔서 연결해주시나요?" (11667, 11030) is a
+# condition, not a topic: the customer already has a set-top box. The approved
+# answer to "유선방송 기사님도 불러야 하나요?" (108663) is about a new cable line,
+# names no set-top box, and was copied onto that condition as "방송사 기사님
+# 방문이 별도로 필요할 수 있습니다" -- the opposite of what staff answer. So when
+# the question asks what the technician does with a set-top box, a row whose
+# own question never mentions one is not evidence for it.
+#
+# Deliberately narrower than the anchor table above, and applied in production
+# mode too, where that table is not: a bare set-top-box anchor was measured on
+# the 26.11.12 copy at 36 of 180 attached rows removed, among them the RF-port
+# answers to "셋톱박스 없이 동축케이블만으로" -- a topic gate. This one fires on
+# 5 sub-questions there (3156, 11030, 11063, 11565, 11667), removes 108663
+# three times plus two rows that never mention a set-top box (85258 extension
+# cord, 154549 "삼성 기사님 방문 설치"), and keeps every row whose question
+# names one. "연결해 주시나요" without the word 기사 is the same request (11063,
+# whose staff answer is "기사님이 ... 연결 및 확인해 드리고 있으니").
+_SET_TOP_BOX = re.compile(r"셋\s*[탑톱]|set\s*-?\s*top|settop", re.IGNORECASE)
+_TECHNICIAN = re.compile(r"기사|(?:연결|설치|셋팅|세팅)\s*(?:을|를)?\s*해\s*주")
 
 
 def normalize_learning_question(value: object) -> str:
@@ -787,6 +806,9 @@ class SimilarAnswerService:
         attribute_mismatch_carried = 0
         query_concepts = self._semantic_concepts(query)
         required_context = query_concepts & CONTEXT_ANCHOR_CONCEPTS
+        technician_set_top_box = bool(
+            _SET_TOP_BOX.search(query) and _TECHNICIAN.search(query)
+        )
         current_product = extract_product_identity(
             product_id=product_id,
             product_name=product_name,
@@ -1124,6 +1146,11 @@ class SimilarAnswerService:
                 not hard_conflicts_only
                 and required_context
                 and not required_context.issubset(candidate_concepts)
+            ):
+                rejection_counts["CONTEXT_POLICY_REJECTED"] += 1
+                continue
+            if technician_set_top_box and not _SET_TOP_BOX.search(
+                str(item["question_normalized"])
             ):
                 rejection_counts["CONTEXT_POLICY_REJECTED"] += 1
                 continue

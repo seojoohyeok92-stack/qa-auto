@@ -141,6 +141,28 @@ class PromptBuilder:
         "사용한 후보와 사용하지 않은 후보를 모두 이유와 함께 보고한다.",
         "어떤 질문에 대해 쓸 수 있는 근거가 없으면 그 질문만 unresolved로"
         " 남기고, 답할 수 있는 다른 질문까지 회피하지 않는다.",
+        "고객이 여러 질문을 했고 그중 하나 이상을 근거로 답할 수 있으면, 근거가"
+        " 없는 질문(NO_RELIABLE_SOURCE)은 answer 에서 완전히 뺀다. 그 질문에 대해"
+        " '확인이 필요합니다'·'확인 후 안내드리겠습니다'·'안내드리기 어렵습니다'"
+        " 같은 보류·확인 안내도 쓰지 않는다. 그 질문은 subquestion_results 에"
+        " status NO_RELIABLE_SOURCE, answered false 로 보고하고 unresolved 에도"
+        " 남기며, can_auto_post 는 answer 에 쓴 내용만으로 판단한다. 단일 질문이거나"
+        " 답할 수 있는 질문이 하나도 없으면, 또는 CONFLICT·NEEDS_DPS·"
+        "DELIVERY_SCHEDULE_REVIEW 인 질문은 이 규칙을 적용하지 않고 지금처럼 답한다.",
+        # 실GPT 재생(26.11.12 사본) 11667·11496: 보류 문구 금지가 생략 대신
+        # 추측 단정을 낳았다 -- "셋톱박스 연결은 통신사 기사님을 통해",
+        # "80cm 서랍장에는 가로 수치상 들어가지만".
+        "질문을 빼는 것은 추측해서 답하는 것의 대안이 아니다. 근거가 그 질문의"
+        " 답을 직접 말하지 않으면 수치·다른 후보에서 결론(설치·거치 가능 여부,"
+        " 기사가 해 주는 작업과 해 주지 않는 작업, 호환 여부 등)을 추론해 단정하지"
+        " 말고 그 질문을 통째로 뺀다. 빼야 할지 확신할 수 없으면 지금처럼 확인이"
+        " 필요하다고 쓰고 unresolved 로 남긴다.",
+        "customer_inquiry 원문에 있는 질문이 atomic_questions 에 없거나 다른 질문과"
+        " 합쳐져 빠진 부분이 있으면, 그 질문을 원문 그대로 unresolved 에 추가하고"
+        " 그 질문에는 답하지 않는다.",
+        "정품·새 상품·유통 경로(병행수입, 리셀러, 리퍼) 여부는 현재 상품의"
+        " Product Catalog 나 현재 상품(source_product 가 현재 상품)인 후보에서만"
+        " 답한다. 다른 상품 후보로 단정하지 않는다.",
         # A symptom is not a verdict. The as_guide route (서비스센터 접수 → 기사
         # 판정 → 판매처) is what may be said; whether it *is* a defect, and what
         # follows for this customer, is decided by the inspection and by staff.

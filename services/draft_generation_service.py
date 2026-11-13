@@ -58,6 +58,78 @@ def _int_ids(value: Any) -> tuple[int, ...]:
     return tuple(dict.fromkeys(found))
 
 
+# A sentence that tells the customer something still needs checking. In a
+# multi-question answer an unsupported question is left out entirely; one that
+# was written up as "확인이 필요합니다" instead keeps the whole answer held.
+# Measured on the 26.11.12 server copy: GPT ② also wrote the gap as "정확한
+# 안내가 어렵습니다", "확인되지 않습니다", "특정하기 어렵습니다". A false match
+# only keeps the hold the answer had before.
+_HOLD_WORDING = re.compile(
+    r"확인(?:이|가)?\s*(?:더\s*)?필요|확인\s*후\s*(?:다시\s*)?(?:안내|답변|연락)"
+    r"|(?:확인|확정|특정|안내|답변|확답|판단)[^.\n]{0,8}?어렵"
+    r"|확인되지\s*않|(?:정보|자료|근거|사양)(?:가|는|이)?\s*없"
+    r"|알\s*수\s*없|(?:담당자|직원|담당\s*부서)\s*(?:의\s*)?확인|추가\s*확인"
+)
+# Retrieval verdicts with a review path of their own. A sub-question in one of
+# these is never left out silently, whatever GPT ② reported for it.
+_OWN_REVIEW_STATUSES = frozenset({
+    "CONFLICT", "NEEDS_DPS", "DELIVERY_SCHEDULE_REVIEW",
+})
+
+
+def _omittable_unsupported(
+    raw: dict[str, Any],
+    unresolved: set[str],
+    learning_context: dict[str, Any] | None,
+) -> set[str]:
+    """Unsupported questions a multi-question answer may simply leave out.
+
+    Only when the customer asked more than one question, GPT ② answered at
+    least one of them, every unresolved one is a question GPT ① split out and
+    is NO_RELIABLE_SOURCE in GPT ② 's report and not under review in
+    retrieval's, and the answer carries no hold wording. Any
+    other shape returns nothing, so the answer is held exactly as before.
+    """
+
+    results = [
+        item for item in (raw.get("subquestion_results") or [])
+        if isinstance(item, dict) and str(item.get("subquestion") or "").strip()
+    ]
+    if len({str(item["subquestion"]).strip() for item in results}) < 2:
+        return set()
+    answered = {
+        str(item["subquestion"]).strip() for item in results
+        if item.get("answered") is True
+        and str(item.get("status") or "").upper() == "ANSWERABLE"
+    }
+    unsupported = {
+        str(item["subquestion"]).strip() for item in results
+        if item.get("answered") is not True
+        and str(item.get("status") or "").upper() == "NO_RELIABLE_SOURCE"
+    }
+    retrieval = {
+        str(item.get("subquestion") or "").strip():
+            str(item.get("status") or "").upper()
+        for item in ((learning_context or {}).get("subquestion_evidence") or [])
+        if isinstance(item, dict)
+    }
+    # Retrieval ran once per question GPT ① split out. A question GPT ② found
+    # in the original text but GPT ① never produced (11691: "기사님 설치가
+    # 11만원") is a dropped question, not an unsupported one, and is held --
+    # including when GPT ① 's split is not on record at all.
+    if (
+        not answered
+        or not unresolved
+        or not unresolved <= unsupported
+        or not unresolved <= retrieval.keys()
+        or answered & unresolved
+        or any(retrieval.get(text) in _OWN_REVIEW_STATUSES for text in unresolved)
+        or _HOLD_WORDING.search(str(raw.get("answer") or ""))
+    ):
+        return set()
+    return set(unresolved)
+
+
 def _all_subquestions_answered(value: Any) -> bool:
     """Whether the draft reported answering every sub-question it was given.
 
@@ -672,6 +744,10 @@ class DraftGenerationService:
                 text = str(item.get("subquestion") or "").strip()
                 if text:
                     unresolved.add(text)
+        # A multi-question answer that left out only the questions nothing
+        # supports is the answer to the rest, not a hold.
+        omitted = _omittable_unsupported(raw, unresolved, learning_context)
+        unresolved -= omitted
         # The one case the legacy classifier never let through, kept here: the
         # model asked for review *and* named, as something it could not
         # confirm, an operational commitment (order, date, money, benefit).
@@ -709,6 +785,7 @@ class DraftGenerationService:
         copied["provider_requires_review"] = provider_review
         copied["provider_can_auto_post"] = raw.get("can_auto_post")
         copied["unresolved"] = list(unresolved)
+        copied["omitted_unsupported"] = sorted(omitted)
         copied["missing_information_details"] = [
             {
                 "text": item,
@@ -1282,6 +1359,11 @@ class DraftGenerationService:
             unresolved=tuple(
                 str(item)
                 for item in (raw.get("unresolved") or [])
+                if str(item or "").strip()
+            ),
+            omitted_unsupported=tuple(
+                str(item)
+                for item in (raw.get("omitted_unsupported") or [])
                 if str(item or "").strip()
             ),
             # Absent stays absent. ``bool(None)`` would silently read a legacy

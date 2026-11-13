@@ -64,6 +64,9 @@ class DraftResult:
     used_historical_ids: tuple[int, ...] = ()
     ignored_evidence: tuple[dict[str, Any], ...] = ()
     unresolved: tuple[str, ...] = ()
+    # Questions of a multi-question inquiry that nothing supports and the
+    # answer left out entirely while answering the others. Not a hold.
+    omitted_unsupported: tuple[str, ...] = ()
     # Tri-state on purpose: ``None`` means the provider said nothing, which is
     # not the same as saying no. A legacy provider that never learned this
     # field keeps the behaviour it had, and only an explicit ``false`` is read
@@ -82,7 +85,7 @@ class DraftResult:
             "used_template_ids", "used_product_facts",
             "unknown_product_facts",
             "used_learning_ids", "used_historical_ids", "ignored_evidence",
-            "unresolved",
+            "unresolved", "omitted_unsupported",
         ):
             result[key] = list(result[key])
         return result

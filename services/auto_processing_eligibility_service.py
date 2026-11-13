@@ -721,7 +721,17 @@ def _evidence_insufficient(
         # A draft from before this stage existed. Untouched, as every other
         # gate here treats an absent record.
         return False
-    lead_time = _lead_time_subquestions(metadata)
+    # A lead time the multi-question answer left out entirely is not answered
+    # without a source -- nothing about it was said.
+    gpt_draft = hybrid.get("draft")
+    omitted = (
+        gpt_draft.get("omitted_unsupported")
+        if isinstance(gpt_draft, Mapping) else None
+    )
+    lead_time = _lead_time_subquestions(metadata) - {
+        str(item).strip()
+        for item in (omitted if isinstance(omitted, (list, tuple)) else ())
+    }
     if not lead_time:
         return False
     entries = hybrid.get("subquestion_evidence")
